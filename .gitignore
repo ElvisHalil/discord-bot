@@ -1,0 +1,57 @@
+# Environment Variables & Secrets
+.env
+.env.*
+*.env
+!.env.example
+
+# Python Bytecode, Compiles & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.so
+*.dylib
+*.dll
+
+# Virtual Environment & Installed Dependencies
+Lib/
+Include/
+scripts/*.exe
+*.exe
+venv/
+.venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+wheels/
+.Python
+
+# Local Data, Memories & Databases
+data/
+*.sqlite
+*.sqlite3
+*.db
+
+# Logs & Debugging
+*.log
+logs/
+
+# IDE & Editor Settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating System Artifacts
+.DS_Store
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+
+# Temporary Scratch Dumps
+lastfm.html
+test.json
+scratch/
