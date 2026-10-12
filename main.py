@@ -192,11 +192,11 @@ async def on_raw_reaction_add(payload):
                     if channel.id in chat_history:
                         chat_history[channel.id].append({
                             "role": "user",
-                            "content": f"{user.display_name} liked {orig_display} and asked for a similar song."
+                            "content": f"{user.display_name} reacted with 👍 to '{orig_display}'."
                         })
                         chat_history[channel.id].append({
                             "role": "assistant",
-                            "content": final_reply
+                            "content": f"Shared similar track: '{meta['song']}' by '{meta['artist']}' ({verified_url})."
                         })
 
                     await channel.send(final_reply)

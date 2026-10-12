@@ -10,7 +10,10 @@ MODES = {
         "tools": tools.RESEARCH_TOOLS,
         "ollama_options": {
             "num_ctx": 16384,
-            "num_predict": 2048
+            "num_predict": 2048,
+            "temperature": 0.7,
+            "repeat_last_n": 256,
+            "repeat_penalty": 1.15
         },
         "get_prompt": lambda facts: (
             "You are a rigorous, autonomous AI research assistant chatting in Discord.\n"
@@ -23,7 +26,8 @@ MODES = {
             "4. NO APOLOGIES OR SURRENDER: Never state that a source returned boilerplate or that you could not extract data. If a source fails, immediately read the alternative URLs or run a targeted search for a different outlet (e.g., AP News, CBC, BBC) until you have all facts.\n"
             "5. FORMATTING: VERY IMPORTANT TO FORMAT FOR DISCORD. Output directly to Discord using standard Markdown. Do not put line breaks between a bullet point and its text. CRITICAL FOR VIDEOS: NEVER invent or guess YouTube links! Always use a tool to get the real URL. To embed a YouTube video or music player, you MUST output the raw URL (e.g., https://www.youtube.com/watch?v=... or https://music.youtube.com/watch?v=...) on its own blank line without any markdown wrapping (no `[Text](link)` or `<link>`).\n"
             "6. VIDEO SUMMARIES: When summarizing a YouTube video, do not invent or guess the title if it is not explicitly provided. Use bullet points, not numbered lists. Break the summary into a 'Core Premise' and 'Key Takeaways'.\n"
-            "7. DIRECT LINKS: If a user shares a URL (http/https), you MUST use the `read_website` tool to fetch its content before responding.\n\n"
+            "7. DIRECT LINKS: If a user shares a URL (http/https), you MUST use the `read_website` tool to fetch its content before responding.\n"
+            "8. CASUAL & SHORT PROMPTS: If the user gives a brief greeting, acknowledgement, or casual remark (e.g. 'yo', 'hi', 'cool', 'thanks'), respond naturally and concisely in 1 sentence. Do NOT re-output previous song cards or invoke tools unless asked.\n\n"
             f"Here is what you currently know about the user:\n{facts}"
         )
     },
@@ -35,7 +39,10 @@ MODES = {
             "tools": tools.RESEARCH_TOOLS,
             "ollama_options": {
                 "num_ctx": 16384,
-                "num_predict": 2048
+                "num_predict": 2048,
+                "temperature": 0.7,
+                "repeat_last_n": 256,
+                "repeat_penalty": 1.15
             },
             "get_prompt": lambda facts: (
                 "You are a rigorous, autonomous AI research assistant chatting in Discord.\n"
@@ -48,7 +55,8 @@ MODES = {
                 "4. NO APOLOGIES OR SURRENDER: Never state that a source returned boilerplate or that you could not extract data. If a source fails, immediately read the alternative URLs or run a targeted search for a different outlet (e.g., AP News, CBC, BBC) until you have all facts.\n"
                 "5. FORMATTING: VERY IMPORTANT TO FORMAT FOR DISCORD. Output directly to Discord using standard Markdown. Do not put line breaks between a bullet point and its text. CRITICAL FOR VIDEOS: NEVER invent or guess YouTube links! Always use a tool to get the real URL. To embed a YouTube video or music player, you MUST output the raw URL (e.g., https://www.youtube.com/watch?v=... or https://music.youtube.com/watch?v=...) on its own blank line without any markdown wrapping (no `[Text](link)` or `<link>`).\n"
                 "6. VIDEO SUMMARIES: When summarizing a YouTube video, do not invent or guess the title if it is not explicitly provided. Use bullet points, not numbered lists. Break the summary into a 'Core Premise' and 'Key Takeaways'.\n"
-                "7. DIRECT LINKS: If a user shares a URL (http/https), you MUST use the `read_website` tool to fetch its content before responding.\n\n"
+                "7. DIRECT LINKS: If a user shares a URL (http/https), you MUST use the `read_website` tool to fetch its content before responding.\n"
+                "8. CASUAL & SHORT PROMPTS: If the user gives a brief greeting, acknowledgement, or casual remark (e.g. 'yo', 'hi', 'cool', 'thanks'), respond naturally and concisely in 1 sentence. Do NOT re-output previous song cards or invoke tools unless asked.\n\n"
                 f"Here is what you currently know about the user:\n{facts}"
             )
         },
