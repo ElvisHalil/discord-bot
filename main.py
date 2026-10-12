@@ -108,7 +108,7 @@ async def on_raw_reaction_add(payload):
                     if not clean_title:
                         clean_title = orig_title
 
-                    search_query = f"{clean_title} {orig_artist}".strip() if orig_artist else clean_title
+                    search_query = f"{clean_title} by {orig_artist}".strip() if orig_artist else clean_title
                     print(f"🎵 [Reaction Target]: Cleaned '{clean_title}' by '{orig_artist}'")
 
                     # 2. Get recommendations from Deezer / Beatport
