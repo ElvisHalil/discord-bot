@@ -161,23 +161,17 @@ def standardize_song_reply(reply: str) -> str:
 
     full_url = yt_match.group(1)
     vid = yt_match.group(2)
-    music_url = full_url.replace("www.youtube.com", "music.youtube.com")
+    has_song_header = bool(re.search(r'\*\*(?:Song|Track):\*\*', reply, re.IGNORECASE))
 
-    # Determine if this response represents a music track
-    is_song = "music.youtube.com" in full_url or vid in MUSIC_METADATA_CACHE
-    if not is_song:
-        # Quick check for topic channel via oEmbed
-        try:
-            r = requests.get(f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json", timeout=3)
-            if r.status_code == 200:
-                author_name = r.json().get("author_name", "")
-                if "Topic" in author_name or author_name.endswith(" - Topic"):
-                    is_song = True
-        except Exception:
-            pass
-
-    if not is_song:
+    # If not formatted as a song card (video mode), ensure standard www.youtube.com video link
+    if not has_song_header:
+        video_url = full_url.replace("music.youtube.com", "www.youtube.com")
+        if video_url != full_url:
+            return reply.replace(full_url, video_url)
         return reply
+
+    # In music mode (contains **Song:**), ensure YouTube Music domain (music.youtube.com)
+    music_url = full_url.replace("www.youtube.com", "music.youtube.com")
 
     meta = get_music_metadata(vid)
     extracted_song = meta.get("song")
