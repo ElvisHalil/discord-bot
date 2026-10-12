@@ -98,11 +98,20 @@ class FreqBlogAggregator(BaseMusicAggregator):
         Checks local cache first to ensure 0 API calls for previously resolved tracks.
         """
         clean_track = re.sub(r'[\(\[\{].*?[\)\]\}]', '', track).strip()
-        clean_artist = artist.strip()
-        cache_key = f"{clean_track.lower()}|{clean_artist.lower()}"
+        clean_artist = artist.strip() if artist else ""
+        if clean_artist.lower() in ("unknown artist", "unknown"):
+            clean_artist = ""
 
+        cache_key = f"{clean_track.lower()}|{clean_artist.lower()}"
         if cache_key in self.cache:
             return self.cache[cache_key]
+
+        # If artist was not supplied, check if the song exists in cache under any artist
+        if not clean_artist:
+            prefix = f"{clean_track.lower()}|"
+            for k, v in self.cache.items():
+                if k.startswith(prefix):
+                    return v
 
         params = {"track": clean_track, "wait": 2}
         if clean_artist:
@@ -125,6 +134,9 @@ class FreqBlogAggregator(BaseMusicAggregator):
                 "release_date": data.get("release_date"),
             }
             self.cache[cache_key] = res
+            resolved_artist = (data.get("artist_name") or "").lower().strip()
+            if resolved_artist:
+                self.cache[f"{clean_track.lower()}|{resolved_artist}"] = res
             self._save_cache()
             return res
 
@@ -288,4 +300,55 @@ class FreqBlogAggregator(BaseMusicAggregator):
                         source="freqblog_harmonic_radio"
                     ))
         return tracks
+
+    def match_mood(self, seed_song: str, count: int = 10) -> tuple[list[Track], dict]:
+        """
+        Finds songs matching the exact emotional mood, energy, and valence of 'seed_song'.
+        Uses FreqBlog's centroid recommendation engine with target energy and valence.
+        """
+        key = self.api_key or os.getenv("FREQBLOG_API_KEY")
+        if not key or self._circuit_broken:
+            return [], {}
+
+        meta = parse_song_meta(seed_song)
+        lookup_data = self.lookup(meta.get("song", seed_song), meta.get("artist", ""))
+        seed_id = lookup_data.get("itunes_track_id")
+        if not seed_id:
+            return [], {}
+
+        energy = lookup_data.get("energy")
+        valence = lookup_data.get("valence")
+        mood = lookup_data.get("mood")
+
+        params = {"seed_tracks": seed_id, "limit": min(20, count)}
+        if energy is not None:
+            params["target_energy"] = energy
+        if valence is not None:
+            params["target_valence"] = valence
+
+        res = self._call("GET", "/recommendations", params=params)
+        tracks = []
+        raw = res.get("tracks", [])
+        if isinstance(raw, list):
+            for item in raw:
+                t_obj = item.get("track", {})
+                title = t_obj.get("track_name", "")
+                artist = t_obj.get("artist_name", "")
+                genre = t_obj.get("genre", "")
+                if title and artist:
+                    tracks.append(Track(
+                        title=title,
+                        artist=artist,
+                        genre=genre or None,
+                        source="freqblog_mood_match"
+                    ))
+
+        mood_info = {
+            "seed_track": lookup_data.get("track_name", seed_song),
+            "seed_artist": lookup_data.get("artist_name", ""),
+            "mood": mood,
+            "energy": energy,
+            "valence": valence,
+        }
+        return tracks, mood_info
 

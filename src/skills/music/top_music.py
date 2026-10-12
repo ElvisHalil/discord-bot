@@ -3,17 +3,25 @@ from src.skills.music.aggregators.manager import MusicAggregatorManager
 
 manager = MusicAggregatorManager()
 
-def skill_top_music(genre: str = None, similar_to: str = None) -> str:
+def skill_top_music(genre: str = None, similar_to: str = None, match_mood: bool = False) -> str:
     """
     Fetches the current top trending/charting music in the world right now, OR finds similar songs.
     ALWAYS use this skill FIRST when a user asks for song recommendations, top hits, or what music is popular today.
     - To get top trending charts by genre, specify 'genre' (e.g., 'pop, techno').
     - To get similar songs, specify 'similar_to' with the track and artist name (e.g. 'Believe by Cher').
+    - To specifically match the emotional mood, vibe, or energy of a song, set 'match_mood=True' (e.g. 'match the mood of Blinding Lights').
     """
     if similar_to:
-        print(f"🎵 [Executing Top Music Skill] Similar to: {similar_to}")
+        print(f"🎵 [Executing Top Music Skill] Similar to: {similar_to} (match_mood={match_mood})")
         try:
-            tracks = manager.get_similar_tracks(similar_to)
+            mood_tag = None
+            if match_mood:
+                tracks, mood_info = manager.get_mood_matched_tracks(similar_to)
+                if mood_info.get("mood"):
+                    mood_tag = mood_info["mood"].title()
+            else:
+                tracks = manager.get_similar_tracks(similar_to)
+
             if not tracks:
                 return f"No similar songs found for '{similar_to}'."
 
@@ -28,7 +36,8 @@ def skill_top_music(genre: str = None, similar_to: str = None) -> str:
 
             random.shuffle(unique_tracks)
 
-            output = f"=== SONGS SIMILAR TO '{similar_to}' ===\n\n"
+            header = f"=== SONGS MATCHING MOOD OF '{similar_to}' ({mood_tag}) ===\n\n" if mood_tag else f"=== SONGS SIMILAR TO '{similar_to}' ===\n\n"
+            output = header
             for t in unique_tracks[:15]:
                 output += t.display_line() + "\n"
 

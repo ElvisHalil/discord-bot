@@ -62,6 +62,21 @@ class MusicAggregatorManager:
 
         return tracks
 
+    def get_mood_matched_tracks(self, query: str) -> tuple[list[Track], dict]:
+        """
+        Specifically matches the acoustic mood, energy, and emotional feel of a seed song.
+        Initiates with FreqBlog's audio intelligence, falling back gracefully to similarity chain.
+        """
+        freqblog = self.aggregators.get("freqblog")
+        if freqblog and hasattr(freqblog, "match_mood"):
+            tracks, mood_info = freqblog.match_mood(query)
+            if tracks:
+                return tracks, mood_info
+
+        # Fallback to general similarity if mood match yields 0
+        fallback_tracks = self.get_similar_tracks(query)
+        return fallback_tracks, {"seed_track": query, "mood": "similar"}
+
     def get_top_charts(self, genre: str = None) -> list[Track]:
         """Fetches trending and charting music across Last.fm, Beatport, and global charts."""
         all_tracks = []

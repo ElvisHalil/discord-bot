@@ -11,7 +11,8 @@ def skill_audio_intelligence(
     """
     Audio analysis and DJ harmonic mixing intelligence powered by FreqBlog.
     Use ONLY when the user explicitly asks for tempo (BPM), musical key/Camelot, 
-    audio transition mixing compatibility, or harmonic DJ sets.
+    audio transition mixing compatibility, harmonic DJ sets, or matching a song's emotional mood/vibe.
+    - action='match_mood': Finds songs that acoustically and emotionally match the mood, energy, and vibe of 'track'.
     - action='bpm_key': Retrieves exact BPM, Camelot key, mood, and energy for a track.
     - action='transition': Scores how cleanly two tracks mix together (requires 'track' and 'second_track').
     - action='bpm_search': Finds tracks at a specific tempo (requires 'target_bpm').
@@ -81,6 +82,27 @@ def skill_audio_intelligence(
         output = f"=== HARMONIC DJ SET (Starting from '{track}') ===\n\n"
         for i, t in enumerate(tracks, 1):
             output += f"{i}. {t.title} by {t.artist}\n"
+        return output
+
+    # 5. Match Mood / Emotional Vibe
+    elif action == "match_mood":
+        tracks, mood_info = freqblog.match_mood(track, count=10)
+        if not tracks:
+            return f"Could not match mood for '{track}'."
+        mood = mood_info.get("mood", "vibe")
+        energy = mood_info.get("energy")
+        valence = mood_info.get("valence")
+        output = f"=== TRACKS MATCHING MOOD OF '{mood_info.get('seed_track', track)}' ===\n"
+        output += f"Detected Mood: {mood.title() if mood else 'Unknown'}"
+        if energy is not None:
+            output += f" (Energy: {energy:.2f}"
+            if valence is not None:
+                output += f", Valence: {valence:.2f}"
+            output += ")\n\n"
+        else:
+            output += "\n\n"
+        for t in tracks:
+            output += t.display_line() + "\n"
         return output
 
     return f"Unknown action '{action}'."
