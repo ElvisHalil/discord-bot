@@ -1,6 +1,8 @@
 from src.skills.music.aggregators.freqblog import FreqBlogAggregator
+from src.skills.music.aggregators.manager import MusicAggregatorManager
 
 freqblog = FreqBlogAggregator()
+manager = MusicAggregatorManager()
 
 def skill_audio_intelligence(
     track: str = None,
@@ -86,23 +88,61 @@ def skill_audio_intelligence(
 
     # 5. Match Mood / Emotional Vibe
     elif action == "match_mood":
-        tracks, mood_info = freqblog.match_mood(track, count=10)
+        tracks, mood_info = manager.get_mood_matched_tracks(track)
         if not tracks:
-            return f"Could not match mood for '{track}'."
-        mood = mood_info.get("mood", "vibe")
+            return f"Could not find any songs matching the mood or vibe of '{track}'."
+        mood = mood_info.get("mood", "")
         energy = mood_info.get("energy")
         valence = mood_info.get("valence")
-        output = f"=== TRACKS MATCHING MOOD OF '{mood_info.get('seed_track', track)}' ===\n"
-        output += f"Detected Mood: {mood.title() if mood else 'Unknown'}"
-        if energy is not None:
-            output += f" (Energy: {energy:.2f}"
+        seed_display = mood_info.get("seed_track", track)
+
+        mood_str = f" ({mood.title()})" if mood and mood.lower() != "similar" else ""
+        output = f"=== TRACKS MATCHING MOOD OF '{seed_display}'{mood_str} ===\n"
+        if energy is not None or valence is not None:
+            output += "Audio Profile:"
+            if energy is not None:
+                output += f" Energy: {energy:.2f}/1.00"
             if valence is not None:
-                output += f", Valence: {valence:.2f}"
-            output += ")\n\n"
-        else:
+                output += f" | Valence: {valence:.2f}/1.00"
             output += "\n\n"
+        else:
+            output += "\n"
+
+        # Deduplicate
+        seen = set()
+        unique = []
         for t in tracks:
+            k = (t.title.lower(), t.artist.lower())
+            if k not in seen:
+                seen.add(k)
+                unique.append(t)
+
+        for t in unique[:15]:
             output += t.display_line() + "\n"
+
+        output += """
+=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===
+Select ONE best matching song from the list above.
+CRITICAL INSTRUCTION: Call `skill_youtube_searcher` with `is_music=True` and query="<Song Title> by <Artist Name>" to fetch its verified YouTube Music link.
+When presenting the song to the user, you MUST format your response using this EXACT clean, text-only template (NO EMOJIS):
+
+[Your brief conversational intro or similarity explanation, if any]
+
+**Song:** <Song Title>
+**Artist:** <Artist Name>
+**Genre:** <Genre Name> (optional, include only if known)
+**Album:** <Album Name> (optional, include only if known)
+
+<Raw YouTube Music URL on its own blank line>
+
+CRITICAL RULES:
+1. BOTH '**Song:**' and '**Artist:**' MUST always be displayed.
+2. Do NOT include ANY emojis in the song template lines. Keep it clean and text-only.
+3. NEVER invent or hallucinate YouTube URLs. You MUST use `skill_youtube_searcher` to get the link.
+4. Paste ONLY the bare YouTube Music URL on a new blank line at the bottom.
+5. NEVER wrap the link in markdown (like `[Title](url)`) or `<>` brackets.
+6. Do NOT output ANY markdown links like `[YouTube](...)` or `[Channel](...)` or `[Title](...)`.
+"""
         return output
 
     return f"Unknown action '{action}'."

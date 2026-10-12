@@ -68,14 +68,33 @@ class MusicAggregatorManager:
         Initiates with FreqBlog's audio intelligence, falling back gracefully to similarity chain.
         """
         freqblog = self.aggregators.get("freqblog")
+        detected_mood = None
+        detected_energy = None
+        detected_valence = None
+
         if freqblog and hasattr(freqblog, "match_mood"):
             tracks, mood_info = freqblog.match_mood(query)
             if tracks:
                 return tracks, mood_info
+            # If match_mood returned no tracks (e.g. 404 or unanalyzed track), check if lookup has seed metadata
+            if hasattr(freqblog, "lookup"):
+                from src.skills.music.utils import parse_song_meta
+                meta = parse_song_meta(query)
+                lookup_data = freqblog.lookup(meta.get("song", query), meta.get("artist", ""))
+                if lookup_data:
+                    detected_mood = lookup_data.get("mood")
+                    detected_energy = lookup_data.get("energy")
+                    detected_valence = lookup_data.get("valence")
 
         # Fallback to general similarity if mood match yields 0
         fallback_tracks = self.get_similar_tracks(query)
-        return fallback_tracks, {"seed_track": query, "mood": "similar"}
+        mood_meta = {
+            "seed_track": query,
+            "mood": detected_mood or "similar",
+            "energy": detected_energy,
+            "valence": detected_valence,
+        }
+        return fallback_tracks, mood_meta
 
     def get_top_charts(self, genre: str = None) -> list[Track]:
         """Fetches trending and charting music across Last.fm, Beatport, and global charts."""

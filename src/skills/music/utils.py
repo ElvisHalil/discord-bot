@@ -152,13 +152,13 @@ def is_placeholder_text(text: str) -> bool:
     """Detects if text contains empty strings or LLM template placeholders."""
     if not text:
         return True
-    t = text.strip().lower()
+    t = text.strip(" *-_#:`\"'").lower()
     return t in (
         "", "unknown", "unknown track", "unknown artist", "none",
         "<song title>", "<artist name>", "<genre name>", "<album name>",
         "<raw youtube music url>", "<raw youtube music url on its own blank line>",
-        "<youtube url>"
-    ) or t.startswith("<raw youtube") or t.startswith("<song") or t.startswith("<artist")
+        "<youtube url>", "song title", "artist name", "genre name", "album name"
+    ) or t.startswith("<raw youtube") or t.startswith("<song") or t.startswith("<artist") or "<song" in t or "<artist" in t or "song title" in t or "artist name" in t
 
 def standardize_song_reply(reply: str) -> str:
     """
@@ -188,69 +188,107 @@ def standardize_song_reply(reply: str) -> str:
 
     # If message was formatted with a song template:
     if has_song_header:
-        # Case A: Song template present but NO valid YouTube video link (e.g. placeholder or missing URL)
-        if not yt_match:
-            print("⚠️ [standardize_song_reply]: Stripping broken song template with missing/placeholder URL.")
-            return intro_text if intro_text else "⚠️ Could not find a verified track on YouTube Music."
+        extracted_song = None
+        extracted_artist = None
+        extracted_album = None
+        extracted_genre = None
 
-        full_url = yt_match.group(1)
-        vid = yt_match.group(2)
-        music_url = full_url.replace("www.youtube.com", "music.youtube.com")
-
-        meta = get_music_metadata(vid)
-        # Defense: If video is NOT in verified cache AND oEmbed returned Unknown Track (HTTP 404 on YouTube), reject dead link
-        if meta.get("song") == "Unknown Track":
-            print(f"⚠️ [standardize_song_reply]: Stripping broken song template for dead/hallucinated video ID {vid}.")
-            return intro_text if intro_text else "⚠️ Could not find a verified track on YouTube Music."
-
-        extracted_song = meta.get("song")
-        extracted_artist = meta.get("artist")
-        extracted_album = meta.get("album")
-        extracted_genre = meta.get("genre")
-
-        m_song = re.search(r'(?:\*\*|\b)(?:Song|Track):\s*(.+)', reply, re.IGNORECASE)
+        m_song = re.search(r'(?:\*\*|\b)(?:Song|Track):\*{0,2}\s*(.+)', reply, re.IGNORECASE)
         if m_song:
             clean_s = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_song.group(1)).strip()
             # If multiple fields are inline (e.g. "Song: X Artist: Y")
             if "artist:" in clean_s.lower():
-                clean_s = re.split(r'\s+(?:\*\*|\b)Artist:\s*', clean_s, flags=re.IGNORECASE)[0].strip()
+                clean_s = re.split(r'\s+(?:\*\*|\b)Artist:\*{0,2}\s*', clean_s, flags=re.IGNORECASE)[0].strip()
+            clean_s = re.sub(r'^(?:\*\*|\b)(?:Song|Track):\*{0,2}\s*', '', clean_s, flags=re.IGNORECASE).strip(" *-_#:`\"'")
             if clean_s and not is_placeholder_text(clean_s):
                 extracted_song = clean_s
 
-        m_art = re.search(r'(?:\*\*|\b)Artist:\s*(.+)', reply, re.IGNORECASE)
+        m_art = re.search(r'(?:\*\*|\b)Artist:\*{0,2}\s*(.+)', reply, re.IGNORECASE)
         if m_art:
             clean_a = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_art.group(1)).strip()
             # If URL is inline (e.g. "Artist: Y https://...")
             clean_a = re.sub(r'https?://\S+', '', clean_a).strip()
+            clean_a = re.sub(r'^(?:\*\*|\b)Artist:\*{0,2}\s*', '', clean_a, flags=re.IGNORECASE).strip(" *-_#:`\"'")
             if clean_a and not is_placeholder_text(clean_a):
                 extracted_artist = clean_a
 
-        m_alb = re.search(r'(?:\*\*|\b)Album:\s*(.+)', reply, re.IGNORECASE)
+        m_alb = re.search(r'(?:\*\*|\b)Album:\*{0,2}\s*(.+)', reply, re.IGNORECASE)
         if m_alb:
             clean_al = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_alb.group(1)).strip()
+            clean_al = re.sub(r'^(?:\*\*|\b)Album:\*{0,2}\s*', '', clean_al, flags=re.IGNORECASE).strip(" *-_#:`\"'")
             if clean_al and not is_placeholder_text(clean_al):
                 extracted_album = clean_al
 
-        m_gen = re.search(r'(?:\*\*|\b)Genre:\s*(.+)', reply, re.IGNORECASE)
+        m_gen = re.search(r'(?:\*\*|\b)Genre:\*{0,2}\s*(.+)', reply, re.IGNORECASE)
         if m_gen:
             clean_g = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_gen.group(1)).strip()
+            clean_g = re.sub(r'^(?:\*\*|\b)Genre:\*{0,2}\s*', '', clean_g, flags=re.IGNORECASE).strip(" *-_#:`\"'")
             if clean_g and not is_placeholder_text(clean_g):
                 extracted_genre = clean_g
 
-        # Case B: If song title or artist is empty, placeholder, or Unknown, strip broken template
-        if is_placeholder_text(extracted_song) or is_placeholder_text(extracted_artist):
-            print(f"⚠️ [standardize_song_reply]: Stripping broken song template for unverified track '{extracted_song}' by '{extracted_artist}' (ID: {vid}).")
-            return intro_text if intro_text else "⚠️ Could not find a verified track on YouTube Music."
+        music_url = None
+        if yt_match:
+            full_url = yt_match.group(1)
+            vid = yt_match.group(2)
+            meta = get_music_metadata(vid)
+            if meta.get("song") != "Unknown Track":
+                music_url = full_url.replace("www.youtube.com", "music.youtube.com")
+                if not extracted_song or is_placeholder_text(extracted_song):
+                    extracted_song = meta.get("song")
+                if not extracted_artist or is_placeholder_text(extracted_artist):
+                    extracted_artist = meta.get("artist")
+                if not extracted_album:
+                    extracted_album = meta.get("album")
+                if not extracted_genre:
+                    extracted_genre = meta.get("genre")
+            else:
+                print(f"⚠️ [standardize_song_reply]: Video ID {vid} is dead/hallucinated. Attempting auto-resolution...")
+        else:
+            print("⚠️ [standardize_song_reply]: No YouTube URL found in song template. Attempting auto-resolution...")
 
-        print(f"🎵 [standardize_song_reply]: Formatted verified song card for '{extracted_song}' by '{extracted_artist}' -> {music_url}")
-        return format_song_card(
-            song=extracted_song,
-            artist=extracted_artist,
-            url=music_url,
-            genre=extracted_genre,
-            album=extracted_album,
-            intro=intro_text
-        )
+        # If music_url is still not verified, attempt auto-resolution via YouTube Music search
+        if not music_url and extracted_song and extracted_artist and not is_placeholder_text(extracted_song) and not is_placeholder_text(extracted_artist):
+            try:
+                from src.skills.music.playback.youtube_music import resolve_youtube_music_link
+                candidates = resolve_youtube_music_link(f"{extracted_song} by {extracted_artist}", max_results=1)
+                if candidates:
+                    music_url = candidates[0].get("url", "").replace("www.youtube.com", "music.youtube.com")
+                    print(f"  └─ ✅ [standardize_song_reply]: Auto-resolved '{extracted_song} by {extracted_artist}' -> {music_url}")
+            except Exception as e:
+                print(f"  └─ ⚠️ [standardize_song_reply]: Auto-resolution failed: {e}")
+
+        # If we have a verified music_url and valid song/artist:
+        if music_url and extracted_song and extracted_artist and not is_placeholder_text(extracted_song) and not is_placeholder_text(extracted_artist):
+            print(f"🎵 [standardize_song_reply]: Formatted verified song card for '{extracted_song}' by '{extracted_artist}' -> {music_url}")
+            return format_song_card(
+                song=extracted_song,
+                artist=extracted_artist,
+                url=music_url,
+                genre=extracted_genre,
+                album=extracted_album,
+                intro=intro_text
+            )
+
+        # If valid song and artist exist but URL could not be resolved, still output the card cleanly without the fake link
+        if extracted_song and extracted_artist and not is_placeholder_text(extracted_song) and not is_placeholder_text(extracted_artist):
+            print(f"⚠️ [standardize_song_reply]: Could not resolve URL for '{extracted_song}' by '{extracted_artist}', presenting text card.")
+            lines = []
+            if intro_text:
+                lines.append(intro_text)
+                lines.append("")
+            lines.append(f"**Song:** {extracted_song.strip()}")
+            lines.append(f"**Artist:** {extracted_artist.strip()}")
+            if extracted_album:
+                lines.append(f"**Album:** {extracted_album.strip()}")
+            if extracted_genre:
+                lines.append(f"**Genre:** {extracted_genre.strip()}")
+            lines.append("")
+            lines.append("⚠️ Could not verify playback link on YouTube Music.")
+            return "\n".join(lines).strip()
+
+        # If song or artist is missing/placeholder:
+        print("⚠️ [standardize_song_reply]: Stripping broken song template with missing/placeholder metadata.")
+        return intro_text if intro_text else "⚠️ Could not find a verified track on YouTube Music."
 
     # Video mode (no **Song:** header):
     if yt_match:

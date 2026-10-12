@@ -10,6 +10,7 @@ from src.skills.music.utils import (
     parse_song_meta,
     format_song_card,
     is_placeholder_text,
+    standardize_song_reply,
 )
 
 
@@ -78,6 +79,30 @@ class TestMusicMetadata(unittest.TestCase):
         self.assertTrue(is_placeholder_text("Unknown Artist"))
         self.assertFalse(is_placeholder_text("Mac Declos"))
         self.assertFalse(is_placeholder_text("Give Nothing"))
+
+    def test_standardize_song_reply_auto_resolve(self):
+        # Even with a fake/hallucinated video ID, valid song & artist auto-resolves or retains song and artist
+        fake_reply = (
+            "Here is a great epic track:\n\n"
+            "**Song:** Victory Song\n"
+            "**Artist:** Ensiferum\n\n"
+            "https://music.youtube.com/watch?v=3Z0Z0Z0Z0Z0"
+        )
+        res = standardize_song_reply(fake_reply)
+        self.assertIn("**Song:** Victory Song", res)
+        self.assertIn("**Artist:** Ensiferum", res)
+        self.assertNotIn("3Z0Z0Z0Z0Z0", res)
+
+    def test_standardize_song_reply_empty_placeholder(self):
+        empty_reply = (
+            "Here is your recommendation:\n\n"
+            "**Song:** <song title>\n"
+            "**Artist:** <artist name>\n\n"
+            "<raw youtube music url>"
+        )
+        res = standardize_song_reply(empty_reply)
+        self.assertNotIn("<song title>", res)
+        self.assertIn("Here is your recommendation:", res)
 
 
 if __name__ == "__main__":
