@@ -148,62 +148,28 @@ def format_song_card(song: str, artist: str, url: str, genre: str = None, album:
     lines.append(url.strip())
     return "\n".join(lines)
 
+def is_placeholder_text(text: str) -> bool:
+    """Detects if text contains empty strings or LLM template placeholders."""
+    if not text:
+        return True
+    t = text.strip().lower()
+    return t in (
+        "", "unknown", "unknown track", "unknown artist", "none",
+        "<song title>", "<artist name>", "<genre name>", "<album name>",
+        "<raw youtube music url>", "<raw youtube music url on its own blank line>",
+        "<youtube url>"
+    ) or t.startswith("<raw youtube") or t.startswith("<song") or t.startswith("<artist")
+
 def standardize_song_reply(reply: str) -> str:
     """
     Scans a message reply for YouTube Music or song links.
     Guarantees that the response adheres strictly to the consistent, emoji-free song template,
     preserving any conversational context or similarity descriptions while stripping
-    hallucinated markdown links.
+    hallucinated markdown links or broken empty templates.
     """
-    yt_match = re.search(r'(https:\/\/(?:music\.|www\.)?youtube\.com\/watch\?v=([0-9A-Za-z_-]{11}))', reply)
-    if not yt_match:
-        return reply
-
-    full_url = yt_match.group(1)
-    vid = yt_match.group(2)
     has_song_header = bool(re.search(r'\*\*(?:Song|Track):\*\*', reply, re.IGNORECASE))
 
-    # If not formatted as a song card (video mode), ensure standard www.youtube.com video link
-    if not has_song_header:
-        video_url = full_url.replace("music.youtube.com", "www.youtube.com")
-        if video_url != full_url:
-            return reply.replace(full_url, video_url)
-        return reply
-
-    # In music mode (contains **Song:**), ensure YouTube Music domain (music.youtube.com)
-    music_url = full_url.replace("www.youtube.com", "music.youtube.com")
-
-    meta = get_music_metadata(vid)
-    extracted_song = meta.get("song")
-    extracted_artist = meta.get("artist")
-    extracted_album = meta.get("album")
-    extracted_genre = meta.get("genre")
-
-    m_song = re.search(r'\*\*(?:Song|Track):\*\*\s*(.+)', reply, re.IGNORECASE)
-    if m_song:
-        clean_s = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_song.group(1)).strip()
-        if clean_s:
-            extracted_song = clean_s
-
-    m_art = re.search(r'\*\*Artist:\*\*\s*(.+)', reply, re.IGNORECASE)
-    if m_art:
-        clean_a = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_art.group(1)).strip()
-        if clean_a:
-            extracted_artist = clean_a
-
-    m_alb = re.search(r'\*\*Album:\*\*\s*(.+)', reply, re.IGNORECASE)
-    if m_alb:
-        clean_al = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_alb.group(1)).strip()
-        if clean_al:
-            extracted_album = clean_al
-
-    m_gen = re.search(r'\*\*Genre:\*\*\s*(.+)', reply, re.IGNORECASE)
-    if m_gen:
-        clean_g = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_gen.group(1)).strip()
-        if clean_g:
-            extracted_genre = clean_g
-
-    # Extract intro lines (anything before the template lines and urls)
+    # Helper: Extract conversational intro lines preceding any song headers or raw urls
     intro_lines = []
     for line in reply.split('\n'):
         line_stripped = line.strip()
@@ -211,20 +177,79 @@ def standardize_song_reply(reply: str) -> str:
             continue
         if re.search(r'\*\*(?:Song|Track|Artist|Album|Genre):\*\*', line_stripped, re.IGNORECASE):
             break
-        if "youtube.com" in line_stripped:
+        if "youtube.com" in line_stripped.lower() or "<raw" in line_stripped.lower() or line_stripped.startswith("<http"):
             break
         clean_l = re.sub(r'\[.*?\]\(.*?\)', '', line_stripped).strip()
-        if clean_l:
+        if clean_l and not clean_l.startswith("<"):
             intro_lines.append(clean_l)
+    intro_text = "\n".join(intro_lines).strip()
 
-    intro_text = "\n".join(intro_lines)
+    yt_match = re.search(r'(https:\/\/(?:music\.|www\.)?youtube\.com\/watch\?v=([0-9A-Za-z_-]{11}))', reply)
 
-    return format_song_card(
-        song=extracted_song or "Unknown Track",
-        artist=extracted_artist or "Unknown Artist",
-        url=music_url,
-        genre=extracted_genre,
-        album=extracted_album,
-        intro=intro_text
-    )
+    # If message was formatted with a song template:
+    if has_song_header:
+        # Case A: Song template present but NO valid YouTube video link (e.g. placeholder or missing URL)
+        if not yt_match:
+            print("⚠️ [standardize_song_reply]: Stripping broken song template with missing/placeholder URL.")
+            return intro_text if intro_text else "⚠️ Could not find a verified track on YouTube Music."
+
+        full_url = yt_match.group(1)
+        vid = yt_match.group(2)
+        music_url = full_url.replace("www.youtube.com", "music.youtube.com")
+
+        meta = get_music_metadata(vid)
+        extracted_song = meta.get("song")
+        extracted_artist = meta.get("artist")
+        extracted_album = meta.get("album")
+        extracted_genre = meta.get("genre")
+
+        m_song = re.search(r'\*\*(?:Song|Track):\*\*\s*(.+)', reply, re.IGNORECASE)
+        if m_song:
+            clean_s = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_song.group(1)).strip()
+            if clean_s and not is_placeholder_text(clean_s):
+                extracted_song = clean_s
+
+        m_art = re.search(r'\*\*Artist:\*\*\s*(.+)', reply, re.IGNORECASE)
+        if m_art:
+            clean_a = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_art.group(1)).strip()
+            if clean_a and not is_placeholder_text(clean_a):
+                extracted_artist = clean_a
+
+        m_alb = re.search(r'\*\*Album:\*\*\s*(.+)', reply, re.IGNORECASE)
+        if m_alb:
+            clean_al = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_alb.group(1)).strip()
+            if clean_al and not is_placeholder_text(clean_al):
+                extracted_album = clean_al
+
+        m_gen = re.search(r'\*\*Genre:\*\*\s*(.+)', reply, re.IGNORECASE)
+        if m_gen:
+            clean_g = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_gen.group(1)).strip()
+            if clean_g and not is_placeholder_text(clean_g):
+                extracted_genre = clean_g
+
+        # Case B: If song title or artist is empty, placeholder, or Unknown, strip broken template
+        if is_placeholder_text(extracted_song) or is_placeholder_text(extracted_artist):
+            print(f"⚠️ [standardize_song_reply]: Stripping broken song template for unverified track '{extracted_song}' by '{extracted_artist}' (ID: {vid}).")
+            return intro_text if intro_text else "⚠️ Could not find a verified track on YouTube Music."
+
+        print(f"🎵 [standardize_song_reply]: Formatted verified song card for '{extracted_song}' by '{extracted_artist}' -> {music_url}")
+        return format_song_card(
+            song=extracted_song,
+            artist=extracted_artist,
+            url=music_url,
+            genre=extracted_genre,
+            album=extracted_album,
+            intro=intro_text
+        )
+
+    # Video mode (no **Song:** header):
+    if yt_match:
+        full_url = yt_match.group(1)
+        video_url = full_url.replace("music.youtube.com", "www.youtube.com")
+        if video_url != full_url:
+            reply = reply.replace(full_url, video_url)
+
+    # Clean any accidental raw placeholders that might linger
+    reply = re.sub(r'<Raw YouTube[^\n>]*>', '', reply, flags=re.IGNORECASE)
+    return reply.strip()
 

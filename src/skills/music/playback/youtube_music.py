@@ -32,7 +32,8 @@ def extract_music_tokens(text: str) -> set[str]:
     stopwords = {
         "by", "the", "a", "an", "and", "or", "of", "in", "on", "at", "to",
         "for", "with", "feat", "ft", "official", "video", "audio", "music",
-        "topic", "remix", "original", "mix", "full", "hd", "4k", "hq"
+        "topic", "remix", "original", "mix", "full", "hd", "4k", "hq",
+        "unknown", "artist", "track", "song"
     }
     return {w for w in words if w not in stopwords and len(w) > 1}
 
@@ -41,7 +42,7 @@ def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, in
     Evaluates whether candidate metadata matches the query.
     Returns: (is_valid, priority_score, reason)
     - priority_score 3: Official Topic channel with matching song & artist
-    - priority_score 2: Official Artist channel / VEVO with matching song
+    - priority_score 2: Official Artist channel / VEVO with matching song & artist
     - priority_score 1: Third-party video with strong title & artist token match
     """
     if is_garbage_music_title(title, query):
@@ -49,7 +50,7 @@ def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, in
 
     q_tokens = extract_music_tokens(query)
     if not q_tokens:
-        return True, 1, "Generic match"
+        return True, 1, "Generic match (no query tokens)"
 
     cand_text = f"{title} {author}"
     cand_tokens = extract_music_tokens(cand_text)
@@ -60,15 +61,19 @@ def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, in
     
     meta = parse_song_meta(query)
     exp_song_tokens = extract_music_tokens(meta.get("song", ""))
-    exp_artist_tokens = extract_music_tokens(meta.get("artist", ""))
+    artist_name = meta.get("artist", "")
+    if artist_name.lower() in ("unknown artist", "unknown", ""):
+        exp_artist_tokens = set()
+    else:
+        exp_artist_tokens = extract_music_tokens(artist_name)
 
     if is_topic:
         song_match = not exp_song_tokens or bool(exp_song_tokens.intersection(cand_tokens))
         artist_match = not exp_artist_tokens or bool(exp_artist_tokens.intersection(cand_tokens))
         if song_match and artist_match:
-            return True, 3, "Topic channel match"
-        if len(overlap) >= len(q_tokens) * 0.5:
-            return True, 3, "Topic channel match via token overlap"
+            return True, 3, "Topic channel match (song & artist verified)"
+        if len(overlap) >= max(1, len(q_tokens) * 0.5):
+            return True, 3, f"Topic channel match via token overlap ({len(overlap)}/{len(q_tokens)})"
 
     # Non-topic channels:
     if exp_song_tokens and exp_artist_tokens:
@@ -78,15 +83,16 @@ def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, in
             author_tokens = extract_music_tokens(author)
             is_artist_channel = bool(exp_artist_tokens.intersection(author_tokens)) or "vevo" in author.lower()
             score = 2 if is_artist_channel else 1
-            return True, score, "Both song and artist match"
+            channel_type = "artist channel/VEVO" if is_artist_channel else "standard channel"
+            return True, score, f"Song and artist match on {channel_type}"
         return False, 0, f"Missing song or artist match (song={bool(song_overlap)}, artist={bool(artist_overlap)})"
 
     # General query overlap ratio
     ratio = len(overlap) / len(q_tokens)
     if ratio >= 0.5:
-        return True, 1, f"Token overlap ({ratio:.2f})"
+        return True, 1, f"Token overlap ({len(overlap)}/{len(q_tokens)} tokens, ratio {ratio:.2f})"
 
-    return False, 0, f"Low token overlap ({ratio:.2f})"
+    return False, 0, f"Low token overlap ({len(overlap)}/{len(q_tokens)} tokens, ratio {ratio:.2f})"
 
 def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
     """
@@ -103,18 +109,28 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
     # =========================================================================
     # PHASE 1: Free DuckDuckGo Search (0 API Quota Units)
     # =========================================================================
-    queries_to_try = [
-        f'site:youtube.com "{query}" Topic',
-        f'site:music.youtube.com {query}',
-        f'site:youtube.com {query}'
-    ]
-    if " by " in query:
-        clean_pair = query.replace(" by ", " ")
-        queries_to_try.insert(1, f'site:youtube.com "{clean_pair}" Topic')
+    meta_q = parse_song_meta(query)
+    song_q = meta_q.get("song", "").strip()
+    artist_q = meta_q.get("artist", "").strip()
+    if artist_q.lower() in ("unknown artist", "unknown"):
+        artist_q = ""
+
+    queries_to_try = []
+    if song_q and artist_q:
+        queries_to_try.append(f'site:youtube.com "{song_q}" "{artist_q}" Topic')
+        queries_to_try.append(f'site:youtube.com {song_q} {artist_q} Topic')
+        queries_to_try.append(f'site:music.youtube.com {song_q} {artist_q}')
+        queries_to_try.append(f'site:youtube.com {song_q} {artist_q}')
+    else:
+        clean_q = query.replace(" by ", " ").replace(" - ", " ").strip()
+        queries_to_try.append(f'site:youtube.com {clean_q} Topic')
+        queries_to_try.append(f'site:music.youtube.com {clean_q}')
+        queries_to_try.append(f'site:youtube.com {clean_q}')
 
     raw_candidates = []
     for q in queries_to_try:
         try:
+            print(f"  └─ 🔍 [DuckDuckGo]: Querying '{q}'...")
             for r in list(DDGS().text(q, max_results=max_results + 4)):
                 href = r.get('href', '')
                 # Fast Shorts rejection on URL structure
@@ -129,17 +145,21 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
                         raw_candidates.append((vid, r.get('title', ''), href))
             if len(raw_candidates) >= max_results + 4:
                 break
-        except Exception:
+        except Exception as e:
+            print(f"  └─ ⚠️ [DuckDuckGo Search Warning]: {e}")
             continue
+
+    print(f"  └─ 🔎 [Music Resolver]: Found {len(raw_candidates)} initial candidate URL(s) to verify.")
 
     for vid, raw_title, href in raw_candidates:
         # 1. Shorts filter
         if is_youtube_short(vid, href=href, title=raw_title):
-            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} because it is a YouTube Short.")
+            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - YouTube Short.")
             continue
 
         # 2. Embeddability check
         if not verify_embeddable(vid):
+            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - Embedding disabled by owner.")
             continue
 
         # 3. Fetch oEmbed metadata (0 API quota units)
@@ -147,6 +167,7 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
         title = oembed.get("title") or raw_title
         author = oembed.get("author", "")
         if not title:
+            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} - Failed to retrieve oEmbed title.")
             continue
 
         # 4. Robust Garbage & Relevance match check
@@ -170,12 +191,14 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
             "score": score
         }
         verified_candidates.append(entry)
+        channel_desc = "Topic channel" if is_topic else (f"Channel: '{author}'" if author else "Standard")
+        print(f"  └─ ✅ [Music Match]: Found '{meta['song']}' by '{meta['artist']}' ({channel_desc}) -> {link} [Score: {score}/3 | Reason: {reason}]")
 
     # =========================================================================
     # PHASE 2: Fallback to YouTube Data API v3 (Burns 100 quota units ONLY on failure)
     # =========================================================================
     if not verified_candidates and api_key:
-        print(f"⚠️ [YouTube Music Resolver]: Web search yielded no verified match. Falling back to YouTube Data API for '{query}'...")
+        print(f"⚠️ [Music Resolver Fallback]: Web search yielded no verified match. Falling back to YouTube Data API for '{query}'...")
         try:
             url = "https://www.googleapis.com/youtube/v3/search"
             params = {
@@ -200,17 +223,20 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
 
                     # Apply Shorts & Garbage filtering to API results as well
                     if is_youtube_short(vid, title=item_title):
+                        print(f"  └─ ⚠️ [Music API Fallback]: Skipping {vid} - Short.")
                         continue
                     if is_garbage_music_title(item_title, query):
+                        print(f"  └─ ⚠️ [Music API Fallback]: Skipping {vid} - Non-music keyword.")
                         continue
                     if not verify_embeddable(vid):
+                        print(f"  └─ ⚠️ [Music API Fallback]: Skipping {vid} - Embedding disabled.")
                         continue
 
                     is_topic = " - Topic" in item_channel or "Topic" in item_channel
                     link = f"https://music.youtube.com/watch?v={vid}"
                     meta = parse_song_meta(item_title, item_channel, query=query)
 
-                    verified_candidates.append({
+                    entry = {
                         "id": vid,
                         "title": meta["song"],
                         "artist": meta["artist"],
@@ -219,18 +245,22 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
                         "url": link,
                         "is_topic": is_topic,
                         "score": 3 if is_topic else 1
-                    })
+                    }
+                    verified_candidates.append(entry)
+                    print(f"  └─ ✅ [Music API Match]: Found '{meta['song']}' by '{meta['artist']}' (Channel: '{item_channel}') -> {link}")
         except Exception as e:
             print(f"⚠️ [YouTube Music API Fallback Error]: {e}")
 
     if not verified_candidates:
+        print(f"❌ [Music Resolver]: No verified music tracks found for '{query}'.")
         return []
 
     # Sort candidates by match quality score descending (Topic channels first)
     verified_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
+    final_results = verified_candidates[:max_results]
 
     # Populate in-memory metadata cache for Discord card rendering
-    for cand in verified_candidates[:max_results]:
+    for cand in final_results:
         MUSIC_METADATA_CACHE[cand["id"]] = {
             "song": cand["title"],
             "artist": cand["artist"],
@@ -238,5 +268,7 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
             "album": cand.get("album"),
             "url": cand["url"]
         }
+        topic_tag = " [Official Topic]" if cand.get("is_topic") else ""
+        print(f"🎧 [Music Resolver Returned]: '{cand['title']}' by '{cand['artist']}' -> {cand['url']}{topic_tag} (Score: {cand.get('score', 0)}/3)")
 
-    return verified_candidates[:max_results]
+    return final_results

@@ -20,10 +20,20 @@ class YouTubeSearchManager:
 
     def search(self, query: str, max_results: int = 1) -> list[dict]:
         """Tries free DuckDuckGo search first (0 quota), falls back to official API if needed."""
-        print(f"🔎 [YouTube]: Searching via DuckDuckGo for '{query}'...")
+        print(f"🔎 [YouTube Video Search]: Searching via DuckDuckGo for '{query}'...")
         results = self.ddg_aggregator.search(query, max_results=max_results)
         if not results:
-            print(f"⚠️ [YouTube]: DuckDuckGo yielded no embeddable results, falling back to YouTube Data API for '{query}'...")
+            print(f"⚠️ [YouTube Video Search]: DuckDuckGo yielded no embeddable results, falling back to YouTube Data API for '{query}'...")
             results = self.api_aggregator.search(query, max_results=max_results)
+            if results:
+                print(f"✅ [YouTube API]: Successfully found {len(results)} video(s) for '{query}'")
+            else:
+                print(f"❌ [YouTube API]: No videos found for '{query}'")
+        else:
+            print(f"✅ [YouTube DDG]: Found {len(results)} verified video(s) for '{query}'")
+
+        for r in results:
+            chan_str = f" (Channel: {r.get('channel')})" if r.get('channel') else ""
+            print(f"  └─ 🎬 [Video Resolver Result]: '{r.get('title')}'{chan_str} -> {r.get('url')}")
         return results
 

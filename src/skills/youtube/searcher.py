@@ -15,8 +15,16 @@ def skill_youtube_searcher(query: str, max_results: int = 1, is_music: bool = Fa
         if is_music:
             results = resolve_youtube_music_link(query, max_results=max_results)
             if not results:
-                return f"Could not find music link for '{query}'. CRITICAL: Do NOT guess or invent a YouTube link! Tell the user you couldn't find it."
+                print(f"❌ [YouTube Search Skill]: No music tracks found for '{query}'.")
+                return (
+                    f"NO_TRACKS_FOUND: Could not find any verified YouTube Music link for '{query}'.\n"
+                    f"CRITICAL INSTRUCTIONS FOR YOUR RESPONSE:\n"
+                    f"1. Do NOT output the '**Song:**' or '**Artist:**' template.\n"
+                    f"2. Do NOT output any URL, link, or placeholder (e.g. <Raw YouTube Music URL>).\n"
+                    f"3. Simply inform the user in a short conversational sentence that you could not find the track on YouTube Music."
+                )
 
+            print(f"✅ [YouTube Search Skill]: Returning {len(results)} music link(s) for '{query}'")
             formatted_results = ""
             for i, r in enumerate(results):
                 formatted_results += f"{i+1}. Song: {r['title']}\n   Artist: {r['artist']}\n   Link: {r['url']}\n\n"
@@ -50,8 +58,15 @@ CRITICAL RULES:
         # General video mode: pure video search
         results = search_youtube(query, max_results=max_results)
         if not results:
-            return f"Could not find YouTube video for '{query}'. CRITICAL: Do NOT guess or invent a YouTube link! Tell the user you couldn't find it."
+            print(f"❌ [YouTube Search Skill]: No video results found for '{query}'.")
+            return (
+                f"NO_VIDEOS_FOUND: Could not find any playable YouTube video for '{query}'.\n"
+                f"CRITICAL INSTRUCTIONS FOR YOUR RESPONSE:\n"
+                f"1. Do NOT guess or invent any YouTube link or URL placeholder.\n"
+                f"2. Simply tell the user in a short sentence that no matching video was found."
+            )
 
+        print(f"✅ [YouTube Search Skill]: Returning {len(results)} video link(s) for '{query}'")
         formatted_results = ""
         for i, r in enumerate(results):
             chan_str = f"\n   Channel: {r['channel']}" if r.get('channel') else ""
@@ -73,5 +88,6 @@ If you searched for a specific song or video, present ONLY the best single link.
 """
 
     except Exception as e:
+        print(f"❌ [YouTube Search Skill Error]: {e}")
         return f"Error searching YouTube: {e}. CRITICAL: Do NOT guess or invent a YouTube link! Tell the user the search failed."
 

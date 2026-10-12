@@ -39,8 +39,10 @@ class DuckDuckGoYouTubeAggregator(BaseYouTubeSearchAggregator):
         verified_results = []
         for vid, raw_title, href in candidates:
             if self.is_short_fn and self.is_short_fn(vid, href=href, title=raw_title):
+                print(f"  └─ ⚠️ [YouTube DDG]: Skipping {vid} ('{raw_title}') - YouTube Short")
                 continue
             if self.verify_embeddable and not self.verify_embeddable(vid):
+                print(f"  └─ ⚠️ [YouTube DDG]: Skipping {vid} ('{raw_title}') - Embedding disabled")
                 continue
 
             oembed = self.get_video_oembed(vid) if self.get_video_oembed else {"title": "", "author": ""}
@@ -53,6 +55,7 @@ class DuckDuckGoYouTubeAggregator(BaseYouTubeSearchAggregator):
                 "channel": author,
                 "url": f"https://www.youtube.com/watch?v={vid}"
             })
+            print(f"  └─ ✅ [YouTube DDG]: Verified candidate {vid} ('{title}')")
 
             if len(verified_results) >= max_results:
                 break
