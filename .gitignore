@@ -51,7 +51,9 @@ Thumbs.db
 ehthumbs.db
 [Dd]esktop.ini
 
-# Temporary Scratch Dumps
+# Temporary Scratch Dumps & Test Artifacts
 lastfm.html
 test.json
 scratch/
+.pytest_cache/
+.coverage

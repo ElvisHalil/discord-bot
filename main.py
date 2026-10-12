@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from ollama import AsyncClient
 import src.tools.registry as tools
 from src.utils import ensure_ollama_running, chunk_message
-from src.music_utils import format_song_card, get_music_metadata, standardize_song_reply
+from src.skills.music.utils import format_song_card, get_music_metadata, standardize_song_reply
 from src.config import MODES
 
 load_dotenv()

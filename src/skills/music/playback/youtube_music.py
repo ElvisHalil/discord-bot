@@ -3,7 +3,7 @@ import re
 import requests
 from dotenv import load_dotenv
 from ddgs import DDGS
-from src.music_utils import parse_song_meta, MUSIC_METADATA_CACHE
+from src.skills.music.utils import parse_song_meta, MUSIC_METADATA_CACHE
 from src.skills.youtube.client import verify_embeddable, get_video_oembed, is_youtube_short
 
 load_dotenv()
