@@ -2,7 +2,7 @@ import sys
 import io
 import asyncio
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
-from src.tools.all import search_web
+from src.tools.web import search_web
 
 async def test():
     results = await asyncio.gather(

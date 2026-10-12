@@ -1,12 +1,8 @@
-import os
-import json
 import requests
-import numexpr as ne
 import urllib.parse as urlparse
 from bs4 import BeautifulSoup
 from youtube_transcript_api import YouTubeTranscriptApi
 from ddgs import DDGS
-from datetime import datetime
 
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -14,14 +10,6 @@ BROWSER_HEADERS = {
 }
 
 VISITED_URLS = set()
-ACTIVE_MEMORY_FILE = "data/memory.json"
-
-def get_current_datetime() -> str:
-    """Get the exact current date, day of the week, and local time from the host machine."""
-    now = datetime.now()
-    result = now.strftime("Current Date: %A, %B %d, %Y | Local Time (UTC-6): %I:%M:%S %p")
-    print(f"🕒 [Checking Clock]: {result}")
-    return result
 
 def search_web(query: str) -> str:
     """Search the web. Returns the top snippets and links. Use `read_website` on a specific URL if you need more details."""
@@ -63,45 +51,6 @@ def read_website(url: str) -> str:
         return text[:20000]
     except Exception as e:
         return f"Failed to read URL: {e}"
-
-def save_memory(fact: str) -> str:
-    """Save a permanent fact, preference, or rule about the user."""
-    print(f"💾 [Saving Memory to {ACTIVE_MEMORY_FILE}]: {fact}")
-    memories = []
-    if os.path.exists(ACTIVE_MEMORY_FILE):
-        try:
-            with open(ACTIVE_MEMORY_FILE, "r") as f:
-                memories = json.load(f)
-        except Exception:
-            memories = []
-    
-    memories.append(fact)
-    os.makedirs(os.path.dirname(ACTIVE_MEMORY_FILE), exist_ok=True)
-    with open(ACTIVE_MEMORY_FILE, "w") as f:
-        json.dump(memories, f, indent=2)
-    return "Memory successfully saved."
-
-def recall_memories() -> str:
-    """Recall all permanently saved memories and facts about the user."""
-    print(f"🧠 [Recalling Memories from {ACTIVE_MEMORY_FILE}]")
-    if os.path.exists(ACTIVE_MEMORY_FILE):
-        try:
-            with open(ACTIVE_MEMORY_FILE, "r") as f:
-                memories = json.load(f)
-            if memories:
-                return "Known facts about the user:\n" + "\n".join(f"- {m}" for m in memories)
-        except Exception:
-            pass
-    return "No memories saved yet."
-
-def evaluate_math(expression: str) -> str:
-    """Evaluate an exact mathematical expression (e.g., 25 * 4 + 100)."""
-    print(f"🧮 [Calculating]: {expression}")
-    try:
-        result = ne.evaluate(expression)
-        return str(result)
-    except Exception as e:
-        return f"Math error: {e}"
 
 def read_youtube_video(url: str) -> str:
     """Extract the transcript text and title from a YouTube video URL to summarize it."""
@@ -161,39 +110,9 @@ def read_youtube_video(url: str) -> str:
             
         return f"{prefix}Failed to fetch transcript: {error_msg}"
 
-from src.skills.weather_reporter import skill_weather_reporter
-from src.skills.youtube_searcher import skill_youtube_searcher
-from src.skills.top_music import skill_top_music
-from src.skills.csgo_esports import skill_csgo_esports
-from src.skills.sports_info import skill_sports_info
-
-# Define which tools are available for each mode
-RESEARCH_TOOLS = {
-    "get_current_datetime": get_current_datetime,
+WEB_TOOLS = {
     "search_web": search_web,
     "read_website": read_website,
-    "save_memory": save_memory,
-    "recall_memories": recall_memories,
-    "evaluate_math": evaluate_math,
     "read_youtube_video": read_youtube_video,
-    "skill_weather_reporter": skill_weather_reporter,
-    "skill_youtube_searcher": skill_youtube_searcher,
-    "skill_top_music": skill_top_music,
-    "skill_csgo_esports": skill_csgo_esports,
-    "skill_sports_info": skill_sports_info
 }
 
-CHAT_TOOLS = {
-    "get_current_datetime": get_current_datetime,
-    "search_web": search_web,
-    "read_website": read_website,
-    "evaluate_math": evaluate_math,
-    "save_memory": save_memory,
-    "recall_memories": recall_memories,
-    "read_youtube_video": read_youtube_video,
-    "skill_weather_reporter": skill_weather_reporter,
-    "skill_youtube_searcher": skill_youtube_searcher,
-    "skill_top_music": skill_top_music,
-    "skill_csgo_esports": skill_csgo_esports,
-    "skill_sports_info": skill_sports_info
-}

@@ -1,4 +1,4 @@
-import src.tools.all as tools
+import src.tools.registry as tools
 import os
 
 MODES = {

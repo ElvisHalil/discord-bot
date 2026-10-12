@@ -7,13 +7,11 @@ def skill_weather_reporter(city: str) -> str:
     """
     print(f"🌤️ [Executing Weather Skill]: {city}")
     try:
-        # Python does the heavy lifting (fetching the data)
         response = requests.get(f"https://wttr.in/{city}?format=%C+%t+%w+%h", timeout=5)
         weather_data = response.text.strip()
     except Exception as e:
         weather_data = f"Error fetching weather: {e}"
         
-    # We return the data, PLUS the prompt directions for the LLM!
     return f"""
 === RAW WEATHER DATA ===
 City: {city}
@@ -26,4 +24,3 @@ You have successfully fetched the weather data. You MUST follow these rules to f
 3. Recommend one fun activity based specifically on this weather.
 4. Keep your response under 4 sentences.
 """
-

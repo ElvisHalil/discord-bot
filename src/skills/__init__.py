@@ -1,4 +1,12 @@
-from .weather_reporter import skill_weather_reporter
-from .youtube_searcher import skill_youtube_searcher
-from .top_music import skill_top_music
-from .csgo_esports import skill_csgo_esports
+from src.skills.weather import skill_weather_reporter
+from src.skills.youtube import skill_youtube_searcher
+from src.skills.music import skill_top_music
+from src.skills.sports import skill_csgo_esports, skill_sports_info
+
+__all__ = [
+    "skill_weather_reporter",
+    "skill_youtube_searcher",
+    "skill_top_music",
+    "skill_csgo_esports",
+    "skill_sports_info",
+]

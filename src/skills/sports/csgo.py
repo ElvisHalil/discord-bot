@@ -27,7 +27,6 @@ def skill_csgo_esports(query_type: str = 'all', event_page: str = None, player_u
             if not api_key:
                 output += "[LIVE STREAMS]\nError: YOUTUBE_API_KEY is missing.\n\n"
             else:
-                # ESLCS channel ID
                 channel_id = "UCPq2ETz4aAGo2Z-8JisDPIA"
                 url = "https://www.googleapis.com/youtube/v3/search"
                 params = {
@@ -69,7 +68,6 @@ def skill_csgo_esports(query_type: str = 'all', event_page: str = None, player_u
                 cols = tr.find_all(['td', 'th'])
                 if len(cols) >= 3 and count < 10:
                     row_text = " | ".join([c.get_text(strip=True) for c in cols])
-                    # Filter out headers and empty rows
                     if "Prize Pool" not in row_text and len(row_text) > 10:
                         link = ''
                         for c in cols:
@@ -138,18 +136,18 @@ def skill_csgo_esports(query_type: str = 'all', event_page: str = None, player_u
                     for x in soup.select('.navbox, .toc, script, style, .mw-editsection'):
                         x.decompose()
                     
-                    text = soup.get_text('\\n', strip=True)
+                    text = soup.get_text('\n', strip=True)
                     if len(text) > 8000:
-                        text = text[:4000] + "\\n...[CONTENT TRUNCATED]...\\n" + text[-4000:]
+                        text = text[:4000] + "\n...[CONTENT TRUNCATED]...\n" + text[-4000:]
                         
-                    output += f"[EVENT INFO: {event_page}]\\n{text}\\n"
+                    output += f"[EVENT INFO: {event_page}]\n{text}\n"
                     if roster_lines:
-                        output += "\\n--- TOURNAMENT ROSTERS ---\\n" + "\\n".join(roster_lines) + "\\n"
-                    output += "\\n"
+                        output += "\n--- TOURNAMENT ROSTERS ---\n" + "\n".join(roster_lines) + "\n"
+                    output += "\n"
                 else:
-                    output += f"[EVENT INFO]\\nError parsing event page. It might not exist.\\n\\n"
+                    output += f"[EVENT INFO]\nError parsing event page. It might not exist.\n\n"
             except Exception as e:
-                output += f"[EVENT INFO]\\nError fetching event: {e}\\n\\n"
+                output += f"[EVENT INFO]\nError fetching event: {e}\n\n"
 
     # 5. PLAYER STATS
     if query_type == 'player_stats':
@@ -171,13 +169,12 @@ def skill_csgo_esports(query_type: str = 'all', event_page: str = None, player_u
                 if not stats_texts:
                     output += f"[PLAYER STATS: {player_url}]\nCould not extract stats (might be blocked by Cloudflare or incorrect URL).\n\n"
                 else:
-                    text = "\\n".join(stats_texts)
-                    # Deduplicate and truncate if massive
+                    text = "\n".join(stats_texts)
                     if len(text) > 4000:
                         text = text[:4000]
-                    output += f"[PLAYER STATS: {player_url}]\\n{text}\\n\\n"
+                    output += f"[PLAYER STATS: {player_url}]\n{text}\n\n"
             except Exception as e:
-                output += f"[PLAYER STATS]\\nError fetching player stats: {e}\\n\\n"
+                output += f"[PLAYER STATS]\nError fetching player stats: {e}\n\n"
 
     output += """
 === SKILL INSTRUCTIONS FOR YOU (THE LLM) ===
@@ -192,4 +189,3 @@ Use this exact data to answer the user's questions about CS esports.
    - Output the raw YouTube link on its own blank line so Discord creates a video embed!
 """
     return output
-

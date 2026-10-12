@@ -55,7 +55,6 @@ def skill_sports_info(sport: str, query: str = "schedule") -> str:
         
         for e in events:
             try:
-                # date is like 2026-03-08T17:00:00
                 e_date = datetime.strptime(e['event_date'][:10], "%Y-%m-%d")
                 if e_date >= now:
                     upcoming.append(e)
@@ -93,4 +92,3 @@ def skill_sports_info(sport: str, query: str = "schedule") -> str:
         
     except Exception as e:
         return f"Error parsing F1 schedule: {e}"
-
