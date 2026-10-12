@@ -91,3 +91,4 @@ class DeezerAggregator(BaseMusicAggregator):
 
     def get_charts(self, genre: str = None) -> list[Track]:
         return []
+

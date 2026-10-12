@@ -51,3 +51,4 @@ class BeatportAggregator(BaseMusicAggregator):
     def get_similar(self, query: str) -> list[Track]:
         # Beatport charts serve as the electronic music safety net
         return self.get_charts(genre="techno")
+

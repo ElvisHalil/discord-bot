@@ -65,26 +65,62 @@ CRITICAL RULES:
 
         output = f"=== TODAY'S TOP CHARTING MUSIC ({genre.upper() if genre else 'ALL GENRES'}) ===\n\n"
         if all_tracks:
-            sampled = random.sample(all_tracks, min(25, len(all_tracks)))
-            for t in sampled:
-                output += t.display_line() + "\n"
+            # Group tracks by source section to preserve provider clarity
+            sections = {}
+            for t in all_tracks:
+                sections.setdefault(t.source or "general", []).append(t)
+
+            section_headers = {
+                "spotify_global": "SPOTIFY GLOBAL (Random 10 from Top 50)",
+                "youtube_trending": "YOUTUBE TRENDING MUSIC (Random 10 from Top 50)",
+                "radio_airplay": "US RADIO AIRPLAY (Random 10 from Top 50)",
+                "beatport_top_100": "BEATPORT TOP 100 (Random 7 from 100)",
+                "beatport_hype_100": "BEATPORT HYPE 100 (Random 7 from 100)",
+                "beatport_best_tracks": "BEATPORT BEST TRACKS (Random 7 from 100)",
+            }
+
+            for source_key, track_list in sections.items():
+                if source_key in section_headers:
+                    header = section_headers[source_key]
+                elif source_key.startswith("itunes_"):
+                    itunes_genre = source_key.replace("itunes_", "").upper()
+                    header = f"APPLE MUSIC / ITUNES US - {itunes_genre} (Random 10 from Top 50)"
+                else:
+                    header = source_key.upper()
+
+                output += f"[{header}]\n"
+                for t in track_list:
+                    output += t.display_line() + "\n"
+                output += "\n"
         else:
             output += "No charting music found.\n"
 
-        output += """
-=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===
-Review the charting tracks above and present recommendations to the user.
-To present a playable song link, call `skill_youtube_searcher` with `is_music=True` and format using the standard song template:
+        output += """=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===
+You have successfully fetched today's top music.
+Present these lists to the user naturally.
+If this skill returned NO data or an unrecognizable genre, immediately use your `search_web` tool to find the top music for that specific genre online.
+CRITICAL INSTRUCTION: If the user explicitly asked for "a song" or "a beat" (singular), you MUST pick EXACTLY ONE song from the list, use `skill_youtube_searcher` with `is_music=True` to get its link, and present ONLY THAT ONE SONG. Do not return 3 songs. Only return multiple if they asked for a playlist or multiple recommendations.
+CRITICAL INSTRUCTION: NEVER guess or invent YouTube URLs. You MUST call `skill_youtube_searcher` with `is_music=True` to get the real, working video link for any song you present.
 
-[Your conversational text]
+When presenting a song to the user, you MUST format your response using this EXACT clean, text-only template (NO EMOJIS):
+
+[Your brief conversational intro or recommendation context, if any]
 
 **Song:** <Song Title>
 **Artist:** <Artist Name>
-**Genre:** <Genre Name> (optional)
-**Album:** <Album Name> (optional)
+**Genre:** <Genre Name> (optional, include only if known)
+**Album:** <Album Name> (optional, include only if known)
 
 <Raw YouTube Music URL on its own blank line>
+
+CRITICAL RULES:
+1. BOTH '**Song:**' and '**Artist:**' MUST always be displayed.
+2. Do NOT include ANY emojis in the song template lines. Keep it clean and text-only.
+3. Paste ONLY the bare YouTube Music URL on a new blank line at the bottom.
+4. NEVER wrap the link in markdown (like `[Title](url)`) or `<>` brackets, otherwise Discord will fail to embed the music player!
+5. Do NOT output ANY markdown links like `[YouTube](...)` or `[Channel](...)` or `[Title](...)`.
 """
         return output
     except Exception as e:
         return f"Error fetching top music: {e}"
+

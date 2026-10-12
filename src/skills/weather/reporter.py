@@ -24,3 +24,4 @@ You have successfully fetched the weather data. You MUST follow these rules to f
 3. Recommend one fun activity based specifically on this weather.
 4. Keep your response under 4 sentences.
 """
+

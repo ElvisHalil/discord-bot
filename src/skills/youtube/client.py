@@ -118,3 +118,4 @@ def search_youtube(query: str, max_results: int = 1) -> list[dict]:
         print(f"⚠️ [YouTube]: Falling back to DuckDuckGo search for '{query}'...")
         results = search_youtube_ddg(query, max_results=max_results)
     return results
+

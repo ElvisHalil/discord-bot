@@ -73,3 +73,4 @@ If you searched for a specific song or video, present ONLY the best single link.
 
     except Exception as e:
         return f"Error searching YouTube: {e}. CRITICAL: Do NOT guess or invent a YouTube link! Tell the user the search failed."
+

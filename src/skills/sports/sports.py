@@ -92,3 +92,4 @@ def skill_sports_info(sport: str, query: str = "schedule") -> str:
         
     except Exception as e:
         return f"Error parsing F1 schedule: {e}"
+

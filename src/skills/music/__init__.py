@@ -9,3 +9,4 @@ __all__ = [
     "MusicAggregatorManager",
     "resolve_youtube_music_link",
 ]
+

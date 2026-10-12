@@ -189,3 +189,4 @@ Use this exact data to answer the user's questions about CS esports.
    - Output the raw YouTube link on its own blank line so Discord creates a video embed!
 """
     return output
+

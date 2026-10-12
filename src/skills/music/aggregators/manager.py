@@ -56,3 +56,4 @@ class MusicAggregatorManager:
             all_tracks.extend(charts.get_charts(genre=genre))
 
         return all_tracks
+

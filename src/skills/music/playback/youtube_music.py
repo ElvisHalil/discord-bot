@@ -118,3 +118,4 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
         }]
 
     return final_results[:max_results]
+

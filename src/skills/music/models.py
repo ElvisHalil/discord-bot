@@ -15,8 +15,9 @@ class Track:
         """Formatted string representation for tool output."""
         meta_parts = []
         if self.album:
-            meta_parts.append(f"Album: {self.album}")
+            meta_parts.append(f"(Album: {self.album})")
         if self.genre:
-            meta_parts.append(f"Genre: {self.genre}")
-        extra = f" ({', '.join(meta_parts)})" if meta_parts else ""
+            meta_parts.append(f"(Genre: {self.genre})")
+        extra = f" {' '.join(meta_parts)}" if meta_parts else ""
         return f"- {self.title} by {self.artist}{extra}"
+

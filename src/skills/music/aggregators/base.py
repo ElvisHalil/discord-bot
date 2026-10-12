@@ -19,3 +19,4 @@ class BaseMusicAggregator(ABC):
         Returns a list of Track models.
         """
         pass
+

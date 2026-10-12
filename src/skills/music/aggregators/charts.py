@@ -140,3 +140,4 @@ class ChartsAggregator(BaseMusicAggregator):
                 print(f"  └─ ⚠️ [Charts]: Error fetching iTunes charts for {g_name}: {e}")
 
         return tracks
+

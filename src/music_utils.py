@@ -14,18 +14,20 @@ def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
     """
     title = re.sub(r'https?://\S+', '', title or "").strip()
     
-    # Extract embedded genre or album tags if present (e.g., "(Genre: Techno)", "(Album: Cruisin)")
+    # Extract embedded genre or album tags if present (e.g., "(Genre: Techno)", "(Album: Cruisin)", "(Album: X, Genre: Y)")
     genre = None
-    m_genre = re.search(r'\(Genre:\s*([^)]+)\)', title, flags=re.IGNORECASE)
+    m_genre = re.search(r'(?:\(|,\s*)Genre:\s*([^,)]+)', title, flags=re.IGNORECASE)
     if m_genre:
         genre = m_genre.group(1).strip()
-        title = re.sub(r'\(Genre:\s*[^)]+\)', '', title, flags=re.IGNORECASE)
 
     album = None
-    m_album = re.search(r'\(Album:\s*([^)]+)\)', title, flags=re.IGNORECASE)
+    m_album = re.search(r'(?:\(|,\s*)Album:\s*([^,)]+)', title, flags=re.IGNORECASE)
     if m_album:
         album = m_album.group(1).strip()
-        title = re.sub(r'\(Album:\s*[^)]+\)', '', title, flags=re.IGNORECASE)
+
+    title = re.sub(r'\((?:Album:[^,)]+|Genre:[^,)]+)(?:,\s*(?:Album:[^,)]+|Genre:[^,)]+))*\)', '', title, flags=re.IGNORECASE)
+    title = re.sub(r'\(Genre:\s*[^)]+\)', '', title, flags=re.IGNORECASE)
+    title = re.sub(r'\(Album:\s*[^)]+\)', '', title, flags=re.IGNORECASE).strip()
 
     # Clean promotional and video suffixes
     clean = re.sub(
