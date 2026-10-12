@@ -1,3 +1,4 @@
+import re
 from src.skills.youtube.client import search_youtube
 from src.skills.music.playback.youtube_music import resolve_youtube_music_link
 
@@ -13,6 +14,17 @@ def skill_youtube_searcher(query: str, max_results: int = 1, is_music: bool = Fa
     try:
         # Music mode: delegate directly to specialized YouTube Music playback resolver
         if is_music:
+            # Guard against generic genre / non-song queries (e.g. "phonk song", "techno music", "dnb track")
+            generic_m = re.match(r'^(?:a\s+|some\s+)?([a-z0-9\s]+?)\s+(?:song|track|music|beat|video)s?$', query.strip(), re.IGNORECASE)
+            if generic_m and " by " not in query and " - " not in query:
+                genre_term = generic_m.group(1).strip()
+                print(f"⚠️ [YouTube Search Skill]: Blocked generic genre query '{query}'. Directing model to skill_top_music.")
+                return (
+                    f"GENRE_QUERY_REJECTED: '{query}' is a broad genre request, NOT a specific song title! "
+                    f"You MUST call `skill_top_music(genre='{genre_term}')` FIRST to discover real songs in the '{genre_term}' genre. "
+                    f"Then pick ONE specific song and call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)`."
+                )
+
             results = resolve_youtube_music_link(query, max_results=max_results)
             if not results:
                 print(f"❌ [YouTube Search Skill]: No music tracks found for '{query}'.")

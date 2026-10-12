@@ -114,7 +114,7 @@ def get_music_metadata(vid: str, fallback_text: str = "", fallback_title: str = 
     else:
         meta = parse_song_meta(title, author)
 
-    if vid:
+    if vid and meta.get("song") != "Unknown Track":
         MUSIC_METADATA_CACHE[vid] = meta
 
     return meta
@@ -167,7 +167,7 @@ def standardize_song_reply(reply: str) -> str:
     preserving any conversational context or similarity descriptions while stripping
     hallucinated markdown links or broken empty templates.
     """
-    has_song_header = bool(re.search(r'\*\*(?:Song|Track):\*\*', reply, re.IGNORECASE))
+    has_song_header = bool(re.search(r'(?:\*\*|\b)(?:Song|Track):\s*', reply, re.IGNORECASE))
 
     # Helper: Extract conversational intro lines preceding any song headers or raw urls
     intro_lines = []
@@ -175,7 +175,7 @@ def standardize_song_reply(reply: str) -> str:
         line_stripped = line.strip()
         if not line_stripped:
             continue
-        if re.search(r'\*\*(?:Song|Track|Artist|Album|Genre):\*\*', line_stripped, re.IGNORECASE):
+        if re.search(r'(?:\*\*|\b)(?:Song|Track|Artist|Album|Genre):\s*', line_stripped, re.IGNORECASE):
             break
         if "youtube.com" in line_stripped.lower() or "<raw" in line_stripped.lower() or line_stripped.startswith("<http"):
             break
@@ -198,30 +198,40 @@ def standardize_song_reply(reply: str) -> str:
         music_url = full_url.replace("www.youtube.com", "music.youtube.com")
 
         meta = get_music_metadata(vid)
+        # Defense: If video is NOT in verified cache AND oEmbed returned Unknown Track (HTTP 404 on YouTube), reject dead link
+        if meta.get("song") == "Unknown Track":
+            print(f"⚠️ [standardize_song_reply]: Stripping broken song template for dead/hallucinated video ID {vid}.")
+            return intro_text if intro_text else "⚠️ Could not find a verified track on YouTube Music."
+
         extracted_song = meta.get("song")
         extracted_artist = meta.get("artist")
         extracted_album = meta.get("album")
         extracted_genre = meta.get("genre")
 
-        m_song = re.search(r'\*\*(?:Song|Track):\*\*\s*(.+)', reply, re.IGNORECASE)
+        m_song = re.search(r'(?:\*\*|\b)(?:Song|Track):\s*(.+)', reply, re.IGNORECASE)
         if m_song:
             clean_s = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_song.group(1)).strip()
+            # If multiple fields are inline (e.g. "Song: X Artist: Y")
+            if "artist:" in clean_s.lower():
+                clean_s = re.split(r'\s+(?:\*\*|\b)Artist:\s*', clean_s, flags=re.IGNORECASE)[0].strip()
             if clean_s and not is_placeholder_text(clean_s):
                 extracted_song = clean_s
 
-        m_art = re.search(r'\*\*Artist:\*\*\s*(.+)', reply, re.IGNORECASE)
+        m_art = re.search(r'(?:\*\*|\b)Artist:\s*(.+)', reply, re.IGNORECASE)
         if m_art:
             clean_a = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_art.group(1)).strip()
+            # If URL is inline (e.g. "Artist: Y https://...")
+            clean_a = re.sub(r'https?://\S+', '', clean_a).strip()
             if clean_a and not is_placeholder_text(clean_a):
                 extracted_artist = clean_a
 
-        m_alb = re.search(r'\*\*Album:\*\*\s*(.+)', reply, re.IGNORECASE)
+        m_alb = re.search(r'(?:\*\*|\b)Album:\s*(.+)', reply, re.IGNORECASE)
         if m_alb:
             clean_al = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_alb.group(1)).strip()
             if clean_al and not is_placeholder_text(clean_al):
                 extracted_album = clean_al
 
-        m_gen = re.search(r'\*\*Genre:\*\*\s*(.+)', reply, re.IGNORECASE)
+        m_gen = re.search(r'(?:\*\*|\b)Genre:\s*(.+)', reply, re.IGNORECASE)
         if m_gen:
             clean_g = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_gen.group(1)).strip()
             if clean_g and not is_placeholder_text(clean_g):
@@ -249,7 +259,8 @@ def standardize_song_reply(reply: str) -> str:
         if video_url != full_url:
             reply = reply.replace(full_url, video_url)
 
-    # Clean any accidental raw placeholders that might linger
+    # Strip hallucinated markdown links and accidental raw placeholders
+    reply = re.sub(r'\[(?:YouTube|Channel|Topic|Play|Watch|Video|Track)[^\]]*\]\([^\)]*\)', '', reply, flags=re.IGNORECASE)
     reply = re.sub(r'<Raw YouTube[^\n>]*>', '', reply, flags=re.IGNORECASE)
     return reply.strip()
 

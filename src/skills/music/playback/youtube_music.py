@@ -14,7 +14,9 @@ GARBAGE_MUSIC_KEYWORDS = [
     "gameplay", "walkthrough", "tier list", "parody", "lesson",
     "drum cover", "synth tutorial", "unboxing", "vlog", "prank",
     "meme", "tiktok compilation", "nightcore", "sped up", "slowed",
-    "vocal coach", "reverb"
+    "vocal coach", "reverb", "top 50", "top 100", "top 20", "top 10",
+    "top 25", "most viral", "compilation", "playlist", "best of",
+    "1 hour", "10 hours", "full album"
 ]
 
 def is_garbage_music_title(title: str, query: str) -> bool:

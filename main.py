@@ -310,9 +310,25 @@ async def on_message(message):
                 if getattr(response.message, "tool_calls", None):
                     print(f"⚡ [{current_mode.upper()}] Model requested {len(response.message.tool_calls)} tools simultaneously!")
                     
+                    tool_names = [call.function.name for call in response.message.tool_calls]
+                    has_top_music = "skill_top_music" in tool_names
+
                     async def run_tool(call):
                         tool_name = call.function.name
                         args = call.function.arguments or {}
+
+                        # Guardrail: Prevent running youtube searcher in parallel with top music
+                        if tool_name == "skill_youtube_searcher" and has_top_music:
+                            print(f"  └─ ⚠️ [Orchestrator]: Blocked parallel {tool_name} call while skill_top_music is executing.")
+                            return {
+                                "role": "tool",
+                                "name": tool_name,
+                                "content": (
+                                    "PARALLEL_EXECUTION_BLOCKED: You cannot call `skill_youtube_searcher` at the same time as `skill_top_music`. "
+                                    "You must first review the songs returned by `skill_top_music` in this step, select ONE specific song, "
+                                    "and then call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` in your NEXT step to get its link."
+                                )
+                            }
 
                         if tool_name in active_tools:
                             print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
