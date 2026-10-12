@@ -17,6 +17,7 @@ from src.tools.web import (
     SEARCH_CACHE,
     YOUTUBE_CACHE,
 )
+from src.utils import suppress_discord_embeds
 
 
 class TestWebTools(unittest.TestCase):
@@ -345,6 +346,32 @@ class TestWebTools(unittest.TestCase):
         res = read_youtube_video("https://youtu.be/dQw4w9WgXcQ")
         self.assertIn("Disabled Video", res)
         self.assertIn("creator disabled transcripts", res)
+
+    def test_suppress_discord_embeds(self):
+        sample = (
+            "Canada Top Headlines Today:\n"
+            "• **National News** - [globalnews.ca](https://globalnews.ca/canada/): Updates.\n"
+            "• Direct: https://cbc.ca/news\n"
+            "• YouTube Video: https://www.youtube.com/watch?v=dQw4w9WgXcQ\n"
+            "• YouTube Markdown: [Watch](https://youtu.be/dQw4w9WgXcQ)\n"
+            "• Already escaped: [Site](<https://example.com>)\n\n"
+            "---\n"
+            "Need deeper details on any story? Use read_website to explore specific URLs!"
+        )
+        cleaned = suppress_discord_embeds(sample)
+        # Markdown links should have angle brackets around URL
+        self.assertIn("[globalnews.ca](<https://globalnews.ca/canada/>)", cleaned)
+        # Raw web URLs should be angle-bracketed
+        self.assertIn("<https://cbc.ca/news>", cleaned)
+        # YouTube URLs must remain unbracketed so video embeds work
+        self.assertIn("https://www.youtube.com/watch?v=dQw4w9WgXcQ", cleaned)
+        self.assertNotIn("<https://www.youtube.com/watch?v=dQw4w9WgXcQ>", cleaned)
+        self.assertIn("[Watch](https://youtu.be/dQw4w9WgXcQ)", cleaned)
+        # Already escaped stays clean
+        self.assertIn("[Site](<https://example.com>)", cleaned)
+        # Leaked tool instruction footer must be stripped
+        self.assertNotIn("read_website", cleaned)
+        self.assertNotIn("Need deeper details", cleaned)
 
 
 if __name__ == "__main__":

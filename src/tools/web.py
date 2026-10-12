@@ -265,13 +265,15 @@ def search_web(query: str = "", **kwargs) -> str:
 
     output += "--- RESPONSE FORMATTING INSTRUCTIONS FOR YOU (THE LLM) ---\n"
     if is_news_requested:
-        output += "• NEWS FORMATTING: Present each news item as a neat bullet point: **[Headline]** - [Source | Date] followed by a concise 1-2 sentence summary.\n"
-        output += "• DISCORD LAYOUT: Keep bullet points compact. Never insert empty blank lines between a bullet and its text.\n"
-        output += "• DRILL DOWN: If you need deeper details on any specific story, call `read_website` on its URL."
+        output += "• NEWS FORMATTING: Provide ONE clean bulleted list per region/topic:\n"
+        output += "  - **Headline** — Concise 1-2 sentence summary. ([Source Domain](<URL>))\n"
+        output += "• EMBED PREVENTION: Always wrap URLs in angle brackets inside the link, like [Source](<URL>). This prevents Discord from creating giant embed cards.\n"
+        output += "• NO DUPLICATE DUMPS: Do NOT create a second section or dump raw snippets/links below. Provide only the concise bulleted summary once.\n"
+        output += "• SILENT TOOLS: Never mention internal tools (like 'read_website') in your final message to the user."
     else:
-        output += "• PRESENTATION: Summarize the findings cleanly using bold headers and concise bullet points. Avoid raw snippet dumps.\n"
-        output += "• DISCORD LAYOUT: Keep bullets compact and readable for Discord.\n"
-        output += "• DRILL DOWN: If you need deeper facts, call `read_website` on the most relevant URL."
+        output += "• PRESENTATION: Summarize the findings cleanly using bold headers and concise bullet points.\n"
+        output += "• EMBED PREVENTION: Wrap URLs in angle brackets like [Source](<URL>) to suppress Discord preview cards.\n"
+        output += "• NO RAW DUMPS: Do not paste raw search snippets or duplicate link blocks."
 
     # Manage cache capacity
     if len(SEARCH_CACHE) >= 100:

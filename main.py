@@ -12,7 +12,7 @@ import requests
 from dotenv import load_dotenv
 from ollama import AsyncClient
 import src.tools.registry as tools
-from src.utils import ensure_ollama_running, chunk_message
+from src.utils import ensure_ollama_running, chunk_message, suppress_discord_embeds
 from src.skills.music.utils import format_song_card, get_music_metadata, standardize_song_reply
 from src.config import MODES
 
@@ -397,6 +397,9 @@ async def on_message(message):
 
             if current_mode == "research":
                 reply = reply.replace("* \\n", "* ").replace("- \\n", "- ")
+
+            # Suppress Discord embed cards for article/web links while preserving YouTube video embeds
+            reply = suppress_discord_embeds(reply)
 
             # Clean and ensure consistent song card template if a music track is returned
             reply = standardize_song_reply(reply)
