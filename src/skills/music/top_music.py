@@ -71,6 +71,7 @@ CRITICAL RULES:
                 sections.setdefault(t.source or "general", []).append(t)
 
             section_headers = {
+                "lastfm_global": "LAST.FM GLOBAL CHARTS (Random 10 from Top 50)",
                 "spotify_global": "SPOTIFY GLOBAL (Random 10 from Top 50)",
                 "youtube_trending": "YOUTUBE TRENDING MUSIC (Random 10 from Top 50)",
                 "radio_airplay": "US RADIO AIRPLAY (Random 10 from Top 50)",
@@ -82,6 +83,9 @@ CRITICAL RULES:
             for source_key, track_list in sections.items():
                 if source_key in section_headers:
                     header = section_headers[source_key]
+                elif source_key.startswith("lastfm_"):
+                    lastfm_tag = source_key.replace("lastfm_", "").replace("_", " ").upper()
+                    header = f"LAST.FM - {lastfm_tag} (Top Trending)"
                 elif source_key.startswith("itunes_"):
                     itunes_genre = source_key.replace("itunes_", "").upper()
                     header = f"APPLE MUSIC / ITUNES US - {itunes_genre} (Random 10 from Top 50)"
