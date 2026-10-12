@@ -6,4 +6,6 @@ youtube-transcript-api
 ddgs
 numexpr
 python-dotenv
+curl_cffi
+markdownify
 
