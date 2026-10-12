@@ -21,6 +21,7 @@ from src.tools.web import (
     VISITED_URLS,
     URL_CACHE,
     SEARCH_CACHE,
+    YOUTUBE_CACHE,
 )
 from src.skills import (
     skill_weather_reporter,

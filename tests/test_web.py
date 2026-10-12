@@ -10,20 +10,23 @@ if hasattr(sys.stderr, "reconfigure"):
 from src.tools.web import (
     read_website,
     search_web,
+    read_youtube_video,
     _smart_truncate,
     URL_CACHE,
     VISITED_URLS,
     SEARCH_CACHE,
+    YOUTUBE_CACHE,
 )
 
 
 class TestWebTools(unittest.TestCase):
-    """Test suite for read_website and search_web tools."""
+    """Test suite for web tools (read_website, search_web, read_youtube_video)."""
 
     def setUp(self):
         URL_CACHE.clear()
         VISITED_URLS.clear()
         SEARCH_CACHE.clear()
+        YOUTUBE_CACHE.clear()
 
     @patch("src.tools.web.cffi_requests.get")
     def test_read_website_jina_success(self, mock_get):
@@ -247,6 +250,101 @@ class TestWebTools(unittest.TestCase):
         self.assertIn("Brave Fallback Result", result)
         self.assertIn("Brave Search", result)
         self.assertIn("Date: 2026-10-09", result)
+
+    def test_read_youtube_video_empty_and_invalid(self):
+        self.assertIn("Error: YouTube URL is empty", read_youtube_video(""))
+        self.assertIn("Failed to extract valid YouTube video ID", read_youtube_video("https://youtube.com/not-a-video"))
+        self.assertIn("Failed to extract valid YouTube video ID", read_youtube_video("https://google.com/search"))
+
+    @patch("src.tools.web.YouTubeTranscriptApi")
+    @patch("src.tools.web.requests.get")
+    def test_read_youtube_video_url_formats_and_aliases(self, mock_requests_get, mock_ytt_cls):
+        oembed_resp = MagicMock()
+        oembed_resp.status_code = 200
+        oembed_resp.json.return_value = {"title": "Test YouTube Video"}
+        mock_requests_get.return_value = oembed_resp
+
+        snippet1 = MagicMock()
+        snippet1.text = "Hello from transcript"
+        mock_ytt_instance = MagicMock()
+        mock_ytt_instance.fetch.return_value = [snippet1]
+        mock_ytt_cls.return_value = mock_ytt_instance
+
+        # 1. Standard watch URL
+        res1 = read_youtube_video("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        self.assertIn("Test YouTube Video", res1)
+        self.assertIn("Hello from transcript", res1)
+
+        # 2. youtu.be shortlink
+        YOUTUBE_CACHE.clear()
+        res2 = read_youtube_video("https://youtu.be/dQw4w9WgXcQ")
+        self.assertIn("Test YouTube Video", res2)
+
+        # 3. Shorts URL
+        YOUTUBE_CACHE.clear()
+        res3 = read_youtube_video("https://www.youtube.com/shorts/dQw4w9WgXcQ")
+        self.assertIn("Test YouTube Video", res3)
+
+        # 4. Embed URL
+        YOUTUBE_CACHE.clear()
+        res4 = read_youtube_video("https://www.youtube.com/embed/dQw4w9WgXcQ")
+        self.assertIn("Test YouTube Video", res4)
+
+        # 5. Live stream URL
+        YOUTUBE_CACHE.clear()
+        res5 = read_youtube_video("https://www.youtube.com/live/dQw4w9WgXcQ")
+        self.assertIn("Test YouTube Video", res5)
+
+        # 6. Bare 11-char ID
+        YOUTUBE_CACHE.clear()
+        res6 = read_youtube_video("dQw4w9WgXcQ")
+        self.assertIn("Test YouTube Video", res6)
+
+        # 7. Alias argument
+        YOUTUBE_CACHE.clear()
+        res7 = read_youtube_video(video_url="<https://youtu.be/dQw4w9WgXcQ>")
+        self.assertIn("Test YouTube Video", res7)
+
+    @patch("src.tools.web.YouTubeTranscriptApi")
+    @patch("src.tools.web.requests.get")
+    def test_read_youtube_video_caching(self, mock_requests_get, mock_ytt_cls):
+        oembed_resp = MagicMock()
+        oembed_resp.status_code = 200
+        oembed_resp.json.return_value = {"title": "Cached Video"}
+        mock_requests_get.return_value = oembed_resp
+
+        snippet = MagicMock()
+        snippet.text = "Cached transcript line"
+        mock_ytt_instance = MagicMock()
+        mock_ytt_instance.fetch.return_value = [snippet]
+        mock_ytt_cls.return_value = mock_ytt_instance
+
+        # Call once
+        res1 = read_youtube_video("https://youtu.be/dQw4w9WgXcQ")
+        self.assertIn("Cached transcript line", res1)
+        self.assertEqual(mock_ytt_instance.fetch.call_count, 1)
+
+        # Call again -> should hit YOUTUBE_CACHE
+        res2 = read_youtube_video("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        self.assertIn("Cached transcript line", res2)
+        self.assertEqual(mock_ytt_instance.fetch.call_count, 1)
+
+    @patch("src.tools.web.YouTubeTranscriptApi")
+    @patch("src.tools.web.requests.get")
+    def test_read_youtube_video_error_handling(self, mock_requests_get, mock_ytt_cls):
+        oembed_resp = MagicMock()
+        oembed_resp.status_code = 200
+        oembed_resp.json.return_value = {"title": "Disabled Video"}
+        mock_requests_get.return_value = oembed_resp
+
+        mock_ytt_instance = MagicMock()
+        mock_ytt_instance.fetch.side_effect = Exception("TranscriptsDisabled for this video")
+        mock_ytt_instance.list.side_effect = Exception("TranscriptsDisabled for this video")
+        mock_ytt_cls.return_value = mock_ytt_instance
+
+        res = read_youtube_video("https://youtu.be/dQw4w9WgXcQ")
+        self.assertIn("Disabled Video", res)
+        self.assertIn("creator disabled transcripts", res)
 
 
 if __name__ == "__main__":

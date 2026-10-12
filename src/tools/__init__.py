@@ -13,6 +13,7 @@ from src.tools.web import (
     VISITED_URLS,
     URL_CACHE,
     SEARCH_CACHE,
+    YOUTUBE_CACHE,
 )
 from src.tools.registry import RESEARCH_TOOLS, CHAT_TOOLS
 
@@ -31,5 +32,6 @@ __all__ = [
     "VISITED_URLS",
     "URL_CACHE",
     "SEARCH_CACHE",
+    "YOUTUBE_CACHE",
 ]
 
