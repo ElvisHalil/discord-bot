@@ -5,9 +5,10 @@ from src.skills.youtube.aggregators.base import BaseYouTubeSearchAggregator
 class DuckDuckGoYouTubeAggregator(BaseYouTubeSearchAggregator):
     """Fallback search aggregator that scrapes DuckDuckGo for working, embeddable YouTube videos."""
 
-    def __init__(self, verify_embeddable_fn=None, get_oembed_fn=None):
+    def __init__(self, verify_embeddable_fn=None, get_oembed_fn=None, is_short_fn=None):
         self.verify_embeddable = verify_embeddable_fn
         self.get_video_oembed = get_oembed_fn
+        self.is_short_fn = is_short_fn
 
     def search(self, query: str, max_results: int = 1) -> list[dict]:
         queries_to_try = [
@@ -21,19 +22,24 @@ class DuckDuckGoYouTubeAggregator(BaseYouTubeSearchAggregator):
             try:
                 res = list(DDGS().text(q, max_results=max_results + 4))
                 for r in res:
-                    m = re.search(r'(?:v=|\/watch\?v=|\/embed\/|\/shorts\/|youtu\.be\/)([0-9A-Za-z_-]{11})(?:[?&/]|\b|$)', r.get('href', ''))
+                    href = r.get('href', '')
+                    if "/shorts/" in href:
+                        continue
+                    m = re.search(r'(?:v=|\/watch\?v=|\/embed\/|youtu\.be\/)([0-9A-Za-z_-]{11})(?:[?&/]|\b|$)', href)
                     if m:
                         vid = m.group(1)
                         if vid not in seen_ids:
                             seen_ids.add(vid)
-                            candidates.append((vid, r.get('title', '')))
+                            candidates.append((vid, r.get('title', ''), href))
                 if len(candidates) >= max_results + 3:
                     break
             except Exception:
                 continue
 
         verified_results = []
-        for vid, raw_title in candidates:
+        for vid, raw_title, href in candidates:
+            if self.is_short_fn and self.is_short_fn(vid, href=href, title=raw_title):
+                continue
             if self.verify_embeddable and not self.verify_embeddable(vid):
                 continue
 
@@ -52,3 +58,4 @@ class DuckDuckGoYouTubeAggregator(BaseYouTubeSearchAggregator):
                 break
 
         return verified_results
+

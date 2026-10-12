@@ -88,3 +88,4 @@ class F1Aggregator(BaseSportsAggregator):
             
         except Exception as e:
             return f"Error parsing F1 schedule: {e}"
+

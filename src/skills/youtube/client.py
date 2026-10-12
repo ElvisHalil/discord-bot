@@ -30,6 +30,21 @@ def get_video_oembed(vid: str) -> dict:
         pass
     return {"title": "", "author": ""}
 
+def is_youtube_short(vid: str, href: str = "", title: str = "") -> bool:
+    """Detects if a YouTube video is a Short via URL structure, title tags, or HTTP redirect check."""
+    if "/shorts/" in (href or "").lower():
+        return True
+    if "#shorts" in (title or "").lower() or "#short" in (title or "").lower():
+        return True
+    try:
+        r = requests.head(f"https://www.youtube.com/shorts/{vid}", allow_redirects=False, timeout=3)
+        # Shorts return HTTP 200; standard videos redirect (HTTP 303/302) to /watch?v=
+        if r.status_code == 200:
+            return True
+    except Exception:
+        pass
+    return False
+
 from src.skills.youtube.aggregators import (
     YouTubeApiAggregator,
     DuckDuckGoYouTubeAggregator,
@@ -38,7 +53,8 @@ from src.skills.youtube.aggregators import (
 
 _search_manager = YouTubeSearchManager(
     verify_embeddable_fn=verify_embeddable,
-    get_oembed_fn=get_video_oembed
+    get_oembed_fn=get_video_oembed,
+    is_short_fn=is_youtube_short
 )
 
 def search_youtube_api(query: str, max_results: int = 1) -> list[dict]:

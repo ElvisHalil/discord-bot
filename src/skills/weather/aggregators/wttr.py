@@ -12,3 +12,4 @@ class WttrAggregator(BaseWeatherAggregator):
             return f"Failed to retrieve weather (HTTP {response.status_code})"
         except Exception as e:
             return f"Error fetching weather: {e}"
+

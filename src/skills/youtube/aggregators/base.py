@@ -10,3 +10,4 @@ class BaseYouTubeSearchAggregator(ABC):
         [{"id": vid, "title": title, "channel": channel, "url": url}]
         """
         pass
+

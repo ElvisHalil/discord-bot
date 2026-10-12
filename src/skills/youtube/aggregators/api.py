@@ -1,6 +1,9 @@
 import os
 import requests
+from dotenv import load_dotenv
 from src.skills.youtube.aggregators.base import BaseYouTubeSearchAggregator
+
+load_dotenv()
 
 class YouTubeApiAggregator(BaseYouTubeSearchAggregator):
     """Searches YouTube using the official Google YouTube Data API v3."""
@@ -39,3 +42,4 @@ class YouTubeApiAggregator(BaseYouTubeSearchAggregator):
         except Exception as e:
             print(f"⚠️ [YouTube API Error]: {e}")
             return []
+

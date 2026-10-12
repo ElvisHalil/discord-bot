@@ -62,3 +62,4 @@ class HltvAggregator(BaseSportsAggregator):
             return f"[PLAYER STATS: {player_url}]\n{text}\n\n"
         except Exception as e:
             return f"[PLAYER STATS]\nError fetching player stats: {e}\n\n"
+

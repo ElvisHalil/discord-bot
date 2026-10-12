@@ -7,3 +7,4 @@ class BaseWeatherAggregator(ABC):
     def get_weather(self, city: str) -> str:
         """Fetches current weather conditions and temperature for the given city."""
         pass
+

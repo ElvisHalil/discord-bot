@@ -75,3 +75,4 @@ class LiquipediaAggregator(BaseSportsAggregator):
             return output + "\n"
         except Exception as e:
             return f"[EVENT INFO]\nError fetching event: {e}\n\n"
+
