@@ -7,15 +7,23 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from src.tools.web import read_website, _smart_truncate, URL_CACHE, VISITED_URLS
+from src.tools.web import (
+    read_website,
+    search_web,
+    _smart_truncate,
+    URL_CACHE,
+    VISITED_URLS,
+    SEARCH_CACHE,
+)
 
 
 class TestWebTools(unittest.TestCase):
-    """Test suite for read_website dual-engine parsing."""
+    """Test suite for read_website and search_web tools."""
 
     def setUp(self):
         URL_CACHE.clear()
         VISITED_URLS.clear()
+        SEARCH_CACHE.clear()
 
     @patch("src.tools.web.cffi_requests.get")
     def test_read_website_jina_success(self, mock_get):
@@ -127,6 +135,118 @@ class TestWebTools(unittest.TestCase):
         result = read_website("https://example.com/retry")
         self.assertIn("Parsed via Local Stealth Scraper", result)
         self.assertIn("Recovered content from local", result)
+
+    def test_search_web_empty_query(self):
+        res = search_web("")
+        self.assertIn("Search query is empty", res)
+        res_spaces = search_web("   ")
+        self.assertIn("Search query is empty", res_spaces)
+
+    @patch("src.tools.web.DDGS")
+    def test_search_web_alias_and_prefix_stripping(self, mock_ddgs_cls):
+        mock_instance = MagicMock()
+        mock_instance.text.return_value = [
+            {"title": "RTX 5080 Specs", "href": "https://nvidia.com/specs", "body": "16GB GDDR7"}
+        ]
+        mock_ddgs_cls.return_value = mock_instance
+
+        # Call with alias 'q' and conversational prefix
+        result = search_web(q="search for rtx 5080")
+        self.assertIn("RTX 5080 Specs", result)
+        self.assertIn("nvidia.com", result)
+        # Verify the stripped query was passed to text()
+        mock_instance.text.assert_called()
+        called_query = mock_instance.text.call_args[0][0]
+        self.assertEqual(called_query, "rtx 5080")
+
+    @patch("src.tools.web.DDGS")
+    def test_search_web_multi_backend_fallback(self, mock_ddgs_cls):
+        mock_instance = MagicMock()
+
+        def text_side_effect(q, **kwargs):
+            backend = kwargs.get("backend")
+            if backend == "api":
+                raise Exception("429 Too Many Requests")
+            elif backend == "html":
+                return [
+                    {"title": "Recovered Result", "href": "https://techpowerup.com/gpu", "body": "Specs details"}
+                ]
+            return []
+
+        mock_instance.text.side_effect = text_side_effect
+        mock_ddgs_cls.return_value = mock_instance
+
+        result = search_web("gpu benchmarks")
+        self.assertIn("Recovered Result", result)
+        self.assertIn("techpowerup.com", result)
+
+    @patch("src.tools.web.DDGS")
+    def test_search_web_news_intent_and_metadata(self, mock_ddgs_cls):
+        mock_instance = MagicMock()
+        mock_instance.news.return_value = [
+            {
+                "title": "NVIDIA Keynote Announced",
+                "url": "https://reuters.com/tech/nvidia",
+                "body": "Jensen Huang announces Blackwell",
+                "date": "2026-10-10T14:00:00Z",
+                "source": "Reuters",
+            }
+        ]
+        mock_ddgs_cls.return_value = mock_instance
+
+        result = search_web("nvidia latest news")
+        self.assertIn("Category: News", result)
+        self.assertIn("NVIDIA Keynote Announced", result)
+        self.assertIn("Reuters", result)
+        self.assertIn("Date: 2026-10-10", result)
+        mock_instance.news.assert_called_once()
+
+    @patch("src.tools.web.DDGS")
+    def test_search_web_caching(self, mock_ddgs_cls):
+        mock_instance = MagicMock()
+        mock_instance.text.return_value = [
+            {"title": "Cached Title", "href": "https://example.com/item", "body": "Cached body"}
+        ]
+        mock_ddgs_cls.return_value = mock_instance
+
+        # Call once
+        res1 = search_web("quantum computing")
+        self.assertIn("Cached Title", res1)
+        self.assertEqual(mock_instance.text.call_count, 1)
+
+        # Call again with identical query -> hits SEARCH_CACHE
+        res2 = search_web("quantum computing")
+        self.assertIn("Cached Title", res2)
+        self.assertEqual(mock_instance.text.call_count, 1)
+
+    @patch("src.tools.web.requests.get")
+    @patch("src.tools.web.DDGS")
+    @patch.dict("os.environ", {"BRAVE_API_KEY": "fake-brave-key"})
+    def test_search_web_brave_fallback(self, mock_ddgs_cls, mock_requests_get):
+        mock_instance = MagicMock()
+        mock_instance.text.return_value = []  # DDGS returns empty
+        mock_ddgs_cls.return_value = mock_instance
+
+        brave_resp = MagicMock()
+        brave_resp.status_code = 200
+        brave_resp.json.return_value = {
+            "web": {
+                "results": [
+                    {
+                        "title": "Brave Fallback Result",
+                        "url": "https://brave.com/search-result",
+                        "description": "Found via Brave index",
+                        "page_age": "2026-10-09",
+                    }
+                ]
+            }
+        }
+        mock_requests_get.return_value = brave_resp
+
+        result = search_web("rare obscure query")
+        self.assertIn("Brave Fallback Result", result)
+        self.assertIn("Brave Search", result)
+        self.assertIn("Date: 2026-10-09", result)
 
 
 if __name__ == "__main__":

@@ -241,6 +241,7 @@ async def on_message(message):
             chat_history.pop(message.channel.id, None)
             tools.VISITED_URLS.clear()
             tools.URL_CACHE.clear()
+            tools.SEARCH_CACHE.clear()
             await message.channel.send(f"🔄 Switched to **{new_mode.upper()}** mode (Model: `{new_model}`). Memory and context wiped.")
         else:
             await message.channel.send(f"⚠️ Unknown mode. Available modes: {', '.join(MODES.keys())}")
@@ -250,6 +251,7 @@ async def on_message(message):
         chat_history.pop(message.channel.id, None)
         tools.VISITED_URLS.clear()
         tools.URL_CACHE.clear()
+        tools.SEARCH_CACHE.clear()
         await message.channel.send("🧹 Memory and context wiped for this channel.")
         return
 

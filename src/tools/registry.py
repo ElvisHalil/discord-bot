@@ -20,6 +20,7 @@ from src.tools.web import (
     BROWSER_HEADERS,
     VISITED_URLS,
     URL_CACHE,
+    SEARCH_CACHE,
 )
 from src.skills import (
     skill_weather_reporter,

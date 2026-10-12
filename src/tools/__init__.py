@@ -10,6 +10,9 @@ from src.tools.web import (
     read_website,
     read_youtube_video,
     WEB_TOOLS,
+    VISITED_URLS,
+    URL_CACHE,
+    SEARCH_CACHE,
 )
 from src.tools.registry import RESEARCH_TOOLS, CHAT_TOOLS
 
@@ -25,5 +28,8 @@ __all__ = [
     "WEB_TOOLS",
     "RESEARCH_TOOLS",
     "CHAT_TOOLS",
+    "VISITED_URLS",
+    "URL_CACHE",
+    "SEARCH_CACHE",
 ]
 

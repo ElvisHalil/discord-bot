@@ -1,4 +1,5 @@
 import ipaddress
+import os
 import re
 import socket
 import requests
@@ -18,6 +19,7 @@ BROWSER_HEADERS = {
 
 VISITED_URLS = set()
 URL_CACHE = {}
+SEARCH_CACHE = {}
 
 def _is_private_or_local_host(hostname: str) -> bool:
     """Check if a hostname resolves to a local, private, loopback, or metadata IP."""
@@ -70,39 +72,193 @@ def _smart_truncate(text: str, max_length: int) -> str:
         
     return cand.strip() + "\n\n...[TEXT TRUNCATED DUE TO LENGTH]..."
 
-def search_web(query: str) -> str:
-    """Search the web for real-time information, current product prices, releases, hardware specs, news, events and facts. Returns the top snippets and links. Use `read_website` on a specific URL if you need more details."""
-    global VISITED_URLS
-    query = query.strip()
-    if not query:
-        return "❌ Error: Search query is empty."
+def search_web(query: str = "", **kwargs) -> str:
+    """Search the web for real-time information, current product prices, releases, hardware specs, news, events and facts.
+    Returns the top snippets and links. Use `read_website` on a specific URL if you need more details.
+    """
+    global VISITED_URLS, SEARCH_CACHE
 
-    print(f"🔎 [Web Search]: {query}")
-    results = []
-    try:
-        results = list(DDGS().text(query, max_results=7))
-    except Exception as e:
-        print(f"⚠️ [DDGS Search Notice]: Primary search failed ({e}), retrying with simplified query...")
+    # Resolve query from aliases if empty
+    if not query or not query.strip():
+        for alt_key in ("q", "search_query", "keywords", "keyword", "prompt", "text", "target"):
+            if alt_key in kwargs and kwargs[alt_key]:
+                query = str(kwargs[alt_key]).strip()
+                break
+
+    raw_query = query.strip()
+    if not raw_query:
+        return "❌ Error: Search query is empty. Please provide search keywords."
+
+    clean_q = raw_query.strip().strip('"\'`')
+    lower_q = clean_q.lower()
+    for prefix in (
+        "search for ", "search ", "look up ", "google ", "find info on ", "find information about ", "find "
+    ):
+        if lower_q.startswith(prefix):
+            candidate = clean_q[len(prefix):].strip()
+            if candidate:
+                clean_q = candidate
+            break
+
+    # Determine query intent: News vs General Web Search
+    category = str(kwargs.get("category", "")).lower()
+    search_type = str(kwargs.get("type", "")).lower()
+    is_news_requested = (
+        bool(kwargs.get("news")) or
+        category == "news" or
+        search_type == "news" or
+        bool(re.search(r'\b(news|breaking news|headlines?)\b', clean_q, re.IGNORECASE))
+    )
+
+    timelimit = kwargs.get("timelimit")
+    if timelimit and timelimit not in ('d', 'w', 'm', 'y'):
+        timelimit = None
+
+    cache_key = (clean_q.lower(), is_news_requested, timelimit)
+    if cache_key in SEARCH_CACHE:
+        print(f"⚡ [Search Cache Hit]: '{clean_q}'")
+        return SEARCH_CACHE[cache_key]
+
+    print(f"🔎 [Web Search]: '{clean_q}' (News: {is_news_requested})")
+    raw_results = []
+
+    # 1. News Search (strictly for news queries)
+    if is_news_requested:
         try:
-            # Strip special punctuation and retry once
-            clean_q = re.sub(r'[\'\"\[\]\{\}\(\)]', ' ', query).strip()
-            results = list(DDGS().text(clean_q, max_results=7))
-        except Exception as retry_err:
-            return f"❌ Search failed: {retry_err}. Try rephrasing with different keywords."
+            raw_results = list(DDGS().news(clean_q, max_results=7))
+        except Exception as news_err:
+            print(f"⚠️ [DDGS News Notice]: News search failed ({news_err}), falling back to web search...")
 
-    if not results:
-        return f"No search results found for '{query}'. Try broader keywords or alternative terms."
+    # 2. General Web Search with Multi-Backend Fallback (api -> html -> lite)
+    if not raw_results:
+        backends = ('api', 'html', 'lite')
+        for backend in backends:
+            try:
+                kwargs_ddgs = {"max_results": 7, "backend": backend}
+                if timelimit:
+                    kwargs_ddgs["timelimit"] = timelimit
+                res = list(DDGS().text(clean_q, **kwargs_ddgs))
+                if res:
+                    raw_results = res
+                    break
+            except Exception as b_err:
+                print(f"⚠️ [DDGS Notice]: Backend '{backend}' failed ({b_err}), trying next backend...")
 
-    output = f"=== SEARCH RESULTS FOR '{query}' ===\n"
-    for i, r in enumerate(results):
-        title = r.get('title', '')
-        href = r.get('href', '')
-        snippet = r.get('body', '')
-        output += f"{i+1}. {title}\nURL: {href}\nSnippet: {snippet}\n\n"
-        
+        # If primary query failed on all backends, retry with punctuation sanitized
+        if not raw_results:
+            clean_fallback = re.sub(r'[\'\"\[\]\{\}\(\)]', ' ', clean_q).strip()
+            if clean_fallback and clean_fallback != clean_q:
+                print(f"⚠️ [DDGS Notice]: Retrying with sanitized query '{clean_fallback}'...")
+                for backend in backends:
+                    try:
+                        res = list(DDGS().text(clean_fallback, max_results=7, backend=backend))
+                        if res:
+                            raw_results = res
+                            break
+                    except Exception:
+                        pass
+
+    # 3. Optional Secondary Provider: Brave Search API
+    brave_api_key = os.getenv("BRAVE_API_KEY", "").strip()
+    if not raw_results and brave_api_key:
+        print("🌐 [Web Search]: Attempting Brave Search API fallback...")
+        try:
+            brave_resp = requests.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                headers={
+                    "Accept": "application/json",
+                    "X-Subscription-Token": brave_api_key,
+                },
+                params={"q": clean_q, "count": 7},
+                timeout=8,
+            )
+            if brave_resp.status_code == 200:
+                brave_data = brave_resp.json()
+                for item in brave_data.get("web", {}).get("results", []):
+                    raw_results.append({
+                        "title": item.get("title", ""),
+                        "href": item.get("url", ""),
+                        "body": item.get("description", ""),
+                        "date": item.get("page_age") or item.get("age", ""),
+                        "source": "Brave Search",
+                    })
+        except Exception as brave_err:
+            print(f"⚠️ [Brave Search Notice]: Fallback failed ({brave_err})")
+
+    if not raw_results:
+        return f"No search results found for '{clean_q}'. Try broader keywords or alternative terms."
+
+    # 4. Deduplicate and format results
+    seen_urls = set()
+    deduped_results = []
+    for r in raw_results:
+        url = (r.get('href') or r.get('url') or '').strip()
+        if not url:
+            continue
+        norm_url = url.rstrip('/')
+        if norm_url in seen_urls:
+            continue
+        seen_urls.add(norm_url)
+        deduped_results.append(r)
+        if len(deduped_results) >= 7:
+            break
+
+    output = f"=== SEARCH RESULTS FOR '{clean_q}'"
+    if is_news_requested:
+        output += " (Category: News)"
+    output += " ===\n"
+
+    for i, r in enumerate(deduped_results):
+        title = r.get('title', 'Untitled').strip()
+        url = (r.get('href') or r.get('url') or '').strip()
+        snippet = (r.get('body') or r.get('snippet') or '').strip()
+        source = (r.get('source') or '').strip()
+
+        # Clean date if present
+        raw_date = (r.get('date') or '').strip()
+        if raw_date and 'T' in raw_date:
+            date_str = raw_date.split('T')[0]
+        else:
+            date_str = raw_date
+
+        domain = ""
+        if url:
+            try:
+                parsed_netloc = urlparse.urlparse(url).netloc.lower()
+                domain = parsed_netloc[4:] if parsed_netloc.startswith("www.") else parsed_netloc
+            except Exception:
+                domain = ""
+
+        # Assemble attribution tags [domain | date] or [source | date]
+        meta_tags = []
+        if source and domain:
+            if domain in source.lower() or source.lower() in domain:
+                meta_tags.append(source)
+            else:
+                meta_tags.append(f"{source} - {domain}")
+        elif source:
+            meta_tags.append(source)
+        elif domain:
+            meta_tags.append(domain)
+
+        if date_str:
+            meta_tags.append(f"Date: {date_str}")
+
+        header = f"{i+1}. {title}"
+        if meta_tags:
+            header += f" [{' | '.join(meta_tags)}]"
+
+        output += f"{header}\nURL: {url}\nSnippet: {snippet}\n\n"
+
     output += "--- SKILL INSTRUCTIONS FOR YOU (THE LLM) ---\n"
-    output += "Review the snippets above. If they contain the answer, use them directly.\n"
+    output += "Review the snippets and source metadata above. If they contain the answer, use them directly.\n"
     output += "If you need deeper facts, use the `read_website` tool on the most promising URL."
+
+    # Manage cache capacity
+    if len(SEARCH_CACHE) >= 100:
+        SEARCH_CACHE.pop(next(iter(SEARCH_CACHE)))
+    SEARCH_CACHE[cache_key] = output
+
     return output
 
 def read_website(url: str = "", **kwargs) -> str:
