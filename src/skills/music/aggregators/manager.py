@@ -2,6 +2,7 @@ from typing import Dict
 from src.skills.music.aggregators.base import BaseMusicAggregator
 from src.skills.music.aggregators.lastfm import LastFmAggregator
 from src.skills.music.aggregators.deezer import DeezerAggregator
+from src.skills.music.aggregators.freqblog import FreqBlogAggregator
 from src.skills.music.aggregators.beatport import BeatportAggregator
 from src.skills.music.aggregators.charts import ChartsAggregator
 from src.skills.music.models import Track
@@ -16,6 +17,7 @@ class MusicAggregatorManager:
         self.aggregators: Dict[str, BaseMusicAggregator] = {
             "lastfm": LastFmAggregator(),
             "deezer": DeezerAggregator(),
+            "freqblog": FreqBlogAggregator(),
             "beatport": BeatportAggregator(),
             "charts": ChartsAggregator(),
         }
@@ -29,7 +31,8 @@ class MusicAggregatorManager:
         Executes the similarity recommendation fallback chain:
         1. Query Last.fm API (scrobble-based similarity graph if API key configured)
         2. Query Deezer API (artist graph & related tracks)
-        3. Fall back to Beatport charts safety net if previous yield no results
+        3. Query FreqBlog API (acoustic & neural embedding fallback if FREQBLOG_API_KEY configured)
+        4. Fall back to Beatport charts safety net if previous yield no results
         """
         tracks = []
 
@@ -44,7 +47,13 @@ class MusicAggregatorManager:
             if deezer:
                 tracks = deezer.get_similar(query)
 
-        # 3. Fallback: Beatport electronic club charts safety net
+        # 3. Tertiary: FreqBlog (Acoustic neural embedding fallback, protected by local cache)
+        if not tracks:
+            freqblog = self.aggregators.get("freqblog")
+            if freqblog:
+                tracks = freqblog.get_similar(query)
+
+        # 4. Fallback: Beatport electronic club charts safety net
         if not tracks:
             print("  └─ ⚠️ [Aggregator]: Primary similarity yielded no tracks, falling back to Beatport...")
             beatport = self.aggregators.get("beatport")

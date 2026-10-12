@@ -24,6 +24,7 @@ from src.skills import (
     skill_weather_reporter,
     skill_youtube_searcher,
     skill_top_music,
+    skill_audio_intelligence,
     skill_csgo_esports,
     skill_sports_info,
 )
@@ -35,6 +36,7 @@ RESEARCH_TOOLS = {
     "skill_weather_reporter": skill_weather_reporter,
     "skill_youtube_searcher": skill_youtube_searcher,
     "skill_top_music": skill_top_music,
+    "skill_audio_intelligence": skill_audio_intelligence,
     "skill_csgo_esports": skill_csgo_esports,
     "skill_sports_info": skill_sports_info,
 }
@@ -45,6 +47,7 @@ CHAT_TOOLS = {
     "skill_weather_reporter": skill_weather_reporter,
     "skill_youtube_searcher": skill_youtube_searcher,
     "skill_top_music": skill_top_music,
+    "skill_audio_intelligence": skill_audio_intelligence,
     "skill_csgo_esports": skill_csgo_esports,
     "skill_sports_info": skill_sports_info,
 }
