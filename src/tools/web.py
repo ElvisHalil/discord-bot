@@ -263,9 +263,15 @@ def search_web(query: str = "", **kwargs) -> str:
 
         output += f"{header}\nURL: {url}\nSnippet: {snippet}\n\n"
 
-    output += "--- SKILL INSTRUCTIONS FOR YOU (THE LLM) ---\n"
-    output += "Review the snippets and source metadata above. If they contain the answer, use them directly.\n"
-    output += "If you need deeper facts, use the `read_website` tool on the most promising URL."
+    output += "--- RESPONSE FORMATTING INSTRUCTIONS FOR YOU (THE LLM) ---\n"
+    if is_news_requested:
+        output += "• NEWS FORMATTING: Present each news item as a neat bullet point: **[Headline]** - [Source | Date] followed by a concise 1-2 sentence summary.\n"
+        output += "• DISCORD LAYOUT: Keep bullet points compact. Never insert empty blank lines between a bullet and its text.\n"
+        output += "• DRILL DOWN: If you need deeper details on any specific story, call `read_website` on its URL."
+    else:
+        output += "• PRESENTATION: Summarize the findings cleanly using bold headers and concise bullet points. Avoid raw snippet dumps.\n"
+        output += "• DISCORD LAYOUT: Keep bullets compact and readable for Discord.\n"
+        output += "• DRILL DOWN: If you need deeper facts, call `read_website` on the most relevant URL."
 
     # Manage cache capacity
     if len(SEARCH_CACHE) >= 100:
@@ -335,7 +341,9 @@ def read_website(url: str = "", **kwargs) -> str:
                 output += "=" * 40 + "\n"
                 output += truncated + "\n"
                 output += "=" * 40 + "\n"
-                output += "INSTRUCTIONS FOR AI: If the answer isn't above, use the `read_website` tool on any [Link](url) found in the text to drill down."
+                output += "--- RESPONSE INSTRUCTIONS FOR YOU (THE LLM) ---\n"
+                output += "• Summarize the key information clearly using bold headings and concise bullet points for Discord.\n"
+                output += "• If you need deeper facts, use `read_website` on any relevant [Link](url) found in the text above."
                 
                 VISITED_URLS.add(url)
                 URL_CACHE[url] = output
@@ -446,9 +454,12 @@ def read_website(url: str = "", **kwargs) -> str:
         if links:
             for link in links:
                 output += f"- [{link['text']}]({link['url']})\n"
-            output += "\nINSTRUCTIONS FOR AI: If the answer isn't in the markdown above, use the `read_website` tool on one of these links to drill down."
         else:
-            output += "No useful navigational links found."
+            output += "No useful navigational links found.\n"
+
+        output += "\n--- RESPONSE INSTRUCTIONS FOR YOU (THE LLM) ---\n"
+        output += "• Summarize the key information clearly using bold headings and concise bullet points for Discord.\n"
+        output += "• If you need deeper facts, use `read_website` on any relevant link above."
             
         final_result = output[:20000]
         VISITED_URLS.add(url)
