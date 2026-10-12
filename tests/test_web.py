@@ -44,6 +44,7 @@ class TestWebTools(unittest.TestCase):
         # Engine 2 GET returns HTML
         local_resp = MagicMock()
         local_resp.status_code = 200
+        local_resp.headers = {"Content-Type": "text/html"}
         local_resp.url = "https://example.com/test"
         local_resp.charset_encoding = "utf-8"
         local_resp.text = "<html><head><title>Test Page</title></head><body><p>Hello world from local</p><a href='/next'>Next link</a></body></html>"
@@ -90,6 +91,42 @@ class TestWebTools(unittest.TestCase):
         self.assertIn("Paragraph 1", truncated)
         self.assertIn("...[TEXT TRUNCATED DUE TO LENGTH]...", truncated)
         self.assertNotIn("Paragraph 3", truncated)
+
+    @patch("src.tools.web.cffi_requests.get")
+    def test_flexible_tool_call_kwargs(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = "Content from link"
+        mock_get.return_value = mock_resp
+
+        # Model used 'link' instead of 'url'
+        res = read_website(link="https://example.com/custom")
+        self.assertIn("Content from link", res)
+
+    @patch("src.tools.web.cffi_requests.get")
+    @patch("src.tools.web.cffi_requests.head")
+    def test_jina_error_text_falls_back_to_local_scraper(self, mock_head, mock_get):
+        # Jina returns 200 with error message text
+        jina_resp = MagicMock()
+        jina_resp.status_code = 200
+        jina_resp.text = "Failed to fetch content from the target URL"
+
+        local_resp = MagicMock()
+        local_resp.status_code = 200
+        local_resp.url = "https://example.com/retry"
+        local_resp.headers = {"Content-Type": "text/html"}
+        local_resp.charset_encoding = "utf-8"
+        local_resp.text = "<html><body><p>Recovered content from local</p></body></html>"
+
+        def get_dispatcher(url, *args, **kwargs):
+            if "r.jina.ai" in url:
+                return jina_resp
+            return local_resp
+
+        mock_get.side_effect = get_dispatcher
+        result = read_website("https://example.com/retry")
+        self.assertIn("Parsed via Local Stealth Scraper", result)
+        self.assertIn("Recovered content from local", result)
 
 
 if __name__ == "__main__":
