@@ -4,14 +4,20 @@ from src.skills.music.playback.youtube_music import resolve_youtube_music_link
 
 def skill_youtube_searcher(query: str, max_results: int = 1, is_music: bool = False) -> str:
     """
-    Use this skill ONLY to search for specific known videos, channels, or specific song titles on YouTube.
-    IMPORTANT: If the user asks for 'top songs', 'trending music', or recommendations (even if they ask for YouTube links), DO NOT use this tool first. You MUST use the `skill_top_music` tool FIRST to discover the actual songs, and only use this YouTube tool afterward to fetch the links.
-    If the user asks for a specific song or video, leave max_results as 1 (default).
-    Set `is_music` to True ONLY if you are explicitly searching for a song or music track.
+    Searches YouTube for videos (dance clips, tutorials, music videos, or specific songs).
+    - VIDEO MODE (is_music=False, default): Use when the user asks for videos to WATCH — such as dance clips (e.g. 'hakken dance', 'shuffle dance compilation'), dance tutorials ('how to hakken'), live festival sets, or visual performances. Returns standard playable YouTube video links.
+    - MUSIC MODE (is_music=True): Use ONLY when fetching an audio playback link for a specific song/artist recommendation discovered via `skill_top_music`.
+    IMPORTANT: If the user asks for dance videos, how people dance, or visual clips, use this tool directly in video mode (`is_music=False`).
     """
     print(f"▶️ [Executing YouTube Search Skill]: {query} (max_results: {max_results}, is_music: {is_music})")
 
     try:
+        # Detect visual dance, tutorial, choreography, or performance requests and route to video mode
+        is_visual = bool(re.search(r'\b(?:dance|dancing|tanzen|tanz|tutorial|compilation|choreography|battle|crowd|performance|how to)\b', query, re.IGNORECASE))
+        if is_music and is_visual:
+            print(f"🎬 [YouTube Search Skill]: Query '{query}' involves dance/visual performance. Switching from music mode to video mode.")
+            is_music = False
+
         # Music mode: delegate directly to specialized YouTube Music playback resolver
         if is_music:
             # Guard against generic genre / non-song queries (e.g. "phonk song", "techno music", "dnb track")
