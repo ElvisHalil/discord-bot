@@ -1,4 +1,6 @@
-import requests
+from src.skills.weather.aggregators import WttrAggregator
+
+_weather_aggregator = WttrAggregator()
 
 def skill_weather_reporter(city: str) -> str:
     """
@@ -6,11 +8,7 @@ def skill_weather_reporter(city: str) -> str:
     Use this whenever the user asks about the weather.
     """
     print(f"🌤️ [Executing Weather Skill]: {city}")
-    try:
-        response = requests.get(f"https://wttr.in/{city}?format=%C+%t+%w+%h", timeout=5)
-        weather_data = response.text.strip()
-    except Exception as e:
-        weather_data = f"Error fetching weather: {e}"
+    weather_data = _weather_aggregator.get_weather(city)
         
     return f"""
 === RAW WEATHER DATA ===

@@ -30,92 +30,26 @@ def get_video_oembed(vid: str) -> dict:
         pass
     return {"title": "", "author": ""}
 
+from src.skills.youtube.aggregators import (
+    YouTubeApiAggregator,
+    DuckDuckGoYouTubeAggregator,
+    YouTubeSearchManager,
+)
+
+_search_manager = YouTubeSearchManager(
+    verify_embeddable_fn=verify_embeddable,
+    get_oembed_fn=get_video_oembed
+)
+
 def search_youtube_api(query: str, max_results: int = 1) -> list[dict]:
     """Searches YouTube using the official YouTube Data API v3."""
-    api_key = os.getenv("YOUTUBE_API_KEY")
-    if not api_key:
-        return []
-
-    try:
-        url = "https://www.googleapis.com/youtube/v3/search"
-        params = {
-            'part': 'snippet',
-            'q': query,
-            'type': 'video',
-            'videoEmbeddable': 'true',
-            'maxResults': max_results,
-            'key': api_key
-        }
-        res = requests.get(url, params=params, timeout=10)
-        if res.status_code != 200:
-            return []
-            
-        data = res.json()
-        results = []
-        for item in data.get('items', []):
-            vid = item['id'].get('videoId', '')
-            if vid:
-                results.append({
-                    "id": vid,
-                    "title": item['snippet'].get('title', 'Unknown Title'),
-                    "channel": item['snippet'].get('channelTitle', 'Unknown Channel'),
-                    "url": f"https://www.youtube.com/watch?v={vid}"
-                })
-        return results
-    except Exception as e:
-        print(f"⚠️ [YouTube API Error]: {e}")
-        return []
+    return _search_manager.api_aggregator.search(query, max_results=max_results)
 
 def search_youtube_ddg(query: str, max_results: int = 1) -> list[dict]:
     """Fallback search using DuckDuckGo scraping to find working, embeddable YouTube videos."""
-    queries_to_try = [
-        f"site:youtube.com {query}",
-        f"site:youtube.com {query} video"
-    ]
-    seen_ids = set()
-    candidates = []
-
-    for q in queries_to_try:
-        try:
-            res = list(DDGS().text(q, max_results=max_results + 4))
-            for r in res:
-                m = re.search(r'(?:v=|\/watch\?v=|\/embed\/|\/shorts\/|youtu\.be\/)([0-9A-Za-z_-]{11})(?:[?&/]|\b|$)', r.get('href', ''))
-                if m:
-                    vid = m.group(1)
-                    if vid not in seen_ids:
-                        seen_ids.add(vid)
-                        candidates.append((vid, r.get('title', '')))
-            if len(candidates) >= max_results + 3:
-                break
-        except Exception:
-            continue
-
-    verified_results = []
-    for vid, raw_title in candidates:
-        if not verify_embeddable(vid):
-            continue
-
-        oembed = get_video_oembed(vid)
-        title = oembed["title"] or raw_title
-        author = oembed["author"]
-
-        verified_results.append({
-            "id": vid,
-            "title": title,
-            "channel": author,
-            "url": f"https://www.youtube.com/watch?v={vid}"
-        })
-
-        if len(verified_results) >= max_results:
-            break
-
-    return verified_results
+    return _search_manager.ddg_aggregator.search(query, max_results=max_results)
 
 def search_youtube(query: str, max_results: int = 1) -> list[dict]:
     """Main YouTube search client. Tries official API first, falls back to DuckDuckGo."""
-    results = search_youtube_api(query, max_results=max_results)
-    if not results:
-        print(f"⚠️ [YouTube]: Falling back to DuckDuckGo search for '{query}'...")
-        results = search_youtube_ddg(query, max_results=max_results)
-    return results
+    return _search_manager.search(query, max_results=max_results)
 
