@@ -1,4 +1,5 @@
 import os
+import re
 import random
 import requests
 from dotenv import load_dotenv
@@ -80,52 +81,83 @@ class LastFmAggregator(BaseMusicAggregator):
             res = self._call("track.getsimilar", {
                 "artist": artist_name,
                 "track": song_title,
-                "limit": 25,
+                "limit": 50,
                 "autocorrect": 1
             })
             tracks = self._parse_similar_tracks(res, exclude_song=song_title)
             if tracks:
                 print(f"  └─ ✅ [Last.fm]: Found {len(tracks)} tracks via track.getSimilar for '{song_title}' by '{artist_name}'")
 
-        # Strategy 2: Track search to resolve exact canonical artist and track title
+        # Strategy 2: Candidate artist/track pairs for multi-word queries without delimiters
+        if not tracks and " by " not in query and " - " not in query:
+            clean_q = re.sub(r'[\(\[\{].*?[\)\]\}]', '', query).strip()
+            words = clean_q.split()
+            pairs = []
+            if len(words) == 2:
+                pairs.append((words[0], words[1]))
+                pairs.append((words[1], words[0]))
+            elif len(words) >= 3:
+                pairs.append((words[0], " ".join(words[1:])))
+                pairs.append((" ".join(words[:2]), " ".join(words[2:])))
+                pairs.append((" ".join(words[:-1]), words[-1]))
+                pairs.append((" ".join(words[1:]), words[0]))
+
+            for cand_art, cand_trk in pairs:
+                res = self._call("track.getsimilar", {
+                    "artist": cand_art,
+                    "track": cand_trk,
+                    "limit": 50,
+                    "autocorrect": 1
+                })
+                cand_tracks = self._parse_similar_tracks(res, exclude_song=cand_trk)
+                if cand_tracks:
+                    tracks = cand_tracks
+                    print(f"  └─ ✅ [Last.fm]: Resolved pair '{cand_trk}' by '{cand_art}' ({len(tracks)} tracks)")
+                    break
+
+        # Strategy 3: Track search (sorted by listener popularity to pick canonical release)
         if not tracks:
-            search_res = self._call("track.search", {"track": query, "limit": 3})
+            search_res = self._call("track.search", {"track": query, "limit": 10})
             matches = search_res.get("results", {}).get("trackmatches", {}).get("track", [])
             if isinstance(matches, dict):
                 matches = [matches]
-            for m in matches:
+            # Prioritize canonical songs with highest listener count
+            matches.sort(key=lambda x: int(x.get("listeners", 0) or 0), reverse=True)
+
+            for m in matches[:5]:
                 cand_track = m.get("name", "")
                 cand_artist = m.get("artist", "")
                 if cand_track and cand_artist:
                     res = self._call("track.getsimilar", {
                         "artist": cand_artist,
                         "track": cand_track,
-                        "limit": 25,
+                        "limit": 50,
                         "autocorrect": 1
                     })
-                    tracks = self._parse_similar_tracks(res, exclude_song=cand_track)
-                    if tracks:
+                    cand_tracks = self._parse_similar_tracks(res, exclude_song=cand_track)
+                    if cand_tracks:
+                        tracks = cand_tracks
                         print(f"  └─ ✅ [Last.fm]: Resolved canonical '{cand_track}' by '{cand_artist}' ({len(tracks)} similar tracks)")
                         break
 
-        # Strategy 3: Artist similarity fallback (artist.getsimilar -> top tracks)
+        # Strategy 4: Artist similarity fallback (artist.getsimilar -> top tracks)
         if not tracks:
             target_artist = artist_name or (query.split(" by ")[-1].strip() if " by " in query else query)
             artist_res = self._call("artist.getsimilar", {
                 "artist": target_artist,
-                "limit": 8,
+                "limit": 10,
                 "autocorrect": 1
             })
             similar_artists = artist_res.get("similarartists", {}).get("artist", [])
             if isinstance(similar_artists, dict):
                 similar_artists = [similar_artists]
 
-            for sa in similar_artists[:6]:
+            for sa in similar_artists[:8]:
                 rel_name = sa.get("name", "")
                 if rel_name:
                     top_res = self._call("artist.gettoptracks", {
                         "artist": rel_name,
-                        "limit": 2,
+                        "limit": 3,
                         "autocorrect": 1
                     })
                     top_tracks = top_res.get("toptracks", {}).get("track", [])
@@ -156,7 +188,7 @@ class LastFmAggregator(BaseMusicAggregator):
         if genre and genre.lower() not in ("all", "general", "none"):
             tag = genre.lower().strip()
             print(f"  └─ 📻 [Last.fm]: Fetching top tracks for tag '{tag}'...")
-            res = self._call("tag.gettoptracks", {"tag": tag, "limit": 30})
+            res = self._call("tag.gettoptracks", {"tag": tag, "limit": 50})
             raw = res.get("tracks", {}).get("track", [])
             if isinstance(raw, dict):
                 raw = [raw]
@@ -175,7 +207,7 @@ class LastFmAggregator(BaseMusicAggregator):
                         ))
         else:
             print("  └─ 📻 [Last.fm]: Fetching global top chart tracks...")
-            res = self._call("chart.gettoptracks", {"limit": 35})
+            res = self._call("chart.gettoptracks", {"limit": 50})
             raw = res.get("tracks", {}).get("track", [])
             if isinstance(raw, dict):
                 raw = [raw]
@@ -193,3 +225,4 @@ class LastFmAggregator(BaseMusicAggregator):
                         ))
 
         return tracks
+
