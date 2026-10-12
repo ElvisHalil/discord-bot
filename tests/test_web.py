@@ -7,11 +7,15 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from src.tools.web import read_website
+from src.tools.web import read_website, _smart_truncate, URL_CACHE, VISITED_URLS
 
 
 class TestWebTools(unittest.TestCase):
     """Test suite for read_website dual-engine parsing."""
+
+    def setUp(self):
+        URL_CACHE.clear()
+        VISITED_URLS.clear()
 
     @patch("src.tools.web.cffi_requests.get")
     def test_read_website_jina_success(self, mock_get):
@@ -56,6 +60,36 @@ class TestWebTools(unittest.TestCase):
         self.assertIn("Test Page", result)
         self.assertIn("Hello world from local", result)
         self.assertIn("Next link", result)
+
+    def test_ssrf_and_private_network_block(self):
+        self.assertIn("Security Block", read_website("http://localhost:8080/secret"))
+        self.assertIn("Security Block", read_website("http://127.0.0.1:11434/api/tags"))
+        self.assertIn("Security Block", read_website("http://192.168.1.1/admin"))
+        self.assertIn("Security Block", read_website("http://169.254.169.254/metadata"))
+
+    @patch("src.tools.web.cffi_requests.get")
+    def test_url_normalization_and_caching(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = "Normalized content"
+        mock_get.return_value = mock_resp
+
+        # Call with scheme omitted
+        res1 = read_website("example.com/doc")
+        self.assertIn("Normalized content", res1)
+        self.assertEqual(mock_get.call_count, 1)
+
+        # Call same URL again -> should hit cache without calling cffi_requests
+        res2 = read_website("https://example.com/doc")
+        self.assertIn("previously read in this session", res2)
+        self.assertEqual(mock_get.call_count, 1)
+
+    def test_smart_truncation(self):
+        text = "Paragraph 1\n\nParagraph 2\n\nParagraph 3"
+        truncated = _smart_truncate(text, 25)
+        self.assertIn("Paragraph 1", truncated)
+        self.assertIn("...[TEXT TRUNCATED DUE TO LENGTH]...", truncated)
+        self.assertNotIn("Paragraph 3", truncated)
 
 
 if __name__ == "__main__":

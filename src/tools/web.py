@@ -1,4 +1,6 @@
+import ipaddress
 import re
+import socket
 import requests
 import urllib.parse as urlparse
 from bs4 import BeautifulSoup
@@ -15,6 +17,58 @@ BROWSER_HEADERS = {
 }
 
 VISITED_URLS = set()
+URL_CACHE = {}
+
+def _is_private_or_local_host(hostname: str) -> bool:
+    """Check if a hostname resolves to a local, private, loopback, or metadata IP."""
+    if not hostname:
+        return True
+    clean_host = hostname.strip().lower().split(':')[0]
+    if clean_host in ('localhost', '127.0.0.1', '::1', '0.0.0.0'):
+        return True
+    if clean_host.endswith(('.local', '.internal', '.lan', '.localdomain')):
+        return True
+    try:
+        ip = ipaddress.ip_address(clean_host)
+        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+    except ValueError:
+        pass
+    try:
+        resolved_ip = socket.gethostbyname(clean_host)
+        ip = ipaddress.ip_address(resolved_ip)
+        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+    except Exception:
+        return False
+
+def _smart_truncate(text: str, max_length: int) -> str:
+    """Truncate text cleanly at paragraph or sentence boundaries without slicing words in half."""
+    if len(text) <= max_length:
+        return text
+    min_search = int(max_length * 0.8)
+    cand = text[:max_length]
+    
+    # Try double newline (paragraph boundary)
+    last_p = cand.rfind('\n\n', min_search)
+    if last_p != -1:
+        return cand[:last_p].strip() + "\n\n...[TEXT TRUNCATED DUE TO LENGTH]..."
+        
+    # Try single newline
+    last_nl = cand.rfind('\n', min_search)
+    if last_nl != -1:
+        return cand[:last_nl].strip() + "\n\n...[TEXT TRUNCATED DUE TO LENGTH]..."
+        
+    # Try sentence ending
+    for punct in ('. ', '? ', '! '):
+        last_s = cand.rfind(punct, min_search)
+        if last_s != -1:
+            return cand[:last_s + 1].strip() + "\n\n...[TEXT TRUNCATED DUE TO LENGTH]..."
+            
+    # Try word space
+    last_sp = cand.rfind(' ', min_search)
+    if last_sp != -1:
+        return cand[:last_sp].strip() + "\n\n...[TEXT TRUNCATED DUE TO LENGTH]..."
+        
+    return cand.strip() + "\n\n...[TEXT TRUNCATED DUE TO LENGTH]..."
 
 def search_web(query: str) -> str:
     """Search the web for real-time information, current product prices, releases, hardware specs, news, events and facts. Returns the top snippets and links. Use `read_website` on a specific URL if you need more details."""
@@ -42,6 +96,28 @@ def search_web(query: str) -> str:
 
 def read_website(url: str) -> str:
     """Read a website using Jina Reader (cloud) with a stealth fallback (local curl_cffi)."""
+    global VISITED_URLS, URL_CACHE
+    url = url.strip()
+    if not url:
+        return "❌ Error: URL is empty."
+
+    # 1. URL Normalization: auto-prepend https:// if model omitted scheme
+    if not url.startswith(('http://', 'https://')):
+        url = f"https://{url}"
+
+    parsed = urlparse.urlparse(url)
+    if parsed.scheme not in ('http', 'https'):
+        return f"❌ Error: Unsupported URL scheme '{parsed.scheme}'. Only http and https are supported."
+
+    # 2. SSRF / Localhost Protection
+    if _is_private_or_local_host(parsed.hostname):
+        return "❌ Security Block: Access to localhost or private network addresses is not permitted."
+
+    # 3. Session Cache / Loop Detection
+    if url in URL_CACHE:
+        print(f"⚡ [Web Cache Hit]: Reusing cached content for {url}")
+        return URL_CACHE[url] + "\n\n*(Note: This page was previously read in this session)*"
+
     print(f"🌐 [Reading Website]: {url}")
     
     # =========================================================
@@ -49,9 +125,13 @@ def read_website(url: str) -> str:
     # =========================================================
     jina_url = f"https://r.jina.ai/{url}"
     try:
-        # We still use curl_cffi here just in case Jina's own servers block standard Python requests
+        jina_headers = {
+            "X-Return-Format": "markdown",
+            "X-Timeout": "12",
+        }
         jina_resp = cffi_requests.get(
             jina_url, 
+            headers=jina_headers,
             impersonate="chrome", 
             timeout=15
         )
@@ -60,17 +140,17 @@ def read_website(url: str) -> str:
             print("✅ [Success] Rendered via Jina Reader API")
             content = jina_resp.text
             
-            # Truncate to save LLM context
-            max_text_length = 18000
-            truncated = content[:max_text_length]
-            if len(content) > max_text_length:
-                truncated += "\n\n...[TEXT TRUNCATED DUE TO LENGTH]..."
+            # Smart Truncate to save LLM context cleanly
+            truncated = _smart_truncate(content, 18000)
                 
             output = f"📄 **SOURCE URL:** {url} (Parsed via Jina AI)\n"
             output += "=" * 40 + "\n"
             output += truncated + "\n"
             output += "=" * 40 + "\n"
             output += "INSTRUCTIONS FOR AI: If the answer isn't above, use the `read_website` tool on any [Link](url) found in the text to drill down."
+            
+            VISITED_URLS.add(url)
+            URL_CACHE[url] = output
             return output
             
         elif jina_resp.status_code == 429:
@@ -97,7 +177,7 @@ def read_website(url: str) -> str:
             return f"❌ Error: URL is a non-HTML file type ({content_type}). The bot can only read web pages."
 
         # 2. Fetch the actual page mimicking the exact TLS fingerprint of Chrome
-        response = cffi_requests.get(url, impersonate="chrome", timeout=(3.0, 10.0))
+        response = cffi_requests.get(url, impersonate="chrome", timeout=(3.0, 10.0), allow_redirects=True)
         
         if response.status_code in [401, 403, 406]:
             return f"❌ Access Denied ({response.status_code}). This website uses strict anti-bot protection. INSTRUCTIONS: Stop trying to read this domain and search for the answer elsewhere."
@@ -146,10 +226,7 @@ def read_website(url: str) -> str:
         clean_markdown = re.sub(r'\n{3,}', '\n\n', raw_markdown).strip()
 
         # 7. Construct Final Fallback Output
-        max_text_length = 15000 
-        truncated_markdown = clean_markdown[:max_text_length]
-        if len(clean_markdown) > max_text_length:
-            truncated_markdown += "\n\n...[TEXT TRUNCATED DUE TO LENGTH]..."
+        truncated_markdown = _smart_truncate(clean_markdown, 15000)
 
         output = f"📄 **PAGE TITLE:** {page_title}\n"
         output += f"📝 **META DESC:** {meta_desc}\n"
@@ -167,7 +244,10 @@ def read_website(url: str) -> str:
         else:
             output += "No useful navigational links found."
             
-        return output[:20000]
+        final_result = output[:20000]
+        VISITED_URLS.add(url)
+        URL_CACHE[url] = final_result
+        return final_result
 
     except (RequestException, RequestsError) as e:
         return f"❌ Network Error reading URL: {str(e)}. Try a different search result."

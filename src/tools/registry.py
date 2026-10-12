@@ -19,6 +19,7 @@ from src.tools.web import (
     WEB_TOOLS,
     BROWSER_HEADERS,
     VISITED_URLS,
+    URL_CACHE,
 )
 from src.skills import (
     skill_weather_reporter,
