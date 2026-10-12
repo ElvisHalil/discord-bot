@@ -17,7 +17,7 @@ BROWSER_HEADERS = {
 VISITED_URLS = set()
 
 def search_web(query: str) -> str:
-    """Search the web. Returns the top snippets and links. Use `read_website` on a specific URL if you need more details."""
+    """Search the web for real-time information, current product prices, releases, hardware specs, news, weather, and facts. Always use this to verify facts and look up current info beyond 2024. Returns the top snippets and links. Use `read_website` on a specific URL if you need more details."""
     global VISITED_URLS
     print(f"🔎 [Web Search]: {query}")
     try:
