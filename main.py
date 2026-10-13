@@ -47,6 +47,14 @@ else:
     if _default_profile:
         print(f"⚠️ DEFAULT_PROFILE '{_default_profile}' is not a known mode; using '{current_mode}'.")
 
+# Only this Discord user may run !mode (it switches the model for every server
+# and unloads GPU memory). Fails closed: if unset, nobody can switch modes.
+try:
+    BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "").strip())
+except ValueError:
+    BOT_OWNER_ID = None
+    print("⚠️ BOT_OWNER_ID is missing or invalid in .env; '!mode' is disabled for everyone.")
+
 
 def clear_tool_caches():
     tools.VISITED_URLS.clear()
@@ -366,6 +374,10 @@ async def on_message(message):
     
     # Mode Switching Logic
     if user_input.lower().startswith("!mode"):
+        if BOT_OWNER_ID is None or message.author.id != BOT_OWNER_ID:
+            print(f"🔒 [!mode denied]: {message.author} ({message.author.id})")
+            await message.channel.send("🔒 Only the bot owner can switch modes.")
+            return
         new_mode = user_input.split(" ")[-1].lower()
         if new_mode in MODES:
             previous_model = MODES[current_mode]["model"]
