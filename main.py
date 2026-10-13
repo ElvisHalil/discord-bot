@@ -154,8 +154,9 @@ async def on_raw_reaction_add(payload):
                     search_query = f"{clean_title} by {orig_artist}".strip() if orig_artist else clean_title
                     print(f"🎵 [Reaction Target]: Cleaned '{clean_title}' by '{orig_artist}'")
 
-                    # 2. Get recommendations from Deezer / Beatport
+                    # 2. Get recommendations from Last.fm / Deezer / FreqBlog
                     similar_res = await asyncio.to_thread(tools.skill_top_music, similar_to=search_query)
+                    is_unrelated_fallback = "NO DIRECT SIMILAR SONGS FOUND" in similar_res
                     similar_tracks = []
                     for line in similar_res.split("\n"):
                         line = line.strip()
@@ -164,10 +165,11 @@ async def on_raw_reaction_add(payload):
                             if clean_title.lower() not in track_name.lower():
                                 similar_tracks.append(track_name)
 
-                    # Guaranteed fallback to Beatport if empty
+                    # Guaranteed fallback to general charts if empty
                     if not similar_tracks:
-                        print("⚠️ [Reaction Fallback]: No similar tracks found, pulling Beatport charts...")
-                        bp_res = await asyncio.to_thread(tools.skill_top_music, genre="techno")
+                        is_unrelated_fallback = True
+                        print("⚠️ [Reaction Fallback]: No similar tracks found, pulling general charts...")
+                        bp_res = await asyncio.to_thread(tools.skill_top_music, genre=None)
                         for line in bp_res.split("\n"):
                             line = line.strip()
                             if line.startswith("- "):
@@ -197,11 +199,26 @@ async def on_raw_reaction_add(payload):
                     # 4. Generate natural persona intro via active model
                     mode_config = MODES[current_mode]
                     orig_display = f"'{orig_title}' by '{orig_artist}'" if orig_artist else f"'{orig_title}'"
-                    intro_prompt = (
-                        f"User {user.display_name} reacted with 👍 to the song {orig_display}. "
-                        f"Write a single short sentence recommending the similar song '{chosen_track}'. "
-                        "Do NOT include any links, URLs, or markdown links."
-                    )
+                    if is_unrelated_fallback:
+                        intro_prompt = (
+                            f"User {user.display_name} reacted with 👍 to {orig_display}, "
+                            f"but no directly related songs could be found for it. "
+                            f"Write a single short sentence letting them know you couldn't find any related songs for {orig_display}, "
+                            f"and suggest '{chosen_track}' as a track they might like instead. "
+                            "Do NOT include any links, URLs, or markdown links."
+                        )
+                        default_intro = (
+                            f"Couldn't find any directly related songs for **{orig_title}**"
+                            + (f" by **{orig_artist}**" if orig_artist else "")
+                            + ", but here is a track you might like instead:"
+                        )
+                    else:
+                        intro_prompt = (
+                            f"User {user.display_name} reacted with 👍 to the song {orig_display}. "
+                            f"Write a single short sentence recommending the similar song '{chosen_track}'. "
+                            "Do NOT include any links, URLs, or markdown links."
+                        )
+                        default_intro = f"Here is a song similar to **{orig_title}** by **{orig_artist}**:"
 
                     try:
                         resp = await ollama_client.chat(
@@ -216,10 +233,10 @@ async def on_raw_reaction_add(payload):
                         intro_text = re.sub(r'https?:\/\/\S+', '', intro_text).strip()
                     except Exception as e:
                         print(f"⚠️ [Reaction Ollama Error]: {e}")
-                        intro_text = f"Here is a song similar to **{orig_title}** by **{orig_artist}**:"
+                        intro_text = default_intro
 
                     if not intro_text:
-                        intro_text = f"Here is a song similar to **{orig_title}** by **{orig_artist}**:"
+                        intro_text = default_intro
 
                     # Prepend user @ mention so the channel knows who triggered the recommendation
                     if user_tag not in intro_text:

@@ -290,14 +290,21 @@ class LastFmAggregator(BaseMusicAggregator):
                 "edm": "electronic",
             }
             tag = genre_aliases.get(tag, tag)
-            print(f"  └─ 📻 [Last.fm]: Fetching top tracks for tag '{tag}'...")
-            res = self._call("tag.gettoptracks", {"tag": tag, "limit": 50})
+            page = random.choice([1, 2])
+            print(f"  └─ 📻 [Last.fm]: Fetching top tracks (page {page}) & rotating artists for tag '{tag}'...")
+            res = self._call("tag.gettoptracks", {"tag": tag, "limit": 50, "page": page})
             raw = res.get("tracks", {}).get("track", [])
+            if not raw and page != 1:
+                res = self._call("tag.gettoptracks", {"tag": tag, "limit": 50, "page": 1})
+                raw = res.get("tracks", {}).get("track", [])
             if isinstance(raw, dict):
                 raw = [raw]
+
+            artist_seen = set()
+            source_name = f"lastfm_{tag.replace(' ', '_')}"
+
+            # Step A: Sample up to 6 diverse tagged tracks (max 1 per artist)
             if raw:
-                # Deduplicate by artist to ensure rich variety across bands/producers
-                artist_seen = set()
                 diverse_raw = []
                 for t in raw:
                     art = t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))
@@ -305,18 +312,50 @@ class LastFmAggregator(BaseMusicAggregator):
                     if clean_art and clean_art not in artist_seen:
                         artist_seen.add(clean_art)
                         diverse_raw.append(t)
-                sampled = random.sample(diverse_raw, min(10, len(diverse_raw)))
+                sampled = random.sample(diverse_raw, min(6, len(diverse_raw)))
+                # Reset artist_seen to only the artists actually sampled in Step A
+                artist_seen = set()
                 for t in sampled:
                     title = t.get("name", "")
                     artist_obj = t.get("artist", {})
                     artist = artist_obj.get("name", "") if isinstance(artist_obj, dict) else str(artist_obj)
                     if title and artist:
+                        artist_seen.add(artist.lower().strip())
                         tracks.append(Track(
                             title=title,
                             artist=artist,
                             genre=genre.title(),
-                            source=f"lastfm_{tag.replace(' ', '_')}"
+                            source=source_name
                         ))
+
+            # Step B: Rotate through top genre artists via tag.gettopartists -> artist.gettoptracks
+            art_res = self._call("tag.gettopartists", {"tag": tag, "limit": 30})
+            raw_artists = art_res.get("topartists", {}).get("artist", [])
+            if isinstance(raw_artists, dict):
+                raw_artists = [raw_artists]
+            if raw_artists:
+                cand_artists = []
+                for a in raw_artists:
+                    a_name = a.get("name", "") if isinstance(a, dict) else str(a)
+                    if a_name and a_name.lower().strip() not in artist_seen:
+                        cand_artists.append(a_name)
+                selected_artists = random.sample(cand_artists, min(4, len(cand_artists)))
+                for a_name in selected_artists:
+                    top_res = self._call("artist.gettoptracks", {"artist": a_name, "limit": 5, "autocorrect": 1})
+                    top_trks = top_res.get("toptracks", {}).get("track", [])
+                    if isinstance(top_trks, dict):
+                        top_trks = [top_trks]
+                    if top_trks:
+                        chosen_t = random.choice(top_trks[:5])
+                        t_title = chosen_t.get("name", "")
+                        if t_title:
+                            artist_seen.add(a_name.lower().strip())
+                            tracks.append(Track(
+                                title=t_title,
+                                artist=a_name,
+                                genre=genre.title(),
+                                source=source_name
+                            ))
         else:
             print("  └─ 📻 [Last.fm]: Fetching global top chart tracks...")
             res = self._call("chart.gettoptracks", {"limit": 50})
@@ -345,4 +384,5 @@ class LastFmAggregator(BaseMusicAggregator):
                         ))
 
         return tracks
+
 

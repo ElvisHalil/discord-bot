@@ -130,30 +130,54 @@ class DeezerAggregator(BaseMusicAggregator):
         clean_g = (genre or "").lower().strip()
         tracks = []
 
-        # Strategy 1: For specific subgenres (e.g. dnb, synthwave, phonk, techno, house),
-        # Deezer's curated editorial playlists provide authentic subgenre tracks.
+        # Strategy 1: For specific subgenres or Beatport chart queries, pool across up to 4 curated playlists
         if clean_g and clean_g not in ("all", "global", "general", "none"):
             search_term = "drum and bass" if clean_g in ("dnb", "drum and bass", "drumnbass", "drum & bass") else clean_g
             try:
-                print(f"  └─ 🎧 [Deezer]: Searching top curated playlists for '{search_term}'...")
-                r_pl = requests.get(f"https://api.deezer.com/search/playlist?q={urllib.parse.quote(search_term)}&limit=3", timeout=5)
+                print(f"  └─ 🎧 [Deezer]: Searching curated playlists for '{search_term}'...")
+                r_pl = requests.get(f"https://api.deezer.com/search/playlist?q={urllib.parse.quote(search_term)}&limit=10", timeout=5)
                 playlists = r_pl.json().get("data", [])
                 if playlists:
-                    best_pl = max(playlists, key=lambda x: x.get("nb_tracks", 0))
-                    pl_id = best_pl.get("id")
-                    r_tr = requests.get(f"https://api.deezer.com/playlist/{pl_id}/tracks?limit=25", timeout=5)
-                    data = r_tr.json().get("data", [])
-                    if data:
-                        for t in data:
-                            tracks.append(Track(
-                                title=t.get("title", "Unknown"),
-                                artist=t.get("artist", {}).get("name", "Unknown"),
-                                album=t.get("album", {}).get("title"),
-                                genre=clean_g.title(),
-                                source=f"deezer_{clean_g.replace(' ', '_')}"
-                            ))
-                        print(f"  └─ ✅ [Deezer]: Retrieved {len(tracks)} tracks from playlist '{best_pl.get('title')}' for '{clean_g}'")
-                        return tracks
+                    valid_pls = [p for p in playlists if p.get("id") and p.get("nb_tracks", 0) >= 15]
+                    if not valid_pls:
+                        valid_pls = [p for p in playlists if p.get("id")]
+
+                    selected_pls = random.sample(valid_pls, min(4, len(valid_pls)))
+                    pooled_tracks = []
+                    pl_titles = []
+
+                    for pl in selected_pls:
+                        pl_id = pl.get("id")
+                        try:
+                            r_tr = requests.get(f"https://api.deezer.com/playlist/{pl_id}/tracks?limit=40", timeout=5)
+                            data = r_tr.json().get("data", [])
+                            if data:
+                                pl_titles.append(pl.get("title", str(pl_id)))
+                                sampled_data = random.sample(data, min(8, len(data)))
+                                for t in sampled_data:
+                                    title = t.get("title", "Unknown")
+                                    artist = t.get("artist", {}).get("name", "Unknown")
+                                    if title and artist:
+                                        pooled_tracks.append(Track(
+                                            title=title,
+                                            artist=artist,
+                                            album=t.get("album", {}).get("title"),
+                                            genre=clean_g.title(),
+                                            source=f"deezer_{clean_g.replace(' ', '_')}"
+                                        ))
+                        except Exception:
+                            continue
+
+                    if pooled_tracks:
+                        random.shuffle(pooled_tracks)
+                        seen_keys = set()
+                        for pt in pooled_tracks:
+                            key = (pt.title.lower().strip(), pt.artist.lower().strip())
+                            if key not in seen_keys:
+                                seen_keys.add(key)
+                                tracks.append(pt)
+                        print(f"  └─ ✅ [Deezer]: Pooled {len(tracks)} diverse tracks across {len(pl_titles)} playlists ({', '.join(pl_titles[:3])}) for '{clean_g}'")
+                        return tracks[:25]
             except Exception as e:
                 print(f"  └─ ⚠️ [Deezer Playlist Search Warning]: {e}")
 

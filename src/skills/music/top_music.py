@@ -13,10 +13,11 @@ def skill_top_music(
 ) -> str:
     """
     Fetches the current top trending/charting music in the world right now, finds similar songs, OR searches top tracks by an artist.
-    ALWAYS use this skill FIRST when a user asks for song recommendations, top hits, songs by a specific artist, or what music is popular today.
+    ALWAYS use this skill FIRST when a user asks for genre recommendations, top hits, songs by a specific artist, similar songs, or what music is popular today.
+    NOTE: When a user requests one specific song by title (e.g. 'play Strobe by Deadmau5'), call `skill_youtube_searcher(query='<Song> by <Artist>', is_music=True)` directly instead of passing the song title as a genre.
 
     Args:
-        genre: Genre for top charts, e.g. 'pop', 'techno', 'rock', 'hip hop'. Leave empty for all genres.
+        genre: Genre or regional style for top charts, e.g. 'pop', 'techno', 'dnb', 'german rap'. Leave empty for all genres.
         similar_to: Seed song to find similar tracks for, as 'Song Title by Artist Name'.
         match_mood: Set true to match the emotional mood/energy of the similar_to song rather than just its style.
         artist: Artist name to get their top popular tracks, e.g. 'Deadmau5' or 'Daft Punk'.
@@ -66,19 +67,36 @@ def skill_top_music(
                     seen.add(key)
                     unique_tracks.append(t)
 
+            is_unrelated_fallback = all(t.source == "fallback_unrelated" for t in unique_tracks)
             random.shuffle(unique_tracks)
 
-            header = f"=== SONGS MATCHING MOOD OF '{similar_to}' ({mood_tag}) ===\n\n" if mood_tag else f"=== SONGS SIMILAR TO '{similar_to}' ===\n\n"
+            if is_unrelated_fallback:
+                header = f"=== NO DIRECT SIMILAR SONGS FOUND FOR '{similar_to}' — FALLBACK SUGGESTIONS ===\n\n"
+            elif mood_tag:
+                header = f"=== SONGS MATCHING MOOD OF '{similar_to}' ({mood_tag}) ===\n\n"
+            else:
+                header = f"=== SONGS SIMILAR TO '{similar_to}' ===\n\n"
+
             output = header
             for t in unique_tracks[:15]:
                 output += t.display_line() + "\n"
 
-            output += (
-                "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-                "Select ONE best matching song from the list above, then call "
-                "`skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` to get its verified link.\n\n"
-                + SONG_TEMPLATE
-            )
+            if is_unrelated_fallback:
+                output += (
+                    "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
+                    f"IMPORTANT: No directly related songs were found for '{similar_to}'. "
+                    "Clearly let the user know that you couldn't find any directly related songs for that track, "
+                    "and suggest ONE track from the list above that they might like instead. "
+                    "Then call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` to get its verified link.\n\n"
+                    + SONG_TEMPLATE
+                )
+            else:
+                output += (
+                    "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
+                    "Select ONE best matching song from the list above, then call "
+                    "`skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` to get its verified link.\n\n"
+                    + SONG_TEMPLATE
+                )
             return output
         except Exception as e:
             return f"Error finding similar songs: {e}"

@@ -1,8 +1,39 @@
 import re
+from collections import deque
 import requests
 
 # Global in-memory cache of resolved music metadata
 MUSIC_METADATA_CACHE = {}
+
+# Rolling session history of recently played/recommended tracks to prevent repeats across turns
+RECENTLY_PLAYED_TRACKS = deque(maxlen=30)
+
+def _norm_track_token(text: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '', (text or '').lower())
+
+def record_played_track(song: str, artist: str) -> None:
+    """Records a song and artist in the rolling session exclusion deque."""
+    s_norm = _norm_track_token(song)
+    a_norm = _norm_track_token(artist)
+    if not s_norm or s_norm in ("unknowntrack", "unknownsong", "unknown"):
+        return
+    entry = (s_norm, a_norm)
+    if entry not in RECENTLY_PLAYED_TRACKS:
+        RECENTLY_PLAYED_TRACKS.append(entry)
+
+def is_recently_played(song: str, artist: str = "") -> bool:
+    """Checks whether a candidate track matches a recently played song in this session."""
+    if not RECENTLY_PLAYED_TRACKS:
+        return False
+    s_norm = _norm_track_token(song)
+    a_norm = _norm_track_token(artist)
+    if not s_norm:
+        return False
+    for rec_s, rec_a in RECENTLY_PLAYED_TRACKS:
+        if s_norm == rec_s and (not a_norm or not rec_a or a_norm == rec_a or a_norm in rec_a or rec_a in a_norm):
+            return True
+    return False
+
 
 def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
     """
@@ -137,6 +168,8 @@ def format_song_card(song: str, artist: str, url: str, genre: str = None, album:
     if intro and intro.strip():
         lines.append(intro.strip())
         lines.append("")
+
+    record_played_track(song, artist)
 
     lines.append(f"**Song:** {song.strip()}")
     lines.append(f"**Artist:** {artist.strip()}")

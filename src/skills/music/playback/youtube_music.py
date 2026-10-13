@@ -3,7 +3,7 @@ import re
 import requests
 from dotenv import load_dotenv
 from ddgs import DDGS
-from src.skills.music.utils import parse_song_meta, MUSIC_METADATA_CACHE
+from src.skills.music.utils import parse_song_meta, MUSIC_METADATA_CACHE, record_played_track
 from src.skills.youtube.client import verify_embeddable, get_video_oembed, is_youtube_short
 
 load_dotenv()
@@ -270,6 +270,7 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
             "album": cand.get("album"),
             "url": cand["url"]
         }
+        record_played_track(cand["title"], cand["artist"])
         topic_tag = " [Official Topic]" if cand.get("is_topic") else ""
         print(f"🎧 [Music Resolver Returned]: '{cand['title']}' by '{cand['artist']}' -> {cand['url']}{topic_tag} (Score: {cand.get('score', 0)}/3)")
 

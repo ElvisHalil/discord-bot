@@ -254,7 +254,173 @@ class TestDeezerExpansion(unittest.TestCase):
         self.assertEqual(args, {"artist": "Deadmau5", "genre": "techno"})
 
 
+class TestMusicDiversityExpansion(unittest.TestCase):
+    """Tests for session exclusion, multi-playlist pooling, multi-region/nationality charts, Beatport subgenres, and Last.fm rotation."""
+
+    def setUp(self):
+        from src.skills.music.utils import RECENTLY_PLAYED_TRACKS
+        RECENTLY_PLAYED_TRACKS.clear()
+
+    def tearDown(self):
+        from src.skills.music.utils import RECENTLY_PLAYED_TRACKS
+        RECENTLY_PLAYED_TRACKS.clear()
+
+    def test_recently_played_exclusion_in_manager(self):
+        from src.skills.music.utils import record_played_track, is_recently_played
+        from src.skills.music.aggregators.manager import MusicAggregatorManager
+        from src.skills.music.models import Track
+
+        record_played_track("Tarantula", "Pendulum")
+        self.assertTrue(is_recently_played("Tarantula", "Pendulum"))
+        self.assertFalse(is_recently_played("Solar System", "Sub Focus"))
+
+        mgr = MusicAggregatorManager()
+        candidates = [
+            Track(title="Tarantula", artist="Pendulum", source="lastfm"),
+            Track(title="Solar System", artist="Sub Focus", source="deezer"),
+            Track(title="Baddadan", artist="Chase & Status", source="itunes"),
+        ]
+        filtered = mgr._filter_and_deduplicate(candidates)
+        self.assertEqual(len(filtered), 2)
+        self.assertEqual([t.title for t in filtered], ["Solar System", "Baddadan"])
+
+    def test_unknown_song_similarity_fallback_marks_unrelated(self):
+        from src.skills.music.aggregators.manager import MusicAggregatorManager
+        from src.skills.music.models import Track
+        from src.skills.music.top_music import skill_top_music
+
+        mgr = MusicAggregatorManager()
+        for name in ("lastfm", "deezer", "freqblog"):
+            mgr.aggregators[name].get_similar = MagicMock(return_value=[])
+        mgr.get_top_charts = MagicMock(return_value=[
+            Track(title="Baddadan", artist="Chase & Status", genre="Drum & Bass", source="deezer")
+        ])
+
+        tracks = mgr.get_similar_tracks("Completely Unknown Obscure Track 99999 by Nobody")
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0].source, "fallback_unrelated")
+
+        with patch("src.skills.music.top_music.manager", mgr):
+            out = skill_top_music(similar_to="Completely Unknown Obscure Track 99999 by Nobody")
+            self.assertIn("NO DIRECT SIMILAR SONGS FOUND", out)
+            self.assertIn("couldn't find any directly related songs", out)
+
+    def test_charts_nationality_modifier_and_song_title_safeguard(self):
+        from src.skills.music.aggregators.charts import resolve_genre_and_regions
+
+        # Regional genre queries
+        gid_de, regs_de = resolve_genre_and_regions("german rap")
+        self.assertEqual(gid_de, 18)
+        self.assertEqual(regs_de, ["de"])
+
+        gid_dr, regs_dr = resolve_genre_and_regions("deutschrap")
+        self.assertEqual(gid_dr, 18)
+        self.assertEqual(regs_dr, ["de"])
+
+        gid_uk, regs_uk = resolve_genre_and_regions("uk drill")
+        self.assertEqual(gid_uk, 18)
+        self.assertEqual(regs_uk, ["gb"])
+
+        gid_fr, regs_fr = resolve_genre_and_regions("french house")
+        self.assertEqual(gid_fr, 1048)
+        self.assertEqual(regs_fr, ["fr"])
+
+        # General genre multi-region capitals
+        gid_dnb, regs_dnb = resolve_genre_and_regions("dnb")
+        self.assertEqual(gid_dnb, 1049)
+        self.assertEqual(regs_dnb, ["gb", "us", "de"])
+
+        # Safeguard: Specific song titles containing nationality words must NOT resolve as genres
+        self.assertEqual(resolve_genre_and_regions("englishman in new york"), (None, []))
+        self.assertEqual(resolve_genre_and_regions("american idiot"), (None, []))
+        self.assertEqual(resolve_genre_and_regions("german shepherd"), (None, []))
+
+    @patch("src.skills.music.aggregators.deezer.requests.get")
+    def test_deezer_multi_playlist_pooling(self, mock_get):
+        from src.skills.music.aggregators.deezer import DeezerAggregator
+
+        mock_search_resp = MagicMock()
+        mock_search_resp.json.return_value = {
+            "data": [
+                {"id": 101, "title": "Hospitality DnB", "nb_tracks": 50},
+                {"id": 102, "title": "UKF Drum & Bass", "nb_tracks": 60},
+            ]
+        }
+        mock_pl1_resp = MagicMock()
+        mock_pl1_resp.json.return_value = {
+            "data": [{"title": "Solar System", "artist": {"name": "Sub Focus"}, "album": {"title": "Portals"}}]
+        }
+        mock_pl2_resp = MagicMock()
+        mock_pl2_resp.json.return_value = {
+            "data": [{"title": "Afterglow", "artist": {"name": "Wilkinson"}, "album": {"title": "Lazers Not Included"}}]
+        }
+        mock_get.side_effect = [mock_search_resp, mock_pl1_resp, mock_pl2_resp]
+
+        deezer = DeezerAggregator()
+        tracks = deezer.get_charts(genre="dnb")
+        artists = {t.artist for t in tracks}
+        self.assertEqual(artists, {"Sub Focus", "Wilkinson"})
+
+    @patch("src.skills.music.aggregators.beatport.fetch_soup")
+    @patch("src.skills.music.aggregators.deezer.DeezerAggregator.get_charts")
+    def test_beatport_techno_queries_beatport_top_100_techno_on_deezer(self, mock_deezer_charts, mock_fetch_soup):
+        from src.skills.music.aggregators.beatport import BeatportAggregator
+        from src.skills.music.models import Track
+
+        mock_fetch_soup.side_effect = Exception("403 Forbidden")
+        mock_deezer_charts.return_value = [
+            Track(title="Consciousness", artist="Anyma", genre="Techno", source="deezer_beatport_top_100_techno")
+        ]
+
+        bp = BeatportAggregator()
+        tracks = bp.get_charts(genre="techno")
+        mock_deezer_charts.assert_called_once_with(genre="Beatport Top 100 Techno")
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0].title, "Consciousness")
+        self.assertEqual(tracks[0].genre, "Techno")
+
+    def test_lastfm_combined_tracks_and_artists_rotation(self):
+        from src.skills.music.aggregators.lastfm import LastFmAggregator
+
+        lfm = LastFmAggregator(api_key="test_key")
+
+        def fake_call(method, params):
+            if method == "tag.gettoptracks":
+                return {
+                    "tracks": {
+                        "track": [
+                            {"name": "Solar System", "artist": {"name": "Sub Focus"}},
+                            {"name": "Afterglow", "artist": {"name": "Wilkinson"}},
+                        ]
+                    }
+                }
+            if method == "tag.gettopartists":
+                return {
+                    "topartists": {
+                        "artist": [
+                            {"name": "Sub Focus"},  # Already in Step A, should be skipped in Step B
+                            {"name": "Noisia"},
+                            {"name": "Netsky"},
+                        ]
+                    }
+                }
+            if method == "artist.gettoptracks":
+                art = params.get("artist")
+                return {
+                    "toptracks": {
+                        "track": [{"name": f"{art} Hit", "artist": {"name": art}}]
+                    }
+                }
+            return {}
+
+        lfm._call = MagicMock(side_effect=fake_call)
+        tracks = lfm.get_charts(genre="dnb")
+        artists = {t.artist for t in tracks}
+        self.assertEqual(artists, {"Sub Focus", "Wilkinson", "Noisia", "Netsky"})
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 

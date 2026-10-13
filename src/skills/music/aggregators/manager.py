@@ -6,6 +6,7 @@ from src.skills.music.aggregators.freqblog import FreqBlogAggregator
 from src.skills.music.aggregators.beatport import BeatportAggregator
 from src.skills.music.aggregators.charts import ChartsAggregator
 from src.skills.music.models import Track
+from src.skills.music.utils import is_recently_played, parse_song_meta, _norm_track_token
 
 class MusicAggregatorManager:
     """
@@ -26,39 +27,99 @@ class MusicAggregatorManager:
         """Register a new music recommendation or chart provider (e.g. Last.fm, Spotify)."""
         self.aggregators[name] = aggregator
 
+    def _filter_and_deduplicate(self, tracks: list[Track], exclude_query: str = None) -> list[Track]:
+        """
+        Unified exclusion and deduplication filter shared across all discovery modes:
+        1. Deduplicates (title, artist) pairs across providers.
+        2. Excludes the seed song when exclude_query is provided (e.g., similar_to).
+        3. Excludes tracks in RECENTLY_PLAYED_TRACKS session history (falling back gracefully if all candidates would be removed).
+        """
+        if not tracks:
+            return []
+
+        seed_song_norm = ""
+        seed_artist_norm = ""
+        if exclude_query:
+            meta = parse_song_meta(exclude_query)
+            seed_song_norm = _norm_track_token(meta.get("song", ""))
+            art_raw = meta.get("artist", "")
+            if art_raw.lower() not in ("unknown artist", "unknown", ""):
+                seed_artist_norm = _norm_track_token(art_raw)
+
+        seen = set()
+        deduped = []
+        fresh = []
+
+        for t in tracks:
+            key = (t.title.lower().strip(), t.artist.lower().strip())
+            if key in seen:
+                continue
+            seen.add(key)
+
+            t_song_norm = _norm_track_token(t.title)
+            t_art_norm = _norm_track_token(t.artist)
+
+            # Exclude seed song in similarity queries
+            if seed_song_norm and t_song_norm:
+                if t_song_norm == seed_song_norm:
+                    if not seed_artist_norm or not t_art_norm or seed_artist_norm in t_art_norm or t_art_norm in seed_artist_norm:
+                        continue
+
+            deduped.append(t)
+            if not is_recently_played(t.title, t.artist):
+                fresh.append(t)
+
+        return fresh if fresh else deduped
+
     def get_similar_tracks(self, query: str) -> list[Track]:
         """
         Executes the similarity recommendation fallback chain:
         1. Query Last.fm API (scrobble-based similarity graph if API key configured)
         2. Query Deezer API (artist graph & related tracks)
         3. Query FreqBlog API (acoustic & neural embedding fallback if FREQBLOG_API_KEY configured)
-        4. Fall back to Beatport charts safety net if previous yield no results
+        4. Transparent genre-aware / generic chart fallback tagged as 'fallback_unrelated' if song is completely unknown
         """
         tracks = []
 
         # 1. Primary: Last.fm (if LASTFM_API_KEY is available)
         lastfm = self.aggregators.get("lastfm")
         if lastfm:
-            tracks = lastfm.get_similar(query)
+            tracks = self._filter_and_deduplicate(lastfm.get_similar(query), exclude_query=query)
 
         # 2. Secondary: Deezer
         if not tracks:
             deezer = self.aggregators.get("deezer")
             if deezer:
-                tracks = deezer.get_similar(query)
+                tracks = self._filter_and_deduplicate(deezer.get_similar(query), exclude_query=query)
 
         # 3. Tertiary: FreqBlog (Acoustic neural embedding fallback, protected by local cache)
         if not tracks:
             freqblog = self.aggregators.get("freqblog")
             if freqblog:
-                tracks = freqblog.get_similar(query)
+                tracks = self._filter_and_deduplicate(freqblog.get_similar(query), exclude_query=query)
 
-        # 4. Fallback: Beatport electronic club charts safety net
+        # 4. Fallback: Genre-aware or generic top charts when the track is completely unknown
         if not tracks:
-            print("  └─ ⚠️ [Aggregator]: Primary similarity yielded no tracks, falling back to Beatport...")
-            beatport = self.aggregators.get("beatport")
-            if beatport:
-                tracks = beatport.get_charts(genre="techno")
+            meta = parse_song_meta(query)
+            detected_genre = meta.get("genre")
+            print(f"  └─ ⚠️ [Aggregator]: No related songs found for '{query}'. Falling back to {'genre ' + detected_genre if detected_genre else 'general'} charts...")
+            fallback_pool = self.get_top_charts(genre=detected_genre)
+            if not fallback_pool:
+                beatport = self.aggregators.get("beatport")
+                if beatport:
+                    fallback_pool = beatport.get_charts(genre=detected_genre or "techno")
+
+            unrelated_tracks = []
+            for t in fallback_pool:
+                unrelated_tracks.append(Track(
+                    title=t.title,
+                    artist=t.artist,
+                    genre=t.genre,
+                    album=t.album,
+                    url=t.url,
+                    source="fallback_unrelated"
+                ))
+            tracks = self._filter_and_deduplicate(unrelated_tracks, exclude_query=query)
 
         return tracks
 
@@ -74,11 +135,11 @@ class MusicAggregatorManager:
 
         if freqblog and hasattr(freqblog, "match_mood"):
             tracks, mood_info = freqblog.match_mood(query)
+            tracks = self._filter_and_deduplicate(tracks, exclude_query=query)
             if tracks:
                 return tracks, mood_info
             # If match_mood returned no tracks (e.g. 404 or unanalyzed track), check if lookup has seed metadata
             if hasattr(freqblog, "lookup"):
-                from src.skills.music.utils import parse_song_meta
                 meta = parse_song_meta(query)
                 lookup_data = freqblog.lookup(meta.get("song", query), meta.get("artist", ""))
                 if lookup_data:
@@ -120,21 +181,14 @@ class MusicAggregatorManager:
         if charts:
             all_tracks.extend(charts.get_charts(genre=genre))
 
-        # Deduplicate tracks across providers preserving order
-        seen = set()
-        unique_tracks = []
-        for t in all_tracks:
-            key = (t.title.lower().strip(), t.artist.lower().strip())
-            if key not in seen:
-                seen.add(key)
-                unique_tracks.append(t)
-
-        return unique_tracks
+        return self._filter_and_deduplicate(all_tracks)
 
     def get_artist_tracks(self, artist: str) -> list[Track]:
         """Fetches top tracks by a specific artist using Deezer."""
         deezer = self.aggregators.get("deezer")
         if deezer and hasattr(deezer, "get_artist_top_tracks"):
-            return deezer.get_artist_top_tracks(artist)
+            tracks = deezer.get_artist_top_tracks(artist)
+            return self._filter_and_deduplicate(tracks)
         return []
+
 
