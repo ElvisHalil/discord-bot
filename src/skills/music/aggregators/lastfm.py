@@ -296,7 +296,16 @@ class LastFmAggregator(BaseMusicAggregator):
             if isinstance(raw, dict):
                 raw = [raw]
             if raw:
-                sampled = random.sample(raw, min(10, len(raw)))
+                # Deduplicate by artist to ensure rich variety across bands/producers
+                artist_seen = set()
+                diverse_raw = []
+                for t in raw:
+                    art = t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))
+                    clean_art = art.lower().strip()
+                    if clean_art and clean_art not in artist_seen:
+                        artist_seen.add(clean_art)
+                        diverse_raw.append(t)
+                sampled = random.sample(diverse_raw, min(10, len(diverse_raw)))
                 for t in sampled:
                     title = t.get("name", "")
                     artist_obj = t.get("artist", {})
@@ -315,7 +324,15 @@ class LastFmAggregator(BaseMusicAggregator):
             if isinstance(raw, dict):
                 raw = [raw]
             if raw:
-                sampled = random.sample(raw, min(10, len(raw)))
+                artist_seen = set()
+                diverse_raw = []
+                for t in raw:
+                    art = t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))
+                    clean_art = art.lower().strip()
+                    if clean_art and clean_art not in artist_seen:
+                        artist_seen.add(clean_art)
+                        diverse_raw.append(t)
+                sampled = random.sample(diverse_raw, min(10, len(diverse_raw)))
                 for t in sampled:
                     title = t.get("name", "")
                     artist_obj = t.get("artist", {})

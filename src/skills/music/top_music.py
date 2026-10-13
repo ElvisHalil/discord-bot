@@ -89,7 +89,25 @@ def skill_top_music(
 
         output = f"=== TODAY'S TOP CHARTING MUSIC ({genre.upper() if genre else 'ALL GENRES'}) ===\n\n"
         if all_tracks:
-            # Group tracks by source section to preserve provider clarity
+            # 1. Primary: Featured diverse selection (max 1 track per artist, randomized across providers)
+            # This ensures the model immediately sees 15+ completely different artists and never gets anchored to one band!
+            artist_seen = set()
+            featured_diverse = []
+            for t in all_tracks:
+                clean_artist = t.artist.lower().strip()
+                if clean_artist and clean_artist not in artist_seen:
+                    artist_seen.add(clean_artist)
+                    featured_diverse.append(t)
+
+            random.shuffle(featured_diverse)
+            featured_sample = featured_diverse[:15]
+
+            output += f"[FEATURED DIVERSE SELECTION ({len(featured_sample)} Different Artists)]\n"
+            for t in featured_sample:
+                output += t.display_line() + "\n"
+            output += "\n"
+
+            # 2. Detailed sections by source
             sections = {}
             for t in all_tracks:
                 sections.setdefault(t.source or "general", []).append(t)
@@ -125,7 +143,9 @@ def skill_top_music(
 
         output += (
             "=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-            "Present these lists to the user naturally. If this returned no data or an unrecognized genre, use `search_web` to find top music for that genre instead.\n"
+            "Present these recommendations to the user naturally.\n"
+            "CRITICAL ARTIST DIVERSITY RULE: Pick a fresh track with a DIFFERENT artist each time! "
+            "Inspect the recent chat history and do NOT recommend the same artist that was previously played (e.g., if Pendulum or Deadmau5 was already played, choose another artist from the list). Never recommend the same artist twice in a row.\n"
             "If the user asked for a single song, pick EXACTLY ONE from the list and present only that one; return several only if they asked for multiple.\n"
             "For every song you present, call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` to get its real link.\n\n"
             + SONG_TEMPLATE
