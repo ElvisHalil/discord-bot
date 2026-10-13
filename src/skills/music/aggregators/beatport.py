@@ -1,12 +1,12 @@
 import json
 import random
-import urllib.request
-from bs4 import BeautifulSoup
 from src.skills.music.aggregators.base import BaseMusicAggregator
 from src.skills.music.models import Track
+from src.utils.http import fetch_soup
 
 class BeatportAggregator(BaseMusicAggregator):
-    """Electronic music chart aggregator scraping Beatport's Top 100, Hype 100, and Best Tracks."""
+    """Electronic music chart aggregator fetching Beatport's Top 100, Hype 100, and Best Tracks
+    via centralized stealth client, with automatic fallback to Deezer electronic charts."""
 
     CHARTS = [
         ("Top 100", "https://www.beatport.com/top-100"),
@@ -16,16 +16,13 @@ class BeatportAggregator(BaseMusicAggregator):
 
     def get_charts(self, genre: str = None) -> list[Track]:
         tracks = []
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
         for chart_name, url in self.CHARTS:
             try:
-                print(f"  └─ 🎧 [Beatport]: Scraping {chart_name}...")
-                req = urllib.request.Request(url, headers=headers)
-                html = urllib.request.urlopen(req, timeout=10).read()
-                soup = BeautifulSoup(html, 'html.parser')
+                print(f"  └─ 🎧 [Beatport]: Fetching {chart_name} via stealth client...")
+                soup = fetch_soup(url, timeout=10)
                 script = soup.find('script', id='__NEXT_DATA__')
-                if script:
+                if script and script.string:
                     data = json.loads(script.string)
                     queries = data.get('props', {}).get('pageProps', {}).get('dehydratedState', {}).get('queries', [])
                     for q in queries:
@@ -44,11 +41,28 @@ class BeatportAggregator(BaseMusicAggregator):
                                     ))
                                 break
             except Exception as e:
-                print(f"  └─ ⚠️ [Beatport]: Error scraping {chart_name}: {e}")
+                print(f"  └─ ⚠️ [Beatport]: Error fetching {chart_name}: {e}")
+
+        # If Beatport was blocked by Cloudflare or yielded no tracks, fall back to
+        # Deezer electronic club charts so recommendations never return empty.
+        if not tracks:
+            print("  └─ 🔄 [Beatport Fallback]: Beatport unavailable/blocked; fetching Deezer electronic charts...")
+            try:
+                from src.skills.music.aggregators.deezer import DeezerAggregator
+                deezer_tracks = DeezerAggregator().get_charts(genre=genre or "electronic")
+                for dt in deezer_tracks:
+                    tracks.append(Track(
+                        title=dt.title,
+                        artist=dt.artist,
+                        genre=dt.genre or "Electronic",
+                        album=dt.album,
+                        source="beatport_fallback_deezer"
+                    ))
+            except Exception as fallback_err:
+                print(f"  └─ ⚠️ [Beatport Fallback Error]: {fallback_err}")
 
         return tracks
 
     def get_similar(self, query: str) -> list[Track]:
         # Beatport charts serve as the electronic music safety net
         return self.get_charts(genre="techno")
-

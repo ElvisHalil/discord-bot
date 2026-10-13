@@ -1,19 +1,14 @@
-import cloudscraper
-from bs4 import BeautifulSoup
 from src.skills.sports.aggregators.base import BaseSportsAggregator
+from src.utils.http import fetch_soup
 
 class HltvAggregator(BaseSportsAggregator):
-    """Aggregator for HLTV team rankings and CS player statistics."""
-
-    def __init__(self):
-        self.scraper = cloudscraper.create_scraper(browser={'browser': 'firefox', 'platform': 'windows', 'mobile': False})
+    """Aggregator for HLTV team rankings and CS player statistics using centralized stealth client."""
 
     def get_rankings(self, limit: int = 15) -> str:
         """Fetches the current world team rankings and rosters from HLTV."""
         print("  └─ 📈 [HLTV]: Fetching World Rankings...")
         try:
-            r = self.scraper.get('https://www.hltv.org/ranking/teams/', timeout=30)
-            soup = BeautifulSoup(r.text, 'html.parser')
+            soup = fetch_soup('https://www.hltv.org/ranking/teams/', timeout=30)
             
             output = f"[HLTV TOP {limit} WORLD RANKINGS]\n"
             team_divs = soup.select('.ranked-team')
@@ -44,8 +39,7 @@ class HltvAggregator(BaseSportsAggregator):
         print(f"  └─ 👤 [HLTV]: Fetching Player Stats for '{player_url}'...")
         try:
             full_url = f"https://www.hltv.org{player_url}"
-            r = self.scraper.get(full_url, timeout=30)
-            soup = BeautifulSoup(r.text, 'html.parser')
+            soup = fetch_soup(full_url, timeout=30)
             
             stats_texts = []
             for stat_div in soup.select('.playerProfile, .player-stat, .stat, .statistics, .summaryStatBreakdown'):
@@ -62,4 +56,3 @@ class HltvAggregator(BaseSportsAggregator):
             return f"[PLAYER STATS: {player_url}]\n{text}\n\n"
         except Exception as e:
             return f"[PLAYER STATS]\nError fetching player stats: {e}\n\n"
-

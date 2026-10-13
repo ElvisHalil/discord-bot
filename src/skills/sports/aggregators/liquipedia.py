@@ -1,19 +1,17 @@
-import cloudscraper
 from bs4 import BeautifulSoup
 from src.skills.sports.aggregators.base import BaseSportsAggregator
+from src.utils.http import fetch_json
 
 class LiquipediaAggregator(BaseSportsAggregator):
-    """Aggregator for Counter-Strike esports tournament and roster data from Liquipedia."""
-
-    def __init__(self):
-        self.scraper = cloudscraper.create_scraper(browser={'browser': 'firefox', 'platform': 'windows', 'mobile': False})
+    """Aggregator for Counter-Strike esports tournament and roster data from Liquipedia using centralized stealth client."""
 
     def get_s_tier_tournaments(self) -> str:
         """Fetches upcoming and ongoing S-Tier tournaments from Liquipedia."""
         print("  └─ 🏆 [Liquipedia]: Fetching S-Tier Tournaments...")
         try:
-            r = self.scraper.get('https://liquipedia.net/counterstrike/api.php?action=parse&page=S-Tier_Tournaments&format=json', timeout=8)
-            soup = BeautifulSoup(r.json()['parse']['text']['*'], 'html.parser')
+            url = 'https://liquipedia.net/counterstrike/api.php?action=parse&page=S-Tier_Tournaments&format=json'
+            data = fetch_json(url, timeout=10)
+            soup = BeautifulSoup(data['parse']['text']['*'], 'html.parser')
             
             output = "[UPCOMING & ONGOING S-TIER TOURNAMENTS]\n"
             rows = soup.find_all('tr')
@@ -48,8 +46,8 @@ class LiquipediaAggregator(BaseSportsAggregator):
 
         print(f"  └─ 📖 [Liquipedia]: Fetching Event Info for '{event_page}'...")
         try:
-            r = self.scraper.get(f'https://liquipedia.net/counterstrike/api.php?action=parse&page={event_page}&format=json', timeout=15)
-            data = r.json()
+            url = f'https://liquipedia.net/counterstrike/api.php?action=parse&page={event_page}&format=json'
+            data = fetch_json(url, timeout=15)
             if 'parse' not in data:
                 return f"[EVENT INFO]\nError parsing event page. It might not exist.\n\n"
 
@@ -75,4 +73,3 @@ class LiquipediaAggregator(BaseSportsAggregator):
             return output + "\n"
         except Exception as e:
             return f"[EVENT INFO]\nError fetching event: {e}\n\n"
-

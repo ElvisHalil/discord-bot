@@ -1,6 +1,6 @@
 from datetime import datetime
-import requests
 from src.skills.sports.aggregators.base import BaseSportsAggregator
+from src.utils.http import fetch_json
 
 class F1Aggregator(BaseSportsAggregator):
     """Aggregator for Formula 1 schedule, upcoming Grands Prix, and session timings."""
@@ -14,11 +14,7 @@ class F1Aggregator(BaseSportsAggregator):
         url = f"https://raw.githubusercontent.com/theOehrly/f1schedule/refs/heads/master/schedule_{year}.json"
         
         try:
-            r = requests.get(url, timeout=5)
-            if r.status_code != 200:
-                return f"Failed to fetch F1 schedule for {year}. Status code: {r.status_code}"
-                
-            data = r.json()
+            data = fetch_json(url, timeout=5)
             
             events = []
             indices = list(data.get("round_number", {}).keys())

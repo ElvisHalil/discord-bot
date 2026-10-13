@@ -58,57 +58,12 @@ def _looks_blocked(text: str) -> bool:
     """True for short pages that are clearly a bot wall rather than real content."""
     return bool(text) and len(text) < 4000 and bool(_BOT_WALL.search(text))
 
-def _is_private_or_local_host(hostname: str) -> bool:
-    """Check if a hostname resolves to a local, private, loopback, or metadata IP."""
-    if not hostname:
-        return True
-    clean_host = hostname.strip().lower().split(':')[0]
-    if clean_host in ('localhost', '127.0.0.1', '::1', '0.0.0.0'):
-        return True
-    if clean_host.endswith(('.local', '.internal', '.lan', '.localdomain')):
-        return True
-    try:
-        ip = ipaddress.ip_address(clean_host)
-        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-    except ValueError:
-        pass
-    try:
-        resolved_ip = socket.gethostbyname(clean_host)
-        ip = ipaddress.ip_address(resolved_ip)
-        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-    except Exception:
-        return False
-
-
-class BlockedRedirectError(Exception):
-    """Raised when a redirect points at a private/local address or a non-HTTP scheme."""
-
-
-MAX_REDIRECTS = 5
-_REDIRECT_CODES = (301, 302, 303, 307, 308)
-
-
-def _fetch_public(method: str, url: str, **kwargs):
-    """curl_cffi request that follows redirects manually, re-checking every hop.
-
-    The initial URL is validated by the caller, but with allow_redirects=True a public
-    page could 302 to http://127.0.0.1/ or a cloud metadata IP and we would fetch it.
-    """
-    current = url
-    for _ in range(MAX_REDIRECTS + 1):
-        func = cffi_requests.head if method == "HEAD" else cffi_requests.get
-        response = func(current, allow_redirects=False, **kwargs)
-        if response.status_code not in _REDIRECT_CODES:
-            return response
-        location = response.headers.get("Location") if hasattr(response, "headers") else None
-        if not location:
-            return response
-        next_url = urlparse.urljoin(current, location)
-        parsed_next = urlparse.urlparse(next_url)
-        if parsed_next.scheme not in ("http", "https") or _is_private_or_local_host(parsed_next.hostname):
-            raise BlockedRedirectError(next_url)
-        current = next_url
-    raise BlockedRedirectError(f"too many redirects (>{MAX_REDIRECTS})")
+from src.utils.http import (
+    _is_private_or_local_host,
+    BlockedRedirectError,
+    _fetch_public,
+    fetch_url,
+)
 
 def _smart_truncate(text: str, max_length: int) -> str:
     """Truncate text cleanly at paragraph or sentence boundaries without slicing words in half."""
