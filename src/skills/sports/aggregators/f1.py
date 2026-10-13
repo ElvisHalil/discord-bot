@@ -21,11 +21,12 @@ class F1Aggregator(BaseSportsAggregator):
         q = (query or "").lower().strip()
         if any(w in q for w in ("standing", "driver", "constructor", "point", "table", "rank")):
             return self.get_standings()
-        return self.get_schedule()
+        return self.get_schedule(filter_query=q)
 
-    def get_schedule(self) -> str:
+    def get_schedule(self, filter_query: str = "") -> str:
         """Fetches the current Formula 1 season calendar, next upcoming Grand Prix,
         session breakdown (FP1-3, Qual, Sprint, Race), and most recent race results.
+        Supports filtering by month or week.
         """
         print("  └─ 🏎️ [F1]: Fetching F1 calendar and race info from ESPN...")
         try:
@@ -67,8 +68,44 @@ class F1Aggregator(BaseSportsAggregator):
 
             output_lines = [f"=== FORMULA 1 {season_year} WORLD CHAMPIONSHIP ===\n"]
 
-            # 2. Next Upcoming Grand Prix Details
-            if upcoming_races:
+            q = (filter_query or "").lower()
+            is_month = "month" in q
+            is_week = "week" in q
+
+            if is_week:
+                week_races = [r for r in upcoming_races if r["dt"] and (r["dt"].date() - now.date()).days <= 7]
+                output_lines.append("🏎️ --- F1 RACES THIS WEEK ---")
+                if week_races:
+                    for r in week_races:
+                        output_lines.append(f"• Event: {r['label']}")
+                        output_lines.append(f"  Dates: {r['date_str']} to {r['endDate'][:10]}")
+                        session_lines = self._fetch_sessions_for_date(r["date_str"].replace("-", ""))
+                        if session_lines:
+                            output_lines.append("  Sessions (UTC):")
+                            output_lines.extend(session_lines)
+                        output_lines.append("")
+                else:
+                    next_note = f" (Next race: {upcoming_races[0]['label']} on {upcoming_races[0]['date_str']})" if upcoming_races else ""
+                    output_lines.append(f"ℹ️ No Grand Prix scheduled for this week{next_note}.\n")
+
+            elif is_month:
+                month_races = [r for r in upcoming_races if r["dt"] and 0 <= (r["dt"].date() - now.date()).days <= 31]
+                output_lines.append(f"🏎️ --- UPCOMING GRAND PRIX THIS MONTH ({len(month_races)} Races) ---")
+                if month_races:
+                    for idx, r in enumerate(month_races, 1):
+                        output_lines.append(f"{idx}. {r['label']}")
+                        output_lines.append(f"   Dates: {r['date_str']} to {r['endDate'][:10]}")
+                        if idx == 1:
+                            session_lines = self._fetch_sessions_for_date(r["date_str"].replace("-", ""))
+                            if session_lines:
+                                output_lines.append("   Sessions (UTC):")
+                                output_lines.extend(session_lines)
+                        output_lines.append("")
+                else:
+                    output_lines.append("No Grand Prix scheduled for this month.\n")
+
+            # 2. Next Upcoming Grand Prix Details (if general query)
+            elif upcoming_races:
                 next_race = upcoming_races[0]
                 output_lines.append("🏎️ --- NEXT UPCOMING GRAND PRIX ---")
                 output_lines.append(f"Event: {next_race['label']}")

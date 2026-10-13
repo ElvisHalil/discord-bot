@@ -101,6 +101,30 @@ class TestF1Aggregator(unittest.TestCase):
         self.assertIn("George Russell - 238 pts", result)
         self.assertIn("Mercedes - 578 pts", result)
 
+    @patch("src.skills.sports.aggregators.f1.fetch_json")
+    def test_get_schedule_this_week(self, mock_fetch):
+        mock_fetch.return_value = {
+            "season": {"year": 2026},
+            "leagues": [{"calendar": [{"label": "United States Grand Prix", "startDate": "2026-10-23T17:30Z", "endDate": "2026-10-25T20:00Z"}]}],
+            "events": []
+        }
+        res = self.agg.get_schedule(filter_query="races this week")
+        self.assertIn("F1 RACES THIS WEEK", res)
+
+    @patch("src.skills.sports.aggregators.f1.fetch_json")
+    def test_get_schedule_this_month(self, mock_fetch):
+        mock_fetch.side_effect = [
+            {
+                "season": {"year": 2026},
+                "leagues": [{"calendar": [{"label": "United States Grand Prix", "startDate": "2026-10-23T17:30Z", "endDate": "2026-10-25T20:00Z"}]}],
+                "events": []
+            },
+            {"events": []}
+        ]
+        res = self.agg.get_schedule(filter_query="races this month")
+        self.assertIn("UPCOMING GRAND PRIX THIS MONTH", res)
+        self.assertIn("United States Grand Prix", res)
+
 
 class TestSoccerAggregator(unittest.TestCase):
     def setUp(self):
@@ -171,6 +195,42 @@ class TestSoccerAggregator(unittest.TestCase):
         self.assertIn("Manchester City", result)
         self.assertIn("18", result)
 
+    @patch("src.skills.sports.aggregators.soccer.fetch_json")
+    def test_get_schedule_range(self, mock_fetch):
+        mock_fetch.side_effect = [
+            {
+                "leagues": [{
+                    "calendar": ["2026-10-17T07:00Z", "2026-10-18T07:00Z"]
+                }]
+            },
+            {
+                "events": [{
+                    "competitions": [{
+                        "status": {"type": {"detail": "Sat, Oct 17 - 11:30 AM UTC"}},
+                        "competitors": [
+                            {"homeAway": "home", "team": {"displayName": "Arsenal"}},
+                            {"homeAway": "away", "team": {"displayName": "Chelsea"}}
+                        ]
+                    }]
+                }]
+            },
+            {
+                "events": [{
+                    "competitions": [{
+                        "status": {"type": {"detail": "Sun, Oct 18 - 3:30 PM UTC"}},
+                        "competitors": [
+                            {"homeAway": "home", "team": {"displayName": "Liverpool"}},
+                            {"homeAway": "away", "team": {"displayName": "Man City"}}
+                        ]
+                    }]
+                }]
+            }
+        ]
+        res = self.agg.get_schedule_range("eng.1", "English Premier League", days_ahead=8)
+        self.assertIn("ENGLISH PREMIER LEAGUE WEEKLY FIXTURES", res)
+        self.assertIn("Chelsea at Arsenal", res)
+        self.assertIn("Man City at Liverpool", res)
+
 
 class TestNbaAggregator(unittest.TestCase):
     def setUp(self):
@@ -210,6 +270,32 @@ class TestNbaAggregator(unittest.TestCase):
         self.assertIn("Q1 | Q2 | Q3 | Q4", result)
         self.assertIn("Moda Center", result)
 
+    @patch("src.skills.sports.aggregators.nba.fetch_json")
+    def test_get_schedule_range(self, mock_fetch):
+        mock_fetch.side_effect = [
+            {
+                "leagues": [{
+                    "calendar": ["2026-10-14T07:00Z"]
+                }]
+            },
+            {
+                "events": [{
+                    "competitions": [{
+                        "status": {"type": {"detail": "Wed, Oct 14 - 7:00 PM EDT"}},
+                        "venue": {"fullName": "Madison Square Garden"},
+                        "competitors": [
+                            {"homeAway": "home", "team": {"displayName": "New York Knicks"}},
+                            {"homeAway": "away", "team": {"displayName": "Boston Celtics"}}
+                        ]
+                    }]
+                }]
+            }
+        ]
+        res = self.agg.get_schedule_range(days_ahead=7)
+        self.assertIn("NBA WEEKLY SCHEDULE", res)
+        self.assertIn("Boston Celtics at New York Knicks", res)
+        self.assertIn("Madison Square Garden", res)
+
 
 class TestHockeyAggregator(unittest.TestCase):
     def setUp(self):
@@ -247,6 +333,32 @@ class TestHockeyAggregator(unittest.TestCase):
         self.assertIn("Detroit Red Wings", result)
         self.assertIn("P1 | P2 | P3", result)
         self.assertIn("Little Caesars Arena", result)
+
+    @patch("src.skills.sports.aggregators.hockey.fetch_json")
+    def test_get_schedule_range(self, mock_fetch):
+        mock_fetch.side_effect = [
+            {
+                "leagues": [{
+                    "calendar": ["2026-10-14T07:00Z"]
+                }]
+            },
+            {
+                "events": [{
+                    "competitions": [{
+                        "status": {"type": {"detail": "Wed, Oct 14 - 7:00 PM EDT"}},
+                        "venue": {"fullName": "Capital One Arena"},
+                        "competitors": [
+                            {"homeAway": "home", "team": {"displayName": "Washington Capitals"}},
+                            {"homeAway": "away", "team": {"displayName": "Montreal Canadiens"}}
+                        ]
+                    }]
+                }]
+            }
+        ]
+        res = self.agg.get_schedule_range(days_ahead=7)
+        self.assertIn("NHL WEEKLY SCHEDULE", res)
+        self.assertIn("Montreal Canadiens at Washington Capitals", res)
+        self.assertIn("Capital One Arena", res)
 
 
 class TestSkillSportsInfo(unittest.TestCase):

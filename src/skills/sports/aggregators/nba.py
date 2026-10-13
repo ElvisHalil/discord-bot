@@ -17,19 +17,103 @@ class NbaAggregator(BaseSportsAggregator):
     STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/basketball/nba/standings"
 
     def get_info(self, query: str = "") -> str:
-        """Entry point for NBA queries. Dispatches between standings and game schedules/scores."""
+        """Entry point for NBA queries. Dispatches between standings, live games, and weekly/monthly schedules."""
         q = (query or "").lower().strip()
         if any(w in q for w in ("standing", "table", "rank", "conference", "seeds")):
             return self.get_standings()
 
-        date_param = None
         now = datetime.now()
-        if "yesterday" in q:
+        is_month = "month" in q
+        is_week = any(w in q for w in ("week", "upcoming", "schedule", "fixtures", "next games"))
+
+        if is_month:
+            return self.get_schedule_range(days_ahead=30, scope_label="MONTHLY SCHEDULE")
+        elif is_week:
+            return self.get_schedule_range(days_ahead=7, scope_label="WEEKLY SCHEDULE")
+        elif "yesterday" in q:
             date_param = (now - timedelta(days=1)).strftime("%Y%m%d")
+            return self.get_games(date_param=date_param, filter_query=q)
         elif "tomorrow" in q:
             date_param = (now + timedelta(days=1)).strftime("%Y%m%d")
+            return self.get_games(date_param=date_param, filter_query=q)
 
-        return self.get_games(date_param=date_param, filter_query=q)
+        return self.get_games(filter_query=q)
+
+    def get_schedule_range(self, days_ahead: int = 7, scope_label: str = "WEEKLY SCHEDULE") -> str:
+        """Fetches upcoming NBA games across multiple days within the specified time window (week or month)."""
+        print(f"  └─ 🏀 [NBA]: Fetching {scope_label} (Next {days_ahead} days)...")
+        now = datetime.now()
+        end_date = now + timedelta(days=days_ahead)
+
+        try:
+            base_data = fetch_json(self.SCOREBOARD_URL, timeout=8)
+            leagues = base_data.get("leagues", [])
+            calendar = leagues[0].get("calendar", []) if leagues else []
+
+            upcoming_dates = []
+            for item in calendar:
+                try:
+                    clean_dt = datetime.fromisoformat(item.replace("Z", "+00:00")).replace(tzinfo=None)
+                    if now.date() <= clean_dt.date() <= end_date.date():
+                        d_str = clean_dt.strftime("%Y%m%d")
+                        if d_str not in upcoming_dates:
+                            upcoming_dates.append(d_str)
+                except Exception:
+                    pass
+
+            if not upcoming_dates:
+                # Fallback: check next few days directly
+                for i in range(min(days_ahead, 7)):
+                    upcoming_dates.append((now + timedelta(days=i)).strftime("%Y%m%d"))
+
+            output_lines = [f"=== NBA {scope_label} ===\n"]
+
+            total_games = 0
+            for udate in upcoming_dates[:5]:
+                try:
+                    dt_obj = datetime.strptime(udate, "%Y%m%d")
+                    day_title = dt_obj.strftime("%A, %B %d, %Y")
+                except Exception:
+                    day_title = udate
+
+                day_data = fetch_json(f"{self.SCOREBOARD_URL}?dates={udate}", timeout=6)
+                events = day_data.get("events", [])
+                if not events:
+                    continue
+
+                output_lines.append(f"📅 --- {day_title.upper()} ({len(events)} Games) ---")
+                for ev in events:
+                    comps = ev.get("competitions", [])
+                    if not comps:
+                        continue
+                    comp = comps[0]
+                    competitors = comp.get("competitors", [])
+                    home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0] if competitors else {})
+                    away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1] if len(competitors) > 1 else {})
+                    home_team = home.get("team", {}).get("displayName", "Home")
+                    away_team = away.get("team", {}).get("displayName", "Away")
+                    status_desc = comp.get("status", {}).get("type", {}).get("detail") or "Scheduled"
+
+                    venue = comp.get("venue", {}).get("fullName")
+                    broadcasts = [b.get("names", [""])[0] for b in comp.get("broadcasts", []) if b.get("names")]
+                    meta = []
+                    if venue:
+                        meta.append(f"Arena: {venue}")
+                    if broadcasts:
+                        meta.append(f"TV: {', '.join(broadcasts)}")
+                    meta_str = f" ({' | '.join(meta)})" if meta else ""
+
+                    output_lines.append(f"  • {away_team} at {home_team}{meta_str} [{status_desc}]")
+                    total_games += 1
+                output_lines.append("")
+
+            if total_games == 0:
+                output_lines.append("No NBA games scheduled for this period.")
+
+            return "\n".join(output_lines)
+
+        except Exception as e:
+            return f"⚠️ Error fetching NBA schedule: {e}"
 
     def get_games(self, date_param: Optional[str] = None, filter_query: str = "") -> str:
         """Fetches live, upcoming, and recent NBA games with scores and quarter breakdowns."""

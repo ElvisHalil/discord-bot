@@ -71,19 +71,19 @@ def skill_sports_info(sport: str, query: Optional[str] = "schedule") -> str:
 
     # 3. Formula 1
     if any(k in sport_lower for k in ("f1", "formula 1", "formula1", "grand prix", "racing")):
-        data = _f1_aggregator.get_info(query_raw)
+        data = _f1_aggregator.get_info(combined)
         guidance = "Review the Formula 1 schedule/standings and inform the user. Remind them session times are in UTC."
     # 4. Soccer (EPL, UCL, La Liga, Serie A, Bundesliga, MLS, etc.)
     elif any(k in sport_lower for k in ("soccer", "football", "epl", "premier", "ucl", "champions", "laliga", "seriea", "bundesliga", "mls", "ligue1")) or any(k in query_lower for k in ("epl", "premier league", "champions league", "la liga", "serie a", "bundesliga", "mls")):
-        data = _soccer_aggregator.get_info(query_raw if query_raw != "schedule" else sport_raw)
+        data = _soccer_aggregator.get_info(combined)
         guidance = "Present the soccer matches/standings clearly. Highlight live matches, scores, and goal scorers."
     # 5. NBA Basketball
     elif any(k in sport_lower for k in ("nba", "basketball", "hoops")):
-        data = _nba_aggregator.get_info(query_raw)
+        data = _nba_aggregator.get_info(combined)
         guidance = "Present the NBA games/standings clearly. Include scores, status, and quarter linescores if available."
     # 6. NHL Hockey
     elif any(k in sport_lower for k in ("nhl", "hockey", "ice hockey")):
-        data = _hockey_aggregator.get_info(query_raw)
+        data = _hockey_aggregator.get_info(combined)
         guidance = "Present the NHL games/standings clearly. Include scores, status, and period linescores if available."
     # Fallback to soccer if club matches
     elif any(club in combined for club in _soccer_aggregator.CLUB_LEAGUE_HINTS):

@@ -73,7 +73,7 @@ class SoccerAggregator(BaseSportsAggregator):
     STANDINGS_BASE = "https://site.api.espn.com/apis/v2/sports/soccer"
 
     def get_info(self, query: str = "") -> str:
-        """Smart entry point for soccer queries. Dispatches between standings and match scores."""
+        """Smart entry point for soccer queries. Dispatches between standings, live matches, and weekly/monthly schedule."""
         q = (query or "").lower().strip()
         league_key = self._detect_league(q)
         league_info = self.LEAGUES[league_key]
@@ -81,26 +81,23 @@ class SoccerAggregator(BaseSportsAggregator):
         if any(w in q for w in ("standing", "table", "rank", "points")):
             return self.get_standings(league_info["code"], league_info["name"])
 
-        # Determine date if specified (e.g. yesterday, tomorrow, weekend)
-        date_param = None
+        # Temporal Scope detection (week vs month vs single day)
         now = datetime.now()
-        if "yesterday" in q:
+        is_month = "month" in q
+        is_week = any(w in q for w in ("week", "upcoming", "next", "fixtures", "schedule", "soon", "weekend", "saturday", "sunday"))
+
+        if is_month:
+            return self.get_schedule_range(league_info["code"], league_info["name"], days_ahead=30, scope_label="MONTHLY FIXTURES", filter_query=q)
+        elif is_week:
+            return self.get_schedule_range(league_info["code"], league_info["name"], days_ahead=8, scope_label="WEEKLY FIXTURES", filter_query=q)
+        elif "yesterday" in q:
             date_param = (now - timedelta(days=1)).strftime("%Y%m%d")
+            return self.get_matches(league_info["code"], league_info["name"], date_param=date_param, filter_query=q)
         elif "tomorrow" in q:
             date_param = (now + timedelta(days=1)).strftime("%Y%m%d")
-        elif "weekend" in q or "saturday" in q:
-            # Nearest upcoming Saturday
-            days_ahead = (5 - now.weekday()) % 7
-            if days_ahead == 0 and now.hour > 18:
-                days_ahead = 7
-            date_param = (now + timedelta(days=days_ahead)).strftime("%Y%m%d")
-        elif "sunday" in q:
-            days_ahead = (6 - now.weekday()) % 7
-            if days_ahead == 0 and now.hour > 18:
-                days_ahead = 7
-            date_param = (now + timedelta(days=days_ahead)).strftime("%Y%m%d")
+            return self.get_matches(league_info["code"], league_info["name"], date_param=date_param, filter_query=q)
 
-        return self.get_matches(league_info["code"], league_info["name"], date_param=date_param, filter_query=q)
+        return self.get_matches(league_info["code"], league_info["name"], date_param=None, filter_query=q)
 
     def _detect_league(self, query: str) -> str:
         """Maps query keywords or team names to the most relevant soccer league key."""
@@ -117,6 +114,93 @@ class SoccerAggregator(BaseSportsAggregator):
         # Default to Premier League if unspecified
         return "epl"
 
+    def get_schedule_range(self, league_code: str, league_name: str, days_ahead: int = 8, scope_label: str = "WEEKLY FIXTURES", filter_query: str = "") -> str:
+        """Fetches upcoming fixtures across multiple matchdays within the specified time window (week or month)."""
+        print(f"  └─ ⚽ [Soccer]: Fetching {scope_label} for {league_name} (Code: {league_code}, Next {days_ahead} days)...")
+        now = datetime.now()
+        end_date = now + timedelta(days=days_ahead)
+
+        try:
+            base_url = f"{self.SCOREBOARD_BASE}/{league_code}/scoreboard"
+            base_data = fetch_json(base_url, timeout=8)
+            leagues = base_data.get("leagues", [])
+            calendar = leagues[0].get("calendar", []) if leagues else []
+
+            # Extract upcoming matchday dates within the range
+            upcoming_dates = []
+            for item in calendar:
+                try:
+                    clean_dt = datetime.fromisoformat(item.replace("Z", "+00:00")).replace(tzinfo=None)
+                    if now.date() <= clean_dt.date() <= end_date.date():
+                        d_str = clean_dt.strftime("%Y%m%d")
+                        if d_str not in upcoming_dates:
+                            upcoming_dates.append(d_str)
+                except Exception:
+                    pass
+
+            # Fallback if calendar is empty: probe upcoming weekend dates
+            if not upcoming_dates:
+                for d in range(1, min(days_ahead + 1, 8)):
+                    cand = now + timedelta(days=d)
+                    if cand.weekday() in (5, 6):  # Sat, Sun
+                        upcoming_dates.append(cand.strftime("%Y%m%d"))
+
+            if not upcoming_dates:
+                return f"=== {league_name.upper()} {scope_label} ===\nNo upcoming matches scheduled in the next {days_ahead} days."
+
+            output_lines = [f"=== {league_name.upper()} {scope_label} ===\n"]
+
+            total_matches = 0
+            for udate in upcoming_dates[:5]:
+                try:
+                    dt_obj = datetime.strptime(udate, "%Y%m%d")
+                    day_title = dt_obj.strftime("%A, %B %d, %Y")
+                except Exception:
+                    day_title = udate
+
+                day_url = f"{self.SCOREBOARD_BASE}/{league_code}/scoreboard?dates={udate}"
+                day_data = fetch_json(day_url, timeout=6)
+                events = day_data.get("events", [])
+                if not events:
+                    continue
+
+                output_lines.append(f"📅 --- {day_title.upper()} ({len(events)} Matches) ---")
+                for ev in events:
+                    comps = ev.get("competitions", [])
+                    if not comps:
+                        continue
+                    comp = comps[0]
+                    competitors = comp.get("competitors", [])
+                    home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0] if competitors else {})
+                    away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1] if len(competitors) > 1 else {})
+                    home_name = home.get("team", {}).get("displayName", "Home")
+                    away_name = away.get("team", {}).get("displayName", "Away")
+                    status_obj = comp.get("status", {})
+                    status_desc = status_obj.get("type", {}).get("detail") or "Scheduled"
+
+                    venue = comp.get("venue", {}).get("fullName")
+                    m_date = ev.get("date", "")
+                    time_str = m_date[11:16] + " UTC" if len(m_date) >= 16 else ""
+
+                    details_list = []
+                    if time_str:
+                        details_list.append(f"Kickoff: {time_str}")
+                    if venue:
+                        details_list.append(f"Venue: {venue}")
+                    details_str = f" ({' | '.join(details_list)})" if details_list else ""
+
+                    output_lines.append(f"  • {away_name} at {home_name}{details_str} [{status_desc}]")
+                    total_matches += 1
+                output_lines.append("")
+
+            if total_matches == 0:
+                return f"=== {league_name.upper()} {scope_label} ===\nNo upcoming matches scheduled in the next {days_ahead} days."
+
+            return "\n".join(output_lines)
+
+        except Exception as e:
+            return f"⚠️ Error fetching {scope_label} for {league_name}: {e}"
+
     def get_matches(self, league_code: str, league_name: str, date_param: Optional[str] = None, filter_query: str = "") -> str:
         """Fetches live matches, recent results, and upcoming fixtures for a league with goal details."""
         print(f"  └─ ⚽ [Soccer]: Fetching matches for {league_name} (Code: {league_code}, Date: {date_param or 'Current'})...")
@@ -128,19 +212,14 @@ class SoccerAggregator(BaseSportsAggregator):
             data = fetch_json(url, timeout=8)
             events = data.get("events", [])
 
-            # If current day has no events, look ahead to upcoming weekend matchday
-            if not events and not date_param:
-                now = datetime.now()
-                # Try nearest Saturday
-                sat_offset = (5 - now.weekday()) % 7
-                if sat_offset == 0:
-                    sat_offset = 7
-                alt_date = (now + timedelta(days=sat_offset)).strftime("%Y%m%d")
-                alt_url = f"{self.SCOREBOARD_BASE}/{league_code}/scoreboard?dates={alt_date}"
-                alt_data = fetch_json(alt_url, timeout=5)
-                if alt_data.get("events"):
-                    events = alt_data["events"]
-                    date_param = alt_date
+            # If current day only has past completed events and no date was passed, automatically attach upcoming matchdays
+            now = datetime.now()
+            all_completed = events and all(ev.get("competitions", [{}])[0].get("status", {}).get("type", {}).get("completed", False) for ev in events)
+            if (not events or all_completed) and not date_param:
+                # Append upcoming weekend fixtures so the user gets upcoming games too
+                upcoming_preview = self.get_schedule_range(league_code, league_name, days_ahead=7, scope_label="UPCOMING MATCHES THIS WEEK")
+                if "No upcoming matches" not in upcoming_preview and "No fixtures found" not in upcoming_preview:
+                    return upcoming_preview
 
             if not events:
                 return f"=== {league_name.upper()} MATCHES ===\nNo matches scheduled for the selected period ({date_param or 'today'})."
