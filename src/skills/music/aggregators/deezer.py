@@ -89,6 +89,85 @@ class DeezerAggregator(BaseMusicAggregator):
 
         return similar_tracks
 
+    GENRE_MAP = {
+        "pop": 132,
+        "rap": 116,
+        "hip hop": 116,
+        "hiphop": 116,
+        "rock": 152,
+        "dance": 113,
+        "electronic": 113,
+        "techno": 113,
+        "house": 113,
+        "edm": 113,
+        "electro": 106,
+        "r&b": 165,
+        "rnb": 165,
+        "alternative": 85,
+        "metal": 464,
+        "latin": 173,
+        "classical": 98,
+        "jazz": 129,
+        "reggae": 144,
+        "folk": 466,
+    }
+
     def get_charts(self, genre: str = None) -> list[Track]:
-        return []
+        """Fetch trending chart tracks globally or for a specific genre from Deezer."""
+        genre_id = 0
+        if genre:
+            genre_id = self.GENRE_MAP.get(genre.lower().strip(), 0)
+
+        endpoint = f"https://api.deezer.com/chart/{genre_id}/tracks?limit=25" if genre_id else "https://api.deezer.com/chart/0/tracks?limit=25"
+        try:
+            print(f"  └─ 🎧 [Deezer Charts]: Fetching {'genre ' + str(genre) if genre else 'Global'} charts...")
+            r = requests.get(endpoint, timeout=5)
+            data = r.json().get("data", [])
+            tracks = []
+            for t in data:
+                tracks.append(Track(
+                    title=t.get("title", "Unknown"),
+                    artist=t.get("artist", {}).get("name", "Unknown"),
+                    album=t.get("album", {}).get("title"),
+                    source="deezer_charts"
+                ))
+            return tracks
+        except Exception as e:
+            print(f"  └─ ⚠️ [Deezer Charts]: Error fetching charts: {e}")
+            return []
+
+    def get_artist_top_tracks(self, artist_name: str, limit: int = 15) -> list[Track]:
+        """Search for an artist and retrieve their most popular top tracks."""
+        clean_name = (artist_name or "").strip()
+        if not clean_name:
+            return []
+
+        print(f"  └─ 🎤 [Deezer Artist Search]: Querying '{clean_name}'...")
+        try:
+            r = requests.get(f"https://api.deezer.com/search/artist?q={urllib.parse.quote(clean_name)}&limit=1", timeout=5)
+            data = r.json().get("data", [])
+            if not data:
+                print(f"  └─ ⚠️ [Deezer Artist]: No artist found matching '{clean_name}'.")
+                return []
+
+            artist = data[0]
+            artist_id = artist.get("id")
+            resolved_artist_name = artist.get("name", clean_name)
+            print(f"  └─ ✅ [Deezer Artist]: Found '{resolved_artist_name}' (ID: {artist_id})")
+
+            r_top = requests.get(f"https://api.deezer.com/artist/{artist_id}/top?limit={limit}", timeout=5)
+            top_tracks = r_top.json().get("data", [])
+
+            tracks = []
+            for t in top_tracks:
+                tracks.append(Track(
+                    title=t.get("title", "Unknown"),
+                    artist=resolved_artist_name,
+                    album=t.get("album", {}).get("title"),
+                    source="deezer_artist"
+                ))
+            return tracks
+        except Exception as e:
+            print(f"  └─ ⚠️ [Deezer Artist]: Error fetching tracks for '{clean_name}': {e}")
+            return []
 

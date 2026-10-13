@@ -110,10 +110,22 @@ class MusicAggregatorManager:
         if beatport:
             all_tracks.extend(beatport.get_charts(genre=genre))
 
-        # 3. Global streaming and radio charts (Spotify, YouTube, Kworb, iTunes)
+        # 3. Deezer charts (reliable public API with genre support)
+        deezer = self.aggregators.get("deezer")
+        if deezer:
+            all_tracks.extend(deezer.get_charts(genre=genre))
+
+        # 4. Global streaming and radio charts (Spotify, YouTube, Kworb, iTunes)
         charts = self.aggregators.get("charts")
         if charts:
             all_tracks.extend(charts.get_charts(genre=genre))
 
         return all_tracks
+
+    def get_artist_tracks(self, artist: str) -> list[Track]:
+        """Fetches top tracks by a specific artist using Deezer."""
+        deezer = self.aggregators.get("deezer")
+        if deezer and hasattr(deezer, "get_artist_top_tracks"):
+            return deezer.get_artist_top_tracks(artist)
+        return []
 

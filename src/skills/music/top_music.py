@@ -5,16 +5,44 @@ from src.skills.music.templates import SONG_TEMPLATE
 
 manager = MusicAggregatorManager()
 
-def skill_top_music(genre: Optional[str] = None, similar_to: Optional[str] = None, match_mood: Optional[bool] = False) -> str:
+def skill_top_music(
+    genre: Optional[str] = None,
+    similar_to: Optional[str] = None,
+    match_mood: Optional[bool] = False,
+    artist: Optional[str] = None
+) -> str:
     """
-    Fetches the current top trending/charting music in the world right now, OR finds similar songs.
-    ALWAYS use this skill FIRST when a user asks for song recommendations, top hits, or what music is popular today.
+    Fetches the current top trending/charting music in the world right now, finds similar songs, OR searches top tracks by an artist.
+    ALWAYS use this skill FIRST when a user asks for song recommendations, top hits, songs by a specific artist, or what music is popular today.
 
     Args:
-        genre: Genre for top charts, e.g. 'pop' or 'techno'. Leave empty for all genres.
+        genre: Genre for top charts, e.g. 'pop', 'techno', 'rock', 'hip hop'. Leave empty for all genres.
         similar_to: Seed song to find similar tracks for, as 'Song Title by Artist Name'.
         match_mood: Set true to match the emotional mood/energy of the similar_to song rather than just its style.
+        artist: Artist name to get their top popular tracks, e.g. 'Deadmau5' or 'Daft Punk'.
     """
+    if artist:
+        print(f"🎵 [Executing Top Music Skill] Artist: {artist}")
+        try:
+            tracks = manager.get_artist_tracks(artist)
+            if not tracks:
+                return f"No tracks found for artist '{artist}'."
+
+            header = f"=== TOP TRACKS BY '{artist.title()}' ===\n\n"
+            output = header
+            for t in tracks[:15]:
+                output += t.display_line() + "\n"
+
+            output += (
+                "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
+                "Select ONE best track from the list above, then call "
+                "`skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` to get its verified link.\n\n"
+                + SONG_TEMPLATE
+            )
+            return output
+        except Exception as e:
+            return f"Error finding tracks for artist '{artist}': {e}"
+
     if similar_to:
         print(f"🎵 [Executing Top Music Skill] Similar to: {similar_to} (match_mood={match_mood})")
         try:

@@ -40,6 +40,15 @@ TOOL_ARG_ALIASES = {
         "country": "region", "location": "region", "place": "region", "nation": "region",
         "category": "topic", "section": "topic",
     },
+    "skill_top_music": {
+        "artist_name": "artist",
+        "band": "artist",
+        "creator": "artist",
+        "style": "genre",
+        "seed": "similar_to",
+        "song": "similar_to",
+        "track": "similar_to",
+    },
 }
 
 

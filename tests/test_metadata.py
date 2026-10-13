@@ -1,5 +1,6 @@
 import sys
 import unittest
+from unittest.mock import patch, MagicMock
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -105,6 +106,58 @@ class TestMusicMetadata(unittest.TestCase):
         self.assertIn("Here is your recommendation:", res)
 
 
+class TestDeezerExpansion(unittest.TestCase):
+    """Test suite for expanded Deezer aggregator and artist search."""
+
+    @patch("src.skills.music.aggregators.deezer.requests.get")
+    def test_deezer_artist_top_tracks(self, mock_get):
+        from unittest.mock import MagicMock
+        from src.skills.music.aggregators.deezer import DeezerAggregator
+        mock_artist_resp = MagicMock()
+        mock_artist_resp.json.return_value = {
+            "data": [{"id": 142381, "name": "Deadmau5"}]
+        }
+        mock_top_resp = MagicMock()
+        mock_top_resp.json.return_value = {
+            "data": [{"title": "Strobe", "album": {"title": "Random Album Title"}}]
+        }
+        mock_get.side_effect = [mock_artist_resp, mock_top_resp]
+
+        deezer = DeezerAggregator()
+        tracks = deezer.get_artist_top_tracks("Deadmau5", limit=5)
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0].title, "Strobe")
+        self.assertEqual(tracks[0].artist, "Deadmau5")
+        self.assertEqual(tracks[0].album, "Random Album Title")
+
+    @patch("src.skills.music.aggregators.deezer.requests.get")
+    def test_deezer_charts_with_genre(self, mock_get):
+        from unittest.mock import MagicMock
+        from src.skills.music.aggregators.deezer import DeezerAggregator
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "data": [{"title": "Dracula", "artist": {"name": "Tame Impala"}, "album": {"title": "Dracula"}}]
+        }
+        mock_get.return_value = mock_resp
+
+        deezer = DeezerAggregator()
+        tracks = deezer.get_charts(genre="electronic")
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0].title, "Dracula")
+        self.assertEqual(tracks[0].artist, "Tame Impala")
+
+    def test_skill_top_music_artist_alias_normalization(self):
+        from src.orchestrator import normalize_tool_args
+        from src.skills.music.top_music import skill_top_music
+        args = normalize_tool_args(
+            "skill_top_music",
+            skill_top_music,
+            {"artist_name": "Deadmau5", "style": "techno"}
+        )
+        self.assertEqual(args, {"artist": "Deadmau5", "genre": "techno"})
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
