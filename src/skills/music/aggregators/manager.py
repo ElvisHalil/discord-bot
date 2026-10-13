@@ -120,7 +120,16 @@ class MusicAggregatorManager:
         if charts:
             all_tracks.extend(charts.get_charts(genre=genre))
 
-        return all_tracks
+        # Deduplicate tracks across providers preserving order
+        seen = set()
+        unique_tracks = []
+        for t in all_tracks:
+            key = (t.title.lower().strip(), t.artist.lower().strip())
+            if key not in seen:
+                seen.add(key)
+                unique_tracks.append(t)
+
+        return unique_tracks
 
     def get_artist_tracks(self, artist: str) -> list[Track]:
         """Fetches top tracks by a specific artist using Deezer."""

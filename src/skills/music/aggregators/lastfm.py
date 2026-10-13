@@ -32,7 +32,7 @@ class LastFmAggregator(BaseMusicAggregator):
             **params
         }
         try:
-            r = requests.get(self.BASE_URL, params=p, timeout=6, headers={"User-Agent": "DiscordMusicBot/1.0"})
+            r = requests.get(self.BASE_URL, params=p, timeout=10, headers={"User-Agent": "DiscordMusicBot/1.0"})
             if r.status_code == 200:
                 return r.json()
             else:
@@ -279,6 +279,17 @@ class LastFmAggregator(BaseMusicAggregator):
         tracks = []
         if genre and genre.lower() not in ("all", "general", "none"):
             tag = genre.lower().strip()
+            genre_aliases = {
+                "dnb": "drum and bass",
+                "drumnbass": "drum and bass",
+                "drum & bass": "drum and bass",
+                "hip hop": "hip-hop",
+                "hiphop": "hip-hop",
+                "r&b": "rnb",
+                "r and b": "rnb",
+                "edm": "electronic",
+            }
+            tag = genre_aliases.get(tag, tag)
             print(f"  └─ 📻 [Last.fm]: Fetching top tracks for tag '{tag}'...")
             res = self._call("tag.gettoptracks", {"tag": tag, "limit": 50})
             raw = res.get("tracks", {}).get("track", [])

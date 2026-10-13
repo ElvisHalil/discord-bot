@@ -49,7 +49,8 @@ class BeatportAggregator(BaseMusicAggregator):
             print("  └─ 🔄 [Beatport Fallback]: Beatport unavailable/blocked; fetching Deezer electronic charts...")
             try:
                 from src.skills.music.aggregators.deezer import DeezerAggregator
-                deezer_tracks = DeezerAggregator().get_charts(genre=genre or "electronic")
+                target_genre = genre or "electronic"
+                deezer_tracks = DeezerAggregator().get_charts(genre=target_genre)
                 for dt in deezer_tracks:
                     tracks.append(Track(
                         title=dt.title,
