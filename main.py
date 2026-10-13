@@ -20,6 +20,7 @@ from src.orchestrator import (
     apply_auto_ping,
     join_orphan_bullets,
     sanitize_agent_reply,
+    extract_reply_context,
 )
 
 load_dotenv()
@@ -243,15 +244,18 @@ async def on_raw_reaction_add(payload):
                     # Record it under the channel lock so it can't land between a
                     # tool call and its results while a message turn is in progress.
                     async with channel_locks[channel.id]:
-                        if channel.id in chat_history:
-                            chat_history[channel.id].append({
-                                "role": "user",
-                                "content": f"{user.display_name} reacted with 👍 to '{orig_display}'."
-                            })
-                            chat_history[channel.id].append({
-                                "role": "assistant",
-                                "content": f"Shared similar track for {user.display_name}: '{meta['song']}' by '{meta['artist']}' ({verified_url})."
-                            })
+                        if channel.id not in chat_history:
+                            system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
+                            chat_history[channel.id] = [system_msg]
+
+                        chat_history[channel.id].append({
+                            "role": "user",
+                            "content": f"{user.display_name} reacted with 👍 to '{orig_display}' requesting a similar track."
+                        })
+                        chat_history[channel.id].append({
+                            "role": "assistant",
+                            "content": final_reply
+                        })
 
                 except Exception as e:
                     print(f"❌ [Reaction Error]: {e}")
@@ -445,11 +449,22 @@ async def on_message(message):
 
         other_mentions = [f"{m.display_name} (ID: {m.id})" for m in message.mentions if m != client.user]
         mention_context = f" [Tagged in chat: {', '.join(other_mentions)}]" if other_mentions else ""
-        
+
+        ref_context = ""
+        if message.reference and message.reference.message_id:
+            try:
+                ref_msg = message.reference.resolved
+                if not isinstance(ref_msg, discord.Message):
+                    ref_msg = await message.channel.fetch_message(message.reference.message_id)
+                if ref_msg:
+                    ref_context = extract_reply_context(ref_msg.content)
+            except Exception as e:
+                print(f"⚠️ [Reference Resolution Error]: {e}")
+
         if current_mode == "chat":
-            user_msg = f"{message.author.display_name} (User ID: {message.author.id}){mention_context}: {user_input}"
+            user_msg = f"{message.author.display_name} (User ID: {message.author.id}){mention_context}{ref_context}: {user_input}"
         else:
-            user_msg = f"User {message.author.display_name} says: {user_input}"
+            user_msg = f"User {message.author.display_name} says{mention_context}{ref_context}: {user_input}"
 
         chat_history[channel_id].append({"role": "user", "content": user_msg})
 

@@ -231,6 +231,27 @@ def join_orphan_bullets(reply: str) -> str:
     return re.sub(r'^([ \t]*[-*•])[ \t]*\n[ \t]*(?=\S)', r'\1 ', reply, flags=re.MULTILINE)
 
 
+def extract_reply_context(referenced_content: typing.Optional[str]) -> str:
+    """Extract context from a Discord message being replied to (e.g. song cards or text snippet)."""
+    if not referenced_content:
+        return ""
+    text = referenced_content.strip()
+    if not text:
+        return ""
+
+    # Check if the referenced message contains a song card
+    m_song = re.search(r'(?im)^[^\S\n]*(?:[-*•][^\S\n]*)?(?:\*\*)?(?:Song|Track):\*{0,2}\s*(.+)', text)
+    m_art = re.search(r'(?:\*\*|\b)Artist:\*{0,2}\s*(.+)', text, re.IGNORECASE)
+    if m_song and m_art:
+        clean_s = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_song.group(1)).strip(" *-_#:`\"'")
+        clean_a = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_art.group(1)).strip(" *-_#:`\"'")
+        return f" [Replying to song card: '{clean_s}' by '{clean_a}']"
+
+    snippet = text[:100].replace('\n', ' ').strip()
+    return f" [Replying to: \"{snippet}\"]"
+
+
+
 # ---------------------------------------------------------------------------
 # Tool leakage and AI meta-refusal sanitization
 # ---------------------------------------------------------------------------

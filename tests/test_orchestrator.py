@@ -228,6 +228,32 @@ class TestSanitizeAgentReply(unittest.TestCase):
         self.assertIn("- Kimi Antonelli - 340 pts", cleaned)
 
 
+class TestExtractReplyContext(unittest.TestCase):
+    def test_extract_song_card_reply(self):
+        from src.orchestrator import extract_reply_context
+        song_card = (
+            "<@123456> User Jubkill reacted with 👍 to 'Strobe by deadmau5'. Check out this similar song:\n\n"
+            "**Song:** Apex\n"
+            "**Artist:** Bicep\n"
+            "**Genre:** Techno\n\n"
+            "https://music.youtube.com/watch?v=12345678901"
+        )
+        ctx = extract_reply_context(song_card)
+        self.assertEqual(ctx, " [Replying to song card: 'Apex' by 'Bicep']")
+
+    def test_extract_generic_snippet(self):
+        from src.orchestrator import extract_reply_context
+        msg = "What is the best GPU to buy in 2026?"
+        ctx = extract_reply_context(msg)
+        self.assertEqual(ctx, ' [Replying to: "What is the best GPU to buy in 2026?"]')
+
+    def test_extract_empty(self):
+        from src.orchestrator import extract_reply_context
+        self.assertEqual(extract_reply_context(""), "")
+        self.assertEqual(extract_reply_context(None), "")
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
