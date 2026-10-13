@@ -15,7 +15,7 @@ from src.tools.web import (
     SEARCH_CACHE,
     YOUTUBE_CACHE,
 )
-from src.tools.registry import RESEARCH_TOOLS, CHAT_TOOLS
+from src.registry import RESEARCH_TOOLS, CHAT_TOOLS
 
 __all__ = [
     "get_current_datetime",

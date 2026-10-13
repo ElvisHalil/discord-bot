@@ -1,5 +1,5 @@
 """
-Tools Registry Module
+Tools & Skills Registry Module
 Assembles system tools, web tools, and domain skills into active toolsets
 used by the agent modes (RESEARCH_TOOLS, CHAT_TOOLS).
 """
@@ -57,4 +57,3 @@ CHAT_TOOLS = {
     **WEB_TOOLS,
     "skill_youtube_searcher": skill_youtube_searcher
 }
-

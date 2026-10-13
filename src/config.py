@@ -1,4 +1,4 @@
-import src.tools.registry as tools
+import src.registry as tools
 import os
 from datetime import datetime
 

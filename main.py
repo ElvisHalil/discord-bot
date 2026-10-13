@@ -10,7 +10,7 @@ import requests
 from collections import defaultdict
 from dotenv import load_dotenv
 from ollama import AsyncClient
-import src.tools.registry as tools
+import src.registry as tools
 from src.utils import ensure_ollama_running, chunk_message, suppress_discord_embeds
 from src.skills.music.utils import format_song_card, get_music_metadata, standardize_song_reply
 from src.config import MODES
