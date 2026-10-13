@@ -41,47 +41,103 @@ class OddsAggregator(BaseSportsAggregator):
 
         # Map common sport names to The Odds API sport keys
         sport_map = {
-            "cs": "esports_cs2",
-            "cs2": "esports_cs2",
-            "csgo": "esports_cs2",
-            "f1": "motorsport_f1",
-            "formula1": "motorsport_f1",
             "nfl": "americanfootball_nfl",
+            "football": "americanfootball_nfl",
+            "american football": "americanfootball_nfl",
+            "ncaaf": "americanfootball_ncaaf",
+            "college football": "americanfootball_ncaaf",
+            "cfl": "americanfootball_cfl",
             "nba": "basketball_nba",
+            "basketball": "basketball_nba",
+            "wnba": "basketball_wnba",
+            "euroleague": "basketball_euroleague",
+            "mlb": "baseball_mlb",
+            "baseball": "baseball_mlb",
+            "nhl": "icehockey_nhl",
+            "hockey": "icehockey_nhl",
             "epl": "soccer_epl",
+            "premier league": "soccer_epl",
             "soccer": "soccer_epl",
+            "champions league": "soccer_uefa_champs_league",
+            "ucl": "soccer_uefa_champs_league",
+            "la liga": "soccer_spain_la_liga",
+            "laliga": "soccer_spain_la_liga",
+            "bundesliga": "soccer_germany_bundesliga",
+            "serie a": "soccer_italy_serie_a",
+            "seriea": "soccer_italy_serie_a",
+            "ligue 1": "soccer_france_ligue_one",
+            "mls": "soccer_usa_mls",
+            "mma": "mma_mixed_martial_arts",
+            "ufc": "mma_mixed_martial_arts",
+            "boxing": "boxing_boxing",
         }
-        sport_key = sport_map.get(sport.lower(), "upcoming")
-        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/?apiKey={api_key}&regions=us,eu&markets=h2h"
 
-        try:
-            data = fetch_json(url, timeout=10)
-            if not isinstance(data, list) or not data:
-                return None
+        # Resolve candidate sport keys to check
+        sport_clean = sport.lower().strip()
+        candidate_keys = []
+        if sport_clean in sport_map:
+            candidate_keys.append(sport_map[sport_clean])
+        else:
+            # Check if any sport keyword is inside query or sport string
+            for k, v in sport_map.items():
+                if k in sport_clean or k in query.lower():
+                    if v not in candidate_keys:
+                        candidate_keys.append(v)
+            if not candidate_keys:
+                candidate_keys = ["americanfootball_nfl", "soccer_epl", "basketball_nba", "baseball_mlb", "icehockey_nhl"]
 
-            q_lower = query.lower()
-            for game in data:
-                home = game.get("home_team", "")
-                away = game.get("away_team", "")
-                if (home.lower() in q_lower or away.lower() in q_lower) and game.get("bookmakers"):
-                    bm = game["bookmakers"][0]
-                    markets = bm.get("markets", [])
-                    if markets and markets[0].get("outcomes"):
-                        outcomes = markets[0]["outcomes"]
-                        lines = []
-                        for out in outcomes:
-                            name = out.get("name", "")
-                            price = float(out.get("price", 0))
-                            lines.append(f"- **{name}**: {price:.2f} (American: {decimal_to_american(price)}) | Implied prob: {implied_probability(price)}")
-                        return (
-                            f"[LIVE BETTING ODDS: {home} vs {away}]\n"
-                            f"Sport/League: {game.get('sport_title', sport)}\n"
-                            f"Commence Time: {game.get('commence_time', '')}\n"
-                            f"Bookmaker: {bm.get('title', 'Consensus')}\n"
-                            + "\n".join(lines) + "\n\n"
-                        )
-        except Exception as e:
-            print(f"  └─ ⚠️ [The Odds API]: {e}")
+        q_lower = query.lower()
+        ignore_words = {"vs", "versus", "the", "and", "odds", "match", "game", "moneyline", "spread", "who", "will", "win"}
+        query_tokens = [w for w in re.split(r'[\s\-_/]+', q_lower) if len(w) >= 3 and w not in ignore_words]
+
+        for sport_key in candidate_keys:
+            url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/?apiKey={api_key}&regions=us,eu,uk&markets=h2h"
+            try:
+                data = fetch_json(url, timeout=10)
+                if not isinstance(data, list) or not data:
+                    continue
+
+                for game in data:
+                    home = game.get("home_team", "")
+                    away = game.get("away_team", "")
+                    home_l, away_l = home.lower(), away.lower()
+
+                    matched = False
+                    if home_l in q_lower or away_l in q_lower:
+                        matched = True
+                    elif query_tokens and any(t in home_l or t in away_l for t in query_tokens):
+                        matched = True
+
+                    if matched and game.get("bookmakers"):
+                        bm = game["bookmakers"][0]
+                        markets = bm.get("markets", [])
+                        if markets and markets[0].get("outcomes"):
+                            outcomes = markets[0]["outcomes"]
+                            lines = []
+                            favorite = None
+                            min_price = 999.0
+                            for out in outcomes:
+                                name = out.get("name", "")
+                                price = float(out.get("price", 0))
+                                if 1.0 < price < min_price:
+                                    min_price = price
+                                    favorite = name
+                                lines.append(f"- **{name}**: {price:.2f} (American: {decimal_to_american(price)}) | Implied prob: {implied_probability(price)}")
+
+                            fav_str = f"Favorite: **{favorite}**\n" if favorite and favorite.lower() != "draw" else ""
+                            return (
+                                f"[LIVE BETTING ODDS: {home} vs {away}]\n"
+                                f"Sport / League: {game.get('sport_title', sport_key)}\n"
+                                f"Scheduled Start: {game.get('commence_time', '')}\n"
+                                f"{fav_str}"
+                                f"Bookmaker Consensus ({bm.get('title', 'Market')}):\n"
+                                + "\n".join(lines) + "\n\n"
+                                "Note: Odds fluctuate leading up to match start.\n\n"
+                            )
+            except Exception as e:
+                # Silently ignore 404s on inactive candidate leagues
+                if "404" not in str(e):
+                    print(f"  └─ ⚠️ [The Odds API ({sport_key})]: {e}")
         return None
 
     def _fetch_esports_hltv_odds(self, query: str) -> Optional[str]:
@@ -185,16 +241,16 @@ class OddsAggregator(BaseSportsAggregator):
         sport_clean = (sport or "esports").strip().lower()
         print(f"  └─ 🎲 [Odds]: Fetching betting odds for '{query_clean}' (Sport: {sport_clean})...")
 
-        # 1. Check The Odds API if key is present
-        api_odds = self._fetch_from_the_odds_api(query_clean, sport_clean)
-        if api_odds:
-            return api_odds
-
-        # 2. For Counter-Strike/Esports, scrape HLTV betting analytics
+        # 1. For Counter-Strike/Esports, scrape HLTV betting analytics first
         if sport_clean in ["cs", "cs2", "csgo", "esports"]:
             hltv_odds = self._fetch_esports_hltv_odds(query_clean)
             if hltv_odds:
                 return hltv_odds
+
+        # 2. Check The Odds API if key is present
+        api_odds = self._fetch_from_the_odds_api(query_clean, sport_clean)
+        if api_odds:
+            return api_odds
 
         # 3. Web search consensus
         return self._fetch_web_odds_search(query_clean, sport_clean)
