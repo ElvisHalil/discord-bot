@@ -15,7 +15,8 @@ class TestBeatportAggregator(unittest.TestCase):
     def test_beatport_instance(self):
         agg = BeatportAggregator()
         self.assertIsNotNone(agg)
-        self.assertEqual(len(agg.CHARTS), 3)
+        self.assertIn("techno", agg.BEATPORT_GENRE_QUERIES)
+        self.assertIn("dnb", agg.BEATPORT_GENRE_QUERIES)
 
     def test_beatport_scrape(self):
         agg = BeatportAggregator()

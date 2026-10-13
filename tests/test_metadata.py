@@ -141,12 +141,21 @@ class TestEmbeddability(unittest.TestCase):
         oembed_resp = MagicMock()
         oembed_resp.status_code = 200
 
-        for marker in ("Playback on other websites has been disabled", "LOGIN_REQUIRED", "UNPLAYABLE", "Video unavailable"):
+        for marker in (
+            "Playback on other websites has been disabled",
+            "blocked it from display on this website or application",
+            '"playableInEmbed":false',
+            "LOGIN_REQUIRED",
+            "UNPLAYABLE",
+            "Video unavailable",
+        ):
             embed_resp = MagicMock()
             embed_resp.status_code = 200
             embed_resp.text = f"<html><body><div>{marker}</div></body></html>"
             mock_get.side_effect = [oembed_resp, embed_resp]
             self.assertFalse(verify_embeddable("12345678901"))
+            _, kwargs = mock_get.call_args
+            self.assertEqual(kwargs.get("headers", {}).get("Referer"), "https://discord.com/")
 
     @patch("src.skills.youtube.client.requests.get")
     def test_verify_embeddable_success(self, mock_get):

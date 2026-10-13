@@ -46,11 +46,11 @@ def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music:
             if not results:
                 print(f"❌ [YouTube Search Skill]: No music tracks found for '{query}'.")
                 return (
-                    f"NO_TRACKS_FOUND: Could not find any verified YouTube Music link for '{query}'.\n"
+                    f"NO_TRACKS_FOUND: Could not find any embeddable YouTube Music link for '{query}' (all uploads blocked third-party Discord embeds or were unavailable).\n"
                     f"CRITICAL INSTRUCTIONS FOR YOUR RESPONSE:\n"
-                    f"1. Do NOT output the '**Song:**' or '**Artist:**' template.\n"
-                    f"2. Do NOT output any URL, link, or placeholder (e.g. <Raw YouTube Music URL>).\n"
-                    f"3. Simply inform the user in a short conversational sentence that you could not find the track on YouTube Music."
+                    f"1. If you were picking a song from a `skill_top_music` list, immediately call `skill_youtube_searcher(query='<Another Song Title> by <Artist Name>', is_music=True)` for a DIFFERENT track from that list.\n"
+                    f"2. Otherwise, do NOT output the '**Song:**' or '**Artist:**' template and do NOT output any URL or placeholder.\n"
+                    f"3. Simply inform the user in a short conversational sentence that you could not find an embeddable playback link for that track on YouTube."
                 )
 
             print(f"✅ [YouTube Search Skill]: Returning {len(results)} music link(s) for '{query}'")

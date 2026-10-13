@@ -123,17 +123,19 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
         queries_to_try.append(f'site:youtube.com {song_q} {artist_q} Topic')
         queries_to_try.append(f'site:music.youtube.com {song_q} {artist_q}')
         queries_to_try.append(f'site:youtube.com {song_q} {artist_q}')
+        queries_to_try.append(f'site:youtube.com {song_q} {artist_q} audio')
     else:
         clean_q = query.replace(" by ", " ").replace(" - ", " ").strip()
         queries_to_try.append(f'site:youtube.com {clean_q} Topic')
         queries_to_try.append(f'site:music.youtube.com {clean_q}')
         queries_to_try.append(f'site:youtube.com {clean_q}')
+        queries_to_try.append(f'site:youtube.com {clean_q} audio')
 
-    raw_candidates = []
     for q in queries_to_try:
+        batch_candidates = []
         try:
             print(f"  └─ 🔍 [DuckDuckGo]: Querying '{q}'...")
-            for r in list(DDGS().text(q, max_results=max_results + 4)):
+            for r in list(DDGS().text(q, max_results=max_results + 5)):
                 href = r.get('href', '')
                 # Fast Shorts rejection on URL structure
                 if "/shorts/" in href:
@@ -144,57 +146,62 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
                     vid = m.group(1)
                     if vid not in seen_ids:
                         seen_ids.add(vid)
-                        raw_candidates.append((vid, r.get('title', ''), href))
-            if len(raw_candidates) >= max_results + 4:
-                break
+                        batch_candidates.append((vid, r.get('title', ''), href))
         except Exception as e:
             print(f"  └─ ⚠️ [DuckDuckGo Search Warning]: {e}")
             continue
 
-    print(f"  └─ 🔎 [Music Resolver]: Found {len(raw_candidates)} initial candidate URL(s) to verify.")
-
-    for vid, raw_title, href in raw_candidates:
-        # 1. Shorts filter
-        if is_youtube_short(vid, href=href, title=raw_title):
-            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - YouTube Short.")
+        if not batch_candidates:
             continue
 
-        # 2. Embeddability check
-        if not verify_embeddable(vid):
-            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - Embedding disabled by owner.")
-            continue
+        print(f"  └─ 🔎 [Music Resolver]: Verifying {len(batch_candidates)} candidate URL(s) from query...")
 
-        # 3. Fetch oEmbed metadata (0 API quota units)
-        oembed = get_video_oembed(vid)
-        if not oembed.get("title"):
-            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - Failed oEmbed verification (cannot embed in Discord).")
-            continue
-        title = oembed["title"]
-        author = oembed.get("author", "")
+        for vid, raw_title, href in batch_candidates:
+            # 1. Shorts filter
+            if is_youtube_short(vid, href=href, title=raw_title):
+                print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - YouTube Short.")
+                continue
 
-        # 4. Robust Garbage & Relevance match check
-        is_valid, score, reason = score_music_candidate(query, title, author)
-        if not is_valid:
-            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{title}'): {reason}")
-            continue
+            # 2. Embeddability check (with Discord third-party Referer/origin)
+            if not verify_embeddable(vid):
+                print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - Embedding disabled on Discord.")
+                continue
 
-        is_topic = " - Topic" in author or "Topic" in author
-        link = f"https://music.youtube.com/watch?v={vid}"
-        meta = parse_song_meta(title, author, query=query)
+            # 3. Fetch oEmbed metadata (0 API quota units)
+            oembed = get_video_oembed(vid)
+            if not oembed.get("title"):
+                print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - Failed oEmbed verification (cannot embed in Discord).")
+                continue
+            title = oembed["title"]
+            author = oembed.get("author", "")
 
-        entry = {
-            "id": vid,
-            "title": meta["song"],
-            "artist": meta["artist"],
-            "genre": meta.get("genre"),
-            "album": meta.get("album"),
-            "url": link,
-            "is_topic": is_topic,
-            "score": score
-        }
-        verified_candidates.append(entry)
-        channel_desc = "Topic channel" if is_topic else (f"Channel: '{author}'" if author else "Standard")
-        print(f"  └─ ✅ [Music Match]: Found '{meta['song']}' by '{meta['artist']}' ({channel_desc}) -> {link} [Score: {score}/3 | Reason: {reason}]")
+            # 4. Robust Garbage & Relevance match check
+            is_valid, score, reason = score_music_candidate(query, title, author)
+            if not is_valid:
+                print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{title}'): {reason}")
+                continue
+
+            is_topic = " - Topic" in author or "Topic" in author
+            link = f"https://music.youtube.com/watch?v={vid}"
+            meta = parse_song_meta(title, author, query=query)
+
+            entry = {
+                "id": vid,
+                "title": meta["song"],
+                "artist": meta["artist"],
+                "genre": meta.get("genre"),
+                "album": meta.get("album"),
+                "url": link,
+                "is_topic": is_topic,
+                "score": score
+            }
+            verified_candidates.append(entry)
+            channel_desc = "Topic channel" if is_topic else (f"Channel: '{author}'" if author else "Standard")
+            print(f"  └─ ✅ [Music Match]: Found '{meta['song']}' by '{meta['artist']}' ({channel_desc}) -> {link} [Score: {score}/3 | Reason: {reason}]")
+
+        # Stop querying once we have enough verified embeddable candidates
+        if len(verified_candidates) >= max_results:
+            break
 
     # =========================================================================
     # PHASE 2: Fallback to YouTube Data API v3 (Burns 100 quota units ONLY on failure)

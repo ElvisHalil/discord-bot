@@ -21,11 +21,15 @@ def verify_embeddable(vid: str) -> bool:
             print(f"⚠️ [YouTube]: Skipping {vid} because oEmbed status is {oembed_res.status_code} (not embeddable).")
             return False
 
-        # Step 2: Embed page response check
-        embed_url = f"https://www.youtube.com/embed/{vid}"
+        # Step 2: Embed page response check (simulating Discord's third-party iframe Referer & origin
+        # so label/owner restrictions like UMG/SME "blocked it from display on this website" are triggered)
+        embed_url = f"https://www.youtube.com/embed/{vid}?origin=https://discord.com&widget_referrer=https://discord.com"
         embed_res = requests.get(
             embed_url,
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'https://discord.com/',
+            },
             timeout=3
         )
         if embed_res.status_code != 200:
@@ -34,6 +38,9 @@ def verify_embeddable(vid: str) -> bool:
         embed_text = embed_res.text
         unplayable_markers = (
             "Playback on other websites has been disabled",
+            "blocked it from display on this website or application",
+            '"playableInEmbed":false',
+            '"playableInEmbed": false',
             "UNPLAYABLE",
             "LOGIN_REQUIRED",
             "Video unavailable",
@@ -42,7 +49,7 @@ def verify_embeddable(vid: str) -> bool:
             "error-message",
         )
         if any(marker in embed_text for marker in unplayable_markers):
-            print(f"⚠️ [YouTube]: Skipping {vid} because embed page indicated unplayable/disabled.")
+            print(f"⚠️ [YouTube]: Skipping {vid} because embed page indicated unplayable/disabled on Discord.")
             return False
 
         return True
