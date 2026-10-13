@@ -77,14 +77,16 @@ class TestLiquipediaAggregator(unittest.TestCase):
           <div class="team-participant-card__opponent"><a title="Team Vitality">Vitality</a></div>
           <div class="team-participant-card__member"><span class="name"><a>ZywOo</a></span></div>
           <div class="team-participant-card__member"><span class="name"><a>apEX</a></span></div>
+          <div class="team-participant-card__member"><span class="name"><a>XTQZZZ</a></span><div class="team-participant-card__member-role-right">Coach</div></div>
         </div>
         <p>Tournament details and bracket info.</p>
         """
         mock_fetch.return_value = {"parse": {"text": {"*": mock_html}}}
 
         res = self.agg.get_event_info("ESL/Pro_League/Season_24")
-        self.assertIn("TOURNAMENT ROSTERS", res)
-        self.assertIn("Team Vitality: ZywOo, apEX", res)
+        self.assertIn("PARTICIPATING TEAMS", res)
+        self.assertIn("Team Vitality", res)
+        self.assertIn("- **Team Vitality**: ZywOo, apEX | Coach: XTQZZZ", res)
 
 
 class TestCsgoSkill(unittest.TestCase):
@@ -109,10 +111,53 @@ class TestCsgoSkill(unittest.TestCase):
 
     def test_tool_arg_aliases_for_csgo(self):
         # Model passing 'category' or 'tournament' or 'type'
-        args = {"type": "tournaments", "tournament": "ESL/Pro_League"}
+        args = {"type": "tournaments", "tournament": "ESL/Pro_League", "match": "Falcons vs NIP"}
         norm = normalize_tool_args("skill_csgo_esports", skill_csgo_esports, args)
         self.assertEqual(norm.get("query_type"), "tournaments")
         self.assertEqual(norm.get("event_page"), "ESL/Pro_League")
+        self.assertEqual(norm.get("matchup"), "Falcons vs NIP")
+
+
+class TestOdds(unittest.TestCase):
+
+    @patch("src.skills.sports.aggregators.odds.fetch_soup")
+    def test_odds_aggregator_hltv_parsing(self, mock_soup):
+        from src.skills.sports.aggregators.odds import OddsAggregator, decimal_to_american, implied_probability
+        from bs4 import BeautifulSoup
+
+        self.assertEqual(decimal_to_american(1.26), "-385")
+        self.assertEqual(decimal_to_american(4.20), "+320")
+        self.assertEqual(implied_probability(1.26), "79.4%")
+        self.assertEqual(implied_probability(4.20), "23.8%")
+
+        html = """
+        <html>
+        <head><title>Falcons vs Ninjas in Pyjamas odds and prediction | Full overview</title></head>
+        <body>
+          <p>Best odds - 1.26</p>
+          <p>Best odds - 4.20</p>
+          <p>Falcons is the bookmaker favorite</p>
+        </body>
+        </html>
+        """
+        mock_soup.return_value = BeautifulSoup(html, "html.parser")
+
+        with patch("src.tools.web.search_web") as mock_search:
+            mock_search.return_value = "https://www.hltv.org/betting/analytics/123/falcons-vs-ninjas-in-pyjamas"
+            agg = OddsAggregator()
+            res = agg.get_odds("Falcons vs Ninjas in Pyjamas", sport="cs2")
+
+            self.assertIn("MATCH BETTING ODDS: Falcons vs Ninjas in Pyjamas", res)
+            self.assertIn("Favorite: **Falcons**", res)
+            self.assertIn("1.26 (American: -385)", res)
+            self.assertIn("4.20 (American: +320)", res)
+
+    def test_tool_arg_aliases_for_odds(self):
+        from src.skills.sports.odds import skill_betting_odds
+        args = {"matchup": "Falcons vs NIP", "category": "cs2"}
+        norm = normalize_tool_args("skill_betting_odds", skill_betting_odds, args)
+        self.assertEqual(norm.get("query"), "Falcons vs NIP")
+        self.assertEqual(norm.get("sport"), "cs2")
 
 
 if __name__ == "__main__":

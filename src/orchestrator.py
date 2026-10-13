@@ -58,6 +58,18 @@ TOOL_ARG_ALIASES = {
         "page": "event_page",
         "tournament": "event_page",
         "player": "player_url",
+        "matchup": "matchup",
+        "match": "matchup",
+        "teams": "matchup",
+    },
+    "skill_betting_odds": {
+        "matchup": "query",
+        "match": "query",
+        "game": "query",
+        "event": "query",
+        "teams": "query",
+        "category": "sport",
+        "league": "sport",
     },
 }
 
@@ -197,4 +209,71 @@ def join_orphan_bullets(reply: str) -> str:
     """Join a bullet marker left alone on its line with the text on the next line:
     '-\\nHeadline' -> '- Headline'."""
     return re.sub(r'^([ \t]*[-*•])[ \t]*\n[ \t]*(?=\S)', r'\1 ', reply, flags=re.MULTILINE)
+
+
+# ---------------------------------------------------------------------------
+# Tool leakage and AI meta-refusal sanitization
+# ---------------------------------------------------------------------------
+
+_DISCLAIMER_HEADER_RE = re.compile(
+    r'(?im)^#*\s*(?:no,?\s*)?(?:i don[\'’]t have direct (?:website|internet|live) access|'
+    r'my capabilities \(without direct website access\)|'
+    r'unable to check live odds|'
+    r'use my search_web tool|'
+    r'while i can[\'’]t browse the web in real time).*$',
+)
+
+_TOOL_CALL_MENTION_RE = re.compile(
+    r'`?(?:search_web|read_website|read_youtube_video|skill_[a-z0-9_]+)`?',
+    re.IGNORECASE
+)
+
+_HALLUCINATED_BETTING_URL_RE = re.compile(
+    r'<https?://www\.bet365\.com/[^\s>]+>',
+    re.IGNORECASE
+)
+
+
+def sanitize_agent_reply(reply: str) -> str:
+    """Sanitizes replies by removing accidental leaks of internal function names,
+    hallucinated bookmaker URLs, and canned AI meta-excuses."""
+    if not reply:
+        return reply
+
+    # 1. Remove meta-lecture lines
+    lines = reply.splitlines()
+    cleaned_lines = []
+    for line in lines:
+        if _DISCLAIMER_HEADER_RE.search(line):
+            continue
+        cleaned_lines.append(line)
+    text = "\n".join(cleaned_lines)
+
+    # 2. Rewrite explicit internal tool mentions in prose to natural phrases
+    text = re.sub(r'(?i)\buse\s+(?:my\s+)?search_web(?:\s+tool)?\b', 'search online', text)
+    text = re.sub(r'(?i)\buse\s+(?:my\s+)?read_website(?:\s+tool)?\b', 'inspect the web page', text)
+    text = re.sub(r'(?i)\btools like search_web or read_website\b', 'search and web research', text)
+    text = re.sub(r'(?i)\baccessible via my tools\b', 'found in current public records', text)
+    text = re.sub(r'(?i)\bvia my tools\b', 'in current records', text)
+
+    # 3. Strip any remaining raw tool function names
+    def _clean_tool_name(m):
+        t = m.group(0).strip('`')
+        if t.startswith('skill_'):
+            return t.replace('skill_', '').replace('_', ' ')
+        if t == 'search_web':
+            return 'web search'
+        if t == 'read_website':
+            return 'web reading'
+        return t
+
+    text = _TOOL_CALL_MENTION_RE.sub(_clean_tool_name, text)
+
+    # 4. Remove hallucinated fake query-string bookmaker links
+    text = _HALLUCINATED_BETTING_URL_RE.sub('[Bet365](<https://www.bet365.com>)', text)
+
+    # Clean up any excessive blank lines created by removals
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
 

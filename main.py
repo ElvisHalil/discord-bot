@@ -14,7 +14,13 @@ import src.tools.registry as tools
 from src.utils import ensure_ollama_running, chunk_message, suppress_discord_embeds
 from src.skills.music.utils import format_song_card, get_music_metadata, standardize_song_reply
 from src.config import MODES
-from src.orchestrator import normalize_tool_args, trim_history, apply_auto_ping, join_orphan_bullets
+from src.orchestrator import (
+    normalize_tool_args,
+    trim_history,
+    apply_auto_ping,
+    join_orphan_bullets,
+    sanitize_agent_reply,
+)
 
 load_dotenv()
 
@@ -463,6 +469,9 @@ async def on_message(message):
                 # Clean and ensure consistent song card template if a music track is returned
                 # (may hit the network for metadata, so run it off the event loop)
                 reply = await asyncio.to_thread(standardize_song_reply, reply)
+
+                # Scrub internal tool name leaks, meta-refusals, and hallucinated betting links
+                reply = sanitize_agent_reply(reply)
 
                 chunks = chunk_message(reply)
                 for chunk in chunks:

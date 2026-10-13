@@ -172,6 +172,35 @@ class TestReplyPostProcessing(unittest.TestCase):
         self.assertEqual(clean("top gun news"), "top gun")
 
 
+class TestSanitizeAgentReply(unittest.TestCase):
+    def test_strips_ai_meta_refusal_headers(self):
+        from src.orchestrator import sanitize_agent_reply
+        text = (
+            "No, I Don’t Have Direct Website Access—But I Can Help!\n"
+            "While I can’t browse the web in real time or access private databases, I can:\n"
+            "- Falcons are the favorites to win against NIP."
+        )
+        cleaned = sanitize_agent_reply(text)
+        self.assertNotIn("No, I Don’t Have Direct Website Access", cleaned)
+        self.assertNotIn("While I can’t browse the web in real time", cleaned)
+        self.assertIn("- Falcons are the favorites to win against NIP.", cleaned)
+
+    def test_rewrites_tool_name_leaks(self):
+        from src.orchestrator import sanitize_agent_reply
+        text = "Use tools like search_web or read_website to fetch details."
+        cleaned = sanitize_agent_reply(text)
+        self.assertNotIn("search_web", cleaned)
+        self.assertNotIn("read_website", cleaned)
+        self.assertIn("search and web research", cleaned)
+
+    def test_sanitizes_hallucinated_bet365_links(self):
+        from src.orchestrator import sanitize_agent_reply
+        text = "Check odds at <https://www.bet365.com/esports/counter-strike/betting-odds?event=Thunderpick>."
+        cleaned = sanitize_agent_reply(text)
+        self.assertNotIn("event=Thunderpick", cleaned)
+        self.assertIn("[Bet365](<https://www.bet365.com>)", cleaned)
+
+
 if __name__ == "__main__":
     unittest.main()
 

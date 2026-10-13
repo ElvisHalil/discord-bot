@@ -31,6 +31,7 @@ from src.skills import (
     skill_audio_intelligence,
     skill_csgo_esports,
     skill_sports_info,
+    skill_betting_odds,
     skill_top_headlines,
 )
 
@@ -46,6 +47,7 @@ RESEARCH_TOOLS = {
     "skill_audio_intelligence": skill_audio_intelligence,
     "skill_csgo_esports": skill_csgo_esports,
     "skill_sports_info": skill_sports_info,
+    "skill_betting_odds": skill_betting_odds,
 }
 
 # Chat mode is a casual persona on a small model: keep the tool list short so the

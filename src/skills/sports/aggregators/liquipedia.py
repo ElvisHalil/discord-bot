@@ -142,24 +142,43 @@ class LiquipediaAggregator(BaseSportsAggregator):
                 return f"[EVENT INFO]\nError parsing event page. It might not exist.\n\n"
 
             soup = BeautifulSoup(data['parse']['text']['*'], 'html.parser')
+            teams_list = []
             roster_lines = []
             for card in soup.select('.team-participant-card'):
                 team_name_el = card.select_one('.team-participant-card__opponent a')
                 team_name = team_name_el['title'] if team_name_el else 'Unknown'
-                players = [p.get_text(strip=True) for p in card.select('.team-participant-card__member .name a')]
-                if players:
-                    roster_lines.append(f"{team_name}: {', '.join(players)}")
-            
+                if team_name == 'Unknown':
+                    continue
+
+                players = []
+                coach = None
+                for member in card.select('.team-participant-card__member'):
+                    name_el = member.select_one('.name a')
+                    name = name_el.get_text(strip=True) if name_el else ''
+                    role_el = member.select_one('.team-participant-card__member-role-right')
+                    role = role_el.get_text(strip=True) if role_el else ''
+                    if 'coach' in role.lower():
+                        coach = name
+                    elif name:
+                        players.append(name)
+
+                teams_list.append(team_name)
+                coach_str = f" | Coach: {coach}" if coach else ""
+                roster_lines.append(f"- **{team_name}**: {', '.join(players)}{coach_str}")
+
             for x in soup.select('.navbox, .toc, script, style, .mw-editsection'):
                 x.decompose()
-            
+
             text = soup.get_text('\n', strip=True)
             if len(text) > 8000:
                 text = text[:4000] + "\n...[CONTENT TRUNCATED]...\n" + text[-4000:]
-                
-            output = f"[EVENT INFO: {event_page}]\n{text}\n"
+
+            output = f"[EVENT INFO: {event_page}]\n"
+            if teams_list:
+                output += "=== PARTICIPATING TEAMS ===\n" + ", ".join(teams_list) + "\n\n"
             if roster_lines:
-                output += "\n--- TOURNAMENT ROSTERS ---\n" + "\n".join(roster_lines) + "\n"
+                output += "=== TOURNAMENT ROSTERS (Active Players & Coaches) ===\n" + "\n".join(roster_lines) + "\n\n"
+            output += "=== SCHEDULE & EVENT DETAILS ===\n" + text + "\n"
             return output + "\n"
         except Exception as e:
             return f"[EVENT INFO]\nError fetching event: {e}\n\n"
