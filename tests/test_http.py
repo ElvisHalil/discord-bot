@@ -104,19 +104,18 @@ class TestHttpClient(unittest.TestCase):
 
 
 class TestBeatportGracefulFallback(unittest.TestCase):
-    """Test that BeatportAggregator falls back to Deezer when Beatport fails or blocks."""
+    """Test that BeatportAggregator resolves Beatport charts directly via Deezer playlists."""
 
-    @patch("src.skills.music.aggregators.beatport.fetch_soup")
     @patch("src.skills.music.aggregators.deezer.DeezerAggregator.get_charts")
-    def test_beatport_falls_back_to_deezer_on_error(self, mock_deezer_charts, mock_fetch_soup):
+    def test_beatport_falls_back_to_deezer_on_error(self, mock_deezer_charts):
         from src.skills.music.models import Track
-        mock_fetch_soup.side_effect = Exception("403 Forbidden")
         mock_deezer_charts.return_value = [
             Track(title="Strobe", artist="Deadmau5", genre="Electronic", album="For Lack of A Better Name", source="deezer_charts")
         ]
 
         agg = BeatportAggregator()
         tracks = agg.get_charts()
+        mock_deezer_charts.assert_called_once_with(genre="Beatport Top 100")
         self.assertEqual(len(tracks), 1)
         self.assertEqual(tracks[0].title, "Strobe")
         self.assertEqual(tracks[0].artist, "Deadmau5")
@@ -125,4 +124,5 @@ class TestBeatportGracefulFallback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

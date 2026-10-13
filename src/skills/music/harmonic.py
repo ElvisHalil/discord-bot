@@ -95,6 +95,12 @@ def skill_audio_intelligence(
 
     # 5. Match Mood / Emotional Vibe
     elif action == "match_mood":
+        from src.skills.music.moods import parse_mood_and_genre
+        from src.skills.music.top_music import skill_top_music
+        parsed_g, parsed_m = parse_mood_and_genre(track)
+        if parsed_m and " by " not in (track or "").lower() and " - " not in (track or ""):
+            return skill_top_music(genre=parsed_g, mood=parsed_m)
+
         tracks, mood_info = manager.get_mood_matched_tracks(track)
         if not tracks:
             return f"Could not find any songs matching the mood or vibe of '{track}'."

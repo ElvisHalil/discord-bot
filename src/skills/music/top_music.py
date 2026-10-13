@@ -1,6 +1,7 @@
 import random
 from typing import Optional
 from src.skills.music.aggregators.manager import MusicAggregatorManager
+from src.skills.music.moods import parse_mood_and_genre
 from src.skills.music.templates import SONG_TEMPLATE
 
 manager = MusicAggregatorManager()
@@ -9,11 +10,12 @@ def skill_top_music(
     genre: Optional[str] = None,
     similar_to: Optional[str] = None,
     match_mood: Optional[bool] = False,
-    artist: Optional[str] = None
+    artist: Optional[str] = None,
+    mood: Optional[str] = None,
 ) -> str:
     """
-    Fetches the current top trending/charting music in the world right now, finds similar songs, OR searches top tracks by an artist.
-    ALWAYS use this skill FIRST when a user asks for genre recommendations, top hits, songs by a specific artist, similar songs, or what music is popular today.
+    Fetches the current top trending/charting music, finds tracks matching a mood/vibe ('banger', 'melodic', 'hard', 'chill', 'sad', 'love'), finds similar songs, OR searches top tracks by an artist.
+    ALWAYS use this skill FIRST when a user asks for genre recommendations, mood/vibe songs ('play me a banger', 'play something melodic', 'play something hard', 'play a love song'), top hits, songs by a specific artist, or similar songs.
     NOTE: When a user requests one specific song by title (e.g. 'play Strobe by Deadmau5'), call `skill_youtube_searcher(query='<Song> by <Artist>', is_music=True)` directly instead of passing the song title as a genre.
 
     Args:
@@ -21,6 +23,7 @@ def skill_top_music(
         similar_to: Seed song to find similar tracks for, as 'Song Title by Artist Name'.
         match_mood: Set true to match the emotional mood/energy of the similar_to song rather than just its style.
         artist: Artist name to get their top popular tracks, e.g. 'Deadmau5' or 'Daft Punk'.
+        mood: Mood or vibe keyword, e.g. 'banger', 'melodic', 'hard', 'dark', 'chill', 'sad', 'love', 'workout'.
     """
     if artist:
         print(f"🎵 [Executing Top Music Skill] Artist: {artist}")
@@ -44,11 +47,16 @@ def skill_top_music(
         except Exception as e:
             return f"Error finding tracks for artist '{artist}': {e}"
 
+    parsed_genre, parsed_mood = parse_mood_and_genre(genre, mood)
+
     if similar_to:
-        print(f"🎵 [Executing Top Music Skill] Similar to: {similar_to} (match_mood={match_mood})")
+        print(f"🎵 [Executing Top Music Skill] Similar to: {similar_to} (match_mood={match_mood}, mood={parsed_mood})")
         try:
             mood_tag = None
-            if match_mood:
+            if parsed_mood:
+                tracks = manager.get_mood_tracks(mood=parsed_mood, genre=parsed_genre, similar_to=similar_to)
+                mood_tag = parsed_mood.title()
+            elif match_mood:
                 tracks, mood_info = manager.get_mood_matched_tracks(similar_to)
                 if mood_info.get("mood"):
                     mood_tag = mood_info["mood"].title()
@@ -101,11 +109,15 @@ def skill_top_music(
         except Exception as e:
             return f"Error finding similar songs: {e}"
 
-    print(f"🎵 [Executing Top Music Skill] Genre: {genre or 'All'}")
+    print(f"🎵 [Executing Top Music Skill] Genre: {parsed_genre or 'All'}, Mood: {parsed_mood or 'None'}")
     try:
-        all_tracks = manager.get_top_charts(genre=genre)
-
-        output = f"=== TODAY'S TOP CHARTING MUSIC ({genre.upper() if genre else 'ALL GENRES'}) ===\n\n"
+        if parsed_mood:
+            all_tracks = manager.get_mood_tracks(mood=parsed_mood, genre=parsed_genre)
+            vibe_label = f"{parsed_mood.upper()} {parsed_genre.upper()}" if parsed_genre else f"{parsed_mood.upper()} (MULTI-GENRE MIX)"
+            output = f"=== TOP VIBE / MOOD SELECTION: {vibe_label} ===\n\n"
+        else:
+            all_tracks = manager.get_top_charts(genre=parsed_genre)
+            output = f"=== TODAY'S TOP CHARTING MUSIC ({parsed_genre.upper() if parsed_genre else 'ALL GENRES'}) ===\n\n"
         if all_tracks:
             # 1. Primary: Featured diverse selection (max 1 track per artist, randomized across providers)
             # This ensures the model immediately sees 15+ completely different artists and never gets anchored to one band!

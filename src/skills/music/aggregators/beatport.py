@@ -1,22 +1,14 @@
-import json
-import random
 from src.skills.music.aggregators.base import BaseMusicAggregator
 from src.skills.music.models import Track
-from src.utils.http import fetch_soup
 
 class BeatportAggregator(BaseMusicAggregator):
-    """Electronic music chart aggregator fetching Beatport's Top 100, Hype 100, and Best Tracks
-    via centralized stealth client, with automatic fallback to Deezer electronic charts."""
-
-    CHARTS = [
-        ("Top 100", "https://www.beatport.com/top-100"),
-        ("Hype 100", "https://www.beatport.com/hype-100"),
-        ("Best Tracks", "https://www.beatport.com/best-tracks-so-far")
-    ]
+    """Electronic music chart aggregator resolving Beatport Top 100, Hype 100, and Subgenre charts
+    directly from Deezer-hosted Beatport playlists."""
 
     BEATPORT_GENRE_QUERIES = {
         "techno": "Beatport Top 100 Techno",
         "melodic techno": "Beatport Top 100 Melodic House & Techno",
+        "melodic house": "Beatport Top 100 Melodic House & Techno",
         "hard techno": "Beatport Top 100 Hard Techno",
         "dnb": "Beatport Top 100 Drum & Bass",
         "drum and bass": "Beatport Top 100 Drum & Bass",
@@ -38,68 +30,40 @@ class BeatportAggregator(BaseMusicAggregator):
         "electronic": "Beatport Top 100",
         "edm": "Beatport Top 100",
         "dance": "Beatport Top 100",
+        "hype": "Beatport Hype 100",
     }
 
     def get_charts(self, genre: str = None) -> list[Track]:
         tracks = []
         clean_g = (genre or "").lower().strip()
 
-        # If a non-electronic genre is requested (e.g., 'german rap', 'country', 'rock'),
-        # skip direct Beatport scraping unless it is an electronic/Beatport genre or global chart
-        if not clean_g or clean_g in self.BEATPORT_GENRE_QUERIES:
-            for chart_name, url in self.CHARTS:
-                try:
-                    print(f"  └─ 🎧 [Beatport]: Fetching {chart_name} via stealth client...")
-                    soup = fetch_soup(url, timeout=5)
-                    script = soup.find('script', id='__NEXT_DATA__')
-                    if script and script.string:
-                        data = json.loads(script.string)
-                        queries = data.get('props', {}).get('pageProps', {}).get('dehydratedState', {}).get('queries', [])
-                        for q in queries:
-                            if 'data' in q.get('state', {}) and 'results' in q['state']['data']:
-                                results = q['state']['data']['results']
-                                if results and 'name' in results[0]:
-                                    sampled = random.sample(results, min(7, len(results)))
-                                    for t in sampled:
-                                        artist_names = ", ".join([a.get('name', '') for a in t.get('artists', [])])
-                                        genre_name = t.get('genre', {}).get('name', 'Unknown')
-                                        tracks.append(Track(
-                                            title=t.get('name', 'Unknown'),
-                                            artist=artist_names,
-                                            genre=genre_name,
-                                            source=f"beatport_{chart_name.lower().replace(' ', '_')}"
-                                        ))
-                                    break
-                except Exception as e:
-                    print(f"  └─ ⚠️ [Beatport]: Error fetching {chart_name}: {e}")
+        if not clean_g or clean_g in ("all", "global", "general", "none"):
+            target_query = "Beatport Top 100"
+            display_genre = "Electronic"
+        elif clean_g in self.BEATPORT_GENRE_QUERIES:
+            target_query = self.BEATPORT_GENRE_QUERIES[clean_g]
+            display_genre = genre.title()
+        elif clean_g.startswith("beatport"):
+            target_query = genre
+            display_genre = "Electronic"
+        else:
+            # Skip non-electronic genres so we don't duplicate Deezer's general genre search
+            return []
 
-        # If Beatport was blocked by Cloudflare or yielded no tracks, resolve Beatport Top 100
-        # genre playlists hosted on Deezer (or general genre playlists for non-electronic genres).
-        if not tracks:
-            try:
-                from src.skills.music.aggregators.deezer import DeezerAggregator
-                if not clean_g or clean_g in ("all", "global", "general", "none"):
-                    target_query = "Beatport Top 100"
-                    display_genre = "Electronic"
-                elif clean_g in self.BEATPORT_GENRE_QUERIES:
-                    target_query = self.BEATPORT_GENRE_QUERIES[clean_g]
-                    display_genre = genre.title()
-                else:
-                    target_query = genre
-                    display_genre = genre.title()
-
-                print(f"  └─ 🔄 [Beatport via Deezer]: Fetching '{target_query}' playlists...")
-                deezer_tracks = DeezerAggregator().get_charts(genre=target_query)
-                for dt in deezer_tracks:
-                    tracks.append(Track(
-                        title=dt.title,
-                        artist=dt.artist,
-                        genre=display_genre if display_genre != "Electronic" else (dt.genre or "Electronic"),
-                        album=dt.album,
-                        source="beatport_fallback_deezer"
-                    ))
-            except Exception as fallback_err:
-                print(f"  └─ ⚠️ [Beatport Fallback Error]: {fallback_err}")
+        try:
+            from src.skills.music.aggregators.deezer import DeezerAggregator
+            print(f"  └─ 🎧 [Beatport via Deezer]: Fetching '{target_query}' playlists...")
+            deezer_tracks = DeezerAggregator().get_charts(genre=target_query)
+            for dt in deezer_tracks:
+                tracks.append(Track(
+                    title=dt.title,
+                    artist=dt.artist,
+                    genre=display_genre if display_genre != "Electronic" else (dt.genre or "Electronic"),
+                    album=dt.album,
+                    source="beatport_fallback_deezer"
+                ))
+        except Exception as err:
+            print(f"  └─ ⚠️ [Beatport Playlist Error]: {err}")
 
         return tracks
 

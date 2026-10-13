@@ -361,13 +361,11 @@ class TestMusicDiversityExpansion(unittest.TestCase):
         artists = {t.artist for t in tracks}
         self.assertEqual(artists, {"Sub Focus", "Wilkinson"})
 
-    @patch("src.skills.music.aggregators.beatport.fetch_soup")
     @patch("src.skills.music.aggregators.deezer.DeezerAggregator.get_charts")
-    def test_beatport_techno_queries_beatport_top_100_techno_on_deezer(self, mock_deezer_charts, mock_fetch_soup):
+    def test_beatport_techno_queries_beatport_top_100_techno_on_deezer(self, mock_deezer_charts):
         from src.skills.music.aggregators.beatport import BeatportAggregator
         from src.skills.music.models import Track
 
-        mock_fetch_soup.side_effect = Exception("403 Forbidden")
         mock_deezer_charts.return_value = [
             Track(title="Consciousness", artist="Anyma", genre="Techno", source="deezer_beatport_top_100_techno")
         ]
@@ -419,8 +417,85 @@ class TestMusicDiversityExpansion(unittest.TestCase):
         self.assertEqual(artists, {"Sub Focus", "Wilkinson", "Noisia", "Netsky"})
 
 
+class TestMoodVibeDiscovery(unittest.TestCase):
+    """Tests for mood/vibe parsing, standalone multi-genre vibe profiles, and genre+mood matrix."""
+
+    def test_parse_mood_and_genre(self):
+        from src.skills.music.moods import parse_mood_and_genre
+
+        # Standalone vibes passed via genre or mood
+        self.assertEqual(parse_mood_and_genre(mood="banger"), (None, "banger"))
+        self.assertEqual(parse_mood_and_genre(genre="banger"), (None, "banger"))
+        self.assertEqual(parse_mood_and_genre(genre="something melodic"), (None, "melodic"))
+        self.assertEqual(parse_mood_and_genre(genre="play me something hard"), (None, "hard"))
+        self.assertEqual(parse_mood_and_genre(genre="chill song"), (None, "chill"))
+        self.assertEqual(parse_mood_and_genre(genre="sad song"), (None, "sad"))
+        self.assertEqual(parse_mood_and_genre(genre="love song"), (None, "love"))
+        self.assertEqual(parse_mood_and_genre(mood="romantic"), (None, "love"))
+
+        # Combined genre + vibe
+        self.assertEqual(parse_mood_and_genre(genre="melodic dnb"), ("dnb", "melodic"))
+        self.assertEqual(parse_mood_and_genre(genre="hard techno"), ("techno", "hard"))
+        self.assertEqual(parse_mood_and_genre(genre="dnb banger"), ("dnb", "banger"))
+        self.assertEqual(parse_mood_and_genre(genre="r&b love song"), ("r&b", "love"))
+        self.assertEqual(parse_mood_and_genre(genre="dnb", mood="melodic"), ("dnb", "melodic"))
+
+        # Pure genres untouched
+        self.assertEqual(parse_mood_and_genre(genre="dnb"), ("dnb", None))
+        self.assertEqual(parse_mood_and_genre(genre="german rap"), ("german rap", None))
+        self.assertEqual(parse_mood_and_genre(genre="techno"), ("techno", None))
+
+    def test_standalone_and_combined_mood_tracks_in_manager(self):
+        from src.skills.music.aggregators.manager import MusicAggregatorManager
+        from src.skills.music.models import Track
+
+        mgr = MusicAggregatorManager()
+        mgr.aggregators["deezer"].get_charts = MagicMock(
+            side_effect=lambda genre=None: [Track(title=f"Hit ({genre})", artist=f"Artist ({genre})", source="deezer")]
+        )
+        mgr.aggregators["lastfm"].get_charts = MagicMock(
+            side_effect=lambda genre=None: [Track(title=f"Tag ({genre})", artist=f"TagArtist ({genre})", source="lastfm")]
+        )
+        mgr.aggregators["beatport"].get_charts = MagicMock(
+            side_effect=lambda genre=None: [Track(title=f"BP ({genre})", artist=f"BPArtist ({genre})", source="beatport")]
+        )
+
+        # Standalone 'banger' pools across 4 Deezer queries + 2 Last.fm tags + Beatport Hype 100
+        banger_tracks = mgr.get_mood_tracks(mood="banger")
+        self.assertEqual(mgr.aggregators["deezer"].get_charts.call_count, 4)
+        self.assertEqual(mgr.aggregators["lastfm"].get_charts.call_count, 2)
+        mgr.aggregators["beatport"].get_charts.assert_called_once_with(genre="Beatport Hype 100")
+        self.assertEqual(len(banger_tracks), 7)
+
+        # Combined 'melodic' + 'dnb' queries Liquid / Melodic DnB
+        mgr.aggregators["deezer"].get_charts.reset_mock()
+        melodic_dnb = mgr.get_mood_tracks(mood="melodic", genre="dnb")
+        dz_called_genres = {call.kwargs.get("genre") for call in mgr.aggregators["deezer"].get_charts.call_args_list}
+        self.assertEqual(dz_called_genres, {"Liquid Drum & Bass", "Melodic Drum and Bass"})
+        self.assertTrue(len(melodic_dnb) >= 3)
+
+    def test_skill_top_music_mood_routing_and_alias(self):
+        from src.orchestrator import normalize_tool_args
+        from src.skills.music.top_music import skill_top_music
+        from src.skills.music.models import Track
+
+        args = normalize_tool_args("skill_top_music", skill_top_music, {"vibe": "love"})
+        self.assertEqual(args, {"mood": "love"})
+
+        fake_mgr = MagicMock()
+        fake_mgr.get_mood_tracks.return_value = [
+            Track(title="Adorn", artist="Miguel", genre="R&B", source="deezer_love")
+        ]
+        with patch("src.skills.music.top_music.manager", fake_mgr):
+            out = skill_top_music(mood="love")
+            fake_mgr.get_mood_tracks.assert_called_once_with(mood="love", genre=None)
+            self.assertIn("TOP VIBE / MOOD SELECTION: LOVE (MULTI-GENRE MIX)", out)
+            self.assertIn("Adorn by Miguel", out)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

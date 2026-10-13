@@ -1,4 +1,5 @@
-from typing import Dict
+import random
+from typing import Dict, Optional
 from src.skills.music.aggregators.base import BaseMusicAggregator
 from src.skills.music.aggregators.lastfm import LastFmAggregator
 from src.skills.music.aggregators.deezer import DeezerAggregator
@@ -6,7 +7,13 @@ from src.skills.music.aggregators.freqblog import FreqBlogAggregator
 from src.skills.music.aggregators.beatport import BeatportAggregator
 from src.skills.music.aggregators.charts import ChartsAggregator
 from src.skills.music.models import Track
-from src.skills.music.utils import is_recently_played, parse_song_meta, _norm_track_token
+from src.skills.music.utils import is_recently_played, parse_song_meta, _norm_track_token, MUSIC_METADATA_CACHE
+from src.skills.music.moods import (
+    STANDALONE_MOOD_PROFILES,
+    GENRE_CANONICAL_MAP,
+    GENRE_MOOD_MATRIX,
+    parse_mood_and_genre,
+)
 
 class MusicAggregatorManager:
     """
@@ -157,29 +164,121 @@ class MusicAggregatorManager:
         }
         return fallback_tracks, mood_meta
 
-    def get_top_charts(self, genre: str = None) -> list[Track]:
-        """Fetches trending and charting music across Last.fm, Beatport, and global charts."""
+    def _infer_seed_genre(self, similar_to: str) -> Optional[str]:
+        """Infers the genre of a seed song from parsed tags, cache, or Last.fm artist tags."""
+        meta = parse_song_meta(similar_to)
+        if meta.get("genre"):
+            return meta["genre"]
+
+        s_norm = _norm_track_token(meta.get("song", ""))
+        a_norm = _norm_track_token(meta.get("artist", ""))
+        for cached in MUSIC_METADATA_CACHE.values():
+            if cached.get("genre"):
+                c_song = _norm_track_token(cached.get("song", ""))
+                c_art = _norm_track_token(cached.get("artist", ""))
+                if s_norm and c_song == s_norm and (not a_norm or c_art == a_norm):
+                    return cached["genre"]
+
+        lastfm = self.aggregators.get("lastfm")
+        artist_name = meta.get("artist", "")
+        if lastfm and hasattr(lastfm, "_call") and artist_name and artist_name.lower() not in ("unknown artist", "unknown"):
+            try:
+                res = lastfm._call("artist.gettoptags", {"artist": artist_name, "autocorrect": 1})
+                tags = res.get("toptags", {}).get("tag", [])
+                if isinstance(tags, dict):
+                    tags = [tags]
+                for t in tags[:5]:
+                    t_name = (t.get("name") or "").lower().strip()
+                    if t_name in GENRE_CANONICAL_MAP:
+                        return GENRE_CANONICAL_MAP[t_name]
+            except Exception:
+                pass
+        return None
+
+    def get_mood_tracks(self, mood: str, genre: str = None, similar_to: str = None) -> list[Track]:
+        """
+        Fetches tracks tailored to a requested mood/vibe:
+        - Standalone mood (genre=None, similar_to=None): Multi-genre mix across curated vibe playlists and tags.
+        - Genre + mood (e.g. 'melodic dnb', 'hard techno'): Subgenre-specific playlists and tags.
+        - Song reply + mood shift (similar_to provided): Pivots to that vibe within the seed song's genre.
+        """
+        parsed_genre, parsed_mood = parse_mood_and_genre(genre, mood)
+        canon_mood = parsed_mood or (mood or "banger").lower().strip()
+        target_genre = parsed_genre
+
+        if similar_to and not target_genre:
+            target_genre = self._infer_seed_genre(similar_to)
+
+        if target_genre:
+            canon_genre = GENRE_CANONICAL_MAP.get(target_genre.lower().strip(), target_genre.lower().strip())
+            profile = GENRE_MOOD_MATRIX.get((canon_genre, canon_mood)) or {
+                "deezer_queries": [f"{canon_mood} {target_genre}", f"{target_genre} {canon_mood}"],
+                "lastfm_tags": [f"{canon_mood} {target_genre}", target_genre],
+                "beatport_query": None,
+            }
+            print(f"  └─ 🎭 [Mood Discovery]: Resolving genre+vibe '{canon_mood}' + '{target_genre}'...")
+        else:
+            profile = STANDALONE_MOOD_PROFILES.get(canon_mood) or {
+                "deezer_queries": [f"{canon_mood} hits", f"{canon_mood} songs", canon_mood],
+                "lastfm_tags": [canon_mood],
+                "beatport_query": None,
+            }
+            print(f"  └─ 🎭 [Mood Discovery]: Resolving standalone multi-genre vibe '{canon_mood}'...")
+
+        all_tracks = []
+        deezer = self.aggregators.get("deezer")
+        lastfm = self.aggregators.get("lastfm")
+        beatport = self.aggregators.get("beatport")
+
+        # 1. Deezer curated vibe playlists (sample up to 4 cross-genre or subgenre queries)
+        dz_queries = list(profile.get("deezer_queries", []))
+        if deezer and dz_queries:
+            selected_dz = random.sample(dz_queries, min(4, len(dz_queries)))
+            for q in selected_dz:
+                all_tracks.extend(deezer.get_charts(genre=q))
+
+        # 2. Last.fm vibe/subgenre tags (sample up to 2 tags)
+        lfm_tags = list(profile.get("lastfm_tags", []))
+        if lastfm and lfm_tags:
+            selected_tags = random.sample(lfm_tags, min(2, len(lfm_tags)))
+            for tag in selected_tags:
+                all_tracks.extend(lastfm.get_charts(genre=tag))
+
+        # 3. Beatport via Deezer (when applicable for electronic vibes)
+        bp_query = profile.get("beatport_query")
+        if beatport and bp_query:
+            all_tracks.extend(beatport.get_charts(genre=bp_query))
+
+        random.shuffle(all_tracks)
+        return self._filter_and_deduplicate(all_tracks, exclude_query=similar_to)
+
+    def get_top_charts(self, genre: str = None, mood: str = None) -> list[Track]:
+        """Fetches trending and charting music across Last.fm, Beatport, and global charts, or delegates to mood discovery."""
+        parsed_genre, parsed_mood = parse_mood_and_genre(genre, mood)
+        if parsed_mood:
+            return self.get_mood_tracks(mood=parsed_mood, genre=parsed_genre)
+
         all_tracks = []
 
         # 1. Last.fm charts (global trending or genre tag)
         lastfm = self.aggregators.get("lastfm")
         if lastfm:
-            all_tracks.extend(lastfm.get_charts(genre=genre))
+            all_tracks.extend(lastfm.get_charts(genre=parsed_genre))
 
         # 2. Beatport charts
         beatport = self.aggregators.get("beatport")
         if beatport:
-            all_tracks.extend(beatport.get_charts(genre=genre))
+            all_tracks.extend(beatport.get_charts(genre=parsed_genre))
 
         # 3. Deezer charts (reliable public API with genre support)
         deezer = self.aggregators.get("deezer")
         if deezer:
-            all_tracks.extend(deezer.get_charts(genre=genre))
+            all_tracks.extend(deezer.get_charts(genre=parsed_genre))
 
         # 4. Global streaming and radio charts (Spotify, YouTube, Kworb, iTunes)
         charts = self.aggregators.get("charts")
         if charts:
-            all_tracks.extend(charts.get_charts(genre=genre))
+            all_tracks.extend(charts.get_charts(genre=parsed_genre))
 
         return self._filter_and_deduplicate(all_tracks)
 
@@ -190,5 +289,6 @@ class MusicAggregatorManager:
             tracks = deezer.get_artist_top_tracks(artist)
             return self._filter_and_deduplicate(tracks)
         return []
+
 
 
