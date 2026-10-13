@@ -42,6 +42,22 @@ _NEWS_FILLER = re.compile(
     re.IGNORECASE,
 )
 
+# Bot walls / CAPTCHA interstitials that some readers return with HTTP 200.
+_BOT_WALL = re.compile(
+    r"captcha|verify (?:that )?you are (?:a )?human|are you a robot|unusual traffic"
+    r"|enable javascript and cookies|access to this page has been denied|checking your browser",
+    re.IGNORECASE,
+)
+_BLOCKED_PAGE_MESSAGE = (
+    "❌ Blocked: this site returned a CAPTCHA/bot-check page instead of the article. "
+    "Do not guess its contents. Use `search_web` with the headline to find the same story from another source."
+)
+
+
+def _looks_blocked(text: str) -> bool:
+    """True for short pages that are clearly a bot wall rather than real content."""
+    return bool(text) and len(text) < 4000 and bool(_BOT_WALL.search(text))
+
 def _is_private_or_local_host(hostname: str) -> bool:
     """Check if a hostname resolves to a local, private, loopback, or metadata IP."""
     if not hostname:
@@ -130,7 +146,7 @@ def search_web(query: str, news: Optional[bool] = None, timelimit: Optional[str]
 
     Args:
         query: The search keywords.
-        news: Set true to search recent news articles (headlines, breaking news).
+        news: Set true to search recent news articles about a specific subject or event. For general top headlines of a country or topic, use `get_top_headlines` instead.
         timelimit: Optional recency filter: 'd' (past day), 'w' (past week), 'm' (past month) or 'y' (past year).
     """
     global VISITED_URLS, SEARCH_CACHE
@@ -348,6 +364,16 @@ def read_website(url: str) -> str:
     if parsed.scheme not in ('http', 'https'):
         return f"❌ Error: Unsupported URL scheme '{parsed.scheme}'. Only http and https are supported."
 
+    # Google News article links only redirect via JavaScript; resolve to the publisher URL.
+    if parsed.hostname == "news.google.com" and "/articles/" in parsed.path:
+        from src.tools.news import decode_google_news_url
+        decoded = decode_google_news_url(url)
+        if not decoded:
+            return "❌ Could not resolve this Google News link to the original article. Use `search_web` with the headline to find the article instead."
+        print(f"🔗 [Google News]: Resolved to {decoded}")
+        url = decoded
+        parsed = urlparse.urlparse(url)
+
     # 2. SSRF / Localhost Protection
     if _is_private_or_local_host(parsed.hostname):
         return "❌ Security Block: Access to localhost or private network addresses is not permitted."
@@ -378,7 +404,7 @@ def read_website(url: str) -> str:
         if jina_resp.status_code == 200:
             content = jina_resp.text.strip()
             # Verify Jina didn't return a disguised error page
-            if content and not content.lower().startswith(('failed to fetch', 'error: 403', 'error: 404', 'target url returned status')):
+            if content and not content.lower().startswith(('failed to fetch', 'error: 403', 'error: 404', 'target url returned status')) and not _looks_blocked(content):
                 print("✅ [Success] Rendered via Jina Reader API")
                 truncated = _smart_truncate(content, 18000)
                     
@@ -483,6 +509,9 @@ def read_website(url: str) -> str:
         target_html = str(soup.body) if soup.body else str(soup)
         raw_markdown = md(target_html, heading_style="ATX", strip=['img', 'a']) 
         clean_markdown = re.sub(r'\n{3,}', '\n\n', raw_markdown).strip()
+
+        if _looks_blocked(clean_markdown):
+            return _BLOCKED_PAGE_MESSAGE
 
         # 7. Construct Final Fallback Output
         truncated_markdown = _smart_truncate(clean_markdown, 15000)
