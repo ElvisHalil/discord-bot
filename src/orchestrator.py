@@ -236,11 +236,18 @@ def join_orphan_bullets(reply: str) -> str:
 # ---------------------------------------------------------------------------
 
 _DISCLAIMER_HEADER_RE = re.compile(
-    r'(?im)^#*\s*(?:no,?\s*)?(?:i don[\'’]t have direct (?:website|internet|live) access|'
+    r'(?im)^#*\s*(?:no,?\s*)?(?:'
+    r'i don[\'’]t have direct (?:website|internet|live) access|'
     r'my capabilities \(without direct website access\)|'
     r'unable to check live odds|'
     r'use my search_web tool|'
-    r'while i can[\'’]t browse the web in real time).*$',
+    r'while i can[\'’]t browse the web in real time|'
+    r'⚠️\s*(?:clarification|data limitations|simulated standings|disclaimer)|'
+    r'clarification:\s*(?:data limitations|simulated standings)|'
+    r'my (?:knowledge|training) cutoff (?:is|was)|'
+    r'all ["\'\s]*(?:live|current) sports data.*(?:is simulated|for context-based)|'
+    r'the standings you see are not real-world|'
+    r'for genuine \d{4}.*results).*$',
 )
 
 _TOOL_CALL_MENTION_RE = re.compile(

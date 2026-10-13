@@ -211,6 +211,22 @@ class TestSanitizeAgentReply(unittest.TestCase):
         self.assertNotIn("event=Thunderpick", cleaned)
         self.assertIn("[Bet365](<https://www.bet365.com>)", cleaned)
 
+    def test_strips_simulated_data_and_cutoff_excuses(self):
+        from src.orchestrator import sanitize_agent_reply
+        text = (
+            "⚠️ Clarification: Data Limitations & Simulated Standings\n"
+            "My knowledge cutoff is 2024, so all \"live\" sports data (including F1) is simulated for context-based storytelling.\n"
+            "The standings you see are not real-world updates but crafted examples to match your query’s structure.\n"
+            "For genuine 2026 F1 results, I’d need live web access, which I cannot provide.\n"
+            "Here are the verified standings from the race weekend:\n"
+            "- Kimi Antonelli - 340 pts"
+        )
+        cleaned = sanitize_agent_reply(text)
+        self.assertNotIn("Data Limitations & Simulated Standings", cleaned)
+        self.assertNotIn("My knowledge cutoff is 2024", cleaned)
+        self.assertNotIn("standings you see are not real-world", cleaned)
+        self.assertIn("- Kimi Antonelli - 340 pts", cleaned)
+
 
 if __name__ == "__main__":
     unittest.main()

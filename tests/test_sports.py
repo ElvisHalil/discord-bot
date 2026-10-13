@@ -536,9 +536,52 @@ class TestSkillSportsInfo(unittest.TestCase):
         self.assertIn("ENGLISH PREMIER LEAGUE", res2)
         self.assertIn("Coventry City", res2)
 
+    @patch("src.skills.sports.aggregators.f1.fetch_json")
+    def test_f1_standings_smart_routing(self, mock_fetch):
+        mock_fetch.return_value = {
+            "children": [
+                {
+                    "name": "Driver Standings",
+                    "standings": {
+                        "entries": [
+                            {
+                                "athlete": {"displayName": "Kimi Antonelli"},
+                                "stats": [{"name": "rank", "displayValue": "1"}, {"name": "championshipPts", "displayValue": "340"}]
+                            },
+                            {
+                                "athlete": {"displayName": "Sergio Perez"},
+                                "stats": [{"name": "rank", "displayValue": "23"}, {"name": "championshipPts", "displayValue": "0"}]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "name": "Constructor Standings",
+                    "standings": {
+                        "entries": [
+                            {
+                                "team": {"displayName": "Cadillac"},
+                                "stats": [{"name": "rank", "displayValue": "11"}, {"name": "points", "displayValue": "0"}]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        res1 = skill_sports_info(query="whats current F1 standings drivers and constructors")
+        self.assertIn("FORMULA 1 CHAMPIONSHIP STANDINGS", res1)
+        self.assertIn("Kimi Antonelli - 340 pts", res1)
+        self.assertIn("Sergio Perez - 0 pts", res1)
+        self.assertIn("Cadillac - 0 pts", res1)
+
+        res2 = skill_sports_info(query="You are missing constructors and drivers I want them all")
+        self.assertIn("FORMULA 1 CHAMPIONSHIP STANDINGS", res2)
+        self.assertIn("Cadillac - 0 pts", res2)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

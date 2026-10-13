@@ -19,7 +19,7 @@ class F1Aggregator(BaseSportsAggregator):
     def get_info(self, query: str = "schedule") -> str:
         """Routes F1 queries between schedule, race results, and championship standings."""
         q = (query or "").lower().strip()
-        if any(w in q for w in ("standing", "driver", "constructor", "point", "table", "rank")):
+        if any(w in q for w in ("standing", "driver", "constructor", "point", "table", "rank", "all", "full", "grid", "champion")):
             return self.get_standings()
         return self.get_schedule(filter_query=q)
 
@@ -195,8 +195,8 @@ class F1Aggregator(BaseSportsAggregator):
                 name = child.get("name", "")
                 entries = child.get("standings", {}).get("entries", [])
                 if "Driver" in name:
-                    output_lines.append("🏆 --- DRIVERS' WORLD CHAMPIONSHIP (Top 10) ---")
-                    for entry in entries[:10]:
+                    output_lines.append(f"🏆 --- DRIVERS' WORLD CHAMPIONSHIP STANDINGS (All {len(entries)} Drivers) ---")
+                    for entry in entries:
                         driver = entry.get("athlete", {}).get("displayName", "Unknown")
                         stats = {s.get("name"): s.get("displayValue") for s in entry.get("stats", [])}
                         rank = stats.get("rank") or entry.get("athlete", {}).get("order", "?")
@@ -204,7 +204,7 @@ class F1Aggregator(BaseSportsAggregator):
                         output_lines.append(f"  {rank}. {driver} - {points} pts")
                     output_lines.append("")
                 elif "Constructor" in name:
-                    output_lines.append("🏎️ --- CONSTRUCTORS' CHAMPIONSHIP ---")
+                    output_lines.append(f"🏎️ --- CONSTRUCTORS' WORLD CHAMPIONSHIP STANDINGS (All {len(entries)} Teams) ---")
                     for entry in entries:
                         team = entry.get("team", {}).get("displayName", "Unknown")
                         stats = {s.get("name"): s.get("displayValue") for s in entry.get("stats", [])}
