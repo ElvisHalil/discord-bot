@@ -5,8 +5,8 @@ from unittest.mock import patch, MagicMock
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-import src.tools.news as news
-from src.tools.news import _build_feed_url, get_top_headlines
+import src.skills.news.headlines as news
+from src.skills.news import _build_feed_url, skill_top_headlines, get_top_headlines
 
 SAMPLE_RSS = b"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel><title>Top stories</title>
@@ -54,12 +54,12 @@ class TestFeedUrls(unittest.TestCase):
         self.assertFalse(_looks_blocked("Short normal article about the economy."))
 
 
-class TestGetTopHeadlines(unittest.TestCase):
+class TestTopHeadlinesSkill(unittest.TestCase):
     def setUp(self):
         news._CACHE.clear()
 
-    @patch("src.tools.news.decode_google_news_url")
-    @patch("src.tools.news.requests.get")
+    @patch("src.skills.news.headlines.decode_google_news_url")
+    @patch("src.skills.news.headlines.requests.get")
     def test_formats_stories_with_decoded_urls(self, mock_get, mock_decode):
         resp = MagicMock(content=SAMPLE_RSS)
         resp.raise_for_status = MagicMock()
@@ -68,7 +68,7 @@ class TestGetTopHeadlines(unittest.TestCase):
             "https://news.google.com/rss/articles/AAA111": "https://www.cbc.ca/news/carney-alberta",
         }.get(link)
 
-        out = get_top_headlines(region="Canada")
+        out = skill_top_headlines(region="Canada")
         self.assertIn("1. Carney addresses Alberta ahead of referendum [CBC | Oct 12, 2026 20:25 UTC]", out)
         self.assertIn("URL: https://www.cbc.ca/news/carney-alberta", out)
         # Undecodable link falls back to the Google News URL
@@ -79,12 +79,20 @@ class TestGetTopHeadlines(unittest.TestCase):
         get_top_headlines(region="Canada")
         self.assertEqual(mock_get.call_count, 1)
 
-    @patch("src.tools.news.requests.get", side_effect=Exception("boom"))
+    @patch("src.skills.news.headlines.requests.get", side_effect=Exception("boom"))
     def test_feed_failure_points_to_search_web(self, _):
-        out = get_top_headlines(region="Canada")
+        out = skill_top_headlines(region="Canada")
         self.assertIn("search_web", out)
+
+    def test_news_argument_aliases(self):
+        from src.orchestrator import normalize_tool_args
+        args = normalize_tool_args(
+            "skill_top_headlines",
+            skill_top_headlines,
+            {"country": "USA", "category": "technology"},
+        )
+        self.assertEqual(args, {"region": "USA", "topic": "technology"})
 
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -146,7 +146,7 @@ def search_web(query: str, news: Optional[bool] = None, timelimit: Optional[str]
 
     Args:
         query: The search keywords.
-        news: Set true to search recent news articles about a specific subject or event. For general top headlines of a country or topic, use `get_top_headlines` instead.
+        news: Set true to search recent news articles about a specific subject or event. For general top headlines of a country or topic, use `skill_top_headlines` instead.
         timelimit: Optional recency filter: 'd' (past day), 'w' (past week), 'm' (past month) or 'y' (past year).
     """
     global VISITED_URLS, SEARCH_CACHE
@@ -366,7 +366,7 @@ def read_website(url: str) -> str:
 
     # Google News article links only redirect via JavaScript; resolve to the publisher URL.
     if parsed.hostname == "news.google.com" and "/articles/" in parsed.path:
-        from src.tools.news import decode_google_news_url
+        from src.skills.news import decode_google_news_url
         decoded = decode_google_news_url(url)
         if not decoded:
             return "❌ Could not resolve this Google News link to the original article. Use `search_web` with the headline to find the article instead."

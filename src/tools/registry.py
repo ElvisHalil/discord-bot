@@ -24,7 +24,6 @@ from src.tools.web import (
     SEARCH_CACHE,
     YOUTUBE_CACHE,
 )
-from src.tools.news import get_top_headlines
 from src.skills import (
     skill_weather_reporter,
     skill_youtube_searcher,
@@ -32,13 +31,15 @@ from src.skills import (
     skill_audio_intelligence,
     skill_csgo_esports,
     skill_sports_info,
+    skill_top_headlines,
 )
 
 # Combined registries for mode execution
 RESEARCH_TOOLS = {
     **SYSTEM_TOOLS,
     **WEB_TOOLS,
-    "get_top_headlines": get_top_headlines,
+    "skill_top_headlines": skill_top_headlines,
+    "get_top_headlines": skill_top_headlines,  # Alias for backward compatibility
     "skill_weather_reporter": skill_weather_reporter,
     "skill_youtube_searcher": skill_youtube_searcher,
     "skill_top_music": skill_top_music,

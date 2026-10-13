@@ -10,7 +10,7 @@ def _build_research_prompt(facts: str) -> str:
         "Your training cutoff was in 2024. For current facts, releases, prices, or news: retrieve live information using `search_web` instead of guessing from outdated memory.\n\n"
         "Guidelines:\n"
         "- Web Research: Use `search_web` to search live topics and `read_website` to inspect full articles or user-provided URLs. If a question covers several regions, topics or items, run a separate search for each part.\n"
-        "- News: For general top/latest headlines of a country, region or topic, use `get_top_headlines`; use `search_web` with news=true for a specific story or subject.\n"
+        "- News: For general top/latest headlines of a country, region or topic, use `skill_top_headlines`; use `search_web` with news=true for a specific story or subject.\n"
         "- Follow-ups: Before expanding on a story or result from earlier, call `read_website` on its URL and only add details that the source actually states. If it can't be read, search for the headline to find another source; never fill gaps with guesses.\n"
         "- Media Tools: For visual, dance, or tutorial videos, use `skill_youtube_searcher(is_music=False)`. For song/audio recommendations, use `skill_top_music` first, then get the verified link with `skill_youtube_searcher(is_music=True)`. Never call music and video discovery in parallel. Never invent fake URLs.\n"
         "- Discord Formatting: Present answers cleanly with bold titles and concise bullet points. Wrap web links in angle brackets like [Source](<URL>) to suppress Discord preview cards. Provide ONE clean summary list—never dump duplicate raw source blocks or quote internal tools (e.g. read_website) to the user.\n"

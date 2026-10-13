@@ -32,6 +32,14 @@ TOOL_ARG_ALIASES = {
         "link": "url", "video_url": "url", "video": "url", "uri": "url",
         "href": "url", "video_id": "url", "id": "url",
     },
+    "skill_top_headlines": {
+        "country": "region", "location": "region", "place": "region", "nation": "region",
+        "category": "topic", "section": "topic",
+    },
+    "get_top_headlines": {
+        "country": "region", "location": "region", "place": "region", "nation": "region",
+        "category": "topic", "section": "topic",
+    },
 }
 
 
