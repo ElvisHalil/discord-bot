@@ -11,6 +11,9 @@ class YouTubeSearchManager:
     """
 
     def __init__(self, verify_embeddable_fn=None, get_oembed_fn=None, is_short_fn=None):
+        self.verify_embeddable = verify_embeddable_fn
+        self.get_video_oembed = get_oembed_fn
+        self.is_short_fn = is_short_fn
         self.api_aggregator = YouTubeApiAggregator()
         self.ddg_aggregator = DuckDuckGoYouTubeAggregator(
             verify_embeddable_fn=verify_embeddable_fn,
@@ -24,7 +27,18 @@ class YouTubeSearchManager:
         results = self.ddg_aggregator.search(query, max_results=max_results)
         if not results:
             print(f"⚠️ [YouTube Video Search]: DuckDuckGo yielded no embeddable results, falling back to YouTube Data API for '{query}'...")
-            results = self.api_aggregator.search(query, max_results=max_results)
+            api_results = self.api_aggregator.search(query, max_results=max_results + 3)
+            verified_api_results = []
+            for r in api_results:
+                vid = r.get("id", "")
+                if self.is_short_fn and self.is_short_fn(vid, title=r.get("title", "")):
+                    continue
+                if self.verify_embeddable and not self.verify_embeddable(vid):
+                    continue
+                verified_api_results.append(r)
+                if len(verified_api_results) >= max_results:
+                    break
+            results = verified_api_results
             if results:
                 print(f"✅ [YouTube API]: Successfully found {len(results)} video(s) for '{query}'")
             else:

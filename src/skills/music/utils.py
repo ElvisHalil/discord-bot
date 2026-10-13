@@ -97,7 +97,8 @@ def get_music_metadata(vid: str, fallback_text: str = "", fallback_title: str = 
 
     title = fallback_title
     author = fallback_author
-    
+    oembed_success = False
+
     if vid:
         try:
             oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json"
@@ -106,6 +107,7 @@ def get_music_metadata(vid: str, fallback_text: str = "", fallback_title: str = 
                 data = r.json()
                 title = data.get("title", title)
                 author = data.get("author_name", author)
+                oembed_success = True
         except Exception:
             pass
 
@@ -114,7 +116,7 @@ def get_music_metadata(vid: str, fallback_text: str = "", fallback_title: str = 
     else:
         meta = parse_song_meta(title, author)
 
-    if vid and meta.get("song") != "Unknown Track":
+    if vid and meta.get("song") != "Unknown Track" and oembed_success:
         MUSIC_METADATA_CACHE[vid] = meta
 
     return meta
@@ -238,9 +240,10 @@ def standardize_song_reply(reply: str) -> str:
         if yt_match:
             full_url = yt_match.group(1)
             vid = yt_match.group(2)
+            from src.skills.youtube.client import verify_embeddable
+            is_embeddable = verify_embeddable(vid)
             meta = get_music_metadata(vid)
             if meta.get("song") != "Unknown Track":
-                music_url = full_url.replace("www.youtube.com", "music.youtube.com")
                 if not extracted_song or is_placeholder_text(extracted_song):
                     extracted_song = meta.get("song")
                 if not extracted_artist or is_placeholder_text(extracted_artist):
@@ -249,6 +252,11 @@ def standardize_song_reply(reply: str) -> str:
                     extracted_album = meta.get("album")
                 if not extracted_genre:
                     extracted_genre = meta.get("genre")
+
+                if is_embeddable:
+                    music_url = full_url.replace("www.youtube.com", "music.youtube.com")
+                else:
+                    print(f"⚠️ [standardize_song_reply]: Video ID {vid} is not embeddable in Discord. Attempting auto-resolution for a working link...")
             else:
                 print(f"⚠️ [standardize_song_reply]: Video ID {vid} is dead/hallucinated. Attempting auto-resolution...")
         else:

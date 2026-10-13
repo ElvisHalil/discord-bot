@@ -166,11 +166,11 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
 
         # 3. Fetch oEmbed metadata (0 API quota units)
         oembed = get_video_oembed(vid)
-        title = oembed.get("title") or raw_title
-        author = oembed.get("author", "")
-        if not title:
-            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} - Failed to retrieve oEmbed title.")
+        if not oembed.get("title"):
+            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - Failed oEmbed verification (cannot embed in Discord).")
             continue
+        title = oembed["title"]
+        author = oembed.get("author", "")
 
         # 4. Robust Garbage & Relevance match check
         is_valid, score, reason = score_music_candidate(query, title, author)

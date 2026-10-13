@@ -118,6 +118,90 @@ class TestMusicMetadata(unittest.TestCase):
         self.assertIn("**Artist:** deadmau5", res)
 
 
+class TestEmbeddability(unittest.TestCase):
+    """Test suite ensuring YouTube links are embeddable and playable in Discord."""
+
+    def test_verify_embeddable_invalid_id(self):
+        from src.skills.youtube.client import verify_embeddable
+        self.assertFalse(verify_embeddable(""))
+        self.assertFalse(verify_embeddable("abc"))
+        self.assertFalse(verify_embeddable("toolongvideoid12345"))
+
+    @patch("src.skills.youtube.client.requests.get")
+    def test_verify_embeddable_oembed_unauthorized(self, mock_get):
+        from src.skills.youtube.client import verify_embeddable
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_get.return_value = mock_resp
+        self.assertFalse(verify_embeddable("12345678901"))
+
+    @patch("src.skills.youtube.client.requests.get")
+    def test_verify_embeddable_markers(self, mock_get):
+        from src.skills.youtube.client import verify_embeddable
+        oembed_resp = MagicMock()
+        oembed_resp.status_code = 200
+
+        for marker in ("Playback on other websites has been disabled", "LOGIN_REQUIRED", "UNPLAYABLE", "Video unavailable"):
+            embed_resp = MagicMock()
+            embed_resp.status_code = 200
+            embed_resp.text = f"<html><body><div>{marker}</div></body></html>"
+            mock_get.side_effect = [oembed_resp, embed_resp]
+            self.assertFalse(verify_embeddable("12345678901"))
+
+    @patch("src.skills.youtube.client.requests.get")
+    def test_verify_embeddable_success(self, mock_get):
+        from src.skills.youtube.client import verify_embeddable
+        oembed_resp = MagicMock()
+        oembed_resp.status_code = 200
+        embed_resp = MagicMock()
+        embed_resp.status_code = 200
+        embed_resp.text = "<html><body><div>Normal playable video player</div></body></html>"
+        mock_get.side_effect = [oembed_resp, embed_resp]
+        self.assertTrue(verify_embeddable("12345678901"))
+
+    @patch("src.skills.youtube.client.verify_embeddable")
+    @patch("src.skills.music.playback.youtube_music.resolve_youtube_music_link")
+    @patch("src.skills.music.utils.get_music_metadata")
+    def test_standardize_song_reply_unembeddable_auto_resolve(self, mock_get_meta, mock_resolve, mock_verify):
+        mock_verify.return_value = False
+        mock_get_meta.return_value = {"song": "Unembeddable Hit", "artist": "Secret Artist"}
+        mock_resolve.return_value = [{
+            "id": "workingid12",
+            "title": "Unembeddable Hit",
+            "artist": "Secret Artist",
+            "url": "https://music.youtube.com/watch?v=workingid12"
+        }]
+
+        reply = (
+            "**Song:** Unembeddable Hit\n"
+            "**Artist:** Secret Artist\n\n"
+            "https://music.youtube.com/watch?v=badid123456"
+        )
+        res = standardize_song_reply(reply)
+        self.assertIn("https://music.youtube.com/watch?v=workingid12", res)
+        self.assertNotIn("badid123456", res)
+
+    @patch("src.skills.music.playback.youtube_music.is_youtube_short")
+    @patch("src.skills.music.playback.youtube_music.get_video_oembed")
+    @patch("src.skills.music.playback.youtube_music.verify_embeddable")
+    @patch("src.skills.music.playback.youtube_music.DDGS")
+    def test_resolve_skips_unembeddable_candidate(self, mock_ddgs, mock_verify, mock_oembed, mock_short):
+        from src.skills.music.playback.youtube_music import resolve_youtube_music_link
+        mock_short.return_value = False
+        mock_ddgs_instance = MagicMock()
+        mock_ddgs_instance.text.return_value = [
+            {"href": "https://www.youtube.com/watch?v=unembed1111", "title": "Strobe - deadmau5"},
+            {"href": "https://www.youtube.com/watch?v=embed222222", "title": "Strobe - deadmau5"}
+        ]
+        mock_ddgs.return_value = mock_ddgs_instance
+        # First candidate fails verify_embeddable, second passes
+        mock_verify.side_effect = [False, True]
+        mock_oembed.return_value = {"title": "Strobe", "author": "deadmau5 - Topic"}
+
+        results = resolve_youtube_music_link("Strobe by deadmau5", max_results=1)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["id"], "embed222222")
+
 
 class TestDeezerExpansion(unittest.TestCase):
     """Test suite for expanded Deezer aggregator and artist search."""

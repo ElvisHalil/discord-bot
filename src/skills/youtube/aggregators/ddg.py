@@ -46,6 +46,9 @@ class DuckDuckGoYouTubeAggregator(BaseYouTubeSearchAggregator):
                 continue
 
             oembed = self.get_video_oembed(vid) if self.get_video_oembed else {"title": "", "author": ""}
+            if self.get_video_oembed and not oembed.get("title"):
+                print(f"  └─ ⚠️ [YouTube DDG]: Skipping {vid} ('{raw_title}') - Failed oEmbed verification")
+                continue
             title = oembed.get("title") or raw_title
             author = oembed.get("author", "")
 

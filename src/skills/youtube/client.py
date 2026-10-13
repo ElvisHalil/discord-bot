@@ -4,16 +4,51 @@ import requests
 from ddgs import DDGS
 
 def verify_embeddable(vid: str) -> bool:
-    """Verifies that a YouTube video can be embedded on third-party sites like Discord."""
+    """
+    Verifies that a YouTube video can be embedded on third-party sites like Discord.
+    Checks:
+    1. Valid 11-char YouTube ID.
+    2. Official YouTube oEmbed API returns 200 OK (returns 401 if owner disabled embedding or video is age-restricted).
+    3. Embed page (https://www.youtube.com/embed/{vid}) does not contain unplayable or disabled markers.
+    """
+    if not vid or not re.match(r'^[0-9A-Za-z_-]{11}$', vid):
+        return False
     try:
-        embed_url = f"https://www.youtube.com/embed/{vid}"
-        embed_text = requests.get(embed_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3).text
-        if "Playback on other websites has been disabled" in embed_text or "UNPLAYABLE" in embed_text:
-            print(f"⚠️ [YouTube]: Skipping {vid} because embedding is disabled by owner.")
+        # Step 1: oEmbed check (standard third-party embed gateway used by Discord)
+        oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json"
+        oembed_res = requests.get(oembed_url, timeout=3)
+        if oembed_res.status_code != 200:
+            print(f"⚠️ [YouTube]: Skipping {vid} because oEmbed status is {oembed_res.status_code} (not embeddable).")
             return False
+
+        # Step 2: Embed page response check
+        embed_url = f"https://www.youtube.com/embed/{vid}"
+        embed_res = requests.get(
+            embed_url,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+            timeout=3
+        )
+        if embed_res.status_code != 200:
+            return False
+
+        embed_text = embed_res.text
+        unplayable_markers = (
+            "Playback on other websites has been disabled",
+            "UNPLAYABLE",
+            "LOGIN_REQUIRED",
+            "Video unavailable",
+            "This video is unavailable",
+            "This video is private",
+            "error-message",
+        )
+        if any(marker in embed_text for marker in unplayable_markers):
+            print(f"⚠️ [YouTube]: Skipping {vid} because embed page indicated unplayable/disabled.")
+            return False
+
         return True
-    except Exception:
-        return True
+    except Exception as e:
+        print(f"⚠️ [YouTube]: Verification failed for {vid}: {e}")
+        return False
 
 def get_video_oembed(vid: str) -> dict:
     """Fetches video title and channel author via YouTube oEmbed."""
