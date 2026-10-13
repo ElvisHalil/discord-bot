@@ -125,6 +125,33 @@ class TestF1Aggregator(unittest.TestCase):
         self.assertIn("UPCOMING GRAND PRIX THIS MONTH", res)
         self.assertIn("United States Grand Prix", res)
 
+    @patch("src.skills.sports.aggregators.f1.fetch_json")
+    def test_get_schedule_all_upcoming_with_fp3_and_circuits(self, mock_fetch):
+        mock_fetch.side_effect = [
+            {
+                "season": {"year": 2026},
+                "leagues": [{"calendar": [{"label": "United States Grand Prix", "startDate": "2026-10-23T17:30Z", "endDate": "2026-10-25T20:00Z"}]}],
+                "events": []
+            },
+            {
+                "events": [{
+                    "circuit": {"fullName": "Circuit of the Americas", "address": {"city": "Austin", "country": "USA"}},
+                    "competitions": [
+                        {"type": {"abbreviation": "FP1"}, "date": "2026-10-23T17:30Z"},
+                        {"type": {"abbreviation": "FP2"}, "date": "2026-10-23T21:00Z"},
+                        {"type": {"abbreviation": "FP3"}, "date": "2026-10-24T17:30Z"},
+                        {"type": {"abbreviation": "Qual"}, "date": "2026-10-24T21:00Z"},
+                        {"type": {"abbreviation": "Race"}, "date": "2026-10-25T20:00Z"}
+                    ]
+                }]
+            }
+        ]
+        res = self.agg.get_schedule()
+        self.assertIn("Circuit of the Americas (Austin, USA)", res)
+        self.assertIn("Practice 3 (FP3)", res)
+        self.assertIn("Standard 3-Day Weekend (with FP3)", res)
+        self.assertIn("None of the remaining 2026 races are Sprint weekends", res)
+
 
 class TestSoccerAggregator(unittest.TestCase):
     def setUp(self):

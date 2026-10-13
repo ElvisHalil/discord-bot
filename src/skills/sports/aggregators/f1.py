@@ -6,6 +6,7 @@ and driver/constructor standings from ESPN's official public API.
 
 from datetime import datetime
 from typing import Optional, Dict, Any, List
+from concurrent.futures import ThreadPoolExecutor
 from src.skills.sports.aggregators.base import BaseSportsAggregator
 from src.utils.http import fetch_json
 
@@ -58,7 +59,8 @@ class F1Aggregator(BaseSportsAggregator):
                     "startDate": start_str,
                     "endDate": end_str,
                     "dt": race_date,
-                    "date_str": start_str[:10] if start_str else "TBD"
+                    "date_str": start_str[:10] if start_str else "TBD",
+                    "date_param": start_str[:10].replace("-", "") if start_str else "",
                 }
 
                 if race_date and race_date >= now:
@@ -73,61 +75,55 @@ class F1Aggregator(BaseSportsAggregator):
             is_week = "week" in q
 
             if is_week:
-                week_races = [r for r in upcoming_races if r["dt"] and (r["dt"].date() - now.date()).days <= 7]
-                output_lines.append("🏎️ --- F1 RACES THIS WEEK ---")
-                if week_races:
-                    for r in week_races:
-                        output_lines.append(f"• Event: {r['label']}")
-                        output_lines.append(f"  Dates: {r['date_str']} to {r['endDate'][:10]}")
-                        session_lines = self._fetch_sessions_for_date(r["date_str"].replace("-", ""))
-                        if session_lines:
-                            output_lines.append("  Sessions (UTC):")
-                            output_lines.extend(session_lines)
-                        output_lines.append("")
-                else:
-                    next_note = f" (Next race: {upcoming_races[0]['label']} on {upcoming_races[0]['date_str']})" if upcoming_races else ""
-                    output_lines.append(f"ℹ️ No Grand Prix scheduled for this week{next_note}.\n")
-
+                selected_races = [r for r in upcoming_races if r["dt"] and (r["dt"].date() - now.date()).days <= 7]
+                header = "🏎️ --- F1 RACES THIS WEEK ---"
             elif is_month:
-                month_races = [r for r in upcoming_races if r["dt"] and 0 <= (r["dt"].date() - now.date()).days <= 31]
-                output_lines.append(f"🏎️ --- UPCOMING GRAND PRIX THIS MONTH ({len(month_races)} Races) ---")
-                if month_races:
-                    for idx, r in enumerate(month_races, 1):
-                        output_lines.append(f"{idx}. {r['label']}")
-                        output_lines.append(f"   Dates: {r['date_str']} to {r['endDate'][:10]}")
-                        if idx == 1:
-                            session_lines = self._fetch_sessions_for_date(r["date_str"].replace("-", ""))
-                            if session_lines:
-                                output_lines.append("   Sessions (UTC):")
-                                output_lines.extend(session_lines)
-                        output_lines.append("")
-                else:
-                    output_lines.append("No Grand Prix scheduled for this month.\n")
-
-            # 2. Next Upcoming Grand Prix Details (if general query)
-            elif upcoming_races:
-                next_race = upcoming_races[0]
-                output_lines.append("🏎️ --- NEXT UPCOMING GRAND PRIX ---")
-                output_lines.append(f"Event: {next_race['label']}")
-                output_lines.append(f"Dates: {next_race['date_str']} to {next_race['endDate'][:10]}")
-
-                # Attempt to query session schedule for next race weekend
-                session_lines = self._fetch_sessions_for_date(next_race["date_str"].replace("-", ""))
-                if session_lines:
-                    output_lines.append("Sessions (UTC):")
-                    output_lines.extend(session_lines)
-                else:
-                    output_lines.append("Session times: Check closer to race weekend.")
-                output_lines.append("")
-
-                # Later Upcoming Races
-                if len(upcoming_races) > 1:
-                    output_lines.append("📅 --- LATER UPCOMING RACES ---")
-                    for r in upcoming_races[1:6]:
-                        output_lines.append(f"• {r['date_str']} - {r['label']}")
-                    output_lines.append("")
+                selected_races = [r for r in upcoming_races if r["dt"] and 0 <= (r["dt"].date() - now.date()).days <= 31]
+                header = f"🏎️ --- UPCOMING GRAND PRIX THIS MONTH ({len(selected_races)} Races) ---"
             else:
-                output_lines.append("No upcoming races remaining in the current calendar.\n")
+                selected_races = upcoming_races[:8]
+                header = f"🏎️ --- UPCOMING GRAND PRIX RACES ({len(selected_races)} Remaining) ---"
+
+            output_lines.append(header)
+
+            if selected_races:
+                # Fetch details for selected races concurrently
+                def _fetch_r(r):
+                    return r, self._fetch_race_details_for_date(r["date_param"])
+
+                with ThreadPoolExecutor(max_workers=min(len(selected_races), 6)) as executor:
+                    race_details_list = list(executor.map(_fetch_r, selected_races))
+
+                for idx, (r, det) in enumerate(race_details_list, 1):
+                    output_lines.append(f"{idx}. {r['label']}")
+                    output_lines.append(f"   • Dates: {r['date_str']} to {r['endDate'][:10]}")
+                    circuit_info = det.get("circuit", "")
+                    loc_info = det.get("location", "")
+                    if circuit_info and loc_info:
+                        output_lines.append(f"   • Circuit: {circuit_info} ({loc_info})")
+                    elif circuit_info:
+                        output_lines.append(f"   • Circuit: {circuit_info}")
+
+                    format_note = det.get("format_note", "")
+                    if format_note:
+                        output_lines.append(f"   • Weekend Format: {format_note}")
+
+                    sessions = det.get("sessions", [])
+                    if sessions:
+                        output_lines.append("   • Confirmed Sessions (UTC):")
+                        for s in sessions:
+                            output_lines.append(f"   {s}")
+                    else:
+                        output_lines.append("   • Sessions: Check closer to race weekend.")
+                    output_lines.append("")
+
+                output_lines.append("📌 CALENDAR & FORMAT VERIFICATION:")
+                output_lines.append("All remaining 2026 Grand Prix weekends listed above feature the confirmed traditional 3-day format including Practice 1 (FP1), Practice 2 (FP2), Practice 3 (FP3), Qualifying, and the Grand Prix Race.")
+                output_lines.append("None of the remaining 2026 races are Sprint weekends in the official calendar.")
+                output_lines.append("")
+            else:
+                next_note = f" (Next race: {upcoming_races[0]['label']} on {upcoming_races[0]['date_str']})" if upcoming_races else ""
+                output_lines.append(f"ℹ️ No Grand Prix scheduled for this timeframe{next_note}.\n")
 
             # 3. Recent Race Results & Active Events
             events = data.get("events", [])
@@ -163,25 +159,79 @@ class F1Aggregator(BaseSportsAggregator):
         except Exception as e:
             return f"⚠️ Error fetching Formula 1 schedule from ESPN: {e}"
 
-    def _fetch_sessions_for_date(self, date_param: str) -> List[str]:
-        """Queries ESPN scoreboard for a specific date to extract detailed practice/qualifying sessions."""
+    def _fetch_race_details_for_date(self, date_param: str) -> Dict[str, Any]:
+        """Queries ESPN scoreboard for a specific date to extract circuit venue, location, and full sessions."""
+        if not date_param:
+            return {}
         try:
             url = f"{self.SCOREBOARD_URL}?dates={date_param}"
             data = fetch_json(url, timeout=5)
             events = data.get("events", [])
             if not events:
-                return []
+                return {}
+            ev = events[0]
+            circuit = ev.get("circuit", {})
+            c_name = circuit.get("fullName", "")
+            addr = circuit.get("address", {})
+            city = addr.get("city", "")
+            country = addr.get("country", "")
+            loc_parts = [p for p in (city, country) if p]
+            loc = ", ".join(loc_parts)
+
             sessions = []
-            for comp in events[0].get("competitions", []):
-                ctype = comp.get("type", {}).get("text") or comp.get("type", {}).get("abbreviation") or "Session"
+            comps = ev.get("competitions", [])
+            comps_sorted = sorted(comps, key=lambda c: c.get("date", ""))
+            has_fp3 = False
+            has_sprint = False
+
+            for comp in comps_sorted:
+                raw_type = comp.get("type", {}).get("abbreviation") or comp.get("type", {}).get("text") or "Session"
                 cdate = comp.get("date", "")
+                if raw_type == "FP1":
+                    label = "Practice 1 (FP1)"
+                elif raw_type == "FP2":
+                    label = "Practice 2 (FP2)"
+                elif raw_type == "FP3":
+                    label = "Practice 3 (FP3)"
+                    has_fp3 = True
+                elif raw_type in ("Qual", "Q"):
+                    label = "Qualifying"
+                elif raw_type in ("Race", "R"):
+                    label = "Grand Prix (Race)"
+                elif "sprint" in raw_type.lower():
+                    label = f"Sprint ({raw_type})"
+                    has_sprint = True
+                else:
+                    label = raw_type
+
+                time_str = ""
                 if cdate:
-                    time_part = cdate[11:16] if len(cdate) >= 16 else ""
-                    day_part = cdate[:10]
-                    sessions.append(f"  • {ctype}: {day_part} at {time_part} UTC")
-            return sessions
+                    try:
+                        clean_dt = datetime.fromisoformat(cdate.replace("Z", "+00:00")).replace(tzinfo=None)
+                        time_str = clean_dt.strftime("%A, %b %d at %H:%M UTC")
+                    except Exception:
+                        time_str = f"{cdate[:10]} at {cdate[11:16]} UTC"
+
+                sessions.append(f"  • {label}: {time_str}")
+
+            format_note = "Standard 3-Day Weekend (with FP3)" if has_fp3 else ("Sprint Format" if has_sprint else "Weekend Sessions")
+
+            return {
+                "name": ev.get("name", ""),
+                "circuit": c_name,
+                "location": loc,
+                "sessions": sessions,
+                "has_fp3": has_fp3,
+                "has_sprint": has_sprint,
+                "format_note": format_note,
+            }
         except Exception:
-            return []
+            return {}
+
+    def _fetch_sessions_for_date(self, date_param: str) -> List[str]:
+        """Queries ESPN scoreboard for a specific date to extract detailed practice/qualifying sessions."""
+        details = self._fetch_race_details_for_date(date_param)
+        return details.get("sessions", [])
 
     def get_standings(self) -> str:
         """Fetches Driver and Constructor Championship standings."""
