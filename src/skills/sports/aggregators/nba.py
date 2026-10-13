@@ -17,16 +17,24 @@ class NbaAggregator(BaseSportsAggregator):
     STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/basketball/nba/standings"
 
     def get_info(self, query: str = "") -> str:
-        """Entry point for NBA queries. Dispatches between standings, live games, and weekly/monthly schedules."""
+        """Entry point for NBA queries. Dispatches between standings, live games, recent results, and weekly/monthly schedules."""
         q = (query or "").lower().strip()
         if any(w in q for w in ("standing", "table", "rank", "conference", "seeds")):
             return self.get_standings()
 
         now = datetime.now()
-        is_month = "month" in q
-        is_week = any(w in q for w in ("week", "upcoming", "schedule", "fixtures", "next games"))
+        is_past = any(w in q for w in (
+            "past", "recent", "played already", "already played", "have been played", "already",
+            "last week", "previous week", "go back", "prior", "completed", "results",
+            "last game", "previous game", "earlier", "history"
+        )) or (any(w in q for w in ("played", "result", "results", "back")) and not any(w in q for w in ("upcoming", "next", "future", "schedule", "tomorrow")))
 
-        if is_month:
+        is_month = "month" in q and not is_past
+        is_week = any(w in q for w in ("week", "upcoming", "schedule", "fixtures", "next games")) and not is_past
+
+        if is_past and "yesterday" not in q:
+            return self.get_past_schedule_range(days_back=7, scope_label="RECENT NBA RESULTS")
+        elif is_month:
             return self.get_schedule_range(days_ahead=30, scope_label="MONTHLY SCHEDULE")
         elif is_week:
             return self.get_schedule_range(days_ahead=7, scope_label="WEEKLY SCHEDULE")
@@ -38,6 +46,80 @@ class NbaAggregator(BaseSportsAggregator):
             return self.get_games(date_param=date_param, filter_query=q)
 
         return self.get_games(filter_query=q)
+
+    def get_past_schedule_range(self, days_back: int = 7, scope_label: str = "RECENT NBA RESULTS") -> str:
+        """Fetches completed NBA games and scores from recent game days."""
+        print(f"  └─ 🏀 [NBA]: Fetching {scope_label} (Past {days_back} days)...")
+        now = datetime.now()
+        start_date = now - timedelta(days=days_back)
+
+        try:
+            base_data = fetch_json(self.SCOREBOARD_URL, timeout=8)
+            leagues = base_data.get("leagues", [])
+            calendar = leagues[0].get("calendar", []) if leagues else []
+
+            past_dates = []
+            for item in calendar:
+                try:
+                    clean_dt = datetime.fromisoformat(item.replace("Z", "+00:00")).replace(tzinfo=None)
+                    if clean_dt.date() < now.date():
+                        d_str = clean_dt.strftime("%Y%m%d")
+                        if d_str not in past_dates:
+                            past_dates.append(d_str)
+                except Exception:
+                    pass
+
+            if not past_dates:
+                return f"=== NBA {scope_label} ===\nNo recent completed games found in the current season calendar."
+
+            recent_dates = [d for d in past_dates if datetime.strptime(d, "%Y%m%d").date() >= start_date.date()]
+            if not recent_dates:
+                recent_dates = past_dates[-3:]
+            else:
+                recent_dates = recent_dates[-3:]
+
+            output_lines = [
+                f"=== NBA {scope_label} ===\n",
+                f"📅 Current Date: {self.format_human_date(now)}\n"
+            ]
+
+            total_games = 0
+            for pdate in recent_dates:
+                day_title = self.format_human_date(pdate)
+                day_data = fetch_json(f"{self.SCOREBOARD_URL}?dates={pdate}", timeout=6)
+                events = day_data.get("events", [])
+                if not events:
+                    continue
+
+                output_lines.append(f"📅 --- {day_title.upper()} ({len(events)} Results) ---")
+                for ev in events:
+                    comps = ev.get("competitions", [])
+                    if not comps:
+                        continue
+                    comp = comps[0]
+                    competitors = comp.get("competitors", [])
+                    home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0] if competitors else {})
+                    away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1] if len(competitors) > 1 else {})
+                    home_team = home.get("team", {}).get("displayName", "Home")
+                    away_team = away.get("team", {}).get("displayName", "Away")
+                    home_score = home.get("score", "0")
+                    away_score = away.get("score", "0")
+                    status_desc = comp.get("status", {}).get("type", {}).get("detail") or "Final"
+
+                    venue = comp.get("venue", {}).get("fullName")
+                    meta_str = f" | Arena: {venue}" if venue else ""
+
+                    output_lines.append(f"  • {away_team} {away_score} @ {home_team} {home_score} [{status_desc}{meta_str}]")
+                    total_games += 1
+                output_lines.append("")
+
+            if total_games == 0:
+                output_lines.append("No completed game records found for recent game days.")
+
+            return "\n".join(output_lines)
+
+        except Exception as e:
+            return f"⚠️ Error fetching recent NBA results: {e}"
 
     def get_schedule_range(self, days_ahead: int = 7, scope_label: str = "WEEKLY SCHEDULE") -> str:
         """Fetches upcoming NBA games across multiple days within the specified time window (week or month)."""
@@ -70,11 +152,7 @@ class NbaAggregator(BaseSportsAggregator):
 
             total_games = 0
             for udate in upcoming_dates[:5]:
-                try:
-                    dt_obj = datetime.strptime(udate, "%Y%m%d")
-                    day_title = dt_obj.strftime("%A, %B %d, %Y")
-                except Exception:
-                    day_title = udate
+                day_title = self.format_human_date(udate)
 
                 day_data = fetch_json(f"{self.SCOREBOARD_URL}?dates={udate}", timeout=6)
                 events = day_data.get("events", [])
@@ -118,6 +196,7 @@ class NbaAggregator(BaseSportsAggregator):
     def get_games(self, date_param: Optional[str] = None, filter_query: str = "") -> str:
         """Fetches live, upcoming, and recent NBA games with scores and quarter breakdowns."""
         print(f"  └─ 🏀 [NBA]: Fetching NBA games (Date: {date_param or 'Today'})...")
+        now = datetime.now()
         url = self.SCOREBOARD_URL
         if date_param:
             url += f"?dates={date_param}"
@@ -128,17 +207,24 @@ class NbaAggregator(BaseSportsAggregator):
 
             # If no games today and no specific date requested, fetch yesterday's results
             if not events and not date_param:
-                yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+                yesterday = (now - timedelta(days=1)).strftime("%Y%m%d")
                 alt_data = fetch_json(f"{self.SCOREBOARD_URL}?dates={yesterday}", timeout=5)
                 if alt_data.get("events"):
                     events = alt_data["events"]
-                    date_param = f"Yesterday ({yesterday})"
+                    date_param = yesterday
 
             if not events:
-                return "=== NBA SCOREBOARD ===\nNo NBA games scheduled for the selected date."
+                day_display = self.format_human_date(date_param) if date_param else self.format_human_date(now)
+                upcoming_preview = self.get_schedule_range(days_ahead=7, scope_label="NEXT UPCOMING GAMES")
+                return (
+                    f"=== NBA SCOREBOARD — NO GAMES SCHEDULED ===\n"
+                    f"📅 Date Checked: {day_display} (No games scheduled for this date).\n\n"
+                    f"ℹ️ There are no NBA games scheduled for {day_display}.\n\n"
+                    f"🔜 {upcoming_preview}"
+                )
 
-            day_label = f" ({date_param})" if date_param else " (Today)"
-            output_lines = [f"=== NBA SCOREBOARD{day_label.upper()} ===\n"]
+            day_display = self.format_human_date(date_param) if date_param else self.format_human_date(now)
+            output_lines = [f"=== NBA SCOREBOARD — {day_display.upper()} ===\n"]
 
             for ev in events:
                 comps = ev.get("competitions", [])

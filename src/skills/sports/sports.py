@@ -1,4 +1,5 @@
 from typing import Optional
+from datetime import datetime
 from src.skills.sports.aggregators import (
     F1Aggregator,
     SoccerAggregator,
@@ -101,9 +102,14 @@ def skill_sports_info(sport: str, query: Optional[str] = "schedule") -> str:
             f"For other sports or niche leagues, please use `search_web`."
         )
 
-    output = data
-    output += "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-    output += f"{guidance} Keep your response formatted cleanly with bold headers, bullet points, and concise details.\n"
+    now = datetime.now()
+    today_str = now.strftime("%A, %B %d, %Y")
+
+    output = f"📅 CURRENT REFERENCE DATE: {today_str}\n\n" + data
+    output += "\n=== CRITICAL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
+    output += f"1. TODAY'S DATE: {today_str}. All relative dates ('today', 'tomorrow', 'yesterday', 'this week', 'next week') MUST anchor on this date.\n"
+    output += f"2. ALWAYS use the exact day of the week and date specified in the data (e.g. 'Wednesday, October 14, 2026'). NEVER guess, extrapolate, or alter calendar days of the week.\n"
+    output += f"3. {guidance} Keep your response formatted cleanly with bold headers, bullet points, and concise details.\n"
     return output
 
 

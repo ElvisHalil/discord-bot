@@ -231,6 +231,37 @@ class TestSoccerAggregator(unittest.TestCase):
         self.assertIn("Chelsea at Arsenal", res)
         self.assertIn("Man City at Liverpool", res)
 
+    @patch("src.skills.sports.aggregators.soccer.fetch_json")
+    def test_get_past_schedule_range(self, mock_fetch):
+        mock_fetch.side_effect = [
+            {
+                "leagues": [{
+                    "calendar": ["2026-10-10T07:00Z"]
+                }]
+            },
+            {
+                "events": [{
+                    "competitions": [{
+                        "status": {"type": {"detail": "FT"}},
+                        "competitors": [
+                            {"homeAway": "home", "score": "2", "team": {"displayName": "Arsenal"}},
+                            {"homeAway": "away", "score": "1", "team": {"displayName": "Leeds United"}}
+                        ],
+                        "details": [{
+                            "type": {"text": "Goal"},
+                            "clock": {"displayValue": "55'"},
+                            "team": {"id": "1"},
+                            "athletesInvolved": [{"displayName": "Bukayo Saka"}]
+                        }]
+                    }]
+                }]
+            }
+        ]
+        res = self.agg.get_past_schedule_range("eng.1", "English Premier League", days_back=7)
+        self.assertIn("ENGLISH PREMIER LEAGUE RECENT MATCH RESULTS", res)
+        self.assertIn("Arsenal 2 - 1 Leeds United", res)
+        self.assertIn("Bukayo Saka", res)
+
 
 class TestNbaAggregator(unittest.TestCase):
     def setUp(self):
@@ -296,6 +327,30 @@ class TestNbaAggregator(unittest.TestCase):
         self.assertIn("Boston Celtics at New York Knicks", res)
         self.assertIn("Madison Square Garden", res)
 
+    @patch("src.skills.sports.aggregators.nba.fetch_json")
+    def test_get_past_schedule_range(self, mock_fetch):
+        mock_fetch.side_effect = [
+            {
+                "leagues": [{
+                    "calendar": ["2026-10-10T07:00Z"]
+                }]
+            },
+            {
+                "events": [{
+                    "competitions": [{
+                        "status": {"type": {"detail": "Final"}},
+                        "competitors": [
+                            {"homeAway": "home", "score": "114", "team": {"displayName": "Toronto Raptors"}},
+                            {"homeAway": "away", "score": "106", "team": {"displayName": "LA Clippers"}}
+                        ]
+                    }]
+                }]
+            }
+        ]
+        res = self.agg.get_past_schedule_range(days_back=7)
+        self.assertIn("NBA RECENT NBA RESULTS", res)
+        self.assertIn("LA Clippers 106 @ Toronto Raptors 114", res)
+
 
 class TestHockeyAggregator(unittest.TestCase):
     def setUp(self):
@@ -360,6 +415,30 @@ class TestHockeyAggregator(unittest.TestCase):
         self.assertIn("Montreal Canadiens at Washington Capitals", res)
         self.assertIn("Capital One Arena", res)
 
+    @patch("src.skills.sports.aggregators.hockey.fetch_json")
+    def test_get_past_schedule_range(self, mock_fetch):
+        mock_fetch.side_effect = [
+            {
+                "leagues": [{
+                    "calendar": ["2026-10-10T07:00Z"]
+                }]
+            },
+            {
+                "events": [{
+                    "competitions": [{
+                        "status": {"type": {"detail": "Final"}},
+                        "competitors": [
+                            {"homeAway": "home", "score": "5", "team": {"displayName": "Boston Bruins"}},
+                            {"homeAway": "away", "score": "1", "team": {"displayName": "Philadelphia Flyers"}}
+                        ]
+                    }]
+                }]
+            }
+        ]
+        res = self.agg.get_past_schedule_range(days_back=7)
+        self.assertIn("NHL RECENT NHL RESULTS", res)
+        self.assertIn("Philadelphia Flyers 1 @ Boston Bruins 5", res)
+
 
 class TestSkillSportsInfo(unittest.TestCase):
     @patch("src.skills.sports.aggregators.f1.fetch_json")
@@ -374,9 +453,21 @@ class TestSkillSportsInfo(unittest.TestCase):
 
     @patch("src.skills.sports.aggregators.soccer.fetch_json")
     def test_soccer_routing(self, mock_fetch):
-        mock_fetch.return_value = {"events": []}
+        mock_fetch.return_value = {
+            "events": [{
+                "name": "Arsenal vs Chelsea",
+                "competitions": [{
+                    "status": {"type": {"detail": "FT"}},
+                    "competitors": [
+                        {"homeAway": "home", "team": {"displayName": "Arsenal"}, "score": "2"},
+                        {"homeAway": "away", "team": {"displayName": "Chelsea"}, "score": "0"}
+                    ]
+                }]
+            }]
+        }
         res = skill_sports_info("soccer", "epl matches")
-        self.assertIn("ENGLISH PREMIER LEAGUE MATCHES", res)
+        self.assertIn("ENGLISH PREMIER LEAGUE", res)
+        self.assertIn("CURRENT REFERENCE DATE", res)
 
     @patch("src.skills.sports.aggregators.nba.fetch_json")
     def test_nba_routing(self, mock_fetch):
