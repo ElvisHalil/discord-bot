@@ -1,11 +1,16 @@
+from typing import Optional
 from src.skills.sports.aggregators import F1Aggregator
 
 _f1_aggregator = F1Aggregator()
 
-def skill_sports_info(sport: str, query: str = "schedule") -> str:
+def skill_sports_info(sport: str, query: Optional[str] = "schedule") -> str:
     """
     Fetch current sports information (schedule, upcoming matches/races). 
     Currently supported sports: 'f1'
+
+    Args:
+        sport: The sport to look up. Currently only 'f1' is supported.
+        query: What to fetch (default 'schedule').
     """
     print(f"🏎️ [Executing Sports Info Skill] Sport: {sport}, Query: {query}")
     sport = sport.lower()

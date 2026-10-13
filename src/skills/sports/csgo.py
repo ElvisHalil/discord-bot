@@ -1,3 +1,4 @@
+from typing import Optional
 from src.skills.sports.aggregators import (
     EslLiveAggregator,
     LiquipediaAggregator,
@@ -8,7 +9,7 @@ _esl_aggregator = EslLiveAggregator()
 _liquipedia_aggregator = LiquipediaAggregator()
 _hltv_aggregator = HltvAggregator()
 
-def skill_csgo_esports(query_type: str = 'all', event_page: str = None, player_url: str = None) -> str:
+def skill_csgo_esports(query_type: Optional[str] = 'all', event_page: Optional[str] = None, player_url: Optional[str] = None) -> str:
     """
     Use this skill to fetch Counter-Strike (CS) esports information.
     query_type can be:
@@ -18,6 +19,11 @@ def skill_csgo_esports(query_type: str = 'all', event_page: str = None, player_u
       - 'player_stats': Gets stats for a specific player (requires player_url).
       - 'live_streams': Checks if ESL is currently streaming a live match on YouTube.
       - 'all': Fetches 'tournaments', 'rankings', and 'live_streams'.
+
+    Args:
+        query_type: One of 'tournaments', 'event_info', 'rankings', 'player_stats', 'live_streams', 'all' (default).
+        event_page: Liquipedia event page, required for query_type='event_info'.
+        player_url: Player profile URL, required for query_type='player_stats'.
     """
     print(f"🎮 [Executing CS Esports Skill] Type: {query_type}")
     output = "=== COUNTER-STRIKE ESPORTS DATA ===\n\n"

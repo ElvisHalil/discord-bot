@@ -9,6 +9,7 @@ from src.tools.system import (
     evaluate_math,
     save_memory,
     recall_memories,
+    set_memory_file,
     SYSTEM_TOOLS,
     ACTIVE_MEMORY_FILE,
 )

@@ -6,6 +6,9 @@ def skill_weather_reporter(city: str) -> str:
     """
     A full 'Skill' packaged as a tool. Fetches the current weather for a city.
     Use this whenever the user asks about the weather.
+
+    Args:
+        city: City name, optionally with country (e.g. 'Paris, France').
     """
     print(f"🌤️ [Executing Weather Skill]: {city}")
     weather_data = _weather_aggregator.get_weather(city)

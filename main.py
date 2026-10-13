@@ -1,20 +1,20 @@
 import discord
 import os
 import sys
-import io
-import inspect
 
 sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
 import re
 import asyncio
 import random
 import requests
+from collections import defaultdict
 from dotenv import load_dotenv
 from ollama import AsyncClient
 import src.tools.registry as tools
 from src.utils import ensure_ollama_running, chunk_message, suppress_discord_embeds
 from src.skills.music.utils import format_song_card, get_music_metadata, standardize_song_reply
 from src.config import MODES
+from src.orchestrator import normalize_tool_args, trim_history, apply_auto_ping, join_orphan_bullets
 
 load_dotenv()
 
@@ -33,12 +33,32 @@ ollama_client = AsyncClient()
 # Global state
 chat_history = {}
 known_users = {}
-current_mode = os.getenv("DEFAULT_PROFILE", "research").lower()
+# One lock per channel so overlapping mentions don't interleave tool calls in a shared history.
+channel_locks = defaultdict(asyncio.Lock)
+# (message_id, user_id) pairs already handled by the 👍 recommender, to avoid duplicate runs.
+handled_reactions = set()
+MAX_HANDLED_REACTIONS = 2000
+
+_default_profile = os.getenv("DEFAULT_PROFILE", "").lower()
+if _default_profile in MODES:
+    current_mode = _default_profile
+else:
+    current_mode = next(iter(MODES))
+    if _default_profile:
+        print(f"⚠️ DEFAULT_PROFILE '{_default_profile}' is not a known mode; using '{current_mode}'.")
+
+
+def clear_tool_caches():
+    tools.VISITED_URLS.clear()
+    tools.URL_CACHE.clear()
+    tools.SEARCH_CACHE.clear()
+    tools.YOUTUBE_CACHE.clear()
+
 
 @client.event
 async def on_ready():
     print(f"✅ Bot online as: {client.user}")
-    print(f"🔥 Active Mode: {current_mode.upper()} (Use '!mode chat' or '!mode research' to switch)")
+    print(f"🔥 Active Mode: {current_mode.upper()} (Switch with '!mode <name>': {', '.join(MODES)})")
 @client.event
 async def on_raw_reaction_add(payload):
     if payload.user_id == client.user.id:
@@ -61,6 +81,14 @@ async def on_raw_reaction_add(payload):
             return
             
         if "music.youtube.com/" in message.content or "youtube.com/watch" in message.content or "youtu.be/" in message.content:
+            # Only recommend once per (message, user), even if they remove and re-add the reaction.
+            reaction_key = (payload.message_id, payload.user_id)
+            if reaction_key in handled_reactions:
+                return
+            if len(handled_reactions) >= MAX_HANDLED_REACTIONS:
+                handled_reactions.clear()
+            handled_reactions.add(reaction_key)
+
             try:
                 user = client.get_user(payload.user_id) or await client.fetch_user(payload.user_id)
             except Exception:
@@ -178,7 +206,8 @@ async def on_raw_reaction_add(payload):
 
                     m_vid = re.search(r'watch\?v=([0-9A-Za-z_-]{11})', verified_url)
                     vid = m_vid.group(1) if m_vid else None
-                    meta = get_music_metadata(vid, fallback_text=chosen_track)
+                    # Network-bound (oEmbed/Deezer lookups); keep it off the event loop.
+                    meta = await asyncio.to_thread(get_music_metadata, vid, fallback_text=chosen_track)
 
                     final_reply = format_song_card(
                         song=meta["song"],
@@ -189,21 +218,134 @@ async def on_raw_reaction_add(payload):
                         intro=intro_text
                     )
 
-                    if channel.id in chat_history:
-                        chat_history[channel.id].append({
-                            "role": "user",
-                            "content": f"{user.display_name} reacted with 👍 to '{orig_display}'."
-                        })
-                        chat_history[channel.id].append({
-                            "role": "assistant",
-                            "content": f"Shared similar track: '{meta['song']}' by '{meta['artist']}' ({verified_url})."
-                        })
-
                     await channel.send(final_reply)
+
+                    # Record it under the channel lock so it can't land between a
+                    # tool call and its results while a message turn is in progress.
+                    async with channel_locks[channel.id]:
+                        if channel.id in chat_history:
+                            chat_history[channel.id].append({
+                                "role": "user",
+                                "content": f"{user.display_name} reacted with 👍 to '{orig_display}'."
+                            })
+                            chat_history[channel.id].append({
+                                "role": "assistant",
+                                "content": f"Shared similar track: '{meta['song']}' by '{meta['artist']}' ({verified_url})."
+                            })
 
                 except Exception as e:
                     print(f"❌ [Reaction Error]: {e}")
-                    await channel.send(f"⚠️ Error finding similar song: {e}")
+                    await channel.send("⚠️ Something went wrong while finding a similar song. Please try again!")
+
+
+async def run_agent_turn(channel_id, mode_config):
+    """Run the model/tool loop for one user turn and return the final reply text."""
+    is_research = mode_config.get("is_research", False)
+    supports_tools = mode_config.get("supports_tools", True)
+    max_iterations = mode_config["max_iterations"]
+    active_tools = mode_config.get("tools", {})
+    tool_functions = list(active_tools.values())
+    history = chat_history[channel_id]
+
+    if is_research:
+        tools.VISITED_URLS.clear()
+
+    base_kwargs = {
+        "model": mode_config["model"],
+        "options": mode_config["ollama_options"],
+    }
+
+    async def final_answer_without_tools(nudge):
+        """Ask the model for a final answer with tools hidden, so it must write text."""
+        response = await ollama_client.chat(
+            **base_kwargs,
+            messages=history + [{"role": "user", "content": nudge}],
+        )
+        text = response.message.content or ""
+        if text.strip():
+            history.append({"role": "assistant", "content": text})
+        return text
+
+    iterations = 0
+    reply = ""
+    while iterations < max_iterations:
+        # Dynamically construct chat arguments so tools are completely hidden
+        # from models that can't handle them.
+        chat_kwargs = dict(base_kwargs, messages=history)
+        if supports_tools and tool_functions:
+            chat_kwargs["tools"] = tool_functions
+
+        response = await ollama_client.chat(**chat_kwargs)
+        history.append(response.message)
+
+        tool_calls = getattr(response.message, "tool_calls", None)
+        if not tool_calls:
+            reply = response.message.content or ""
+            # Nudge if the model returned nothing after using tools
+            if not reply.strip() and iterations > 0 and is_research:
+                reply = await final_answer_without_tools(
+                    "Now summarize and give your final answer based on the tool results above."
+                )
+            break
+
+        print(f"⚡ [{current_mode.upper()}] Model requested {len(tool_calls)} tools simultaneously!")
+        has_top_music = any(call.function.name == "skill_top_music" for call in tool_calls)
+
+        async def run_tool(call):
+            tool_name = call.function.name
+
+            # Guardrail: Prevent running youtube searcher in parallel with top music
+            if tool_name == "skill_youtube_searcher" and has_top_music:
+                print(f"  └─ ⚠️ [Orchestrator]: Blocked parallel {tool_name} call while skill_top_music is executing.")
+                return {
+                    "role": "tool",
+                    "name": tool_name,
+                    "content": (
+                        "PARALLEL_EXECUTION_BLOCKED: You cannot call `skill_youtube_searcher` at the same time as `skill_top_music`. "
+                        "You must first review the songs returned by `skill_top_music` in this step, select ONE specific song, "
+                        "and then call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` in your NEXT step to get its link."
+                    )
+                }
+
+            if tool_name in active_tools:
+                func = active_tools[tool_name]
+                args = normalize_tool_args(tool_name, func, call.function.arguments or {})
+                print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
+                try:
+                    tool_output = await asyncio.to_thread(func, **args)
+                except Exception as e:
+                    print(f"  └─ ❌ Tool {tool_name} crashed: {e}")
+                    tool_output = f"Tool execution failed: {e}"
+            else:
+                print(f"  └─ ⚠ Unknown tool requested: {tool_name}")
+                tool_output = f"Tool '{tool_name}' not available."
+
+            return {
+                "role": "tool",
+                "name": tool_name,
+                "content": str(tool_output)
+            }
+
+        tool_results = await asyncio.gather(*(run_tool(call) for call in tool_calls))
+        history.extend(tool_results)
+        iterations += 1
+
+    if iterations >= max_iterations and not reply.strip():
+        # Step budget exhausted while still calling tools: make the model answer with what it has.
+        print(f"⚠️ [{current_mode.upper()}] Reached max iterations ({max_iterations}); forcing a final answer.")
+        try:
+            reply = await final_answer_without_tools(
+                "You have used all available tool steps. Do not call any more tools. "
+                "Give your best final answer now using only the tool results above."
+            )
+        except Exception as e:
+            print(f"⚠️ Final-answer call failed: {e}")
+            reply = ""
+        if not reply.strip() and is_research:
+            reply = "⚠️ I reached the maximum step limit before I could finish. Please try a narrower question."
+
+    return reply
+
 
 @client.event
 async def on_message(message):
@@ -238,11 +380,10 @@ async def on_message(message):
                     print(f"Note: Could not explicitly unload model: {e}")
 
             current_mode = new_mode
-            chat_history.pop(message.channel.id, None)
-            tools.VISITED_URLS.clear()
-            tools.URL_CACHE.clear()
-            tools.SEARCH_CACHE.clear()
-            tools.YOUTUBE_CACHE.clear()
+            # The mode is global, so every channel's history was built with the old
+            # system prompt/persona. Wipe them all, not just this channel.
+            chat_history.clear()
+            clear_tool_caches()
             await message.channel.send(f"🔄 Switched to **{new_mode.upper()}** mode (Model: `{new_model}`). Memory and context wiped.")
         else:
             await message.channel.send(f"⚠️ Unknown mode. Available modes: {', '.join(MODES.keys())}")
@@ -250,10 +391,7 @@ async def on_message(message):
 
     if user_input.lower() == "!reset":
         chat_history.pop(message.channel.id, None)
-        tools.VISITED_URLS.clear()
-        tools.URL_CACHE.clear()
-        tools.SEARCH_CACHE.clear()
-        tools.YOUTUBE_CACHE.clear()
+        clear_tool_caches()
         await message.channel.send("🧹 Memory and context wiped for this channel.")
         return
 
@@ -263,155 +401,65 @@ async def on_message(message):
     if not is_mentioned and not is_dm:
         return
 
-    # Set up mode config
-    mode_config = MODES[current_mode]
-    tools.ACTIVE_MEMORY_FILE = mode_config["memory_file"]
-    supports_tools = mode_config.get("supports_tools", True)
+    channel_id = message.channel.id
 
-    if message.channel.id not in chat_history:
-        saved_facts = tools.recall_memories()
-        chat_history[message.channel.id] = [
-            {"role": "system", "content": mode_config["get_prompt"](saved_facts)}
-        ]
+    # Serialize turns per channel: two overlapping mentions would otherwise
+    # interleave their tool calls/results in the same history list.
+    async with channel_locks[channel_id]:
+        # Set up mode config
+        mode_config = MODES[current_mode]
+        is_research = mode_config.get("is_research", False)
+        tools.set_memory_file(mode_config["memory_file"])
 
-    other_mentions = [f"{m.display_name} (ID: {m.id})" for m in message.mentions if m != client.user]
-    mention_context = f" [Tagged in chat: {', '.join(other_mentions)}]" if other_mentions else ""
-    
-    if current_mode == "chat":
-        user_msg = f"{message.author.display_name} (User ID: {message.author.id}){mention_context}: {user_input}"
-    else:
-        user_msg = f"User {message.author.display_name} says: {user_input}"
+        # Rebuild the system prompt every turn so the date and saved facts stay current.
+        system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
+        if channel_id not in chat_history:
+            chat_history[channel_id] = [system_msg]
+        else:
+            chat_history[channel_id][0] = system_msg
 
-    chat_history[message.channel.id].append({"role": "user", "content": user_msg})
+        other_mentions = [f"{m.display_name} (ID: {m.id})" for m in message.mentions if m != client.user]
+        mention_context = f" [Tagged in chat: {', '.join(other_mentions)}]" if other_mentions else ""
+        
+        if current_mode == "chat":
+            user_msg = f"{message.author.display_name} (User ID: {message.author.id}){mention_context}: {user_input}"
+        else:
+            user_msg = f"User {message.author.display_name} says: {user_input}"
 
-    async with message.channel.typing():
-        try:
-            iterations = 0
-            max_iterations = mode_config["max_iterations"]
-            reply = ""
-            active_tools = mode_config.get("tools", {})
-            tool_functions = list(active_tools.values())
+        chat_history[channel_id].append({"role": "user", "content": user_msg})
 
-            if current_mode == "research":
-                tools.VISITED_URLS.clear()
+        async with message.channel.typing():
+            try:
+                reply = await run_agent_turn(channel_id, mode_config)
 
-            while iterations < max_iterations:
-                
-                # Dynamically construct chat arguments so tools are completely hidden
-                # from models that can't handle them.
-                chat_kwargs = {
-                    "model": mode_config["model"],
-                    "messages": chat_history[message.channel.id],
-                    "options": mode_config["ollama_options"]
-                }
-                
-                if supports_tools and tool_functions:
-                    chat_kwargs["tools"] = tool_functions
+                if not reply.strip():
+                    reply = "Don't leave me hanging—what's on your mind?" if current_mode == "chat" else "⚠️ Generated an empty response."
 
-                response = await ollama_client.chat(**chat_kwargs)
+                # Rolling context trimming (also shortens old tool dumps)
+                chat_history[channel_id] = trim_history(chat_history[channel_id], mode_config.get("history_limit", 40))
 
-                chat_history[message.channel.id].append(response.message)
+                # Auto-ping fix for chat mode
+                if current_mode == "chat":
+                    reply = apply_auto_ping(reply, known_users)
 
-                # Process Tool Calls if any
-                if getattr(response.message, "tool_calls", None):
-                    print(f"⚡ [{current_mode.upper()}] Model requested {len(response.message.tool_calls)} tools simultaneously!")
-                    
-                    tool_names = [call.function.name for call in response.message.tool_calls]
-                    has_top_music = "skill_top_music" in tool_names
+                if is_research:
+                    reply = join_orphan_bullets(reply)
 
-                    async def run_tool(call):
-                        tool_name = call.function.name
-                        args = call.function.arguments or {}
+                # Suppress Discord embed cards for article/web links while preserving YouTube video embeds
+                reply = suppress_discord_embeds(reply)
 
-                        # Guardrail: Prevent running youtube searcher in parallel with top music
-                        if tool_name == "skill_youtube_searcher" and has_top_music:
-                            print(f"  └─ ⚠️ [Orchestrator]: Blocked parallel {tool_name} call while skill_top_music is executing.")
-                            return {
-                                "role": "tool",
-                                "name": tool_name,
-                                "content": (
-                                    "PARALLEL_EXECUTION_BLOCKED: You cannot call `skill_youtube_searcher` at the same time as `skill_top_music`. "
-                                    "You must first review the songs returned by `skill_top_music` in this step, select ONE specific song, "
-                                    "and then call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` in your NEXT step to get its link."
-                                )
-                            }
+                # Clean and ensure consistent song card template if a music track is returned
+                # (may hit the network for metadata, so run it off the event loop)
+                reply = await asyncio.to_thread(standardize_song_reply, reply)
 
-                        if tool_name in active_tools:
-                            print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
-                            try:
-                                if not isinstance(args, dict):
-                                    args = {}
-                                func = active_tools[tool_name]
-                                sig = inspect.signature(func)
-                                filtered_args = {k: v for k, v in args.items() if k in sig.parameters}
-                                tool_output = await asyncio.to_thread(func, **filtered_args)
-                            except Exception as e:
-                                print(f"  └─ ❌ Tool {tool_name} crashed: {e}")
-                                tool_output = f"Tool execution failed: {e}"
-                        else:
-                            print(f"  └─ ⚠ Unknown tool requested: {tool_name}")
-                            tool_output = f"Tool '{tool_name}' not available."
+                chunks = chunk_message(reply)
+                for chunk in chunks:
+                    if chunk:
+                        await message.channel.send(chunk)
 
-                        return {
-                            "role": "tool",
-                            "name": tool_name,
-                            "content": str(tool_output)
-                        }
-
-                    tool_results = await asyncio.gather(*(run_tool(call) for call in response.message.tool_calls))
-                    chat_history[message.channel.id].extend(tool_results)
-
-                    iterations += 1
-                    continue
-                else:
-                    reply = response.message.content or ""
-                    
-                    # Nudge if the model returned nothing after using tools
-                    if not reply.strip() and iterations > 0 and current_mode == "research":
-                        force_chat_kwargs = dict(chat_kwargs)
-                        force_chat_kwargs["messages"] = chat_history[message.channel.id] + [{
-                            "role": "user",
-                            "content": "Now summarize and give your final answer based on the tool results above."
-                        }]
-                        force_response = await ollama_client.chat(**force_chat_kwargs)
-                        reply = force_response.message.content or ""
-                    break
-
-            if iterations >= max_iterations and current_mode == "research":
-                reply = "⚠️ I reached the maximum step limit and paused. Here is what I gathered so far."
-
-            if not reply.strip():
-                reply = "Don't leave me hanging—what's on your mind?" if current_mode == "chat" else "⚠️ Generated an empty response."
-
-            # Auto-ping fix for chat mode
-            if current_mode == "chat":
-                for name, uid in sorted(known_users.items(), key=lambda x: len(x[0]), reverse=True):
-                    pattern = re.compile(rf'@?(?:\\b{re.escape(name)}\\b)', re.IGNORECASE)
-                    reply = pattern.sub(f"<@{uid}>", reply)
-
-            # Rolling context trimming
-            history_limit = 12 if current_mode == "research" else 40
-            if len(chat_history[message.channel.id]) > history_limit:
-                trim_size = 10 if current_mode == "research" else 35
-                chat_history[message.channel.id] = [chat_history[message.channel.id][0]] + chat_history[message.channel.id][-trim_size:]
-
-            if current_mode == "research":
-                reply = reply.replace("* \\n", "* ").replace("- \\n", "- ")
-
-            # Suppress Discord embed cards for article/web links while preserving YouTube video embeds
-            reply = suppress_discord_embeds(reply)
-
-            # Clean and ensure consistent song card template if a music track is returned
-            reply = standardize_song_reply(reply)
-
-            chunks = chunk_message(reply)
-            for chunk in chunks:
-                if chunk:
-                    await message.channel.send(chunk)
-
-        except Exception as e:
-            print(f"❌ Error handling message: {e}")
-            await message.channel.send(f"⚠️ Error: {e}")
+            except Exception as e:
+                print(f"❌ Error handling message: {type(e).__name__}: {e}")
+                await message.channel.send("⚠️ Something went wrong while handling that. Please try again!")
 
 if __name__ == "__main__":
     client.run(DISCORD_TOKEN)

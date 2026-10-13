@@ -160,6 +160,11 @@ def is_placeholder_text(text: str) -> bool:
         "<youtube url>", "song title", "artist name", "genre name", "album name"
     ) or t.startswith("<raw youtube") or t.startswith("<song") or t.startswith("<artist") or "<song" in t or "<artist" in t or "song title" in t or "artist name" in t
 
+# A song-card title line: "**Song:** X", "Song: X" or "**Track:** X" at the start of a line
+# (optionally after a bullet). Anchoring matters: news headlines like "- **Fast Track: ...**"
+# must not be mistaken for a song card.
+_SONG_LINE = re.compile(r'(?im)^[^\S\n]*(?:[-*•][^\S\n]*)?(?:\*\*)?(?:Song|Track):(?:\*\*)?[^\S\n]*\S')
+
 def standardize_song_reply(reply: str) -> str:
     """
     Scans a message reply for YouTube Music or song links.
@@ -167,7 +172,10 @@ def standardize_song_reply(reply: str) -> str:
     preserving any conversational context or similarity descriptions while stripping
     hallucinated markdown links or broken empty templates.
     """
-    has_song_header = bool(re.search(r'(?:\*\*|\b)(?:Song|Track):\s*', reply, re.IGNORECASE))
+    has_song_line = bool(_SONG_LINE.search(reply))
+    has_artist_field = bool(re.search(r'(?:\*\*|\b)Artist:', reply, re.IGNORECASE))
+    has_youtube_link = bool(re.search(r'(?:youtube\.com/watch|youtu\.be/)', reply, re.IGNORECASE))
+    has_song_header = has_song_line and (has_artist_field or has_youtube_link)
 
     # Helper: Extract conversational intro lines preceding any song headers or raw urls
     intro_lines = []
@@ -193,7 +201,7 @@ def standardize_song_reply(reply: str) -> str:
         extracted_album = None
         extracted_genre = None
 
-        m_song = re.search(r'(?:\*\*|\b)(?:Song|Track):\*{0,2}\s*(.+)', reply, re.IGNORECASE)
+        m_song = re.search(r'(?im)^[^\S\n]*(?:[-*•][^\S\n]*)?(?:\*\*)?(?:Song|Track):\*{0,2}\s*(.+)', reply)
         if m_song:
             clean_s = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_song.group(1)).strip()
             # If multiple fields are inline (e.g. "Song: X Artist: Y")

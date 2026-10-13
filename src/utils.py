@@ -40,10 +40,26 @@ def chunk_message(text: str, max_length: int = 1900) -> list[str]:
         
     return chunks
 
+# URL body that allows one level of balanced parentheses, e.g. .../Python_(programming_language)
+_URL_BODY = r'https?://(?:[^\s()<>]|\([^\s()<>]*\))+'
+_YOUTUBE_HOST = re.compile(r'(?:youtube\.com|youtu\.be)', re.IGNORECASE)
+_TRAILING_PUNCT = '.,;:!?\'"'
+
+# Lines where the model tells the *user* to run an internal tool, e.g.
+# "Need deeper details on any story? Use read_website to explore specific URLs!"
+# Deliberately narrow: ordinary sentences that merely mention a tool name are kept.
+_LEAKED_TOOL_FOOTER = re.compile(
+    r'(?im)^[^\S\n]*(?:[-*•>][^\S\n]*)?'
+    r'(?:need (?:deeper|more) (?:details|info|information)\b[^\n]*\b(?:read_website|search_web)\b[^\n]*'
+    r'|(?:you can |feel free to )?(?:use|call|try) (?:the )?`?(?:read_website|search_web)`?(?: tool)? (?:to|on|for)\b[^\n]*)'
+    r'[^\S\n]*(?:\n|$)'
+)
+
+
 def suppress_discord_embeds(text: str) -> str:
     """Enclose web links in angle brackets <URL> to prevent Discord from generating
     huge embed preview cards for article links, while preserving intentional YouTube embeds.
-    Also strips any accidentally echoed tool instructions.
+    Also strips leaked "use read_website ..." footers the model sometimes echoes to the user.
     """
     if not text:
         return text
@@ -52,25 +68,28 @@ def suppress_discord_embeds(text: str) -> str:
     # Exempt youtube.com and youtu.be so intended media cards embed.
     def _mask_link(m):
         label, url = m.group(1), m.group(2)
-        if re.search(r'(?:youtube\.com|youtu\.be)', url, re.IGNORECASE):
+        if _YOUTUBE_HOST.search(url):
             return m.group(0)
         return f"[{label}](<{url}>)"
 
-    text = re.sub(r'\[([^\]]+)\]\((https?://[^>)\s]+)\)', _mask_link, text)
+    text = re.sub(rf'\[([^\]]+)\]\(({_URL_BODY})\)', _mask_link, text)
 
     # 2. Standalone raw URLs: https://... -> <https://...>
-    # Match URLs not already preceded by < or ( or " or '
+    # Skip URLs already wrapped in <...> and markdown link targets "](url)" (YouTube ones kept bare above).
     def _mask_raw(m):
         url = m.group(1)
-        if re.search(r'(?:youtube\.com|youtu\.be)', url, re.IGNORECASE):
-            return url
-        return f"<{url}>"
+        trailing = ""
+        while url and url[-1] in _TRAILING_PUNCT:
+            trailing = url[-1] + trailing
+            url = url[:-1]
+        if _YOUTUBE_HOST.search(url):
+            return url + trailing
+        return f"<{url}>{trailing}"
 
-    text = re.sub(r'(?<![<(\"\'])(https?://[^\s>)\"\']+)', _mask_raw, text)
+    text = re.sub(rf'(?<!<)(?<!\]\()({_URL_BODY})', _mask_raw, text)
 
-    # 3. Strip any leaked internal tool instruction lines
-    leak_pattern = r'(?im)^.*?\b(?:read_website|search_web)\b.*$\n?'
-    text = re.sub(leak_pattern, '', text)
+    # 3. Strip leaked tool-instruction footers
+    text = _LEAKED_TOOL_FOOTER.sub('', text)
 
     # 4. Clean up any trailing empty separator dashes
     text = re.sub(r'\n*---\s*$', '', text)

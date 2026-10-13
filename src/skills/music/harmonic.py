@@ -1,3 +1,4 @@
+from typing import Optional
 from src.skills.music.aggregators.freqblog import FreqBlogAggregator
 from src.skills.music.aggregators.manager import MusicAggregatorManager
 
@@ -5,10 +6,10 @@ freqblog = FreqBlogAggregator()
 manager = MusicAggregatorManager()
 
 def skill_audio_intelligence(
-    track: str = None,
-    action: str = "bpm_key",
-    second_track: str = None,
-    target_bpm: int = None
+    track: Optional[str] = None,
+    action: Optional[str] = "bpm_key",
+    second_track: Optional[str] = None,
+    target_bpm: Optional[int] = None
 ) -> str:
     """
     Audio analysis and DJ harmonic mixing intelligence powered by FreqBlog.
@@ -19,6 +20,12 @@ def skill_audio_intelligence(
     - action='transition': Scores how cleanly two tracks mix together (requires 'track' and 'second_track').
     - action='bpm_search': Finds tracks at a specific tempo (requires 'target_bpm').
     - action='harmonic_radio': Builds a continuous Camelot-compatible DJ set starting from 'track'.
+
+    Args:
+        track: Seed song as 'Song Title by Artist Name'.
+        action: One of 'bpm_key' (default), 'match_mood', 'transition', 'bpm_search', 'harmonic_radio'.
+        second_track: Second song for action='transition', as 'Song Title by Artist Name'.
+        target_bpm: Tempo to search for with action='bpm_search'.
     """
     if not track and not target_bpm:
         return "Please specify a track name or target BPM."

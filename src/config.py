@@ -39,6 +39,8 @@ MODES = {
         "model": "gemma4:e4b",
         "memory_file": "data/research_memory.json",
         "max_iterations": 10,
+        "is_research": True,
+        "history_limit": 12,  # messages kept after the system prompt (tool outputs count)
         "supports_tools": True,  # Set to False if the model fails to use tools properly
         "tools": tools.RESEARCH_TOOLS,
         "ollama_options": {
@@ -54,6 +56,8 @@ MODES = {
         "model": "qwen3:8b",
         "memory_file": "data/research_memory.json",
         "max_iterations": 10,
+        "is_research": True,
+        "history_limit": 12,  # messages kept after the system prompt (tool outputs count)
         "supports_tools": True,  # Set to False if the model fails to use tools properly
         "tools": tools.RESEARCH_TOOLS,
         "ollama_options": {
@@ -69,6 +73,8 @@ MODES = {
         "model": "hf.co/bartowski/Llama-3.1-8B-Lexi-Uncensored-V2-GGUF:Q4_K_M",
         "memory_file": "data/chat_memory.json",
         "max_iterations": 4,
+        "is_research": False,
+        "history_limit": 40,
         "supports_tools": True, # Turned off tools for this mode to prevent model confusion
         "tools": tools.CHAT_TOOLS,
         "ollama_options": {
@@ -85,6 +91,8 @@ MODES = {
         "model": "hf.co/bartowski/Llama-3.1-8B-Lexi-Uncensored-V2-GGUF:Q4_K_M",
         "memory_file": "data/chat_memory.json",
         "max_iterations": 4,
+        "is_research": False,
+        "history_limit": 40,
         "supports_tools": False, # Turned off tools for this mode to prevent model confusion
         "tools": tools.CHAT_TOOLS,
         "ollama_options": {

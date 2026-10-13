@@ -18,6 +18,12 @@ from src.tools.web import (
     YOUTUBE_CACHE,
 )
 from src.utils import suppress_discord_embeds
+from src.orchestrator import normalize_tool_args
+
+
+def call_as_model(func, **raw_args):
+    """Call a tool the way main.py does for a model tool call (aliases mapped, types coerced)."""
+    return func(**normalize_tool_args(func.__name__, func, raw_args))
 
 
 class TestWebTools(unittest.TestCase):
@@ -81,6 +87,26 @@ class TestWebTools(unittest.TestCase):
         self.assertIn("Security Block", read_website("http://169.254.169.254/metadata"))
 
     @patch("src.tools.web.cffi_requests.get")
+    @patch("src.tools.web.cffi_requests.head")
+    def test_redirect_to_private_host_blocked(self, mock_head, mock_get):
+        jina_resp = MagicMock()
+        jina_resp.status_code = 429
+        redirect_resp = MagicMock()
+        redirect_resp.status_code = 302
+        redirect_resp.headers = {"Location": "http://169.254.169.254/latest/meta-data/"}
+        mock_head.return_value = redirect_resp
+        requested = []
+
+        def get_dispatcher(url, *args, **kwargs):
+            requested.append(url)
+            return jina_resp if "r.jina.ai" in url else redirect_resp
+
+        mock_get.side_effect = get_dispatcher
+        result = read_website("https://example.com/redirector")
+        self.assertIn("Security Block", result)
+        self.assertFalse(any("169.254.169.254" in u and "jina" not in u for u in requested))
+
+    @patch("src.tools.web.cffi_requests.get")
     def test_url_normalization_and_caching(self, mock_get):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -112,7 +138,7 @@ class TestWebTools(unittest.TestCase):
         mock_get.return_value = mock_resp
 
         # Model used 'link' instead of 'url'
-        res = read_website(link="https://example.com/custom")
+        res = call_as_model(read_website, link="https://example.com/custom")
         self.assertIn("Content from link", res)
 
     @patch("src.tools.web.cffi_requests.get")
@@ -155,7 +181,7 @@ class TestWebTools(unittest.TestCase):
         mock_ddgs_cls.return_value = mock_instance
 
         # Call with alias 'q' and conversational prefix
-        result = search_web(q="search for rtx 5080")
+        result = call_as_model(search_web, q="search for rtx 5080")
         self.assertIn("RTX 5080 Specs", result)
         self.assertIn("nvidia.com", result)
         # Verify the stripped query was passed to text()
@@ -303,7 +329,7 @@ class TestWebTools(unittest.TestCase):
 
         # 7. Alias argument
         YOUTUBE_CACHE.clear()
-        res7 = read_youtube_video(video_url="<https://youtu.be/dQw4w9WgXcQ>")
+        res7 = call_as_model(read_youtube_video, video_url="<https://youtu.be/dQw4w9WgXcQ>")
         self.assertIn("Test YouTube Video", res7)
 
     @patch("src.tools.web.YouTubeTranscriptApi")
