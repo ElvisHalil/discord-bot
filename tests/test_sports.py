@@ -278,6 +278,34 @@ class TestSkillSportsInfo(unittest.TestCase):
         res = skill_sports_info("nhl", "hockey scores")
         self.assertIn("NHL SCOREBOARD", res)
 
+    @patch("src.skills.sports.aggregators.liquipedia.fetch_json")
+    @patch("src.skills.sports.aggregators.hltv.fetch_soup")
+    @patch("src.skills.sports.aggregators.esl_live.EslLiveAggregator.get_live_matches")
+    def test_cs_routing_via_sports_info(self, mock_esl, mock_hltv, mock_liqui):
+        mock_esl.return_value = "No active streams"
+        mock_liqui.return_value = {"parse": {"text": {"*": "<div>S-Tier</div>"}}}
+        mock_hltv.return_value = MagicMock(select=MagicMock(return_value=[]))
+
+        res = skill_sports_info("cs", "whats happening in cs")
+        self.assertIn("COUNTER-STRIKE ESPORTS DATA", res)
+
+    @patch("src.skills.sports.aggregators.odds.fetch_soup")
+    @patch("src.tools.web.search_web")
+    def test_cs_odds_with_stake_simulation(self, mock_search, mock_soup):
+        mock_search.return_value = "https://www.hltv.org/betting/analytics/123/falcons-vs-ninjas-in-pyjamas-thunderpick-world-championship-2026"
+        mock_page = MagicMock()
+        mock_page.title.get_text.return_value = "Falcons vs Ninjas in Pyjamas odds and prediction | HLTV.org"
+        mock_page.get_text.return_value = "Best odds - 1.26 Best odds - 4.20 Falcons is the bookmaker favorite"
+        mock_soup.return_value = mock_page
+
+        from src.skills.sports.aggregators.odds import OddsAggregator
+        agg = OddsAggregator()
+        res = agg.get_odds("if I bet $200 on falcons tomorrow will I win and how much?", sport="sports")
+        self.assertIn("MATCH BETTING ODDS: Falcons vs Ninjas in Pyjamas", res)
+        self.assertIn("Bet Payout Simulation ($200.00 Stake)", res)
+        self.assertIn("Returns **$252.00**", res)
+        self.assertIn("Returns **$840.00**", res)
+
 
 if __name__ == "__main__":
     unittest.main()

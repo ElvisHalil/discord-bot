@@ -29,32 +29,50 @@ def skill_csgo_esports(query_type: Optional[str] = 'all', event_page: Optional[s
         player_url: Player profile URL, required for query_type='player_stats'.
         matchup: Team matchup for betting odds (e.g. 'Falcons vs Ninjas in Pyjamas'), used for query_type='odds'.
     """
-    print(f"🎮 [Executing CS Esports Skill] Type: {query_type}")
+    print(f"🎮 [Executing CS Esports Skill] Type: {query_type}, Matchup: {matchup}")
     output = "=== COUNTER-STRIKE ESPORTS DATA ===\n\n"
 
+    # Normalize query_type to prevent empty data when models pass natural language
+    q_type = (query_type or "all").lower().strip()
+    if any(w in q_type for w in ("odd", "bet", "moneyline", "payout", "win")):
+        q_type = "odds"
+    elif any(w in q_type for w in ("tourn", "schedule", "calendar")):
+        q_type = "tournaments"
+    elif any(w in q_type for w in ("rank", "top", "leader", "standings")):
+        q_type = "rankings"
+    elif any(w in q_type for w in ("live", "stream", "broadcast")):
+        q_type = "live_streams"
+    elif q_type not in ['tournaments', 'event_info', 'rankings', 'player_stats', 'live_streams', 'odds', 'all']:
+        if any(team in q_type for team in _odds_aggregator.CS_TEAMS):
+            q_type = "odds"
+            if not matchup:
+                matchup = query_type
+        else:
+            q_type = "all"
+
     # 1. LIVE STREAMS
-    if query_type in ['live_streams', 'all']:
+    if q_type in ['live_streams', 'all']:
         output += _esl_aggregator.get_live_matches()
 
     # 2. TOURNAMENTS
-    if query_type in ['tournaments', 'all']:
+    if q_type in ['tournaments', 'all']:
         output += _liquipedia_aggregator.get_s_tier_tournaments()
 
     # 3. HLTV RANKINGS
-    if query_type in ['rankings', 'all']:
-        limit = 7 if query_type == 'all' else 15
+    if q_type in ['rankings', 'all']:
+        limit = 7 if q_type == 'all' else 15
         output += _hltv_aggregator.get_rankings(limit=limit)
 
     # 4. EVENT INFO
-    if query_type == 'event_info':
+    if q_type == 'event_info':
         output += _liquipedia_aggregator.get_event_info(event_page)
 
     # 5. PLAYER STATS
-    if query_type == 'player_stats':
+    if q_type == 'player_stats':
         output += _hltv_aggregator.get_player_stats(player_url)
 
-    # 6. BETTING ODDS
-    if query_type in ['odds', 'betting']:
+    # 6. BETTING ODDS / TEAM MATCHUP
+    if q_type in ['odds', 'betting'] or matchup:
         target = matchup or event_page or "Falcons vs Ninjas in Pyjamas"
         output += _odds_aggregator.get_odds(target, sport='cs2')
 

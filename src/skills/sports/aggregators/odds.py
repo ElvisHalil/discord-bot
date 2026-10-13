@@ -74,6 +74,9 @@ class OddsAggregator(BaseSportsAggregator):
 
         # Resolve candidate sport keys to check
         sport_clean = sport.lower().strip()
+        if sport_clean in ("cs", "cs2", "csgo", "esports"):
+            return None
+
         candidate_keys = []
         if sport_clean in sport_map:
             candidate_keys.append(sport_map[sport_clean])
@@ -140,65 +143,115 @@ class OddsAggregator(BaseSportsAggregator):
                     print(f"  └─ ⚠️ [The Odds API ({sport_key})]: {e}")
         return None
 
-    def _fetch_esports_hltv_odds(self, query: str) -> Optional[str]:
+    CS_TEAMS = (
+        "falcons", "team falcons", "nip", "ninjas in pyjamas", "spirit", "team spirit",
+        "vitality", "team vitality", "mouz", "mousesports", "furia", "faze", "g2",
+        "navi", "natus vincere", "astralis", "complexity", "mongolz", "heroic",
+        "eternal fire", "virtus.pro", "9z", "aurora", "betboom", "parivision",
+        "thunderpick", "blast", "pgl", "iem", "esl", "cs", "cs2", "csgo"
+    )
+
+    def _fetch_esports_hltv_odds(self, query: str, stake: Optional[float] = None) -> Optional[str]:
         """Finds and parses live HLTV betting analytics for Counter-Strike matches."""
         try:
             from src.tools.web import search_web
-            search_query = f"{query} odds hltv"
+            # Strip conversational and monetary filler to isolate core team/matchup
+            clean_target = query
+            for stopword in [
+                "if i bet", "i bet", "bet on", "bet", "will i win and how much",
+                "will i win", "how much", "tomorrow", "today", "tonight", "next game",
+                "next match", "match", "game", "odds", "what are the", "can you check",
+                "dollars", "bucks", "usd", "on"
+            ]:
+                clean_target = re.sub(rf'\b{re.escape(stopword)}\b', ' ', clean_target, flags=re.IGNORECASE)
+            clean_target = re.sub(r'[\$0-9]+(?:\.[0-9]{2})?', ' ', clean_target)
+            clean_target = re.sub(r'[^\w\s]', ' ', clean_target)
+            clean_target = ' '.join(clean_target.split())
+            if not clean_target:
+                clean_target = query
+
+            search_query = f"{clean_target} cs2 betting analytics hltv"
             search_res = search_web(search_query)
 
-            hltv_url = None
+            candidate_urls = []
             for line in search_res.split("\n"):
                 if "hltv.org/betting/analytics/" in line:
                     match = re.search(r'https://www.hltv.org/betting/analytics/[^\s)]+', line)
-                    if match:
-                        hltv_url = match.group(0)
-                        break
+                    if match and match.group(0) not in candidate_urls:
+                        url = match.group(0)
+                        if "2026" in url or "thunderpick" in url:
+                            candidate_urls.insert(0, url)
+                        else:
+                            candidate_urls.append(url)
 
-            if not hltv_url:
+            # Fallback search query if analytics URL not found on first attempt
+            if not candidate_urls:
+                search_res = search_web(f"{clean_target} odds hltv")
+                for line in search_res.split("\n"):
+                    if "hltv.org/betting/analytics/" in line:
+                        match = re.search(r'https://www.hltv.org/betting/analytics/[^\s)]+', line)
+                        if match and match.group(0) not in candidate_urls:
+                            url = match.group(0)
+                            if "2026" in url or "thunderpick" in url:
+                                candidate_urls.insert(0, url)
+                            else:
+                                candidate_urls.append(url)
+
+            if not candidate_urls:
                 return None
 
-            print(f"  └─ 🎲 [Odds Scraper]: Parsing HLTV betting analytics at {hltv_url}...")
-            soup = fetch_soup(hltv_url, timeout=12)
-            page_text = soup.get_text(" ", strip=True)
+            for hltv_url in candidate_urls[:3]:
+                print(f"  └─ 🎲 [Odds Scraper]: Parsing HLTV betting analytics at {hltv_url}...")
+                soup = fetch_soup(hltv_url, timeout=12)
+                page_text = soup.get_text(" ", strip=True)
 
-            # Match title (e.g. Falcons vs Ninjas in Pyjamas odds and prediction ...)
-            title = soup.title.get_text(strip=True) if soup.title else query
-            title_clean = title.split(" | ")[0].replace(" odds and prediction", "").replace(" | Full overview", "")
+                # Match title (e.g. Falcons vs Ninjas in Pyjamas odds and prediction ...)
+                title = soup.title.get_text(strip=True) if soup.title else query
+                title_clean = title.split(" | ")[0].replace(" odds and prediction", "").replace(" | Full overview", "")
 
-            # Extract best odds numbers (e.g. Best odds - 1.26, Best odds - 4.20)
-            best_odds = [float(x) for x in re.findall(r'Best odds\s*-\s*([0-9]+\.[0-9]+)', page_text)]
-            
-            # Parse team names from matchup
-            teams = re.split(r'\s+vs\.?\s+', title_clean, flags=re.IGNORECASE)
+                # Extract best odds numbers (e.g. Best odds - 1.26, Best odds - 4.20)
+                best_odds = [float(x) for x in re.findall(r'Best odds\s*-\s*([0-9]+\.[0-9]+)', page_text)]
+                
+                # Parse team names from matchup
+                teams = re.split(r'\s+vs\.?\s+', title_clean, flags=re.IGNORECASE)
 
-            if len(teams) >= 2 and len(best_odds) >= 2:
-                team1, team2 = teams[0].strip(), teams[1].strip()
-                odds1, odds2 = best_odds[0], best_odds[1]
+                if len(teams) >= 2 and len(best_odds) >= 2:
+                    team1, team2 = teams[0].strip(), teams[1].strip()
+                    odds1, odds2 = best_odds[0], best_odds[1]
 
-                # Extract favorite
-                fav_match = re.search(r'([A-Za-z0-9\s]+?)\s+(?:has better form ranking|is the bookmaker favorite)', page_text)
-                favorite = fav_match.group(1).strip() if fav_match else ""
+                    # Extract favorite
+                    fav_match = re.search(r'([A-Za-z0-9\s]+?)\s+(?:has better form ranking|is the bookmaker favorite)', page_text)
+                    favorite = fav_match.group(1).strip() if fav_match else ""
 
-                # Match favorite against parsed team names
-                favorite_name = "Market Consensus"
-                if team1.lower() in favorite.lower():
-                    favorite_name = team1
-                elif team2.lower() in favorite.lower():
-                    favorite_name = team2
-                elif odds1 < odds2:
-                    favorite_name = team1
-                elif odds2 < odds1:
-                    favorite_name = team2
+                    favorite_name = "Market Consensus"
+                    if team1.lower() in favorite.lower():
+                        favorite_name = team1
+                    elif team2.lower() in favorite.lower():
+                        favorite_name = team2
+                    elif odds1 < odds2:
+                        favorite_name = team1
+                    elif odds2 < odds1:
+                        favorite_name = team2
 
-                out = f"[MATCH BETTING ODDS: {team1} vs {team2}]\n"
-                out += f"Favorite: **{favorite_name}**\n"
-                out += f"Best Odds Available:\n"
-                out += f"- **{team1}**: {odds1:.2f} (American: {decimal_to_american(odds1)}) | Win probability: ~{implied_probability(odds1)}\n"
-                out += f"- **{team2}**: {odds2:.2f} (American: {decimal_to_american(odds2)}) | Win probability: ~{implied_probability(odds2)}\n"
-                out += f"Market Source: HLTV Betting Analytics (<{hltv_url}>)\n"
-                out += f"Note: Betting lines reflect bookmaker consensus and fluctuate prior to match start.\n\n"
-                return out
+                    out = f"[MATCH BETTING ODDS: {team1} vs {team2}]\n"
+                    out += f"Favorite: **{favorite_name}**\n"
+                    out += f"Best Odds Available:\n"
+                    out += f"- **{team1}**: {odds1:.2f} (American: {decimal_to_american(odds1)}) | Win probability: ~{implied_probability(odds1)}\n"
+                    out += f"- **{team2}**: {odds2:.2f} (American: {decimal_to_american(odds2)}) | Win probability: ~{implied_probability(odds2)}\n"
+
+                    # If the user specified a stake (e.g. $200), calculate projected payouts
+                    if stake and stake > 0:
+                        payout1 = stake * odds1
+                        profit1 = payout1 - stake
+                        payout2 = stake * odds2
+                        profit2 = payout2 - stake
+                        out += f"\n💰 Bet Payout Simulation (${stake:.2f} Stake):\n"
+                        out += f"- Wager on **{team1}** ({odds1:.2f}): Returns **${payout1:.2f}** (${profit1:.2f} profit) | Win probability: ~{implied_probability(odds1)}\n"
+                        out += f"- Wager on **{team2}** ({odds2:.2f}): Returns **${payout2:.2f}** (${profit2:.2f} profit) | Win probability: ~{implied_probability(odds2)}\n"
+
+                    out += f"\nMarket Source: HLTV Betting Analytics (<{hltv_url}>)\n"
+                    out += f"Note: Betting lines reflect bookmaker consensus and fluctuate prior to match start.\n\n"
+                    return out
 
         except Exception as e:
             print(f"  └─ ⚠️ [HLTV Odds Scraper Error]: {e}")
@@ -239,11 +292,27 @@ class OddsAggregator(BaseSportsAggregator):
 
         query_clean = query.strip()
         sport_clean = (sport or "esports").strip().lower()
+
+        # Extract potential stake from query (e.g. $200, 200 dollars)
+        stake_match = re.search(r'\$([0-9]+(?:\.[0-9]{2})?)|\b([0-9]+(?:\.[0-9]{2})?)\s*(?:dollars|bucks|usd)', query_clean, re.IGNORECASE)
+        stake = float(stake_match.group(1) or stake_match.group(2)) if stake_match else None
+
+        # Detect Counter-Strike / Esports teams and context
+        q_lower = query_clean.lower()
+        is_cs = (
+            sport_clean in ("cs", "cs2", "csgo", "esports") or
+            any(t in q_lower for t in self.CS_TEAMS) or
+            any(t in sport_clean for t in self.CS_TEAMS)
+        )
+        # Avoid misclassifying explicit NFL requests
+        if is_cs and not any(k in q_lower for k in ("nfl", "atlanta falcons", "american football")):
+            sport_clean = "cs2"
+
         print(f"  └─ 🎲 [Odds]: Fetching betting odds for '{query_clean}' (Sport: {sport_clean})...")
 
         # 1. For Counter-Strike/Esports, scrape HLTV betting analytics first
         if sport_clean in ["cs", "cs2", "csgo", "esports"]:
-            hltv_odds = self._fetch_esports_hltv_odds(query_clean)
+            hltv_odds = self._fetch_esports_hltv_odds(query_clean, stake=stake)
             if hltv_odds:
                 return hltv_odds
 
@@ -254,3 +323,4 @@ class OddsAggregator(BaseSportsAggregator):
 
         # 3. Web search consensus
         return self._fetch_web_odds_search(query_clean, sport_clean)
+
