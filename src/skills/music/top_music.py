@@ -1,15 +1,19 @@
 import random
+from typing import Optional
 from src.skills.music.aggregators.manager import MusicAggregatorManager
+from src.skills.music.templates import SONG_TEMPLATE
 
 manager = MusicAggregatorManager()
 
-def skill_top_music(genre: str = None, similar_to: str = None, match_mood: bool = False) -> str:
+def skill_top_music(genre: Optional[str] = None, similar_to: Optional[str] = None, match_mood: Optional[bool] = False) -> str:
     """
     Fetches the current top trending/charting music in the world right now, OR finds similar songs.
     ALWAYS use this skill FIRST when a user asks for song recommendations, top hits, or what music is popular today.
-    - To get top trending charts by genre, specify 'genre' (e.g., 'pop, techno').
-    - To get similar songs, specify 'similar_to' with the track and artist name (e.g. 'Believe by Cher').
-    - To specifically match the emotional mood, vibe, or energy of a song, set 'match_mood=True' (e.g. 'match the mood of Blinding Lights').
+
+    Args:
+        genre: Genre for top charts, e.g. 'pop' or 'techno'. Leave empty for all genres.
+        similar_to: Seed song to find similar tracks for, as 'Song Title by Artist Name'.
+        match_mood: Set true to match the emotional mood/energy of the similar_to song rather than just its style.
     """
     if similar_to:
         print(f"🎵 [Executing Top Music Skill] Similar to: {similar_to} (match_mood={match_mood})")
@@ -41,29 +45,12 @@ def skill_top_music(genre: str = None, similar_to: str = None, match_mood: bool 
             for t in unique_tracks[:15]:
                 output += t.display_line() + "\n"
 
-            output += """
-=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===
-Select ONE best matching song from the list above.
-CRITICAL INSTRUCTION: Call `skill_youtube_searcher` with `is_music=True` and query="<Song Title> by <Artist Name>" to fetch its verified YouTube Music link.
-When presenting the song to the user, you MUST format your response using this EXACT clean, text-only template (NO EMOJIS):
-
-[Your brief conversational intro or similarity explanation, if any]
-
-**Song:** <Song Title>
-**Artist:** <Artist Name>
-**Genre:** <Genre Name> (optional, include only if known)
-**Album:** <Album Name> (optional, include only if known)
-
-<Raw YouTube Music URL on its own blank line>
-
-CRITICAL RULES:
-1. BOTH '**Song:**' and '**Artist:**' MUST always be displayed.
-2. Do NOT include ANY emojis in the song template lines. Keep it clean and text-only.
-3. NEVER invent or hallucinate YouTube URLs. You MUST use `skill_youtube_searcher` to get the link.
-4. Paste ONLY the bare YouTube Music URL on a new blank line at the bottom.
-5. NEVER wrap the link in markdown (like `[Title](url)`) or `<>` brackets.
-6. Do NOT output ANY markdown links like `[YouTube](...)` or `[Channel](...)` or `[Title](...)`.
-"""
+            output += (
+                "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
+                "Select ONE best matching song from the list above, then call "
+                "`skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` to get its verified link.\n\n"
+                + SONG_TEMPLATE
+            )
             return output
         except Exception as e:
             return f"Error finding similar songs: {e}"
@@ -108,31 +95,13 @@ CRITICAL RULES:
         else:
             output += "No charting music found.\n"
 
-        output += """=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===
-You have successfully fetched today's top music.
-Present these lists to the user naturally.
-If this skill returned NO data or an unrecognizable genre, immediately use your `search_web` tool to find the top music for that specific genre online.
-CRITICAL INSTRUCTION: If the user explicitly asked for "a song" or "a beat" (singular), you MUST pick EXACTLY ONE song from the list, use `skill_youtube_searcher` with `is_music=True` to get its link, and present ONLY THAT ONE SONG. Do not return 3 songs. Only return multiple if they asked for a playlist or multiple recommendations.
-CRITICAL INSTRUCTION: NEVER guess or invent YouTube URLs. You MUST call `skill_youtube_searcher` with `is_music=True` to get the real, working video link for any song you present.
-
-When presenting a song to the user, you MUST format your response using this EXACT clean, text-only template (NO EMOJIS):
-
-[Your brief conversational intro or recommendation context, if any]
-
-**Song:** <Song Title>
-**Artist:** <Artist Name>
-**Genre:** <Genre Name> (optional, include only if known)
-**Album:** <Album Name> (optional, include only if known)
-
-<Raw YouTube Music URL on its own blank line>
-
-CRITICAL RULES:
-1. BOTH '**Song:**' and '**Artist:**' MUST always be displayed.
-2. Do NOT include ANY emojis in the song template lines. Keep it clean and text-only.
-3. Paste ONLY the bare YouTube Music URL on a new blank line at the bottom.
-4. NEVER wrap the link in markdown (like `[Title](url)`) or `<>` brackets, otherwise Discord will fail to embed the music player!
-5. Do NOT output ANY markdown links like `[YouTube](...)` or `[Channel](...)` or `[Title](...)`.
-"""
+        output += (
+            "=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
+            "Present these lists to the user naturally. If this returned no data or an unrecognized genre, use `search_web` to find top music for that genre instead.\n"
+            "If the user asked for a single song, pick EXACTLY ONE from the list and present only that one; return several only if they asked for multiple.\n"
+            "For every song you present, call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` to get its real link.\n\n"
+            + SONG_TEMPLATE
+        )
         return output
     except Exception as e:
         return f"Error fetching top music: {e}"

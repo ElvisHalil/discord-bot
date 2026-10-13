@@ -1,11 +1,12 @@
-discord.py
-ollama
-requests
-beautifulsoup4
-youtube-transcript-api
-ddgs
-numexpr
-python-dotenv
-curl_cffi
-markdownify
-
+# Compatible-release pins (~=): allows bug-fix updates, blocks breaking upgrades.
+# Versions match the environment the bot was tested with.
+discord.py~=2.7.1
+ollama~=0.6.3
+requests~=2.34
+beautifulsoup4~=4.15
+youtube-transcript-api~=1.2.4
+ddgs~=9.16
+numexpr~=2.14
+python-dotenv~=1.2
+curl_cffi~=0.16.3
+markdownify~=1.2

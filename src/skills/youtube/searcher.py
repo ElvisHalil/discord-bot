@@ -1,14 +1,25 @@
 import re
+from typing import Optional
 from src.skills.youtube.client import search_youtube
 from src.skills.music.playback.youtube_music import resolve_youtube_music_link
+from src.skills.music.templates import SONG_TEMPLATE
 
-def skill_youtube_searcher(query: str, max_results: int = 1, is_music: bool = False) -> str:
+MAX_YOUTUBE_RESULTS = 5
+
+def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music: Optional[bool] = False) -> str:
     """
-    Searches YouTube for videos (dance clips, tutorials, music videos, or specific songs).
-    - VIDEO MODE (is_music=False, default): Use when the user asks for videos to WATCH — such as dance clips (e.g. 'hakken dance', 'shuffle dance compilation'), dance tutorials ('how to hakken'), live festival sets, or visual performances. Returns standard playable YouTube video links.
-    - MUSIC MODE (is_music=True): Use ONLY when fetching an audio playback link for a specific song/artist recommendation discovered via `skill_top_music`.
-    IMPORTANT: If the user asks for dance videos, how people dance, or visual clips, use this tool directly in video mode (`is_music=False`).
+    Searches YouTube for videos to WATCH (dance clips, tutorials, live sets, visual performances) or,
+    in music mode, fetches the playback link for a specific song found via `skill_top_music`.
+
+    Args:
+        query: What to search for. In music mode use 'Song Title by Artist Name'.
+        max_results: Number of results to return (default 1, max 5).
+        is_music: Set true ONLY to get a YouTube Music link for a specific song. Leave false for videos.
     """
+    try:
+        max_results = max(1, min(int(max_results or 1), MAX_YOUTUBE_RESULTS))
+    except (TypeError, ValueError):
+        max_results = 1
     print(f"▶️ [Executing YouTube Search Skill]: {query} (max_results: {max_results}, is_music: {is_music})")
 
     try:
@@ -47,30 +58,11 @@ def skill_youtube_searcher(query: str, max_results: int = 1, is_music: bool = Fa
             for i, r in enumerate(results):
                 formatted_results += f"{i+1}. Song: {r['title']}\n   Artist: {r['artist']}\n   Link: {r['url']}\n\n"
 
-            instruction_text = """=== REQUIRED RESPONSE TEMPLATE FOR SONGS ===
-When presenting a song to the user, you MUST format your response using this EXACT clean, text-only template (NO EMOJIS):
-
-[Your brief conversational intro or similarity explanation, if any]
-
-**Song:** <Song Title>
-**Artist:** <Artist Name>
-**Genre:** <Genre Name> (optional, include only if known)
-**Album:** <Album Name> (optional, include only if known)
-
-<Raw YouTube Music URL on its own blank line>
-
-CRITICAL RULES:
-1. BOTH '**Song:**' and '**Artist:**' MUST always be displayed.
-2. Do NOT include ANY emojis in the song template lines. Keep it clean and text-only.
-3. Paste ONLY the bare YouTube Music URL on a new blank line at the bottom.
-4. NEVER wrap the link in markdown (like `[Title](url)`) or `<>` brackets.
-5. Do NOT output ANY markdown links like `[YouTube](...)` or `[Channel](...)` or `[Title](...)`.
-"""
             return f"""
 === YOUTUBE MUSIC RESULTS ===
 {formatted_results}
 
-{instruction_text}
+{SONG_TEMPLATE}
 """
 
         # General video mode: pure video search
