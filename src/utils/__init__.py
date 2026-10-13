@@ -25,3 +25,4 @@ __all__ = [
     "_is_private_or_local_host",
     "BlockedRedirectError",
 ]
+

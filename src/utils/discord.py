@@ -98,3 +98,4 @@ def suppress_discord_embeds(text: str) -> str:
     text = re.sub(r'\n*---\s*$', '', text)
 
     return text.strip()
+

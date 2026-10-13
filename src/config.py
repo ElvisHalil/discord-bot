@@ -14,6 +14,7 @@ def _build_research_prompt(facts: str) -> str:
         "- Follow-ups: Before expanding on a story or result from earlier, call `read_website` on its URL and only add details that the source actually states. If it can't be read, search for the headline to find another source; never fill gaps with guesses.\n"
         "- Media Tools: For visual, dance, or tutorial videos, use `skill_youtube_searcher(is_music=False)`. For song/audio recommendations, use `skill_top_music` first, then get the verified link with `skill_youtube_searcher(is_music=True)`. Never call music and video discovery in parallel. Never invent fake URLs.\n"
         "- Discord Formatting: Present answers cleanly with bold titles and concise bullet points. Wrap web links in angle brackets like [Source](<URL>) to suppress Discord preview cards. Provide ONE clean summary list—never dump duplicate raw source blocks or quote internal tools (e.g. read_website) to the user.\n"
+        "- Esports / CS: When asked about Counter-Strike or esports, use `skill_csgo_esports`. Synthesize the pro scene naturally (highlight the nearest upcoming tournament, recent champions, and top contenders) with real Markdown links `[Tournament](<URL>)`. Never output empty live match sections, rigid raw templates, or fake `<event_page:...>` links.\n"
         "- Casual Chats: For brief greetings or casual remarks, reply in 1 natural sentence without calling tools.\n\n"
         f"Here is what you currently know about the user:\n{facts}"
     )

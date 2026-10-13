@@ -49,6 +49,16 @@ TOOL_ARG_ALIASES = {
         "song": "similar_to",
         "track": "similar_to",
     },
+    "skill_csgo_esports": {
+        "type": "query_type",
+        "category": "query_type",
+        "query": "query_type",
+        "mode": "query_type",
+        "event": "event_page",
+        "page": "event_page",
+        "tournament": "event_page",
+        "player": "player_url",
+    },
 }
 
 

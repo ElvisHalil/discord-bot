@@ -38,7 +38,8 @@ def skill_csgo_esports(query_type: Optional[str] = 'all', event_page: Optional[s
 
     # 3. HLTV RANKINGS
     if query_type in ['rankings', 'all']:
-        output += _hltv_aggregator.get_rankings()
+        limit = 7 if query_type == 'all' else 15
+        output += _hltv_aggregator.get_rankings(limit=limit)
 
     # 4. EVENT INFO
     if query_type == 'event_info':
@@ -49,14 +50,21 @@ def skill_csgo_esports(query_type: Optional[str] = 'all', event_page: Optional[s
         output += _hltv_aggregator.get_player_stats(player_url)
 
     output += """=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===
-Use this exact data to answer the user's questions about CS esports.
-1. When asked about current or live event details (INCLUDING TEAM ROSTERS), FIRST call this tool with `query_type='tournaments'` to get the `event_page` IDs. THEN, call this tool again with `query_type='event_info'` and pass the corresponding `event_page` to get current matches, details, and FULL TEAM ROSTERS. Do not use generic web searches for this!
-2. When asked for player stats, check the 'rankings' to get the player's `player_url`, then call this tool with `query_type='player_stats'` and pass the `player_url`.
-3. If asked for the roster of a team playing in a live match, DO NOT say you cannot find it. Use `event_info` on the current tournament; it returns the exact rosters!
+Use this exact live data to answer the user's questions about CS esports.
+1. When answering general questions (e.g. "what's happening in cs", "cs news", "esports update"):
+   - Synthesize a lively, cohesive overview instead of dumping raw rigid sections or boilerplate templates.
+   - Highlight what is happening NEXT: the immediate upcoming tournament starting soonest (from UPCOMING S-TIER TOURNAMENTS) with dates, prize pool, location, and its clickable Markdown link: `[Tournament Name](<https://liquipedia.net/...>)`.
+   - Highlight recent action: mention the most recent tournament champion and runner-up (from RECENT TOURNAMENT CHAMPIONS).
+   - Mention top world ranking leaders concisely (e.g. #1 Spirit, #2 Vitality) without dumping long lists of all players unless the user asked for rosters.
+   - If there is an active ESL YouTube live stream, highlight the matchup and stream link. If ESL is NOT broadcasting live, simply omit the live section or mention in passing that no games are live right now—DO NOT create a prominent empty section.
+   - NEVER output pseudo-links like `[Event Page](<event_page: ...>)` or `<event_page: ...>`. Only use real HTTPS links with angle brackets: `[Tournament](<https://liquipedia.net/...>)`.
+   - Do NOT end your message with generic canned questions (e.g. "Need details about a specific team, tournament...?"). Converse naturally like an esports enthusiast.
+2. When asked about specific event details or team rosters:
+   - Call this tool with `query_type='event_info'` and pass the corresponding `event_page` (e.g. 'Thunderpick/World_Championship/2026'). It returns exact rosters and match brackets!
+3. When asked for player stats:
+   - Check 'rankings' to get the player's `player_url`, then call this tool with `query_type='player_stats'` and pass the `player_url`.
 4. When presenting a LIVE match from YouTube:
-   - Actively parse the video 'Title' to figure out who is playing (e.g. 'Team A vs. Team B').
-   - Parse the title to determine what stage of the tournament it is (e.g., Playoffs, Group Stage, Grand Final, Semi-Final).
-   - Present this dynamically to the user with bold styling for the teams and the stage.
-   - Output the raw YouTube link on its own blank line so Discord creates a video embed!
+   - Parse the title to determine who is playing and the stage (e.g. Grand Final, Semifinal).
+   - Output the raw YouTube link on its own blank line so Discord generates an embed.
 """
     return output

@@ -157,3 +157,4 @@ def fetch_text(
     resp = fetch_url(url=url, method="GET", headers=headers, timeout=timeout, impersonate=impersonate, **kwargs)
     resp.raise_for_status()
     return resp.text
+
