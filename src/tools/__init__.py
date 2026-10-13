@@ -15,7 +15,12 @@ from src.tools.web import (
     SEARCH_CACHE,
     YOUTUBE_CACHE,
 )
-from src.registry import RESEARCH_TOOLS, CHAT_TOOLS
+def __getattr__(name: str):
+    if name in ("RESEARCH_TOOLS", "CHAT_TOOLS"):
+        import src.registry as reg
+        return getattr(reg, name)
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
 
 __all__ = [
     "get_current_datetime",
