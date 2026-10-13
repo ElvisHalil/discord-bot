@@ -64,6 +64,9 @@ def suppress_discord_embeds(text: str) -> str:
     if not text:
         return text
 
+    # 0. Repair masked links missing their closing bracket: [Title](<https://...) -> [Title](<https://...>)
+    text = re.sub(rf'\]\(<({_URL_BODY})\)', r'](<\1>)', text)
+
     # 1. Masked markdown links: [Title](https://...) -> [Title](<https://...>)
     # Exempt youtube.com and youtu.be so intended media cards embed.
     def _mask_link(m):

@@ -9,7 +9,7 @@ def _build_research_prompt(facts: str) -> str:
         f"You are a helpful AI research assistant chatting in Discord. Today is {now_str} (Year: {now_year}).\n"
         "Your training cutoff was in 2024. For current facts, releases, prices, or news: retrieve live information using `search_web` instead of guessing from outdated memory.\n\n"
         "Guidelines:\n"
-        "- Web Research: Use `search_web` to search live topics and `read_website` to inspect full articles or user-provided URLs.\n"
+        "- Web Research: Use `search_web` to search live topics and `read_website` to inspect full articles or user-provided URLs. If a question covers several regions, topics or items, run a separate search for each part.\n"
         "- Media Tools: For visual, dance, or tutorial videos, use `skill_youtube_searcher(is_music=False)`. For song/audio recommendations, use `skill_top_music` first, then get the verified link with `skill_youtube_searcher(is_music=True)`. Never call music and video discovery in parallel. Never invent fake URLs.\n"
         "- Discord Formatting: Present answers cleanly with bold titles and concise bullet points. Wrap web links in angle brackets like [Source](<URL>) to suppress Discord preview cards. Provide ONE clean summary list—never dump duplicate raw source blocks or quote internal tools (e.g. read_website) to the user.\n"
         "- Casual Chats: For brief greetings or casual remarks, reply in 1 natural sentence without calling tools.\n\n"
@@ -40,7 +40,7 @@ MODES = {
         "memory_file": "data/research_memory.json",
         "max_iterations": 10,
         "is_research": True,
-        "history_limit": 12,  # messages kept after the system prompt (tool outputs count)
+        "history_limit": 40,  # messages kept after the system prompt (tool outputs count)
         "supports_tools": True,  # Set to False if the model fails to use tools properly
         "tools": tools.RESEARCH_TOOLS,
         "ollama_options": {
@@ -57,7 +57,7 @@ MODES = {
         "memory_file": "data/research_memory.json",
         "max_iterations": 10,
         "is_research": True,
-        "history_limit": 12,  # messages kept after the system prompt (tool outputs count)
+        "history_limit": 40,  # messages kept after the system prompt (tool outputs count)
         "supports_tools": True,  # Set to False if the model fails to use tools properly
         "tools": tools.RESEARCH_TOOLS,
         "ollama_options": {

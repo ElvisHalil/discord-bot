@@ -35,6 +35,13 @@ URL_CACHE = {}
 SEARCH_CACHE = {}
 YOUTUBE_CACHE = {}
 
+# Generic words that add nothing to a keyword-matched news search.
+_NEWS_FILLER = re.compile(
+    r"\b(?:(?:top|latest|breaking|current|major|biggest)\s+(?:news\s+)?(?:headlines?|news|stories)"
+    r"|headlines?|news|today'?s?|tonight|right now|this (?:morning|evening))\b",
+    re.IGNORECASE,
+)
+
 def _is_private_or_local_host(hostname: str) -> bool:
     """Check if a hostname resolves to a local, private, loopback, or metadata IP."""
     if not hostname:
@@ -158,12 +165,26 @@ def search_web(query: str, news: Optional[bool] = None, timelimit: Optional[str]
     print(f"🔎 [Web Search]: '{clean_q}' (News: {is_news_requested})")
     raw_results = []
 
-    # 1. News Search (strictly for news queries)
+    # 1. News Search (strictly for news queries). Honor the recency filter first,
+    # then retry once without it before falling back to general web search.
     if is_news_requested:
-        try:
-            raw_results = list(DDGS().news(clean_q, max_results=7))
-        except Exception as news_err:
-            print(f"⚠️ [DDGS News Notice]: News search failed ({news_err}), falling back to web search...")
+        # The news endpoint is keyword-matched and already returns news, so words like
+        # "top headlines" or "today" only pull in articles that literally contain them.
+        news_q = _NEWS_FILLER.sub(" ", clean_q)
+        news_q = re.sub(r"\s{2,}", " ", news_q).strip(" ,.-")
+        news_q = re.sub(r"^(?:in|from|about|for|on|of)\s+", "", news_q, flags=re.IGNORECASE) or clean_q
+        for news_limit in dict.fromkeys([timelimit, None]):
+            try:
+                news_kwargs = {"max_results": 7}
+                if news_limit:
+                    news_kwargs["timelimit"] = news_limit
+                raw_results = list(DDGS().news(news_q, **news_kwargs))
+                if raw_results:
+                    break
+            except Exception as news_err:
+                print(f"⚠️ [DDGS News Notice]: News search '{news_q}' (timelimit={news_limit}) failed ({news_err})")
+        if not raw_results:
+            print("⚠️ [DDGS News Notice]: No news results, falling back to web search...")
 
     # 2. General Web Search with Multi-Backend Fallback (api -> html -> lite)
     if not raw_results:
@@ -288,9 +309,9 @@ def search_web(query: str, news: Optional[bool] = None, timelimit: Optional[str]
 
     output += "--- RESPONSE FORMATTING INSTRUCTIONS FOR YOU (THE LLM) ---\n"
     if is_news_requested:
-        output += "• NEWS FORMATTING: Provide ONE clean bulleted list per region/topic:\n"
-        output += "  - **Headline** — Concise 1-2 sentence summary. ([Source Domain](<URL>))\n"
-        output += "• EMBED PREVENTION: Always wrap URLs in angle brackets inside the link, like [Source](<URL>). This prevents Discord from creating giant embed cards.\n"
+        output += "• NEWS FORMATTING: Give a bold heading per region/topic, then one bullet per story:\n"
+        output += "  - **Headline** — 1-2 sentence summary. [Source Name](<URL>)\n"
+        output += "• LINKS: Copy each story's full URL exactly as listed above (not the site's homepage) and keep it inside <> so Discord shows no preview card.\n"
         output += "• NO DUPLICATE DUMPS: Do NOT create a second section or dump raw snippets/links below. Provide only the concise bulleted summary once.\n"
         output += "• SILENT TOOLS: Never mention internal tools (like 'read_website') in your final message to the user."
     else:

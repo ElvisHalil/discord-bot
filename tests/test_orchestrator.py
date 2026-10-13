@@ -156,6 +156,22 @@ class TestReplyPostProcessing(unittest.TestCase):
         text = "The bot calls search_web first."
         self.assertEqual(suppress_discord_embeds(text), text)
 
+    def test_masked_link_missing_closing_bracket_repaired(self):
+        out = suppress_discord_embeds("Story. [Source](<https://www.example.com/world-news/)).")
+        self.assertIn("[Source](<https://www.example.com/world-news/>)", out)
+
+    def test_news_filler_stripped(self):
+        import re
+        from src.tools.web import _NEWS_FILLER
+
+        def clean(q):
+            return re.sub(r"\s{2,}", " ", _NEWS_FILLER.sub(" ", q)).strip(" ,.-")
+
+        self.assertEqual(clean("Canada top headlines"), "Canada")
+        self.assertEqual(clean("latest news headlines USA today"), "USA")
+        self.assertEqual(clean("top gun news"), "top gun")
+
 
 if __name__ == "__main__":
     unittest.main()
+
