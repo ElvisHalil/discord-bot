@@ -187,15 +187,17 @@ async def on_raw_reaction_add(payload):
                             chosen_track = candidate
                             break
 
+                    user_tag = user.mention if user else f"<@{payload.user_id}>"
+
                     if not verified_url or not chosen_track:
-                        await channel.send(f"⚠️ Found similar songs, but couldn't verify a working YouTube link. Please try again!")
+                        await channel.send(f"{user_tag} ⚠️ Found similar songs, but couldn't verify a working YouTube link. Please try again!")
                         return
 
                     # 4. Generate natural persona intro via active model
                     mode_config = MODES[current_mode]
                     orig_display = f"'{orig_title}' by '{orig_artist}'" if orig_artist else f"'{orig_title}'"
                     intro_prompt = (
-                        f"User {user.display_name} liked the song {orig_display}. "
+                        f"User {user.display_name} reacted with 👍 to the song {orig_display}. "
                         f"Write a single short sentence recommending the similar song '{chosen_track}'. "
                         "Do NOT include any links, URLs, or markdown links."
                     )
@@ -217,6 +219,10 @@ async def on_raw_reaction_add(payload):
 
                     if not intro_text:
                         intro_text = f"Here is a song similar to **{orig_title}** by **{orig_artist}**:"
+
+                    # Prepend user @ mention so the channel knows who triggered the recommendation
+                    if user_tag not in intro_text:
+                        intro_text = f"{user_tag} {intro_text}"
 
                     m_vid = re.search(r'watch\?v=([0-9A-Za-z_-]{11})', verified_url)
                     vid = m_vid.group(1) if m_vid else None
@@ -244,12 +250,13 @@ async def on_raw_reaction_add(payload):
                             })
                             chat_history[channel.id].append({
                                 "role": "assistant",
-                                "content": f"Shared similar track: '{meta['song']}' by '{meta['artist']}' ({verified_url})."
+                                "content": f"Shared similar track for {user.display_name}: '{meta['song']}' by '{meta['artist']}' ({verified_url})."
                             })
 
                 except Exception as e:
                     print(f"❌ [Reaction Error]: {e}")
-                    await channel.send("⚠️ Something went wrong while finding a similar song. Please try again!")
+                    user_tag = user.mention if 'user' in locals() and user else f"<@{payload.user_id}>"
+                    await channel.send(f"{user_tag} ⚠️ Something went wrong while finding a similar song. Please try again!")
 
 
 async def run_agent_turn(channel_id, mode_config):

@@ -105,6 +105,19 @@ class TestMusicMetadata(unittest.TestCase):
         self.assertNotIn("<song title>", res)
         self.assertIn("Here is your recommendation:", res)
 
+    def test_standardize_song_reply_preserves_user_mention(self):
+        mention_reply = (
+            "<@123456789> Since you liked that track, here is another one:\n\n"
+            "**Song:** Strobe\n"
+            "**Artist:** deadmau5\n\n"
+            "https://music.youtube.com/watch?v=tKi9Zwc53Sw"
+        )
+        res = standardize_song_reply(mention_reply)
+        self.assertIn("<@123456789>", res)
+        self.assertIn("**Song:** Strobe", res)
+        self.assertIn("**Artist:** deadmau5", res)
+
+
 
 class TestDeezerExpansion(unittest.TestCase):
     """Test suite for expanded Deezer aggregator and artist search."""

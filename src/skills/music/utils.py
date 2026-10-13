@@ -188,7 +188,7 @@ def standardize_song_reply(reply: str) -> str:
         if "youtube.com" in line_stripped.lower() or "<raw" in line_stripped.lower() or line_stripped.startswith("<http"):
             break
         clean_l = re.sub(r'\[.*?\]\(.*?\)', '', line_stripped).strip()
-        if clean_l and not clean_l.startswith("<"):
+        if clean_l and not (clean_l.startswith("<") and not clean_l.startswith("<@")):
             intro_lines.append(clean_l)
     intro_text = "\n".join(intro_lines).strip()
 
