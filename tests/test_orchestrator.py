@@ -27,6 +27,10 @@ def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music:
     """Stand-in with the real skill_youtube_searcher signature (no network)."""
 
 
+def skill_sports_info(sport: Optional[str] = "soccer", query: Optional[str] = "schedule"):
+    """Stand-in with the real skill_sports_info signature (no network)."""
+
+
 class TestNormalizeToolArgs(unittest.TestCase):
     def test_alias_maps_to_canonical(self):
         self.assertEqual(normalize_tool_args("search_web", search_web, {"q": "gpu prices"}), {"query": "gpu prices"})
@@ -47,6 +51,13 @@ class TestNormalizeToolArgs(unittest.TestCase):
         self.assertEqual(args, {"query": "x", "max_results": 3, "is_music": False})
         args = normalize_tool_args("search_web", search_web, {"query": "x", "news": "True"})
         self.assertIs(args["news"], True)
+
+    def test_sports_info_aliases(self):
+        args = normalize_tool_args(
+            "skill_sports_info", skill_sports_info,
+            {"league": "soccer", "outcomes": "previous matches and outcomes"}
+        )
+        self.assertEqual(args, {"sport": "soccer", "query": "previous matches and outcomes"})
 
     def test_non_dict_args(self):
         self.assertEqual(normalize_tool_args("search_web", search_web, "oops"), {})

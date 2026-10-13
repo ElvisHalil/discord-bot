@@ -71,6 +71,26 @@ TOOL_ARG_ALIASES = {
         "category": "sport",
         "league": "sport",
     },
+    "skill_sports_info": {
+        "league": "sport",
+        "category": "sport",
+        "type": "sport",
+        "sport_type": "sport",
+        "sport_name": "sport",
+        "discipline": "sport",
+        "competition": "sport",
+        "q": "query",
+        "text": "query",
+        "prompt": "query",
+        "search": "query",
+        "question": "query",
+        "matchup": "query",
+        "match": "query",
+        "matches": "query",
+        "filter": "query",
+        "outcomes": "query",
+        "outcome": "query",
+    },
 }
 
 

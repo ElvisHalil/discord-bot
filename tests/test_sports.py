@@ -509,7 +509,36 @@ class TestSkillSportsInfo(unittest.TestCase):
         self.assertIn("Returns **$252.00**", res)
         self.assertIn("Returns **$840.00**", res)
 
+    @patch("src.skills.sports.aggregators.soccer.fetch_json")
+    def test_sports_info_followup_without_sport_keyword(self, mock_fetch):
+        cal = {"leagues": [{"calendar": ["2026-10-12T19:00Z"]}]}
+        events = {
+            "events": [{
+                "name": "Coventry City vs Newcastle United",
+                "competitions": [{
+                    "status": {"type": {"detail": "FT"}},
+                    "competitors": [
+                        {"homeAway": "home", "team": {"displayName": "Coventry City"}, "score": "4"},
+                        {"homeAway": "away", "team": {"displayName": "Newcastle United"}, "score": "1"}
+                    ]
+                }]
+            }]
+        }
+        mock_fetch.side_effect = [cal, events, cal, events]
+
+        # Calling with only query (sport omitted)
+        res = skill_sports_info(query="what were previous matches and outcomes?")
+        self.assertIn("ENGLISH PREMIER LEAGUE", res)
+        self.assertIn("Coventry City", res)
+
+        # Calling with sentence as first positional argument
+        res2 = skill_sports_info("what were previous matches and outcomes?")
+        self.assertIn("ENGLISH PREMIER LEAGUE", res2)
+        self.assertIn("Coventry City", res2)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
 

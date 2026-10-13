@@ -23,7 +23,7 @@ CS_KEYWORDS = {
     "thunderpick", "blast", "pgl", "iem", "esl"
 }
 
-def skill_sports_info(sport: str, query: Optional[str] = "schedule") -> str:
+def skill_sports_info(sport: Optional[str] = "soccer", query: Optional[str] = "schedule") -> str:
     """
     Fetch live sports and esports information including match scores, goal scorers, quarter/period linescores,
     upcoming schedules, tournaments, betting odds, and championship standings.
@@ -37,16 +37,30 @@ def skill_sports_info(sport: str, query: Optional[str] = "schedule") -> str:
     - 'odds' / 'betting': Live betting odds, moneylines, and match favorites across esports and sports.
 
     Args:
-        sport: The sport to look up (e.g. 'cs', 'f1', 'soccer', 'nba', 'nhl', 'epl', 'ucl', 'odds').
-        query: What to fetch ('schedule', 'scores', 'standings', 'results', team name, or date like 'yesterday'/'tomorrow').
+        sport: The sport to look up (e.g. 'cs', 'f1', 'soccer', 'nba', 'nhl', 'epl', 'ucl', 'odds'). Defaults to 'soccer'.
+        query: What to fetch ('schedule', 'scores', 'standings', 'results', team name, date, or query like 'previous matches and outcomes').
     """
     sport_raw = (sport or "").strip()
-    query_raw = (query or "schedule").strip()
+    query_raw = (query or "").strip()
+
+    # If sport is omitted or looks like a full sentence query, normalize gracefully
+    if not sport_raw and not query_raw:
+        sport_raw = "soccer"
+        query_raw = "schedule"
+    elif not sport_raw and query_raw:
+        sport_raw = "soccer"
+    elif sport_raw and not query_raw:
+        if len(sport_raw.split()) > 2 and any(w in sport_raw.lower() for w in ("match", "matches", "game", "games", "result", "results", "score", "scores", "schedule", "standing", "table", "who", "what", "outcome", "outcomes")):
+            query_raw = sport_raw
+            sport_raw = "soccer"
+        else:
+            query_raw = "schedule"
+
     print(f"🏟️ [Executing Sports Info Skill] Sport: {sport_raw}, Query: {query_raw}")
 
     sport_lower = sport_raw.lower()
     query_lower = query_raw.lower()
-    combined = f"{sport_lower} {query_lower}"
+    combined = f"{sport_lower} {query_lower}".strip()
 
     # 1. Counter-Strike / Esports Check (handle CS first if matched in sport or query)
     is_cs = (
@@ -71,25 +85,26 @@ def skill_sports_info(sport: str, query: Optional[str] = "schedule") -> str:
         return _odds_aggregator.get_odds(query_raw, sport=sport_lower)
 
     # 3. Formula 1
-    if any(k in sport_lower for k in ("f1", "formula 1", "formula1", "grand prix", "racing")):
+    if any(k in sport_lower for k in ("f1", "formula 1", "formula1", "grand prix", "racing")) or any(k in query_lower for k in ("formula 1", "grand prix", "f1 race")):
         data = _f1_aggregator.get_info(combined)
         guidance = "Review the Formula 1 schedule/standings and inform the user. Remind them session times are in UTC."
-    # 4. Soccer (EPL, UCL, La Liga, Serie A, Bundesliga, MLS, etc.)
-    elif any(k in sport_lower for k in ("soccer", "football", "epl", "premier", "ucl", "champions", "laliga", "seriea", "bundesliga", "mls", "ligue1")) or any(k in query_lower for k in ("epl", "premier league", "champions league", "la liga", "serie a", "bundesliga", "mls")):
-        data = _soccer_aggregator.get_info(combined)
-        guidance = "Present the soccer matches/standings clearly. Highlight live matches, scores, and goal scorers."
-    # 5. NBA Basketball
-    elif any(k in sport_lower for k in ("nba", "basketball", "hoops")):
+    # 4. NBA Basketball
+    elif any(k in sport_lower for k in ("nba", "basketball", "hoops")) or any(k in query_lower for k in ("nba", "basketball")):
         data = _nba_aggregator.get_info(combined)
         guidance = "Present the NBA games/standings clearly. Include scores, status, and quarter linescores if available."
-    # 6. NHL Hockey
-    elif any(k in sport_lower for k in ("nhl", "hockey", "ice hockey")):
+    # 5. NHL Hockey
+    elif any(k in sport_lower for k in ("nhl", "hockey", "ice hockey")) or any(k in query_lower for k in ("nhl", "hockey", "ice hockey")):
         data = _hockey_aggregator.get_info(combined)
         guidance = "Present the NHL games/standings clearly. Include scores, status, and period linescores if available."
-    # Fallback to soccer if club matches
-    elif any(club in combined for club in _soccer_aggregator.CLUB_LEAGUE_HINTS):
+    # 6. Soccer (EPL, UCL, La Liga, Serie A, Bundesliga, MLS, Ligue 1, or match/matches/fixtures/outcomes)
+    elif (
+        any(k in sport_lower for k in ("soccer", "football", "epl", "premier", "ucl", "champions", "laliga", "seriea", "bundesliga", "mls", "ligue1", "matches", "match", "fixtures")) or
+        any(k in query_lower for k in ("epl", "premier league", "champions league", "la liga", "serie a", "bundesliga", "mls", "match", "matches", "fixture", "fixtures", "pitch", "premier", "soccer", "football", "outcome", "outcomes")) or
+        any(club in combined for club in _soccer_aggregator.CLUB_LEAGUE_HINTS) or
+        sport_lower in ("", "sports", "sport", "general", "all")
+    ):
         data = _soccer_aggregator.get_info(combined)
-        guidance = "Present the match or table info cleanly for the requested team."
+        guidance = "Present the soccer matches/standings clearly. Highlight live matches, scores, and goal scorers."
     else:
         return (
             f"Currently supported sports in skill_sports_info:\n"
