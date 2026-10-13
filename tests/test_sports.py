@@ -605,6 +605,21 @@ class TestSkillSportsInfo(unittest.TestCase):
         self.assertIn("FORMULA 1 CHAMPIONSHIP STANDINGS", res2)
         self.assertIn("Cadillac - 0 pts", res2)
 
+    def test_sports_info_rejects_ai_queries(self):
+        res = skill_sports_info(query="gemini 4 agron vs opus 5.5")
+        self.assertIn("not a sports query", res)
+        self.assertIn("search_web", res)
+
+        res_pos = skill_sports_info("gemini 4 agron vs opus 5.5")
+        self.assertIn("not a sports query", res_pos)
+        self.assertIn("search_web", res_pos)
+
+    def test_sports_info_rejects_unrelated_queries(self):
+        res = skill_sports_info(query="how to bake chocolate cookies")
+        self.assertIn("not recognized as a sport", res)
+        self.assertIn("search_web", res)
+
+
 
 if __name__ == "__main__":
     unittest.main()

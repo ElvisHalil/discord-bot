@@ -24,10 +24,12 @@ CS_KEYWORDS = {
     "thunderpick", "blast", "pgl", "iem", "esl"
 }
 
-def skill_sports_info(sport: Optional[str] = "soccer", query: Optional[str] = "schedule") -> str:
+def skill_sports_info(sport: Optional[str] = None, query: Optional[str] = None) -> str:
     """
     Fetch live sports and esports information including match scores, goal scorers, quarter/period linescores,
     upcoming schedules, tournaments, betting odds, and championship standings.
+    ONLY for sports: Soccer, Formula 1, NBA, NHL, CS/Esports, and Sports Betting.
+    Do NOT use this tool for AI models, technology, coding, general news, or non-sports topics (use search_web instead).
 
     Supported sports:
     - 'cs' / 'cs2' / 'esports' / 'counter-strike': S-Tier CS tournaments, upcoming matches (e.g. Falcons, NIP), live streams, HLTV rankings, and betting odds.
@@ -38,7 +40,7 @@ def skill_sports_info(sport: Optional[str] = "soccer", query: Optional[str] = "s
     - 'odds' / 'betting': Live betting odds, moneylines, and match favorites across esports and sports.
 
     Args:
-        sport: The sport to look up (e.g. 'cs', 'f1', 'soccer', 'nba', 'nhl', 'epl', 'ucl', 'odds'). Defaults to 'soccer'.
+        sport: The sport to look up (e.g. 'cs', 'f1', 'soccer', 'nba', 'nhl', 'epl', 'ucl', 'odds').
         query: What to fetch ('schedule', 'scores', 'standings', 'results', team name, date, or query like 'previous matches and outcomes').
     """
     sport_raw = (sport or "").strip()
@@ -54,6 +56,14 @@ def skill_sports_info(sport: Optional[str] = "soccer", query: Optional[str] = "s
         sport_raw = "soccer"
         query_raw = "schedule"
         combined = "soccer schedule"
+
+    # Explicit guardrail: Reject AI models, tech, coding, and non-sports queries mistakenly routed here
+    if re.search(r'\b(?:gemini|opus|claude|chatgpt|gpt-[0-9a-z]+|deepseek|qwen|llama|llms?|benchmarks?|antigravity|coding|python|javascript|nvidia|rtx|intel|amd)\b', combined):
+        return (
+            f"⚠️ Query '{query_raw or sport_raw}' is not a sports query.\n"
+            f"`skill_sports_info` ONLY supports sports and esports (Soccer, Formula 1, NBA, NHL, Counter-Strike, Betting Odds).\n"
+            f"For AI models, benchmarks, technology, programming, news, or general knowledge: please use `search_web` instead."
+        )
 
     # 1. Counter-Strike / Esports Check (handle CS first if matched in sport or query)
     is_cs = (
@@ -107,26 +117,41 @@ def skill_sports_info(sport: Optional[str] = "soccer", query: Optional[str] = "s
         data = _hockey_aggregator.get_info(query_raw or combined)
         guidance = "Present the NHL games/standings clearly. Include scores, status, and period linescores if available."
 
-    # 6. Soccer Check (or default for generic sports/matches)
-    elif (
-        any(k in combined for k in ("soccer", "football", "epl", "premier", "ucl", "champions", "laliga", "seriea", "bundesliga", "mls", "ligue1", "matches", "match", "fixtures", "pitch", "relegation", "outcome", "outcomes")) or
-        any(club in combined for club in _soccer_aggregator.CLUB_LEAGUE_HINTS) or
-        sport_raw.lower() in ("", "soccer", "sports", "sport", "general", "all")
-    ):
-        sport_raw = "soccer"
-        data = _soccer_aggregator.get_info(query_raw or combined)
-        guidance = "Present the soccer matches/standings clearly. Highlight live matches, scores, and goal scorers."
+    # 6. Soccer Check (or general sports if sports/match terms present)
     else:
-        return (
-            f"Currently supported sports in skill_sports_info:\n"
-            f"- Counter-Strike ('cs', 'cs2', 'esports'): tournaments, matches (Falcons, NIP, etc.), world rankings, and odds\n"
-            f"- Formula 1 ('f1'): race calendars, session times, driver/constructor standings\n"
-            f"- Soccer ('soccer', 'epl', 'ucl', 'laliga', 'seriea', 'bundesliga', 'mls'): live scores, goal details, standings\n"
-            f"- NBA Basketball ('nba'): live scores, quarter linescores, conference standings\n"
-            f"- NHL Hockey ('nhl'): live scores, period linescores, standings\n"
-            f"- Betting Odds ('odds'): moneylines and match odds across esports and sports\n\n"
-            f"For other sports or niche leagues, please use `search_web`."
+        soccer_keywords = (
+            "soccer", "football", "epl", "premier", "ucl", "champions",
+            "laliga", "la liga", "seriea", "serie a", "bundesliga", "mls",
+            "ligue1", "ligue 1", "pitch", "relegation"
         )
+        general_match_keywords = (
+            "match", "matches", "fixture", "fixtures", "game", "games",
+            "score", "scores", "schedule", "standings", "table", "results",
+            "outcome", "outcomes", "today", "tomorrow", "yesterday", "this week", "next week"
+        )
+
+        is_soccer = (
+            sport_raw.lower() in ("soccer", "football", "epl", "ucl", "laliga", "seriea", "bundesliga", "mls", "ligue1") or
+            any(k in combined for k in soccer_keywords) or
+            any(club in combined for club in _soccer_aggregator.CLUB_LEAGUE_HINTS)
+        )
+
+        is_generic_sports = (
+            sport_raw.lower() in ("sports", "sport", "general", "all") or
+            (sport_raw.lower() == "" and any(k in combined for k in general_match_keywords)) or
+            bool(re.search(r'\b(?:sports?)\b', combined))
+        )
+
+        if is_soccer or is_generic_sports:
+            sport_raw = "soccer"
+            data = _soccer_aggregator.get_info(query_raw or combined)
+            guidance = "Present the soccer matches/standings clearly. Highlight live matches, scores, and goal scorers."
+        else:
+            return (
+                f"⚠️ Query '{query_raw or sport_raw}' is not recognized as a sport, team, or match.\n"
+                f"`skill_sports_info` ONLY supports sports and esports (Soccer, Formula 1, NBA, NHL, Counter-Strike, Betting Odds).\n"
+                f"For AI models, technology, coding, general news, or other topics: please use `search_web` instead."
+            )
 
     print(f"🏟️ [Executing Sports Info Skill] Sport: {sport_raw}, Query: {query_raw or combined}")
 

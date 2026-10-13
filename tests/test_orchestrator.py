@@ -27,7 +27,7 @@ def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music:
     """Stand-in with the real skill_youtube_searcher signature (no network)."""
 
 
-def skill_sports_info(sport: Optional[str] = "soccer", query: Optional[str] = "schedule"):
+def skill_sports_info(sport: Optional[str] = None, query: Optional[str] = None):
     """Stand-in with the real skill_sports_info signature (no network)."""
 
 
