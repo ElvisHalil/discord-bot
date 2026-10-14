@@ -307,13 +307,16 @@ def parse_team_schedule(
 
     out = f"=== 📅 {team_name.upper()} TEAM SCHEDULE & RESULTS (ALL COMPETITIONS) ===\n"
     if live_lines:
-        out += "🔴 **Live Now:**\n" + "\n".join(live_lines) + "\n\n"
+        out += "🔴 **CURRENTLY PLAYING RIGHT NOW (LIVE MATCH IN PROGRESS):**\n" + "\n".join(live_lines) + "\n\n"
     if past_lines:
         out += f"✅ **Recent Results (Last {min(len(past_lines), max_past)}):**\n"
         out += "\n".join(past_lines[-max_past:]) + "\n\n"
-    if future_lines:
-        out += f"⏭️ **Upcoming Fixtures (Next {min(len(future_lines), max_future)}):**\n"
-        out += "\n".join(future_lines[:max_future]) + "\n"
+    if future_lines or live_lines:
+        out += f"⏭️ **Current & Upcoming Fixtures (Next {min(len(future_lines), max_future)}):**\n"
+        if live_lines:
+            out += "\n".join(live_lines) + "  *(⬅️ IN PROGRESS RIGHT NOW)*\n"
+        if future_lines:
+            out += "\n".join(future_lines[:max_future]) + "\n"
     return out.strip()
 
 

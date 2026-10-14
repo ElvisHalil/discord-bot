@@ -602,7 +602,56 @@ class TestSportsEspnUpgrade(unittest.TestCase):
         self.assertIn("[SPORTSBOOK CONSENSUS ODDS: AS Roma vs Real Madrid]", res)
         self.assertIn("FanDuel", res)
 
+    @patch("src.skills.sports.aggregators.espn_utils.cached_espn_get")
+    def test_status_does_not_trigger_roster_and_bundesliga_does_not_trigger_cs(self, mock_get):
+        def side_effect(url, params=None, ttl=120):
+            if "/teams" in url and "/schedule" not in url and "/roster" not in url:
+                return {
+                    "sports": [{
+                        "leagues": [{
+                            "teams": [{"team": {"id": "86", "displayName": "Real Madrid", "shortDisplayName": "Real Madrid", "abbreviation": "RMA"}}]
+                        }]
+                    }]
+                }
+            if "/schedule" in url:
+                return {
+                    "events": [{
+                        "id": "401915414",
+                        "date": "2026-10-14T19:00Z",
+                        "league": {"name": "UEFA Champions League", "slug": "uefa.champions"},
+                        "competitions": [{
+                            "status": {"type": {"state": "in", "detail": "33'", "completed": False}},
+                            "competitors": [
+                                {"homeAway": "home", "team": {"displayName": "AS Roma"}, "score": {"displayValue": "1"}},
+                                {"homeAway": "away", "team": {"displayName": "Real Madrid"}, "score": {"displayValue": "1"}},
+                            ],
+                        }],
+                    }]
+                }
+            if "/summary" in url:
+                return {
+                    "header": {
+                        "competitions": [{
+                            "status": {"type": {"detail": "33'"}},
+                            "competitors": [
+                                {"homeAway": "home", "team": {"displayName": "AS Roma"}, "score": "1"},
+                                {"homeAway": "away", "team": {"displayName": "Real Madrid"}, "score": "1"},
+                            ],
+                        }]
+                    }
+                }
+            return {}
+
+        mock_get.side_effect = side_effect
+        out = skill_sports_info(query="whats status of current real madrid game?")
+        self.assertIn("MATCH SUMMARY: AS Roma 1 - 1 Real Madrid (33')", out)
+        self.assertIn("CURRENTLY PLAYING RIGHT NOW", out)
+        self.assertNotIn("SQUAD ROSTER & PLAYER SEASON STATS", out)
+        # Ensure live match summary is placed BEFORE the schedule block
+        self.assertLess(out.index("MATCH SUMMARY"), out.index("TEAM SCHEDULE & RESULTS"))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

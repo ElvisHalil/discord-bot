@@ -6,6 +6,7 @@ via ESPN's official public v2 API.
 """
 
 from datetime import datetime, timedelta
+import re
 from typing import Optional, Dict, Any, List
 from src.skills.sports.aggregators.base import BaseSportsAggregator
 from src.skills.sports.aggregators.espn_utils import (
@@ -29,11 +30,15 @@ class HockeyAggregator(BaseSportsAggregator):
         matched_team = resolve_espn_team("hockey", "nhl", q)
 
         # 1. Injuries & Player Availability
-        if any(w in q for w in ("injur", "injured", "unavailable", "availability", "day-to-day", "questionable", "out", "ir")):
+        if re.search(r'\b(?:injur(?:y|ies|ed)|unavailable|availability|day-to-day|questionable|injured\s*reserve)\b', q):
             return parse_league_injuries("hockey", "nhl", "NHL", q)
 
         # 2. Team Roster & Player Stats
-        if any(w in q for w in ("roster", "squad", "player", "players", "stat", "stats")) and matched_team:
+        is_live_or_sched = bool(re.search(r'\b(?:status|current|currently|live|playing|right\s*now|score|scores|next|upcoming|when|schedule)\b', q))
+        if (
+            re.search(r'\b(?:rosters?|squads?)\b', q)
+            or (not is_live_or_sched and re.search(r'\b(?:players?|stats|statistics)\b', q))
+        ) and matched_team:
             return parse_team_roster_and_stats(
                 "hockey", "nhl", matched_team["id"], matched_team["displayName"], player_filter=q
             )

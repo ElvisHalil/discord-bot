@@ -6,6 +6,7 @@ player, or league discoverable via ESPN's public v2/v3 APIs.
 """
 
 from datetime import datetime, timedelta
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from src.skills.sports.aggregators.base import BaseSportsAggregator
 from src.skills.sports.aggregators.espn_utils import (
@@ -188,11 +189,13 @@ class UniversalEspnAggregator(BaseSportsAggregator):
         sport_path, league_code, label, icon, matched_team, discovered_player = self.resolve_sport_context(q)
 
         # 1. Injuries & Availability Reports
-        if any(w in q for w in ("injur", "injured", "unavailable", "availability", "day-to-day", "questionable", "out", "ir")):
+        if re.search(r'\b(?:injur(?:y|ies|ed)|unavailable|availability|day-to-day|questionable|injured\s*reserve)\b', q):
             return parse_league_injuries(sport_path, league_code, label, q)
 
+        is_live_or_sched = bool(re.search(r'\b(?:status|current|currently|live|playing|right\s*now|score|scores|next|upcoming|when|schedule|fixtures?)\b', q))
+
         # 2. Individual Athlete Profile / Stats (if an athlete was discovered)
-        if discovered_player and not any(w in q for w in ("roster", "squad", "schedule", "fixtures", "standing", "table")):
+        if discovered_player and not is_live_or_sched and not any(w in q for w in ("roster", "squad", "schedule", "fixtures", "standing", "table")):
             ath_out = parse_athlete_overview(
                 sport_path,
                 league_code,
@@ -204,7 +207,10 @@ class UniversalEspnAggregator(BaseSportsAggregator):
                 return ath_out
 
         # 3. Team Roster & Player Stats
-        if any(w in q for w in ("roster", "squad", "player", "players", "stat", "stats", "depth")) and matched_team:
+        if (
+            re.search(r'\b(?:rosters?|squads?|depth)\b', q)
+            or (not is_live_or_sched and re.search(r'\b(?:players?|stats|statistics)\b', q))
+        ) and matched_team:
             return parse_team_roster_and_stats(
                 sport_path, league_code, matched_team["id"], matched_team["displayName"], player_filter=q
             )

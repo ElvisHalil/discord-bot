@@ -83,20 +83,19 @@ def skill_sports_info(
             f"For AI models, benchmarks, technology, programming, news, or general knowledge: please use `search_web` instead."
         )
 
-    # 1. Counter-Strike / Esports Check (guard against NFL "Atlanta Falcons")
+    # 1. Counter-Strike / Esports Check (guard against NFL "Atlanta Falcons" and substring false positives like 'esl' in 'bundesliga' or 'cs' in 'celtics')
     is_nfl_falcons = "atlanta" in combined or sport_raw.lower() in ("nfl", "football", "american football")
     is_cs = not is_nfl_falcons and (
         sport_raw.lower() in ("cs", "cs2", "csgo", "counter-strike", "counter strike", "esports") or
-        any(k in combined for k in CS_KEYWORDS) or
-        bool(re.search(r'\b(?:cs|cs2|csgo|counter-strike)\b', combined))
+        any(bool(re.search(rf'\b{re.escape(k)}\b', combined)) for k in CS_KEYWORDS)
     )
     if is_cs:
         sport_raw = "cs"
         target_q = " ".join(p for p in (team_raw, player_raw, query_raw) if p).strip() or combined
         named_event = target_q if any(t in combined for t in ("thunderpick", "pgl", "blast", "iem", "esl", "major", "bucharest", "chengdu", "atlanta")) else None
-        if any(k in combined for k in ("odd", "bet", "prop", "moneyline")):
+        if re.search(r'\b(?:odds?|bet|bets|betting|prop|props|moneyline)\b', combined):
             return _odds_aggregator.get_odds(target_q, sport="cs2")
-        elif any(k in combined for k in ("stat", "stats", "rating", "kdr", "kd")):
+        elif re.search(r'\b(?:stats|statistics|rating|kdr|kd)\b', combined):
             return skill_csgo_esports(query_type="player_stats", player_url=player_raw or team_raw or target_q)
         elif any(k in combined for k in ("roster", "player", "lineup", "group", "bracket", "teams")):
             return skill_csgo_esports(query_type="event_info", event_page=named_event or (target_q if target_q not in ("schedule", "") else None))
@@ -107,15 +106,15 @@ def skill_sports_info(
         elif any(k in combined for k in ("live", "stream", "broadcast")):
             return skill_csgo_esports(query_type="live_streams")
         else:
-            is_team_matchup = " vs " in combined or sum(1 for t in _odds_aggregator.CS_TEAMS if t in combined) >= 2
+            is_team_matchup = " vs " in combined or sum(1 for t in _odds_aggregator.CS_TEAMS if bool(re.search(rf'\b{re.escape(t)}\b', combined))) >= 2
             return skill_csgo_esports(
                 query_type="all",
                 event_page=named_event,
                 matchup=target_q if is_team_matchup else None,
             )
 
-    # 2. Betting odds check for traditional sports
-    if "odd" in combined or "bet" in combined or sport_raw.lower() in ("odds", "betting"):
+    # 2. Betting odds check for traditional sports (use word boundaries so 'betis' or 'better' do not match 'bet')
+    if re.search(r'\b(?:odds?|bet|bets|betting|moneyline)\b', combined) or sport_raw.lower() in ("odds", "betting"):
         return _odds_aggregator.get_odds(combined, sport=sport_raw.lower())
 
     # 3. Formula 1 Check
@@ -233,5 +232,6 @@ def skill_sports_info(
     output += "\n=== CRITICAL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
     output += f"1. TODAY'S DATE: {today_str}. All relative dates ('today', 'tomorrow', 'yesterday', 'this week', 'next week') MUST anchor on this date.\n"
     output += f"2. ALWAYS use the exact day of the week and date specified in the data (e.g. 'Wednesday, October 14, 2026'). NEVER guess, extrapolate, or alter calendar days of the week.\n"
-    output += f"3. {guidance} Keep your response formatted cleanly with bold headers, bullet points, and concise details.\n"
+    output += "3. If a match is marked 🔴 LIVE NOW / CURRENTLY PLAYING RIGHT NOW, ALWAYS report that live match first (including its current score, minute clock, goal scorers, and match stats) before mentioning future fixtures.\n"
+    output += f"4. {guidance} Keep your response formatted cleanly with bold headers, bullet points, and concise details.\n"
     return output

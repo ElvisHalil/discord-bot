@@ -6,6 +6,7 @@ injuries, and league standings across major soccer competitions via ESPN's publi
 """
 
 from datetime import datetime, timedelta, timezone
+import re
 from typing import Optional, Dict, Any, List, Tuple
 from src.skills.sports.aggregators.base import BaseSportsAggregator
 from src.skills.sports.aggregators.espn_utils import (
@@ -123,17 +124,23 @@ class SoccerAggregator(BaseSportsAggregator):
                         matched_team = resolve_espn_team("soccer", league_code, disc["subtitle"])
 
         # 1. Deep Match Summary / Starting Lineups / Substitutions / Boxscore
-        if any(w in q for w in ("lineup", "line-up", "starting xi", "starting 11", "formation", "sub", "substitution", "subs", "boxscore", "match stats", "match summary", "possession", "corners", "fouls")):
+        if re.search(r'\b(?:lineups?|line-ups?|starting\s*xi|starting\s*11|formations?|subs?|substitutions?|boxscores?|match\s*stats?|match\s*summary|possession|corners|fouls)\b', q):
             summary_out = self.get_match_summary(league_code, league_name, q, matched_team=matched_team)
             if summary_out:
                 return summary_out
 
         # 2. Injuries / Suspensions / Availability
-        if any(w in q for w in ("injur", "injured", "unavailable", "availability", "fitness", "suspended", "suspension")):
+        if re.search(r'\b(?:injur(?:y|ies|ed)|unavailable|availability|fitness|suspended|suspensions?)\b', q):
             return parse_league_injuries("soccer", league_code, league_name, q)
 
         # 3. Squad Roster, Player Season Stats, Top Scorers, Assists, or Cards
-        if discovered_player and not any(w in q for w in ("roster", "squad", "schedule", "fixtures", "standing", "table")):
+        # Note: Do NOT match bare substring 'stat' (which false-positives on 'status' / 'state'!).
+        is_live_or_schedule_query = bool(
+            re.search(r'\b(?:status|current|currently|live|playing|right\s*now|score|scores|next|upcoming|when|schedule|fixtures?|vs\.?)\b', q)
+        )
+        is_explicit_roster = bool(re.search(r'\b(?:rosters?|squads?)\b', q))
+
+        if discovered_player and not is_explicit_roster and not is_live_or_schedule_query and not any(w in q for w in ("standing", "table")):
             ath_out = parse_athlete_overview(
                 "soccer",
                 league_code,
@@ -144,7 +151,10 @@ class SoccerAggregator(BaseSportsAggregator):
             if ath_out:
                 return ath_out
 
-        if any(w in q for w in ("roster", "squad", "player", "players", "stat", "stats", "scorer", "scorers", "golden boot", "assist", "assists", "yellow card", "red card", "cards", "appearances")):
+        if is_explicit_roster or (
+            not is_live_or_schedule_query
+            and re.search(r'\b(?:players?|stats|statistics|scorers?|golden\s*boot|assists?|yellow\s*cards?|red\s*cards?|cards|appearances)\b', q)
+        ):
             if matched_team:
                 roster_out = parse_team_roster_and_stats(
                     "soccer", league_code, matched_team["id"], matched_team["displayName"], player_filter=q
@@ -174,9 +184,13 @@ class SoccerAggregator(BaseSportsAggregator):
         if matched_team:
             team_sched_block = parse_team_schedule("soccer", league_code, matched_team["id"], matched_team["displayName"])
             if team_sched_block:
-                if "🔥 **TODAY" in team_sched_block or "🔴 **LIVE" in team_sched_block or is_past:
+                is_live_now = "🔴 **LIVE" in team_sched_block
+                if is_live_now or "🔥 **TODAY" in team_sched_block or is_past or is_live_or_schedule_query:
                     match_sum = self.get_match_summary(league_code, league_name, q, matched_team=matched_team)
                     if match_sum:
+                        # Put live match summary FIRST when a game is currently live or user asks for current status
+                        if is_live_now or any(w in q for w in ("status", "current", "currently", "live", "playing", "score")):
+                            return f"{match_sum}\n\n{team_sched_block}"
                         return f"{team_sched_block}\n\n{match_sum}"
                 return team_sched_block
 
