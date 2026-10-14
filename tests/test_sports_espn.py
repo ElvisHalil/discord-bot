@@ -363,6 +363,71 @@ class TestSportsEspnUpgrade(unittest.TestCase):
         mock_soccer_info.assert_called_once_with("ucl standings")
         self.assertIn("MOCK_UCL_STANDINGS", res)
 
+    def test_enrich_sports_tool_args_bayern_and_pronoun_followup(self):
+        from src.orchestrator import normalize_tool_args, enrich_sports_tool_args
+
+        # Turn 1: User asks "When does Bayern Munich play next?", LLM passes only sport='soccer', query='schedule'
+        history_t1 = [{"role": "user", "content": "User Jubkill says: When does Bayern Munich play next?"}]
+        raw_t1 = normalize_tool_args("skill_sports_info", skill_sports_info, {"sport": "soccer", "query": "schedule"})
+        enriched_t1 = enrich_sports_tool_args(raw_t1, history_t1)
+        self.assertIn("bayern munich", enriched_t1["query"].lower())
+
+        # Turn 2: User asks "what their roster?", LLM passes only sport='soccer', query='roster'
+        history_t2 = history_t1 + [
+            {"role": "assistant", "content": "Bayern Munich plays RB Leipzig next."},
+            {"role": "user", "content": "User Jubkill says: what their roster?"},
+        ]
+        raw_t2 = normalize_tool_args("skill_sports_info", skill_sports_info, {"sport": "soccer", "query": "roster"})
+        enriched_t2 = enrich_sports_tool_args(raw_t2, history_t2)
+        self.assertIn("bayern munich", enriched_t2["query"].lower())
+        # Old intent word 'play'/'next' from Turn 1 is stripped so 'roster' wins cleanly
+        self.assertNotIn("play", enriched_t2["query"].lower())
+
+    @patch("src.skills.sports.aggregators.espn_utils.cached_espn_get")
+    def test_espn_search_auto_discover_and_athlete_overview(self, mock_get):
+        from src.skills.sports.aggregators.espn_utils import espn_search_auto_discover, parse_athlete_overview
+
+        def side_effect(url, params=None, ttl=300):
+            if "search/v2" in url:
+                return {
+                    "results": [
+                        {
+                            "type": "player",
+                            "contents": [
+                                {
+                                    "displayName": "Shohei Ohtani",
+                                    "subtitle": "Los Angeles Dodgers",
+                                    "sport": "baseball",
+                                    "defaultLeagueSlug": "mlb",
+                                    "uid": "s:1~l:10~a:39832",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            return {
+                "statistics": {
+                    "displayName": "2026 Batting",
+                    "labels": ["GP", "HR", "RBI"],
+                    "splits": [{"displayName": "Regular Season", "stats": ["135", "30", "81"]}],
+                },
+                "rotowire": {"headline": "Ohtani is batting cleanup Wednesday."},
+            }
+
+        mock_get.side_effect = side_effect
+        disc = espn_search_auto_discover("Shohei Ohtani stats")
+        self.assertIsNotNone(disc)
+        self.assertEqual(disc["sport"], "baseball")
+        self.assertEqual(disc["league"], "mlb")
+        self.assertEqual(disc["athlete_id"], "39832")
+
+        overview = parse_athlete_overview("baseball", "mlb", "39832", "Shohei Ohtani", "Los Angeles Dodgers")
+        self.assertIn("SHOHEI OHTANI (Los Angeles Dodgers)", overview)
+        self.assertIn("**HR:** 30", overview)
+        self.assertIn("Ohtani is batting cleanup Wednesday.", overview)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

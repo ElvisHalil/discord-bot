@@ -16,6 +16,8 @@ from src.skills.sports.aggregators.espn_utils import (
     parse_team_roster_and_stats,
     parse_league_injuries,
     parse_match_summary,
+    espn_search_auto_discover,
+    parse_athlete_overview,
 )
 from src.utils.http import fetch_json
 
@@ -98,6 +100,27 @@ class SoccerAggregator(BaseSportsAggregator):
         league_name = league_info["name"]
 
         matched_team = resolve_espn_team("soccer", league_code, q)
+        discovered_player = None
+
+        # Auto-discover any worldwide soccer club or player via ESPN Search v2 if not found in default league
+        if not matched_team:
+            disc = espn_search_auto_discover(q)
+            if disc and disc.get("sport") == "soccer":
+                disc_league = disc.get("league") or league_code
+                league_code = disc_league
+                for l_info in self.LEAGUES.values():
+                    if l_info["code"] == disc_league:
+                        league_name = l_info["name"]
+                        break
+                else:
+                    league_name = f"Soccer ({disc_league.upper()})"
+
+                if disc.get("entity_type") == "team" and disc.get("team_id"):
+                    matched_team = {"id": disc["team_id"], "displayName": disc["display_name"]}
+                elif disc.get("entity_type") == "player" and disc.get("athlete_id"):
+                    discovered_player = disc
+                    if disc.get("subtitle"):
+                        matched_team = resolve_espn_team("soccer", league_code, disc["subtitle"])
 
         # 1. Deep Match Summary / Starting Lineups / Substitutions / Boxscore
         if any(w in q for w in ("lineup", "line-up", "starting xi", "starting 11", "formation", "sub", "substitution", "subs", "boxscore", "match stats", "match summary", "possession", "corners", "fouls")):
@@ -110,12 +133,22 @@ class SoccerAggregator(BaseSportsAggregator):
             return parse_league_injuries("soccer", league_code, league_name, q)
 
         # 3. Squad Roster, Player Season Stats, Top Scorers, Assists, or Cards
+        if discovered_player and not any(w in q for w in ("roster", "squad", "schedule", "fixtures", "standing", "table")):
+            ath_out = parse_athlete_overview(
+                "soccer",
+                league_code,
+                discovered_player["athlete_id"],
+                discovered_player["display_name"],
+                discovered_player.get("subtitle", ""),
+            )
+            if ath_out:
+                return ath_out
+
         if any(w in q for w in ("roster", "squad", "player", "players", "stat", "stats", "scorer", "scorers", "golden boot", "assist", "assists", "yellow card", "red card", "cards", "appearances")):
             if matched_team:
                 roster_out = parse_team_roster_and_stats(
                     "soccer", league_code, matched_team["id"], matched_team["displayName"], player_filter=q
                 )
-                # If the user specifically asked about cards or match events, also append the latest match summary
                 if any(w in q for w in ("card", "yellow", "red", "last match", "last game", "recent")):
                     match_sum = self.get_match_summary(league_code, league_name, q, matched_team=matched_team)
                     if match_sum:

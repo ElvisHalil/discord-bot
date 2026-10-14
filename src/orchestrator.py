@@ -86,6 +86,18 @@ TOOL_ARG_ALIASES = {
         "sport_name": "sport",
         "discipline": "sport",
         "competition": "sport",
+        "club": "team",
+        "franchise": "team",
+        "squad": "team",
+        "teams": "team",
+        "competitor": "team",
+        "side": "team",
+        "organization": "team",
+        "athlete": "player",
+        "player_name": "player",
+        "fighter": "player",
+        "driver": "player",
+        "golfer": "player",
         "q": "query",
         "text": "query",
         "prompt": "query",
@@ -137,7 +149,7 @@ def _coerce(value, annotation):
 def normalize_tool_args(tool_name: str, func, args) -> dict:
     """Map aliased argument names onto the function's real parameters, drop anything the
     function does not accept (and explicit nulls, so defaults apply), and coerce types.
-    Canonical names always win over aliases."""
+    Canonical names always win over aliases (or merge for skill_sports_info so team/league context isn't lost)."""
     if not isinstance(args, dict):
         return {}
 
@@ -146,11 +158,81 @@ def normalize_tool_args(tool_name: str, func, args) -> dict:
 
     normalized = {k: v for k, v in args.items() if k in params and v is not None}
     for key, value in args.items():
+        if key in params or value in (None, ""):
+            continue
         target = aliases.get(key)
-        if target and target in params and target not in normalized and value not in (None, ""):
-            normalized[target] = value
+        if target and target in params:
+            if target not in normalized:
+                normalized[target] = value
+            elif tool_name == "skill_sports_info" and isinstance(normalized[target], str) and isinstance(value, str):
+                if value.strip().lower() not in normalized[target].lower():
+                    normalized[target] = f"{normalized[target]} {value.strip()}".strip()
 
     return {k: _coerce(v, params[k].annotation) for k, v in normalized.items()}
+
+
+def _extract_raw_user_text(msg) -> str:
+    """Strip Discord wrapper prefixes ('User X says: ...') from a user message in history."""
+    content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
+    if not content:
+        return ""
+    text = str(content).strip()
+    m = re.match(r"^(?:User\s+.+?\s+says(?:\s*\[.*?\])*|.+\(User ID:\s*\d+\)(?:\s*\[.*?\])*)\s*:\s*(.+)$", text, flags=re.DOTALL)
+    return m.group(1).strip() if m else text
+
+
+_INTENT_WORDS_TO_STRIP = {
+    "roster", "squad", "schedule", "fixtures", "fixture", "standings", "table",
+    "rank", "points", "injuries", "injured", "injury", "lineup", "lineups",
+    "starting", "xi", "formation", "stats", "statistics", "stat", "scores",
+    "score", "results", "result", "yesterday", "tomorrow", "today", "play",
+    "playing", "played", "next", "previous", "past", "recent", "upcoming",
+}
+
+
+def enrich_sports_tool_args(args: dict, history: list) -> dict:
+    """Ensure skill_sports_info never loses team/player/league context from the user's prompt
+    or from the immediately preceding user turn on pronoun follow-ups (e.g. 'what is their roster?')."""
+    if not isinstance(args, dict) or not history:
+        return args
+
+    user_texts = [
+        _extract_raw_user_text(m)
+        for m in history
+        if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
+    ]
+    user_texts = [t for t in user_texts if t and not t.startswith("Now summarize") and not t.startswith("You have used")]
+    if not user_texts:
+        return args
+
+    latest_user = user_texts[-1]
+    combined_args_str = " ".join(str(v) for v in args.values() if v).lower()
+
+    # Check if latest user turn is a pronoun follow-up ("their roster", "when do they play", "his stats")
+    has_pronoun = bool(re.search(r"\b(?:their|they|them|his|her|its|that\s+team|same\s+team)\b", latest_user.lower()))
+    context_snippets = []
+
+    if has_pronoun and len(user_texts) >= 2 and not args.get("team") and not args.get("player"):
+        prev_user = user_texts[-2]
+        # Strip intent words from previous turn so only the team/player/league subject carries over
+        prev_entities = " ".join(
+            w for w in re.findall(r"[A-Za-z0-9À-ÿ'.-]+", prev_user)
+            if w.lower().strip("'.-") not in _INTENT_WORDS_TO_STRIP
+        ).strip()
+        if prev_entities and prev_entities.lower() not in combined_args_str:
+            context_snippets.append(prev_entities)
+
+    if latest_user.lower() not in combined_args_str:
+        context_snippets.append(latest_user)
+
+    if context_snippets:
+        enriched = dict(args)
+        existing_q = str(enriched.get("query") or "").strip()
+        extra_context = " ".join(context_snippets).strip()
+        enriched["query"] = f"{existing_q} {extra_context}".strip() if existing_q else extra_context
+        return enriched
+
+    return args
 
 
 # ---------------------------------------------------------------------------

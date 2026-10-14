@@ -16,6 +16,7 @@ from src.skills.music.utils import format_song_card, get_music_metadata, standar
 from src.config import MODES
 from src.orchestrator import (
     normalize_tool_args,
+    enrich_sports_tool_args,
     trim_history,
     apply_auto_ping,
     join_orphan_bullets,
@@ -76,6 +77,7 @@ def clear_tool_caches():
         from src.skills.sports.aggregators.liquipedia import clear_liquipedia_cache
         from src.skills.sports.aggregators.hltv import clear_hltv_cache
         from src.skills.sports.aggregators.kashrock import clear_kashrock_cache
+        from src.skills.sports.aggregators.espn_utils import clear_espn_cache
         clear_youtube_caches()
         clear_deezer_cache()
         clear_lastfm_cache()
@@ -83,6 +85,7 @@ def clear_tool_caches():
         clear_liquipedia_cache()
         clear_hltv_cache()
         clear_kashrock_cache()
+        clear_espn_cache()
     except Exception:
         pass
 
@@ -385,6 +388,8 @@ async def run_agent_turn(channel_id, mode_config):
             if tool_name in active_tools:
                 func = active_tools[tool_name]
                 args = normalize_tool_args(tool_name, func, call.function.arguments or {})
+                if tool_name == "skill_sports_info":
+                    args = enrich_sports_tool_args(args, history)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
                 try:
                     tool_output = await asyncio.to_thread(func, **args)

@@ -8,6 +8,8 @@ from src.skills.sports.aggregators.soccer import SoccerAggregator
 from src.skills.sports.aggregators.nba import NbaAggregator
 from src.skills.sports.aggregators.hockey import HockeyAggregator
 from src.skills.sports.aggregators.odds import OddsAggregator
+from src.skills.sports.aggregators.universal_espn import UniversalEspnAggregator
+from src.skills.sports.aggregators.espn_utils import clear_espn_cache
 
 __all__ = [
     "BaseSportsAggregator",
@@ -23,5 +25,6 @@ __all__ = [
     "NbaAggregator",
     "HockeyAggregator",
     "OddsAggregator",
+    "UniversalEspnAggregator",
+    "clear_espn_cache",
 ]
-

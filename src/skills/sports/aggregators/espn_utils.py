@@ -397,10 +397,13 @@ def parse_team_roster_and_stats(
     # Check if user asked for a specific player on this team
     if player_filter:
         pf_low = player_filter.lower()
+        pf_words = set(pf_low.replace("?", " ").replace(",", " ").split())
+        t_words = set(team_name.lower().split())
         matched_players = [
             p for p in parsed_players
             if p["name"].lower() in pf_low or any(
-                tok in pf_low for tok in p["name"].lower().split() if len(tok) >= 4
+                tok in pf_words and tok not in t_words
+                for tok in p["name"].lower().split() if len(tok) >= 4
             )
         ]
         if matched_players:
@@ -465,8 +468,8 @@ def parse_team_roster_and_stats(
 
 
 def parse_league_injuries(sport_path: str, league_code: str, league_label: str, query: str = "") -> str:
-    """Fetch and format injury reports for NBA, NHL, or Soccer clubs."""
-    if sport_path in ("basketball", "hockey"):
+    """Fetch and format injury reports for NBA, NHL, NFL, MLB, WNBA, or Soccer clubs."""
+    if sport_path in ("basketball", "hockey", "football", "baseball"):
         url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_code}/injuries"
         data = cached_espn_get(url, ttl=300)
         if not data or not data.get("injuries"):
@@ -501,7 +504,7 @@ def parse_league_injuries(sport_path: str, league_code: str, league_label: str, 
 
                 # If user asked for a specific player (and not a team), filter by player name if applicable
                 if not target_team_name and q_low and not any(
-                    k in q_low for k in ("nba", "nhl", "hockey", "basketball", "injur", "report", "all", "today", "who")
+                    k in q_low for k in ("nba", "nhl", "nfl", "mlb", "wnba", "hockey", "basketball", "football", "baseball", "injur", "report", "all", "today", "who")
                 ):
                     if p_name.lower() not in q_low and t_name.lower() not in q_low:
                         continue
@@ -520,7 +523,6 @@ def parse_league_injuries(sport_path: str, league_code: str, league_label: str, 
         if not sections and target_team_name:
             return f"=== 🚑 {league_label} INJURY REPORT ===\nNo players are currently listed on the injury report for **{matched_team['displayName']}**."
         if not sections:
-            # Fallback to showing top teams with injuries
             for t_entry in teams_inj[:12]:
                 t_name = t_entry.get("displayName", "Team")
                 inj_list = t_entry.get("injuries", [])
@@ -696,3 +698,139 @@ def parse_match_summary(sport_path: str, league_code: str, event_id: str) -> str
             out_sections.append("\n".join(lineup_blocks))
 
     return "\n\n".join(out_sections).strip()
+
+
+_SEARCH_STOPWORDS = {
+    "when", "does", "do", "play", "playing", "played", "next", "what", "whats", "what's",
+    "is", "are", "their", "the", "roster", "squad", "schedule", "fixtures", "fixture",
+    "matches", "match", "game", "games", "score", "scores", "standings", "table",
+    "stats", "statistics", "stat", "player", "players", "injuries", "injured", "injury",
+    "report", "lineup", "lineups", "starting", "xi", "formation", "cards", "yellow",
+    "red", "results", "result", "recent", "past", "upcoming", "today", "tomorrow",
+    "yesterday", "this", "week", "month", "who", "how", "in", "for", "on", "at",
+    "about", "of", "context", "previous", "last", "current", "currently", "team",
+    "soccer", "football", "basketball", "hockey", "baseball", "sports", "sport",
+    "all", "show", "get", "me", "please", "tell", "give",
+}
+
+
+def clean_entity_search_query(query: str) -> str:
+    """Extract likely team, player, or league entity keywords from a natural-language sports query."""
+    if not query:
+        return ""
+    import re as _re
+    tokens = _re.findall(r"[A-Za-z0-9À-ÿ'.-]+", query)
+    kept = [t for t in tokens if t.lower().strip("'.-") not in _SEARCH_STOPWORDS and len(t) >= 2]
+    cleaned = " ".join(kept).strip()
+    # Expand known short aliases if the cleaned query matches one
+    low = cleaned.lower()
+    if low in TEAM_ALIASES:
+        return TEAM_ALIASES[low]
+    return cleaned
+
+
+def espn_search_auto_discover(query: str) -> Optional[Dict[str, Any]]:
+    """
+    Universal ESPN Auto-Discovery via https://site.web.api.espn.com/apis/search/v2.
+    Given any team, player, or league query, returns a normalized dict:
+    {
+        "entity_type": "team" | "player" | "league",
+        "display_name": str,
+        "subtitle": str,
+        "sport": str,          # e.g. 'soccer', 'football', 'baseball', 'basketball', 'hockey', 'mma', 'tennis'
+        "league": str,         # e.g. 'ger.1', 'nfl', 'mlb', 'college-football', 'nba', 'wnba', 'nhl', 'ufc', 'atp'
+        "team_id": Optional[str],
+        "athlete_id": Optional[str],
+    }
+    """
+    cleaned = clean_entity_search_query(query)
+    if not cleaned:
+        return None
+
+    url = "https://site.web.api.espn.com/apis/search/v2"
+    data = cached_espn_get(url, params={"query": cleaned, "limit": 5}, ttl=600)
+    if not data or not data.get("results"):
+        return None
+
+    import re as _re
+    DEFAULT_SPORT_LEAGUE = {
+        "football": "nfl",
+        "baseball": "mlb",
+        "basketball": "nba",
+        "hockey": "nhl",
+        "soccer": "eng.1",
+        "mma": "ufc",
+        "tennis": "atp",
+        "golf": "pga",
+    }
+
+    # Check team and player results first
+    for group in data.get("results", []):
+        g_type = group.get("type", "")
+        if g_type not in ("team", "player", "league"):
+            continue
+        for item in group.get("contents", []):
+            sport = (item.get("sport") or "").lower().strip()
+            if not sport:
+                continue
+            league = (item.get("defaultLeagueSlug") or DEFAULT_SPORT_LEAGUE.get(sport, "")).lower().strip()
+            uid = item.get("uid") or ""
+            m_t = _re.search(r"t:(\d+)", uid)
+            m_a = _re.search(r"a:(\d+)", uid)
+            team_id = m_t.group(1) if m_t else (str(item.get("id")) if g_type == "team" and str(item.get("id", "")).isdigit() else None)
+            athlete_id = m_a.group(1) if m_a else (str(item.get("id")) if g_type == "player" and str(item.get("id", "")).isdigit() else None)
+
+            return {
+                "entity_type": g_type,
+                "display_name": item.get("displayName", cleaned),
+                "subtitle": item.get("subtitle") or "",
+                "sport": sport,
+                "league": league,
+                "team_id": team_id,
+                "athlete_id": athlete_id,
+            }
+    return None
+
+
+def parse_athlete_overview(
+    sport_path: str,
+    league_code: str,
+    athlete_id: str,
+    athlete_name: str,
+    team_name: str = "",
+) -> str:
+    """Fetch and format an individual athlete's season/career statistics & recent game logs from ESPN v3."""
+    url = f"https://site.web.api.espn.com/apis/common/v3/sports/{sport_path}/{league_code}/athletes/{athlete_id}/overview"
+    data = cached_espn_get(url, ttl=300)
+    if not data:
+        return ""
+
+    team_suffix = f" ({team_name})" if team_name else ""
+    out = [f"=== 🌟 ATHLETE PROFILE & STATS: {athlete_name.upper()}{team_suffix} ==="]
+
+    # 1. Statistics block
+    stats_block = data.get("statistics", {})
+    labels = stats_block.get("labels") or stats_block.get("names") or []
+    splits = stats_block.get("splits", [])
+    stat_title = stats_block.get("displayName") or "Season Statistics"
+
+    if labels and splits:
+        out.append(f"\n📊 **{stat_title}:**")
+        for sp in splits[:4]:
+            sp_name = sp.get("displayName", "Split")
+            sp_vals = sp.get("stats", [])
+            if sp_vals:
+                pairs = [f"**{lbl}:** {val}" for lbl, val in zip(labels, sp_vals) if val not in ("0", "0.0", "-", None, "")]
+                if not pairs:
+                    pairs = [f"**{lbl}:** {val}" for lbl, val in list(zip(labels, sp_vals))[:6]]
+                out.append(f"  • **{sp_name}:** " + " | ".join(pairs[:12]))
+
+    # 2. Recent News / RotoWire Injury or Status Note
+    rotowire = data.get("rotowire", {})
+    if rotowire and rotowire.get("headline"):
+        out.append(f"\n📰 **Latest Player Note:** {rotowire.get('headline')}")
+        if rotowire.get("story"):
+            out.append(f"  {rotowire.get('story')}")
+
+    return "\n".join(out)
+
