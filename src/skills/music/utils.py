@@ -11,26 +11,38 @@ RECENTLY_PLAYED_TRACKS = deque(maxlen=30)
 def _norm_track_token(text: str) -> str:
     return re.sub(r'[^a-z0-9]+', '', (text or '').lower())
 
+def _clean_song_token(text: str) -> str:
+    """Normalizes a song title after stripping parentheticals and dash suffixes (e.g., '- Slowed', '(Official Audio)')."""
+    s = re.sub(r'[\(\[\{].*?[\)\]\}]', '', text or '')
+    s = re.sub(r'\s+[-–—|/]\s+.*$', '', s)
+    return _norm_track_token(s)
+
 def record_played_track(song: str, artist: str) -> None:
     """Records a song and artist in the rolling session exclusion deque."""
     s_norm = _norm_track_token(song)
+    s_clean = _clean_song_token(song)
     a_norm = _norm_track_token(artist)
     if not s_norm or s_norm in ("unknowntrack", "unknownsong", "unknown"):
         return
-    entry = (s_norm, a_norm)
-    if entry not in RECENTLY_PLAYED_TRACKS:
-        RECENTLY_PLAYED_TRACKS.append(entry)
+    for tok in {s_norm, s_clean}:
+        if tok:
+            entry = (tok, a_norm)
+            if entry in RECENTLY_PLAYED_TRACKS:
+                RECENTLY_PLAYED_TRACKS.remove(entry)
+            RECENTLY_PLAYED_TRACKS.append(entry)
 
 def is_recently_played(song: str, artist: str = "") -> bool:
     """Checks whether a candidate track matches a recently played song in this session."""
     if not RECENTLY_PLAYED_TRACKS:
         return False
     s_norm = _norm_track_token(song)
+    s_clean = _clean_song_token(song)
     a_norm = _norm_track_token(artist)
     if not s_norm:
         return False
+    candidate_tokens = {t for t in (s_norm, s_clean) if t}
     for rec_s, rec_a in RECENTLY_PLAYED_TRACKS:
-        if s_norm == rec_s and (not a_norm or not rec_a or a_norm == rec_a or a_norm in rec_a or rec_a in a_norm):
+        if rec_s in candidate_tokens and (not a_norm or not rec_a or a_norm == rec_a or a_norm in rec_a or rec_a in a_norm):
             return True
     return False
 
@@ -285,7 +297,23 @@ def standardize_song_reply(reply: str) -> str:
                 if not extracted_genre:
                     extracted_genre = meta.get("genre")
 
-                if is_embeddable:
+                # Verify that the LLM did not paste a stale video URL from an earlier turn for a different song/artist
+                meta_s = _clean_song_token(meta.get("song", ""))
+                meta_a = _norm_track_token(meta.get("artist", ""))
+                ext_s = _clean_song_token(extracted_song or "")
+                ext_a = _norm_track_token(extracted_artist or "")
+                is_mismatched_vid = (
+                    bool(meta_s and ext_s and meta_a and ext_a)
+                    and (meta_s not in ext_s and ext_s not in meta_s)
+                    and (meta_a not in ext_a and ext_a not in meta_a)
+                )
+
+                if is_mismatched_vid:
+                    print(
+                        f"⚠️ [standardize_song_reply]: Stale/mismatched Video ID {vid} ('{meta.get('song')}' by '{meta.get('artist')}') "
+                        f"for card '{extracted_song}' by '{extracted_artist}'. Auto-resolving correct link..."
+                    )
+                elif is_embeddable:
                     music_url = full_url.replace("www.youtube.com", "music.youtube.com")
                 else:
                     print(f"⚠️ [standardize_song_reply]: Video ID {vid} is not embeddable in Discord. Attempting auto-resolution for a working link...")

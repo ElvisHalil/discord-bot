@@ -31,16 +31,23 @@ def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music:
 
         # Music mode: delegate directly to specialized YouTube Music playback resolver
         if is_music:
-            # Guard against generic genre / non-song queries (e.g. "phonk song", "techno music", "dnb track")
-            generic_m = re.match(r'^(?:a\s+|some\s+)?([a-z0-9\s]+?)\s+(?:song|track|music|beat|video)s?$', query.strip(), re.IGNORECASE)
-            if generic_m and " by " not in query and " - " not in query:
-                genre_term = generic_m.group(1).strip()
-                print(f"⚠️ [YouTube Search Skill]: Blocked generic genre query '{query}'. Directing model to skill_top_music.")
-                return (
-                    f"GENRE_QUERY_REJECTED: '{query}' is a broad genre request, NOT a specific song title! "
-                    f"You MUST call `skill_top_music(genre='{genre_term}')` FIRST to discover real songs in the '{genre_term}' genre. "
-                    f"Then pick ONE specific song and call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)`."
-                )
+            # Guard against generic genre / non-song queries (e.g. "phonk", "phonk song", "techno music", "dnb track")
+            clean_q_low = re.sub(r'^(?:play\s+)?(?:a\s+|some\s+)?', '', query.strip(), flags=re.IGNORECASE).strip()
+            generic_m = re.match(r'^([a-z0-9\s&]+?)\s+(?:song|track|music|beat|video|banger)s?$', clean_q_low, re.IGNORECASE)
+            KNOWN_BARE_GENRES = {
+                "phonk", "drift phonk", "synthwave", "retrowave", "darksynth", "hardstyle",
+                "dnb", "drum and bass", "drum & bass", "drumnbass", "jungle", "neurofunk",
+                "techno", "hard techno", "melodic techno", "house", "tech house", "deep house",
+                "trance", "psytrance", "dubstep", "edm", "electronic", "ambient", "lofi", "lo-fi",
+                "rap", "hip hop", "hip-hop", "trap", "drill", "uk drill", "german rap", "deutschrap",
+                "rock", "metal", "heavy metal", "indie", "pop", "r&b", "rnb", "jazz", "classical",
+                "banger", "chill", "melodic", "hard", "dark", "sad", "love", "workout",
+            }
+            if (" by " not in query.lower() and " - " not in query.lower()) and (generic_m or clean_q_low.lower() in KNOWN_BARE_GENRES):
+                genre_term = generic_m.group(1).strip() if generic_m else clean_q_low
+                print(f"🔄 [YouTube Search Skill]: Redirecting genre/vibe query '{query}' -> skill_top_music(genre='{genre_term}').")
+                from src.skills.music.top_music import skill_top_music
+                return skill_top_music(genre=genre_term)
 
             results = resolve_youtube_music_link(query, max_results=max_results)
             if not results:

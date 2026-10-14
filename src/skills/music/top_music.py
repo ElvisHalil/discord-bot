@@ -37,12 +37,25 @@ def _pre_resolve_top_candidate(candidates: list[Track]) -> str:
     if not candidates or _is_manager_mocked():
         return ""
 
-    for cand in candidates[:4]:
+    from src.skills.music.utils import is_recently_played, record_played_track, RECENTLY_PLAYED_TRACKS, _norm_track_token
+
+    # Filter out any tracks that have already been played in this session, and deprioritize the last played artist
+    last_artist = RECENTLY_PLAYED_TRACKS[-1][1] if RECENTLY_PLAYED_TRACKS else ""
+    fresh_diff_artist = [
+        c for c in candidates
+        if not is_recently_played(c.title, c.artist) and (not last_artist or _norm_track_token(c.artist) != last_artist)
+    ]
+    fresh_any = [c for c in candidates if not is_recently_played(c.title, c.artist)]
+    ordered_candidates = fresh_diff_artist or fresh_any or candidates
+
+    for cand in ordered_candidates[:4]:
         query = f"{cand.title} by {cand.artist}"
         try:
             results = resolve_youtube_music_link(query, max_results=1)
             if results:
                 r = results[0]
+                record_played_track(cand.title, cand.artist)
+                record_played_track(r["title"], r["artist"])
                 vid = r.get("id")
                 genre = cand.genre or r.get("genre")
                 album = cand.album or r.get("album")
@@ -99,18 +112,18 @@ def skill_top_music(
             top_sample = tracks[:15]
             header = f"=== TOP TRACKS BY '{artist.title()}' ===\n\n"
             output = header
+            pre_resolved = _pre_resolve_top_candidate(top_sample)
+            if pre_resolved:
+                output += pre_resolved + "\n"
+
             for t in top_sample:
                 output += t.display_line() + "\n"
 
-            pre_resolved = _pre_resolve_top_candidate(top_sample)
-            if pre_resolved:
-                output += pre_resolved
-
             output += (
                 "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-                "If the user asked for a single song and `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, "
-                "present that pre-verified track and its Link immediately using the template below—do NOT call `skill_youtube_searcher` again! "
-                "Only call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` if you need additional songs or a different track from the list.\n\n"
+                "CRITICAL: If the user asked for a single song and `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, "
+                "you MUST present THAT EXACT Song, Artist, and Link immediately using the template below—do NOT pick a different track from the list and do NOT call `skill_youtube_searcher` again! "
+                "Only call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` if the user explicitly asked for multiple songs.\n\n"
                 + SONG_TEMPLATE
             )
             return output
@@ -157,12 +170,12 @@ def skill_top_music(
                 header = f"=== SONGS SIMILAR TO '{similar_to}' ===\n\n"
 
             output = header
-            for t in top_sample:
-                output += t.display_line() + "\n"
-
             pre_resolved = _pre_resolve_top_candidate(top_sample)
             if pre_resolved:
-                output += pre_resolved
+                output += pre_resolved + "\n"
+
+            for t in top_sample:
+                output += t.display_line() + "\n"
 
             if is_unrelated_fallback:
                 output += (
@@ -170,16 +183,16 @@ def skill_top_music(
                     f"IMPORTANT: No directly related songs were found for '{similar_to}'. "
                     "Clearly let the user know that you couldn't find any directly related songs for that track, "
                     "and suggest ONE track from above that they might like instead. "
-                    "If `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, present that track and its Link immediately without calling `skill_youtube_searcher` again; "
+                    "If `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, present THAT EXACT track and its Link immediately without calling `skill_youtube_searcher` again; "
                     "otherwise call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)`.\n\n"
                     + SONG_TEMPLATE
                 )
             else:
                 output += (
                     "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-                    "If the user asked for a single song and `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, "
-                    "present that pre-verified track and its Link immediately using the template below—do NOT call `skill_youtube_searcher` again! "
-                    "Only call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` if you need additional songs or a different track from the list.\n\n"
+                    "CRITICAL: If the user asked for a single song and `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, "
+                    "you MUST present THAT EXACT Song, Artist, and Link immediately using the template below—do NOT pick a different track from the list and do NOT call `skill_youtube_searcher` again! "
+                    "Only call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` if the user explicitly asked for multiple songs.\n\n"
                     + SONG_TEMPLATE
                 )
             return output
@@ -208,24 +221,23 @@ def skill_top_music(
             random.shuffle(featured_diverse)
             featured_sample = featured_diverse[:15]
 
+            pre_resolved = _pre_resolve_top_candidate(featured_sample)
+            if pre_resolved:
+                output += pre_resolved + "\n"
+
             output += f"[FEATURED DIVERSE SELECTION ({len(featured_sample)} Different Artists)]\n"
             for t in featured_sample:
                 output += t.display_line() + "\n"
-
-            pre_resolved = _pre_resolve_top_candidate(featured_sample)
-            if pre_resolved:
-                output += pre_resolved
-            else:
-                output += "\n"
+            output += "\n"
         else:
             output += "No charting music found.\n"
 
         output += (
             "=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
             "Present these recommendations to the user naturally.\n"
-            "If the user asked for a single song and `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, "
-            "present that pre-verified track and its Link immediately using the template below—do NOT call `skill_youtube_searcher` again!\n"
-            "Only call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` if the user asked for multiple songs or if no pre-resolved link is shown above.\n\n"
+            "CRITICAL: If the user asked for a single song and `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, "
+            "you MUST present THAT EXACT Song, Artist, and Link immediately using the template below—do NOT pick a different track from the list and do NOT call `skill_youtube_searcher` again!\n"
+            "Only call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` if the user explicitly asked for multiple songs or if no pre-resolved link is shown above.\n\n"
             + SONG_TEMPLATE
         )
         return output

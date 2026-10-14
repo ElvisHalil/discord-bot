@@ -316,23 +316,14 @@ class LastFmAggregator(BaseMusicAggregator):
 
         tracks = []
         if genre and genre.lower() not in ("all", "general", "none"):
+            from collections import Counter
+            from src.skills.music.utils import is_recently_played, RECENTLY_PLAYED_TRACKS, _norm_track_token
             tag = genre.lower().strip()
-            genre_aliases = {
-                "dnb": "drum and bass",
-                "drumnbass": "drum and bass",
-                "drum & bass": "drum and bass",
-                "hip hop": "hip-hop",
-                "hiphop": "hip-hop",
-                "r&b": "rnb",
-                "r and b": "rnb",
-                "edm": "electronic",
-            }
-            tag = genre_aliases.get(tag, tag)
             print(f"  └─ 📻 [Last.fm]: Fetching top tracks & verified genre artists for tag '{tag}'...")
 
             with ThreadPoolExecutor(max_workers=2) as pool:
-                f_tracks = pool.submit(self._call, "tag.gettoptracks", {"tag": tag, "limit": 100, "page": 1})
-                f_artists = pool.submit(self._call, "tag.gettopartists", {"tag": tag, "limit": 100})
+                f_tracks = pool.submit(self._call, "tag.gettoptracks", {"tag": tag, "limit": 50, "page": 1})
+                f_artists = pool.submit(self._call, "tag.gettopartists", {"tag": tag, "limit": 50})
                 res = f_tracks.result()
                 art_res = f_artists.result()
 
@@ -350,10 +341,12 @@ class LastFmAggregator(BaseMusicAggregator):
                 if a_name and a_name.strip():
                     verified_genre_artists.add(a_name.lower().strip())
 
+            recent_artist_norms = {rec_a for _, rec_a in RECENTLY_PLAYED_TRACKS if rec_a}
             artist_seen = set()
             source_name = f"lastfm_{tag.replace(' ', '_')}"
 
-            # Step A: Sample up to 6 diverse tagged tracks (max 1 per artist), cross-verified against top genre artists
+            # Step A: Candidate tracks from tag.gettoptracks cross-verified against tag.gettopartists
+            sampled_candidates = []
             if raw:
                 if verified_genre_artists:
                     verified_raw = [
@@ -364,17 +357,101 @@ class LastFmAggregator(BaseMusicAggregator):
                     if verified_raw:
                         raw = verified_raw
 
+                unplayed_raw = [
+                    t for t in raw
+                    if not is_recently_played(
+                        t.get("name", ""),
+                        t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))
+                    )
+                ]
+                active_raw = unplayed_raw if unplayed_raw else raw
+
                 diverse_raw = []
-                for t in raw:
+                for t in active_raw:
                     art = t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))
                     clean_art = art.lower().strip()
                     if clean_art and clean_art not in artist_seen:
                         artist_seen.add(clean_art)
                         diverse_raw.append(t)
-                sampled = random.sample(diverse_raw, min(6, len(diverse_raw)))
-                # Reset artist_seen to only the artists actually sampled in Step A
-                artist_seen = set()
-                for t in sampled:
+                sampled_candidates = random.sample(diverse_raw, min(8, len(diverse_raw)))
+
+            # Step B: Candidate rotating artists from tag.gettopartists
+            selected_artists = []
+            if raw_artists:
+                step_a_artists = {
+                    (t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))).lower().strip()
+                    for t in sampled_candidates
+                }
+                fresh_cand_artists = []
+                fallback_cand_artists = []
+                for a in raw_artists[:45]:
+                    a_name = a.get("name", "") if isinstance(a, dict) else str(a)
+                    clean_a = a_name.lower().strip()
+                    if a_name and clean_a not in step_a_artists:
+                        if _norm_track_token(a_name) not in recent_artist_norms:
+                            fresh_cand_artists.append(a_name)
+                        else:
+                            fallback_cand_artists.append(a_name)
+                cand_pool = fresh_cand_artists if len(fresh_cand_artists) >= 8 else (fresh_cand_artists + fallback_cand_artists)
+                selected_artists = random.sample(cand_pool, min(8, len(cand_pool)))
+
+            # Dynamic scrobble-tag consensus verification across all candidate artists (Step A + Step B)
+            all_cand_artist_names = list(dict.fromkeys(
+                [
+                    (t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", "")))
+                    for t in sampled_candidates
+                ]
+                + selected_artists
+            ))
+
+            def _fetch_high_tags(a_name: str) -> tuple[str, set[str]]:
+                tag_res = self._call("artist.gettoptags", {"artist": a_name, "autocorrect": 1})
+                t_list = tag_res.get("toptags", {}).get("tag", [])
+                if isinstance(t_list, dict):
+                    t_list = [t_list]
+                if not t_list:
+                    return a_name.lower().strip(), set()
+                high = set()
+                for tg in t_list[:8]:
+                    t_name = (tg.get("name") or "").lower().strip()
+                    try:
+                        t_count = int(tg.get("count", 0))
+                    except (TypeError, ValueError):
+                        t_count = 0
+                    if t_name and t_count >= 50:
+                        high.add(t_name)
+                return a_name.lower().strip(), high
+
+            artist_high_tags: dict[str, set[str]] = {}
+            tag_counter = Counter()
+            if all_cand_artist_names:
+                with ThreadPoolExecutor(max_workers=min(10, len(all_cand_artist_names))) as pool:
+                    for clean_a, high_set in pool.map(_fetch_high_tags, all_cand_artist_names):
+                        artist_high_tags[clean_a] = high_set
+                        for h in high_set:
+                            tag_counter[h] += 1
+
+            dominant_tag = tag_counter.most_common(1)[0][0] if tag_counter else tag
+
+            def _is_verified_primary_artist(a_name: str) -> bool:
+                high_set = artist_high_tags.get(a_name.lower().strip())
+                if not high_set:
+                    return True  # Graceful pass-through if unmocked or artist has no tags
+                if tag in high_set or dominant_tag in high_set:
+                    return True
+                return any(tag in h or h in tag for h in high_set)
+
+            # Finalize Step A tracks (up to 6 verified primary-genre tracks)
+            artist_seen = set()
+            if sampled_candidates:
+                primary_sampled = [
+                    t for t in sampled_candidates
+                    if _is_verified_primary_artist(
+                        t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))
+                    )
+                ]
+                final_step_a = (primary_sampled if primary_sampled else sampled_candidates)[:6]
+                for t in final_step_a:
                     title = t.get("name", "")
                     artist_obj = t.get("artist", {})
                     artist = artist_obj.get("name", "") if isinstance(artist_obj, dict) else str(artist_obj)
@@ -387,38 +464,40 @@ class LastFmAggregator(BaseMusicAggregator):
                             source=source_name
                         ))
 
-            # Step B: Rotate through top genre artists via tag.gettopartists -> artist.gettoptracks concurrently
-            if raw_artists:
-                cand_artists = []
-                for a in raw_artists[:40]:
-                    a_name = a.get("name", "") if isinstance(a, dict) else str(a)
-                    if a_name and a_name.lower().strip() not in artist_seen:
-                        cand_artists.append(a_name)
-                selected_artists = random.sample(cand_artists, min(6, len(cand_artists)))
+            # Finalize Step B tracks (up to 6 rotating primary-genre artists)
+            verified_step_b_artists = [
+                a_name for a_name in selected_artists
+                if a_name.lower().strip() not in artist_seen and _is_verified_primary_artist(a_name)
+            ][:6]
 
-                def _fetch_tag_artist_top(a_name: str):
-                    top_res = self._call("artist.gettoptracks", {"artist": a_name, "limit": 5, "autocorrect": 1})
-                    top_trks = top_res.get("toptracks", {}).get("track", [])
-                    if isinstance(top_trks, dict):
-                        top_trks = [top_trks]
-                    if top_trks:
-                        chosen_t = random.choice(top_trks[:5])
-                        t_title = chosen_t.get("name", "")
-                        if t_title:
-                            return Track(
-                                title=t_title,
-                                artist=a_name,
-                                genre=genre.title(),
-                                source=source_name
-                            )
-                    return None
+            def _fetch_tag_artist_top(a_name: str):
+                top_res = self._call("artist.gettoptracks", {"artist": a_name, "limit": 8, "autocorrect": 1})
+                top_trks = top_res.get("toptracks", {}).get("track", [])
+                if isinstance(top_trks, dict):
+                    top_trks = [top_trks]
+                if top_trks:
+                    unplayed_trks = [
+                        tk for tk in top_trks[:8]
+                        if tk.get("name") and not is_recently_played(tk.get("name", ""), a_name)
+                    ]
+                    pool_trks = unplayed_trks if unplayed_trks else top_trks[:5]
+                    chosen_t = random.choice(pool_trks)
+                    t_title = chosen_t.get("name", "")
+                    if t_title:
+                        return Track(
+                            title=t_title,
+                            artist=a_name,
+                            genre=genre.title(),
+                            source=source_name
+                        )
+                return None
 
-                if selected_artists:
-                    with ThreadPoolExecutor(max_workers=min(6, len(selected_artists))) as pool:
-                        for trk in pool.map(_fetch_tag_artist_top, selected_artists):
-                            if trk:
-                                artist_seen.add(trk.artist.lower().strip())
-                                tracks.append(trk)
+            if verified_step_b_artists:
+                with ThreadPoolExecutor(max_workers=min(6, len(verified_step_b_artists))) as pool:
+                    for trk in pool.map(_fetch_tag_artist_top, verified_step_b_artists):
+                        if trk:
+                            artist_seen.add(trk.artist.lower().strip())
+                            tracks.append(trk)
         else:
             print("  └─ 📻 [Last.fm]: Fetching global top chart tracks...")
             res = self._call("chart.gettoptracks", {"limit": 50})
