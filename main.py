@@ -13,6 +13,12 @@ from ollama import AsyncClient
 import src.registry as tools
 from src.utils import ensure_ollama_running, chunk_message, suppress_discord_embeds
 from src.skills.music.utils import format_song_card, get_music_metadata, standardize_song_reply
+from src.skills.sports.live_tracker import (
+    LIVE_TRACKER,
+    bind_tracker_event_loop,
+    set_active_channel_id,
+    skill_track_live_game,
+)
 from src.config import MODES
 from src.orchestrator import (
     normalize_tool_args,
@@ -90,10 +96,99 @@ def clear_tool_caches():
         pass
 
 
+async def handle_live_match_update(match, snapshot, triggers):
+    """Callback invoked by LIVE_TRACKER when a tracked game has a score change, red card, halftime, or full-time."""
+    channel = client.get_channel(match.channel_id)
+    if not channel:
+        try:
+            channel = await client.fetch_channel(match.channel_id)
+        except Exception as e:
+            print(f"⚠️ [Live Tracker]: Could not fetch channel {match.channel_id}: {e}")
+            return
+
+    trigger_block = "\n".join(f"- {t}" for t in triggers)
+    stats_line = f"\nLive Match Stats: {snapshot.stats_summary}" if snapshot.stats_summary else ""
+    fallback_msg = (
+        f"📡 **LIVE MATCH UPDATE — {match.league_name}**\n"
+        f"{trigger_block}"
+        + (f"\n📊 *{snapshot.stats_summary}*" if snapshot.stats_summary else "")
+    )
+
+    mode_config = MODES[current_mode]
+    if current_mode == "chat":
+        sys_prompt = (
+            "you are a casual, hyped sports fan hanging out in discord. "
+            "write 1-2 short lowercase sentences reacting to this live sports match update. "
+            "include the exact score, team names, and scorer/event details. no links."
+        )
+    elif current_mode == "chappie":
+        sys_prompt = (
+            "Act as Chappie, the childlike AI raised by South African gangsters. "
+            "Speak in the third person in 1-2 short sentences announcing this live sports match update "
+            "with the exact score and player/event details. No links."
+        )
+    else:
+        sys_prompt = (
+            "You are a live sports desk commentator in Discord. "
+            "Write a concise, energetic 1-3 sentence live match alert announcing the event below. "
+            "Include the exact score, match clock/status, competition name, and any goal scorer/assist/card or stats details."
+        )
+
+    internal_user_prompt = (
+        f"[INTERNAL LIVE SPORTS TRACKER TRIGGER]\n"
+        f"Match: {snapshot.home_team} vs {snapshot.away_team} ({match.league_name})\n"
+        f"Current Score: {snapshot.home_team} {snapshot.home_score} - {snapshot.away_score} {snapshot.away_team} ({snapshot.status_detail})\n"
+        f"Events Just Detected:\n{trigger_block}{stats_line}\n\n"
+        "Announce this live update to the Discord channel now."
+    )
+
+    update_options = {
+        **mode_config["ollama_options"],
+        "num_ctx": 2048,
+        "num_predict": 220,
+    }
+
+    async with channel_locks[match.channel_id]:
+        try:
+            resp = await ollama_client.chat(
+                model=mode_config["model"],
+                messages=[
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": internal_user_prompt},
+                ],
+                options=update_options,
+            )
+            llm_text = sanitize_agent_reply((resp.message.content or "").strip())
+        except Exception as e:
+            print(f"⚠️ [Live Tracker LLM Error]: {e}")
+            llm_text = ""
+
+        final_msg = f"📡 **LIVE UPDATE ({match.league_name})**\n{llm_text}" if llm_text else fallback_msg
+        await channel.send(final_msg)
+
+        if match.channel_id not in chat_history:
+            system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
+            chat_history[match.channel_id] = [system_msg]
+
+        chat_history[match.channel_id].append({
+            "role": "user",
+            "content": f"[Live Sports Tracker Event]: {trigger_block}",
+        })
+        chat_history[match.channel_id].append({
+            "role": "assistant",
+            "content": final_msg,
+        })
+
+
 @client.event
 async def on_ready():
     print(f"✅ Bot online as: {client.user}")
     print(f"🔥 Active Mode: {current_mode.upper()} (Switch with '!mode <name>': {', '.join(MODES)})")
+    bind_tracker_event_loop(asyncio.get_running_loop())
+    LIVE_TRACKER.set_notify_callback(handle_live_match_update)
+    LIVE_TRACKER.ensure_loop_running()
+
+
 @client.event
 async def on_raw_reaction_add(payload):
     if payload.user_id == client.user.id:
@@ -390,6 +485,7 @@ async def run_agent_turn(channel_id, mode_config):
                 args = normalize_tool_args(tool_name, func, call.function.arguments or {})
                 if tool_name == "skill_sports_info":
                     args = enrich_sports_tool_args(args, history)
+                set_active_channel_id(channel_id)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
                 try:
                     tool_output = await asyncio.to_thread(func, **args)
@@ -407,6 +503,8 @@ async def run_agent_turn(channel_id, mode_config):
             }
 
         tool_results = await asyncio.gather(*(run_tool(call) for call in tool_calls))
+        if LIVE_TRACKER.tracked_matches:
+            LIVE_TRACKER.ensure_loop_running()
         history.extend(tool_results)
         iterations += 1
 
@@ -477,6 +575,28 @@ async def on_message(message):
         chat_history.pop(message.channel.id, None)
         clear_tool_caches()
         await message.channel.send("🧹 Memory and context wiped for this channel.")
+        return
+
+    # Direct Live Sports Tracker Commands (!track <team>, !untrack [team], !tracked)
+    if user_input.lower().startswith("!track "):
+        target_q = user_input[7:].strip()
+        set_active_channel_id(message.channel.id)
+        res = await asyncio.to_thread(skill_track_live_game, action="start", query=target_q)
+        LIVE_TRACKER.ensure_loop_running()
+        await message.channel.send(res)
+        return
+
+    if user_input.lower().startswith("!untrack"):
+        target_q = user_input[8:].strip()
+        set_active_channel_id(message.channel.id)
+        res = await asyncio.to_thread(skill_track_live_game, action="stop", query=target_q)
+        await message.channel.send(res)
+        return
+
+    if user_input.lower() in ("!tracked", "!track"):
+        set_active_channel_id(message.channel.id)
+        res = await asyncio.to_thread(skill_track_live_game, action="list")
+        await message.channel.send(res)
         return
 
     is_mentioned = client.user in message.mentions

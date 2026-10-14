@@ -110,6 +110,21 @@ TOOL_ARG_ALIASES = {
         "outcomes": "query",
         "outcome": "query",
     },
+    "skill_track_live_game": {
+        "team": "query",
+        "club": "query",
+        "match": "query",
+        "matchup": "query",
+        "game": "query",
+        "event": "query",
+        "target": "query",
+        "q": "query",
+        "command": "action",
+        "mode": "action",
+        "type": "action",
+        "league": "sport",
+        "category": "sport",
+    },
 }
 
 

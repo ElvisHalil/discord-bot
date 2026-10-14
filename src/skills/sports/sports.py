@@ -83,6 +83,14 @@ def skill_sports_info(
             f"For AI models, benchmarks, technology, programming, news, or general knowledge: please use `search_web` instead."
         )
 
+    # 0. Live Match Tracking Check (if LLM calls skill_sports_info instead of skill_track_live_game)
+    if re.search(r'\b(?:untrack|stop\s+tracking)\b', combined):
+        from src.skills.sports.live_tracker import skill_track_live_game
+        return skill_track_live_game(action="stop", query=team_raw or query_raw or combined, sport=sport_raw)
+    if re.search(r'\b(?:track|tracking)\b', combined) and not re.search(r'\b(?:track\s+and\s+field|race\s+track|soundtrack)\b', combined):
+        from src.skills.sports.live_tracker import skill_track_live_game
+        return skill_track_live_game(action="start", query=team_raw or query_raw or combined, sport=sport_raw)
+
     # 1. Counter-Strike / Esports Check (guard against NFL "Atlanta Falcons" and substring false positives like 'esl' in 'bundesliga' or 'cs' in 'celtics')
     is_nfl_falcons = "atlanta" in combined or sport_raw.lower() in ("nfl", "football", "american football")
     is_cs = not is_nfl_falcons and (

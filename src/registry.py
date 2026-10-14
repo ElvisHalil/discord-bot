@@ -32,6 +32,7 @@ from src.skills import (
     skill_csgo_esports,
     skill_sports_info,
     skill_betting_odds,
+    skill_track_live_game,
     skill_top_headlines,
 )
 
@@ -48,6 +49,7 @@ RESEARCH_TOOLS = {
     "skill_csgo_esports": skill_csgo_esports,
     "skill_sports_info": skill_sports_info,
     "skill_betting_odds": skill_betting_odds,
+    "skill_track_live_game": skill_track_live_game,
 }
 
 # Chat mode is a casual persona on a small model: keep the tool list short so the
@@ -55,5 +57,7 @@ RESEARCH_TOOLS = {
 CHAT_TOOLS = {
     **SYSTEM_TOOLS,
     **WEB_TOOLS,
-    "skill_youtube_searcher": skill_youtube_searcher
+    "skill_youtube_searcher": skill_youtube_searcher,
+    "skill_track_live_game": skill_track_live_game,
 }
+
