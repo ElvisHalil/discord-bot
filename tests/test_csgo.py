@@ -171,6 +171,68 @@ class TestCsgoSkill(unittest.TestCase):
         mock_csgo.assert_called_once_with(query_type="tournaments", event_page=None)
         self.assertEqual(res, "CS SCHEDULE DATA")
 
+    @patch("src.skills.sports.sports.skill_csgo_esports")
+    def test_sports_info_routes_cs_player_stats_queries_to_player_stats(self, mock_csgo):
+        from src.skills.sports.sports import skill_sports_info
+        mock_csgo.return_value = "CS PLAYER STATS DATA"
+
+        res = skill_sports_info(sport="cs", query="whats falcons player current stats")
+        mock_csgo.assert_called_once_with(query_type="player_stats", player_url="whats falcons player current stats")
+        self.assertEqual(res, "CS PLAYER STATS DATA")
+
+    @patch("src.skills.sports.aggregators.hltv.fetch_soup")
+    def test_hltv_aggregator_resolves_team_player_stats(self, mock_fetch_soup):
+        from bs4 import BeautifulSoup
+        from src.skills.sports.aggregators.hltv import HltvAggregator
+
+        rankings_html = """
+        <div class="ranked-team">
+          <span class="name">Falcons</span>
+          <a href="/player/3741/niko">NiKo</a>
+          <a href="/player/19230/m0nesy">m0NESY</a>
+        </div>
+        """
+        niko_html = """
+        <div class="playerProfile">
+          <h1 class="playerNickname">NiKo</h1>
+          <div class="playerRealname">Nikola Kovač</div>
+          <div class="playerTeam"><span class="listRight"><a href="/team/11283/falcons">Falcons</a></span></div>
+          <div class="playerAge"><span class="listRight"><span itemprop="text">29 years</span></span></div>
+          <div class="tab-content">(Past 3 months • 35 maps)</div>
+          <div class="player-stat">Rating 3.0 1.11</div>
+          <div class="player-stat">Firepower 70 /100</div>
+        </div>
+        """
+        m0nesy_html = """
+        <div class="playerProfile">
+          <h1 class="playerNickname">m0NESY</h1>
+          <div class="playerRealname">Ilya Osipov</div>
+          <div class="playerTeam"><span class="listRight"><a href="/team/11283/falcons">Falcons</a></span></div>
+          <div class="playerAge"><span class="listRight"><span itemprop="text">21 years</span></span></div>
+          <div class="tab-content">(Past 3 months • 35 maps)</div>
+          <div class="player-stat">Rating 3.0 1.36</div>
+          <div class="player-stat">Sniping 94 /100</div>
+        </div>
+        """
+
+        def side_effect(url, timeout=30):
+            if "ranking/teams" in url:
+                return BeautifulSoup(rankings_html, "html.parser")
+            if "3741/niko" in url:
+                return BeautifulSoup(niko_html, "html.parser")
+            if "19230/m0nesy" in url:
+                return BeautifulSoup(m0nesy_html, "html.parser")
+            return BeautifulSoup("", "html.parser")
+
+        mock_fetch_soup.side_effect = side_effect
+        agg = HltvAggregator()
+        res = agg.get_player_stats("whats falcons player current stats")
+        self.assertIn("[TEAM PLAYER STATS: Falcons]", res)
+        self.assertIn("**NiKo** (Nikola Kovač)", res)
+        self.assertIn("Rating 3.0 1.11 | Firepower 70/100", res)
+        self.assertIn("**m0NESY** (Ilya Osipov)", res)
+        self.assertIn("Rating 3.0 1.36 | Sniping 94/100", res)
+
     def test_tool_arg_aliases_for_csgo(self):
         # Model passing 'category' or 'tournament' or 'type'
         args = {"type": "tournaments", "tournament": "ESL/Pro_League", "match": "Falcons vs NIP"}

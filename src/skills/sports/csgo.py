@@ -36,7 +36,7 @@ def skill_csgo_esports(query_type: Optional[str] = 'all', event_page: Optional[s
     q_type = (query_type or "all").lower().strip()
     if any(w in q_type for w in ("odd", "bet", "moneyline", "payout", "win")):
         q_type = "odds"
-    elif "player" in q_type and "stat" in q_type and player_url:
+    elif any(w in q_type for w in ("stat", "rating", "kdr", "kd")) or q_type == "player_stats" or player_url:
         q_type = "player_stats"
     elif any(w in q_type for w in ("event", "roster", "lineup", "group", "bracket")) or ("player" in q_type and not player_url):
         q_type = "event_info"
@@ -70,16 +70,17 @@ def skill_csgo_esports(query_type: Optional[str] = 'all', event_page: Optional[s
         limit = 7 if q_type == 'all' else 15
         output += _hltv_aggregator.get_rankings(limit=limit)
 
-    # 4. EVENT INFO (triggered when q_type == 'event_info' OR whenever event_page is provided for non-odds queries)
+    # 4. EVENT INFO (triggered when q_type == 'event_info' OR whenever event_page is provided for non-odds/non-stats queries)
     if q_type == 'event_info' or (event_page and q_type not in ['odds', 'betting', 'player_stats']):
         output += _liquipedia_aggregator.get_event_info(event_page)
 
-    # 5. PLAYER STATS
+    # 5. PLAYER / TEAM STATS
     if q_type == 'player_stats':
-        output += _hltv_aggregator.get_player_stats(player_url)
+        stats_target = player_url or matchup or event_page or (query_type if q_type != (query_type or "").lower().strip() else None)
+        output += _hltv_aggregator.get_player_stats(stats_target)
 
     # 6. BETTING ODDS / TEAM MATCHUP
-    if q_type in ['odds', 'betting'] or matchup:
+    if q_type in ['odds', 'betting'] or (matchup and q_type not in ['player_stats', 'event_info']):
         target = matchup or event_page or "Falcons vs Ninjas in Pyjamas"
         output += _odds_aggregator.get_odds(target, sport='cs2')
 
@@ -107,8 +108,9 @@ Use this exact live data to answer the user's questions about CS esports.
    - Use `query_type='odds'` or `skill_betting_odds` with the matchup (e.g. 'Falcons vs Ninjas in Pyjamas').
    - State the favorite, underdog, decimal/American odds, and win probabilities directly.
    - NEVER claim that you cannot check odds or tell the user to visit websites manually!
-5. When asked for player stats:
-   - Check 'rankings' to get the player's `player_url`, then call this tool with `query_type='player_stats'` and pass the `player_url`.
+5. When asked for player stats or a team's player stats (e.g. "whats falcons player current stats", "m0NESY stats"):
+   - Present the statistics from `[PLAYER STATS]` or `[TEAM PLAYER STATS]` clearly for each player: **Rating 3.0**, key role scores (`Firepower`, `Opening`, `Clutching`, `Sniping`, `Trading`, `Utility`), **Career KDR / Headshot % / Win Rate**, and notable achievements.
+   - NEVER expose internal tool instructions, parameter names (`query_type='player_stats'`, `player_url`), or tell the user how to call the tool!
 6. When presenting a LIVE match from YouTube:
    - Parse the title to determine who is playing and the stage (e.g. Grand Final, Semifinal).
    - Output the raw YouTube link on its own blank line so Discord generates an embed.
