@@ -106,7 +106,10 @@ async def on_raw_reaction_add(payload):
         if message.author.id != client.user.id:
             return
             
-        if "music.youtube.com/" in message.content or "youtube.com/watch" in message.content or "youtu.be/" in message.content:
+        m_card_song = re.search(r'(?im)^\s*(?:\*\*)?(?:Song|Track):\*{0,2}\s*(.+)', message.content)
+        m_card_art = re.search(r'(?im)^\s*(?:\*\*)?Artist:\*{0,2}\s*(.+)', message.content)
+
+        if m_card_song and m_card_art and "music.youtube.com/" in message.content:
             # Only recommend once per (message, user), even if they remove and re-add the reaction.
             reaction_key = (payload.message_id, payload.user_id)
             if reaction_key in handled_reactions:
@@ -122,34 +125,15 @@ async def on_raw_reaction_add(payload):
 
             print(f"👍 [Reaction Caught]: {user.name} liked a song. Finding a verified similar track...")
 
-            video_match = re.search(r'(?:music\.youtube\.com\/watch\?v=|youtube\.com\/watch\?v=|youtu\.be\/)([0-9A-Za-z_-]{11})', message.content)
+            video_match = re.search(r'music\.youtube\.com\/watch\?v=([0-9A-Za-z_-]{11})', message.content)
             if not video_match:
                 return
-            video_id = video_match.group(1)
 
             async with channel.typing():
                 try:
-                    # 1. Resolve original track metadata from message card or in-memory cache (0ms when cached)
-                    orig_title = "Unknown Song"
-                    orig_artist = ""
-                    m_card_song = re.search(r'(?im)^\s*(?:\*\*)?(?:Song|Track):\*{0,2}\s*(.+)', message.content)
-                    m_card_art = re.search(r'(?im)^\s*(?:\*\*)?Artist:\*{0,2}\s*(.+)', message.content)
-                    if m_card_song and m_card_art:
-                        orig_title = m_card_song.group(1).strip()
-                        orig_artist = m_card_art.group(1).strip()
-                    else:
-                        seed_meta = await asyncio.to_thread(get_music_metadata, video_id)
-                        if seed_meta.get("song") and seed_meta.get("song") != "Unknown Track":
-                            orig_title = seed_meta["song"]
-                            orig_artist = seed_meta.get("artist", "").replace("Unknown Artist", "").strip()
-
-                    # Fallback title parsing from message content if still unknown
-                    if orig_title == "Unknown Song":
-                        for line in message.content.split("\n"):
-                            m_title = re.search(r'\[(.*?)\]', line)
-                            if m_title and "youtube" not in m_title.group(1).lower():
-                                orig_title = m_title.group(1)
-                                break
+                    # 1. Extract track metadata directly from the verified song card
+                    orig_title = m_card_song.group(1).strip()
+                    orig_artist = m_card_art.group(1).strip()
 
                     # Smart clean YouTube title and artist
                     clean_title = re.sub(r'[\(\[\{].*?(?:official|video|audio|lyrics|visualizer|download|remastered|hd|4k|hq|mix).*?[\)\]\}]', '', orig_title, flags=re.IGNORECASE)
