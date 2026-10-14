@@ -241,7 +241,7 @@ def parse_team_schedule(
 ) -> str:
     """Fetch and format a specific team's past results and upcoming schedule from ESPN (across all competitions for soccer)."""
     url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_code}/teams/{team_id}/schedule"
-    data = cached_espn_get(url, ttl=120)
+    data = cached_espn_get(url, ttl=20)
 
     events: List[Dict[str, Any]] = list(data.get("events", [])) if data else []
     seen_ids = {str(e.get("id")) for e in events if e.get("id")}
@@ -256,7 +256,7 @@ def parse_team_schedule(
             (all_url, {"season": str(cur_year)}),
             (url, {"fixture": "true"}),
         ):
-            extra_data = cached_espn_get(extra_url, params=extra_params, ttl=120)
+            extra_data = cached_espn_get(extra_url, params=extra_params, ttl=20)
             if extra_data and extra_data.get("events"):
                 for fev in extra_data["events"]:
                     ev_id = str(fev.get("id", ""))
@@ -274,6 +274,7 @@ def parse_team_schedule(
     past_lines: List[str] = []
     live_lines: List[str] = []
     future_lines: List[str] = []
+    recorded_live = False
 
     for ev in events:
         raw_date = ev.get("date", "")
@@ -300,10 +301,23 @@ def parse_team_schedule(
             past_lines.append(f"• **{date_str}**: **{h_name}** {h_score} - {a_score} **{a_name}** ({detail or 'FT'}){comp_tag}")
         elif state == "in":
             live_lines.append(f"• 🔴 **LIVE NOW ({detail})**: **{h_name}** {h_score} - {a_score} **{a_name}**{comp_tag}")
+            try:
+                from src.skills.sports.live_tracker import record_channel_last_match_query
+                record_channel_last_match_query(f"{h_name} vs {a_name}", sport=sport_path)
+                recorded_live = True
+            except Exception:
+                pass
         else:
             is_today = raw_date.startswith(now_utc_date)
             today_prefix = "🔥 **TODAY — " if is_today else "**"
             future_lines.append(f"• {today_prefix}{date_str}**: **{a_name}** @ **{h_name}**{comp_tag}")
+
+    if not recorded_live and team_name:
+        try:
+            from src.skills.sports.live_tracker import record_channel_last_match_query
+            record_channel_last_match_query(team_name, sport=sport_path)
+        except Exception:
+            pass
 
     out = f"=== 📅 {team_name.upper()} TEAM SCHEDULE & RESULTS (ALL COMPETITIONS) ===\n"
     if live_lines:
@@ -578,7 +592,7 @@ def parse_league_injuries(sport_path: str, league_code: str, league_label: str, 
 def parse_match_summary(sport_path: str, league_code: str, event_id: str) -> str:
     """Fetch and format deep match summary (/summary?event={id}): key events, cards, subs, lineups, and boxscore."""
     url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_code}/summary"
-    data = cached_espn_get(url, params={"event": event_id}, ttl=60)
+    data = cached_espn_get(url, params={"event": event_id}, ttl=15)
     if not data:
         return ""
 
@@ -594,8 +608,29 @@ def parse_match_summary(sport_path: str, league_code: str, event_id: str) -> str
         a_name = away.get("team", {}).get("displayName", "Away")
         h_score = extract_score_str(home.get("score"))
         a_score = extract_score_str(away.get("score"))
-        status_det = header_comp.get("status", {}).get("type", {}).get("detail", "")
-        out_sections.append(f"=== 🏟️ MATCH SUMMARY: {h_name} {h_score} - {a_score} {a_name} ({status_det}) ===")
+        status_type = header_comp.get("status", {}).get("type", {})
+        state = status_type.get("state", "pre")
+        completed = bool(status_type.get("completed", False))
+        status_det = status_type.get("detail") or status_type.get("shortDetail") or ""
+
+        try:
+            from src.skills.sports.live_tracker import record_channel_last_match_query
+            record_channel_last_match_query(f"{h_name} vs {a_name}", sport=sport_path)
+        except Exception:
+            pass
+
+        if state == "in" and not completed:
+            out_sections.append(
+                f"=== 🔴 LIVE MATCH IN PROGRESS (ONGOING — NOT FINISHED): {h_name} {h_score} - {a_score} {a_name} (Live Clock: {status_det}) ===\n"
+                f"⚠️ CRITICAL LIVE MATCH INSTRUCTION: This match is CURRENTLY LIVE AND IN PROGRESS at {status_det} "
+                f"(Current Score: {h_name} {h_score} - {a_score} {a_name}). "
+                f"Ignore any older scores or minutes from earlier messages in the conversation! "
+                f"The game is NOT over — do NOT say the match concluded, ended at {status_det}, or sealed victory, and do NOT call {h_score}-{a_score} the 'final score'!"
+            )
+        elif state == "post" or completed:
+            out_sections.append(f"=== 🏁 FINAL MATCH SUMMARY (COMPLETED): {h_name} {h_score} - {a_score} {a_name} ({status_det or 'FT'}) ===")
+        else:
+            out_sections.append(f"=== 🏟️ MATCH SUMMARY: {h_name} {h_score} - {a_score} {a_name} ({status_det}) ===")
 
     # 2. Venue, Attendance & Officials
     game_info = data.get("gameInfo", {})

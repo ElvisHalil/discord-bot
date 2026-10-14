@@ -202,12 +202,38 @@ _INTENT_WORDS_TO_STRIP = {
     "starting", "xi", "formation", "stats", "statistics", "stat", "scores",
     "score", "results", "result", "yesterday", "tomorrow", "today", "play",
     "playing", "played", "next", "previous", "past", "recent", "upcoming",
+    "whats", "what", "is", "are", "the", "this", "that", "it", "its", "their",
+    "they", "them", "his", "her", "status", "of", "game", "match", "hows",
+    "how", "going", "who", "scored", "last", "goal", "goals", "time", "minute",
+    "still", "live", "not", "over", "currently", "on", "right", "now",
+    "track", "tracking", "untrack", "stop", "start", "monitor", "follow",
+    "please", "can", "you", "for", "me", "in", "at",
 }
+
+_FOLLOWUP_MATCH_PATTERN = re.compile(
+    r"\b(?:"
+    r"their|they|them|his|her|its|that\s+team|same\s+team|"
+    r"this\s+game|that\s+game|the\s+game|this\s+match|that\s+match|the\s+match|"
+    r"track\s+this|track\s+that|track\s+the|track\s+it|untrack|"
+    r"hows?\s+the\s+game|how\s+is\s+the\s+game|hows?\s+it\s+going|"
+    r"who\s+scored|last\s+goal|still\s+live|not\s+over|what\s+minute|"
+    r"whats?\s+the\s+score|whats?\s+the\s+status|status\s+of\s+(?:the|that|this)\s+(?:game|match)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_subject_entities(text: str) -> str:
+    """Strip generic sports intent and follow-up filler words to isolate team/player/league names."""
+    return " ".join(
+        w for w in re.findall(r"[A-Za-z0-9À-ÿ'.-]+", text or "")
+        if w.lower().strip("'.-") not in _INTENT_WORDS_TO_STRIP
+    ).strip()
 
 
 def enrich_sports_tool_args(args: dict, history: list) -> dict:
-    """Ensure skill_sports_info never loses team/player/league context from the user's prompt
-    or from the immediately preceding user turn on pronoun follow-ups (e.g. 'what is their roster?')."""
+    """Ensure sports tools never lose team/player/league context from the user's prompt
+    or from earlier user turns on pronoun/match follow-ups (e.g. 'track this game', 'hows the game going')."""
     if not isinstance(args, dict) or not history:
         return args
 
@@ -223,19 +249,18 @@ def enrich_sports_tool_args(args: dict, history: list) -> dict:
     latest_user = user_texts[-1]
     combined_args_str = " ".join(str(v) for v in args.values() if v).lower()
 
-    # Check if latest user turn is a pronoun follow-up ("their roster", "when do they play", "his stats")
-    has_pronoun = bool(re.search(r"\b(?:their|they|them|his|her|its|that\s+team|same\s+team)\b", latest_user.lower()))
+    # Check if latest user turn is a pronoun or demonstrative match follow-up
+    has_followup_cue = bool(_FOLLOWUP_MATCH_PATTERN.search(latest_user.lower())) or not _extract_subject_entities(latest_user)
     context_snippets = []
 
-    if has_pronoun and len(user_texts) >= 2 and not args.get("team") and not args.get("player"):
-        prev_user = user_texts[-2]
-        # Strip intent words from previous turn so only the team/player/league subject carries over
-        prev_entities = " ".join(
-            w for w in re.findall(r"[A-Za-z0-9À-ÿ'.-]+", prev_user)
-            if w.lower().strip("'.-") not in _INTENT_WORDS_TO_STRIP
-        ).strip()
-        if prev_entities and prev_entities.lower() not in combined_args_str:
-            context_snippets.append(prev_entities)
+    if has_followup_cue and len(user_texts) >= 2 and not args.get("team") and not args.get("player"):
+        # Scan backwards through prior user messages to find the most recent message with a concrete subject/team entity
+        for prev_user in reversed(user_texts[:-1]):
+            prev_entities = _extract_subject_entities(prev_user)
+            if prev_entities:
+                if prev_entities.lower() not in combined_args_str:
+                    context_snippets.append(prev_entities)
+                break
 
     if latest_user.lower() not in combined_args_str:
         context_snippets.append(latest_user)
@@ -250,11 +275,124 @@ def enrich_sports_tool_args(args: dict, history: list) -> dict:
     return args
 
 
+_NON_SPORTS_TRACK_RE = re.compile(
+    r"\b(?:soundtrack|backing\s+track|diss\s+track|title\s+track|bonus\s+track|"
+    r"similar\s+track|next\s+track|previous\s+track|play\s+track|song|album|artist|"
+    r"spotify|youtube|package|parcel|order|shipment|flight|reacted\s+with)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_explicit_tracker_intent(user_text: str) -> typing.Optional[typing.Tuple[str, str]]:
+    """Detect if a user message is explicitly asking to start, stop, or list live sports match tracking.
+    Returns (action, query) or None."""
+    if not user_text:
+        return None
+    q = _extract_raw_user_text({"content": user_text}).strip()
+    q_low = q.lower()
+    if not q_low or _NON_SPORTS_TRACK_RE.search(q_low):
+        return None
+
+    m_stop = re.search(r"\b(?:untrack|stop\s+tracking|cancel\s+tracking|end\s+tracking)\b(?:\s+(.*))?", q_low)
+    if m_stop:
+        return ("stop", (m_stop.group(1) or "").strip(" ?.!,"))
+
+    if re.search(
+        r"\b(?:what\s+(?:games?|matches?)\s+are\s+(?:you|we)\s+tracking|"
+        r"which\s+(?:games?|matches?)\s+are\s+(?:being\s+)?tracked|"
+        r"list\s+tracked|are\s+you\s+tracking\s+(?:any|the|this))\b",
+        q_low,
+    ):
+        return ("list", "")
+
+    m_start = re.match(
+        r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|yo\s+|hey\s+)?"
+        r"(?:start\s+tracking|track|monitor|follow\s+live)\s+(.+?)\s*[?.!]*$",
+        q_low,
+    )
+    if m_start:
+        return ("start", m_start.group(1).strip())
+
+    m_mid = re.search(
+        r"\b(?:track\s+(?:this|that|the)\s+(?:game|match)|start\s+tracking\s+(?:this|that|the)\s+(?:game|match))\b",
+        q_low,
+    )
+    if m_mid:
+        return ("start", m_mid.group(0).strip())
+
+    return None
+
+
+def detect_missed_sports_tool_call(
+    history: list,
+    active_channel_id: int = 0,
+) -> typing.Optional[typing.Tuple[str, dict]]:
+    """Detect when an 8B model skips calling a sports tool on iteration 0 (e.g. roleplaying
+    'MATCH TRACKING ACTIVE' or repeating a stale 55' score from chat_history without fetching fresh ESPN data).
+    Returns (tool_name, tool_args) or None."""
+    if not history:
+        return None
+
+    user_texts = [
+        _extract_raw_user_text(m)
+        for m in history
+        if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
+    ]
+    user_texts = [t for t in user_texts if t and not t.startswith("Now summarize") and not t.startswith("You have used")]
+    if not user_texts:
+        return None
+
+    latest_user = user_texts[-1]
+    q_low = latest_user.lower()
+
+    # 1. Explicit live match tracker command ("track this game", "track real madrid", "untrack")
+    tracker_intent = detect_explicit_tracker_intent(latest_user)
+    if tracker_intent is not None:
+        action, target_q = tracker_intent
+        args = {"action": action, "query": target_q}
+        if action == "start":
+            args = enrich_sports_tool_args(args, history)
+        return ("skill_track_live_game", args)
+
+    # 2. Live sports status / score / match follow-up when channel already has sports context
+    if _NON_SPORTS_TRACK_RE.search(q_low) or q_low.startswith("!"):
+        return None
+
+    has_prior_sports_turn = any(
+        (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "tool"
+        and (m.get("name") if isinstance(m, dict) else getattr(m, "name", None))
+        in ("skill_sports_info", "skill_track_live_game", "skill_betting_odds")
+        for m in history
+    )
+    last_match_q = ""
+    try:
+        from src.skills.sports.live_tracker import get_channel_last_match_query
+        last_match_q, _ = get_channel_last_match_query(active_channel_id)
+    except Exception:
+        pass
+
+    if has_prior_sports_turn or last_match_q:
+        is_live_match_followup = bool(
+            re.search(
+                r"\b(?:status|score|scores|scored|scorer|goal|goals|game|match|going|"
+                r"live|playing|minute|half|halftime|over|finished|winning|losing|leading|"
+                r"lineup|lineups|stats|possession|shots|cards?)\b",
+                q_low,
+            )
+        )
+        if is_live_match_followup:
+            args = enrich_sports_tool_args({"query": latest_user}, history)
+            return ("skill_sports_info", args)
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Chat history management
 # ---------------------------------------------------------------------------
 
 OLD_TOOL_OUTPUT_CHARS = 800
+_EPHEMERAL_SPORTS_TOOLS = {"skill_sports_info", "skill_track_live_game", "skill_betting_odds"}
 
 
 def _role(msg):
@@ -270,6 +408,9 @@ def trim_history(history: list, limit: int, old_tool_chars: int = OLD_TOOL_OUTPU
       are shortened, since the model has already summarized them. This keeps
       large search/website dumps from overflowing the context window, which
       would otherwise make Ollama silently drop the system prompt.
+    - Earlier turns' live sports tool outputs are explicitly marked as expired
+      snapshots so 8B models never regurgitate a stale minute clock or score
+      on subsequent turns without calling the tool again.
     - The window always starts on a user message, so an assistant tool call is
       never separated from its tool results.
     """
@@ -282,8 +423,18 @@ def trim_history(history: list, limit: int, old_tool_chars: int = OLD_TOOL_OUTPU
     for i in range(max(last_user, 0)):
         msg = rest[i]
         if isinstance(msg, dict) and msg.get("role") == "tool":
+            tool_name = msg.get("name", "")
             content = str(msg.get("content") or "")
-            if len(content) > old_tool_chars:
+            if tool_name in _EPHEMERAL_SPORTS_TOOLS:
+                rest[i] = {
+                    **msg,
+                    "content": (
+                        "[EXPIRED SPORTS SNAPSHOT FROM EARLIER TURN — DO NOT REUSE OLD SCORES, MINUTE CLOCKS, "
+                        "OR TRACKING STATUS. You MUST call skill_sports_info or skill_track_live_game again "
+                        "for fresh real-time data.]"
+                    ),
+                }
+            elif len(content) > old_tool_chars:
                 rest[i] = {**msg, "content": content[:old_tool_chars].rstrip() + "\n...[older tool output truncated]"}
 
     if len(rest) > limit:

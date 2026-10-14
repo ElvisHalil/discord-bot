@@ -24,6 +24,8 @@ from src.utils.http import fetch_json
 # Context variable set by main.py so LLM tool calls know which Discord channel invoked them
 ACTIVE_CHANNEL_ID: ContextVar[Optional[int]] = ContextVar("ACTIVE_CHANNEL_ID", default=None)
 _FALLBACK_CHANNEL_ID: Optional[int] = None
+# Per-channel memory of the last match/team inspected so "track this game" / "track the game" resolves automatically
+_CHANNEL_LAST_MATCH_QUERY: Dict[int, Tuple[str, Optional[str]]] = {}
 
 SAFETY_TIMEOUT_SECONDS: int = 4 * 3600  # 4-hour maximum lifetime per tracked match
 DEFAULT_POLL_INTERVAL_SECONDS: int = 45
@@ -45,6 +47,28 @@ def get_active_channel_id() -> int:
     if _FALLBACK_CHANNEL_ID is not None:
         return _FALLBACK_CHANNEL_ID
     return 0
+
+
+def record_channel_last_match_query(query: str, sport: Optional[str] = None, channel_id: Optional[int] = None) -> None:
+    """Record the most recently discussed team or matchup in a Discord channel."""
+    cleaned = _clean_tracking_query(query)
+    if not cleaned:
+        return
+    cid = channel_id if channel_id is not None else get_active_channel_id()
+    _CHANNEL_LAST_MATCH_QUERY[cid] = (query.strip(), sport)
+
+
+def get_channel_last_match_query(channel_id: Optional[int] = None) -> Tuple[str, Optional[str]]:
+    """Retrieve the most recently discussed team or matchup in a Discord channel."""
+    cid = channel_id if channel_id is not None else get_active_channel_id()
+    if cid in _CHANNEL_LAST_MATCH_QUERY:
+        return _CHANNEL_LAST_MATCH_QUERY[cid]
+    if 0 in _CHANNEL_LAST_MATCH_QUERY:
+        return _CHANNEL_LAST_MATCH_QUERY[0]
+    for (t_cid, _), m in LIVE_TRACKER.tracked_matches.items():
+        if t_cid == cid:
+            return (f"{m.home_team} vs {m.away_team}", m.sport_path)
+    return ("", None)
 
 
 @dataclass
@@ -110,26 +134,28 @@ class TrackedMatch:
 
 
 def _clean_tracking_query(query: str) -> str:
-    """Strip tracking/conversational filler words and expand short club/team aliases."""
+    """Strip tracking/conversational/pronoun filler words and expand short club/team aliases."""
     clean = (query or "").lower().strip()
     for phrase in (
         "can you track", "please track", "start tracking", "stop tracking",
         "keep me updated on", "keep me posted on", "let me know when",
         "live updates for", "live updates on", "track the", "watch the",
         "monitor the", "follow the", "right now", "currently playing",
+        "this game", "that game", "the game", "this match", "that match", "the match",
     ):
         clean = re.sub(rf'\b{re.escape(phrase)}\b', ' ', clean, flags=re.IGNORECASE)
     for word in (
         "track", "tracking", "untrack", "watch", "monitor", "follow",
-        "live", "updates", "update", "score", "scores", "game", "match",
+        "live", "updates", "update", "score", "scores", "game", "games", "match", "matches",
         "current", "currently", "playing", "today", "tonight", "next",
-        "the", "for", "on", "in", "please", "me", "us",
+        "the", "this", "that", "it", "same", "again", "now", "right",
+        "for", "on", "in", "please", "me", "us",
     ):
         clean = re.sub(rf'\b{re.escape(word)}\b', ' ', clean, flags=re.IGNORECASE)
     clean = re.sub(r'[^\w\s]', ' ', clean)
     clean = ' '.join(clean.split()).strip()
     if not clean:
-        return (query or "").strip()
+        return ""
 
     if clean in TEAM_ALIASES:
         return TEAM_ALIASES[clean]
@@ -334,10 +360,13 @@ def resolve_live_or_next_event(
         'snapshot': MatchSnapshot,
     }
     """
+    from datetime import datetime, timezone
     from src.skills.sports.aggregators.soccer import SoccerAggregator
     from src.skills.sports.aggregators.universal_espn import UniversalEspnAggregator
 
     target = _clean_tracking_query(query)
+    if not target:
+        return None
     sport_clean = (sport or "").lower().strip()
     sport_hint = None
 
@@ -351,42 +380,71 @@ def resolve_live_or_next_event(
     if not sport_hint and sport_clean in ("soccer", "epl", "ucl", "laliga", "seriea", "bundesliga", "ligue1", "mls"):
         sport_hint = "soccer"
 
-    disc = espn_search_auto_discover(target, sport_hint=sport_hint)
+    # If target is a matchup (e.g. "as roma vs real madrid"), try each side so team auto-discovery succeeds
+    candidate_targets = [target]
+    if re.search(r'\b(?:vs|v)\b', target, flags=re.IGNORECASE):
+        parts = [p.strip() for p in re.split(r'\b(?:vs|v)\b', target, flags=re.IGNORECASE) if p.strip()]
+        candidate_targets = parts + [target]
+
+    disc = None
+    for cand_t in candidate_targets:
+        disc = espn_search_auto_discover(cand_t, sport_hint=sport_hint)
+        if disc and (disc.get("team_id") or disc.get("id")):
+            break
+
     sport_path = (disc or {}).get("sport") or sport_hint
     league_code = (disc or {}).get("league") or club_league
     team_id = (disc or {}).get("team_id") or (disc or {}).get("id")
 
+    explicit_league = False
     if not sport_path or not league_code:
         for reg in UniversalEspnAggregator.SPORT_LEAGUE_REGISTRY.values():
             if any(alias in target.lower() or alias in sport_clean for alias in reg["aliases"]):
                 sport_path = reg["sport"]
                 league_code = reg["league"]
+                explicit_league = True
                 break
 
     sport_path = sport_path or "soccer"
     league_code = league_code or club_league or "eng.1"
 
     if not team_id:
-        resolved = resolve_espn_team(sport_path, league_code, target)
-        if resolved:
-            team_id = resolved.get("id")
+        for cand_t in candidate_targets:
+            resolved = resolve_espn_team(sport_path, league_code, cand_t)
+            if resolved and resolved.get("id"):
+                team_id = resolved.get("id")
+                break
+
+    # Do NOT fall back to an arbitrary league scoreboard if we couldn't identify a team or explicit league
+    if not team_id and not explicit_league and not club_league:
+        return None
 
     events: List[Dict[str, Any]] = []
+    seen_ev_ids: Set[str] = set()
     if team_id:
         if sport_path == "soccer":
-            sched_data = fetch_json(
+            cur_year = datetime.now(timezone.utc).year
+            for u in (
                 f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/teams/{team_id}/schedule?fixture=true",
-                timeout=8,
-            )
-            events = (sched_data or {}).get("events", [])
-        if not events:
+                f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/teams/{team_id}/schedule?season={cur_year}",
+                f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_code}/teams/{team_id}/schedule",
+            ):
+                sched_data = fetch_json(u, timeout=8)
+                for ev in (sched_data or {}).get("events", []):
+                    eid = str(ev.get("id", ""))
+                    if eid and eid not in seen_ev_ids:
+                        seen_ev_ids.add(eid)
+                        events.append(ev)
+                if any((e.get("competitions") or [{}])[0].get("status", {}).get("type", {}).get("state") == "in" for e in events):
+                    break
+        else:
             sched_data = fetch_json(
                 f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_code}/teams/{team_id}/schedule",
                 timeout=8,
             )
             events = (sched_data or {}).get("events", [])
 
-    if not events:
+    if not events and explicit_league:
         sb_data = fetch_json(
             f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_code}/scoreboard",
             timeout=8,
@@ -413,7 +471,8 @@ def resolve_live_or_next_event(
             pre_events.sort(key=lambda e: e.get("date", "9999"))
             chosen_ev = pre_events[0]
     if not chosen_ev:
-        chosen_ev = events[0]
+        events.sort(key=lambda e: e.get("date", ""))
+        chosen_ev = events[-1]
 
     ev_id = str(chosen_ev.get("id", ""))
     if not ev_id:
@@ -517,6 +576,10 @@ class LiveSportsTracker:
                 continue
 
             curr_snapshot = extract_snapshot_from_summary(summary_data)
+            print(
+                f"🔄 [Live Tracker Poll]: {match.home_team} {curr_snapshot.home_score} - "
+                f"{curr_snapshot.away_score} {match.away_team} ({curr_snapshot.status_detail}) [{match.league_name}]"
+            )
             # Carry forward all previously seen event IDs so we never re-alert old goals/cards
             merged_seen = set(match.last_snapshot.seen_event_ids) | set(curr_snapshot.seen_event_ids)
 
@@ -545,7 +608,17 @@ class LiveSportsTracker:
         sport: Optional[str] = None,
     ) -> str:
         """Resolve and register a match for live tracking in channel_id."""
-        info = resolve_live_or_next_event(query, sport=sport)
+        effective_query = query
+        effective_sport = sport
+        if not _clean_tracking_query(effective_query):
+            last_q, last_s = get_channel_last_match_query(channel_id)
+            if last_q:
+                effective_query = last_q
+                effective_sport = effective_sport or last_s
+
+        info = resolve_live_or_next_event(effective_query, sport=effective_sport)
+        if not info and effective_query != query:
+            info = resolve_live_or_next_event(query, sport=sport)
         if not info:
             return (
                 f"⚠️ Could not find an active or upcoming match for '{query}'. "
@@ -553,6 +626,8 @@ class LiveSportsTracker:
             )
 
         snap: MatchSnapshot = info["snapshot"]
+        record_channel_last_match_query(f"{snap.home_team} vs {snap.away_team}", sport=info["sport_path"], channel_id=channel_id)
+
         if snap.is_finished:
             return (
                 f"🏁 The match **{snap.home_team} {snap.home_score} - {snap.away_score} {snap.away_team}** "
@@ -573,17 +648,33 @@ class LiveSportsTracker:
         self.tracked_matches[key] = tracked
         self.ensure_loop_running()
 
-        status_badge = (
-            f"🔴 LIVE NOW ({snap.status_detail}) — Score: **{snap.home_team} {snap.home_score} - {snap.away_score} {snap.away_team}**"
-            if snap.state == "in"
-            else f"🕒 Scheduled ({snap.status_detail}) — **{snap.away_team} @ {snap.home_team}**"
-        )
+        if snap.state == "in":
+            status_badge = (
+                f"🔴 LIVE IN PROGRESS RIGHT NOW (Current Match Clock: {snap.status_detail} — ONGOING, NOT FINISHED) — "
+                f"Live Score: **{snap.home_team} {snap.home_score} - {snap.away_score} {snap.away_team}**"
+            )
+            llm_instruction = (
+                f"\n\n=== CRITICAL INSTRUCTION FOR YOU (THE LLM) ===\n"
+                f"1. Live tracking is NOW ACTIVE and RUNNING in the background for {snap.home_team} vs {snap.away_team}.\n"
+                f"2. The match is CURRENTLY LIVE IN PROGRESS at {snap.status_detail} "
+                f"(Current Score: {snap.home_team} {snap.home_score} - {snap.away_score} {snap.away_team}). "
+                f"It is NOT over! Do NOT say the game ended at {snap.status_detail}, do NOT call {snap.home_score}-{snap.away_score} the 'final result', "
+                f"and do NOT say tracking stopped or ended immediately!\n"
+                f"3. Ignore any older scores or minutes from earlier messages in the conversation."
+            )
+        else:
+            status_badge = f"🕒 Scheduled ({snap.status_detail}) — **{snap.away_team} @ {snap.home_team}**"
+            llm_instruction = (
+                f"\n\n=== CRITICAL INSTRUCTION FOR YOU (THE LLM) ===\n"
+                f"1. Live tracking is NOW ACTIVE and RUNNING in the background for {snap.home_team} vs {snap.away_team}."
+            )
         return (
             f"📡 **LIVE MATCH TRACKER ACTIVATED**\n"
             f"• **Match:** {snap.home_team} vs {snap.away_team} ({info['league_name']})\n"
             f"• **Current Status:** {status_badge}\n"
             f"• **Tracking Rules:** Polling every {self.poll_interval}s for kickoff, goals/score changes, red cards, halftime, and full-time. "
-            f"The tracker will automatically stop itself as soon as the match ends (or after 4 hours)."
+            f"The tracker will remain active while the game is in play and will automatically stop once Full-Time (FT) is reached."
+            f"{llm_instruction}"
         )
 
     def stop_tracking(self, channel_id: int, query: str = "") -> str:
@@ -609,14 +700,26 @@ class LiveSportsTracker:
         return f"🛑 Stopped live tracking for: {', '.join(removed)}."
 
     def list_tracked(self, channel_id: int) -> str:
-        """List all matches currently tracked in channel_id."""
+        """List all matches currently tracked in channel_id (refreshing live display snapshots first)."""
         matches = [m for k, m in self.tracked_matches.items() if k[0] == channel_id]
         if not matches:
             return "ℹ️ No live matches are currently being tracked in this channel."
 
+        from src.skills.sports.aggregators.espn_utils import cached_espn_get
+
         lines = ["📡 **ACTIVELY TRACKED MATCHES IN THIS CHANNEL:**"]
         for m in matches:
             s = m.last_snapshot
+            summary_url = (
+                f"https://site.api.espn.com/apis/site/v2/sports/{m.sport_path}/"
+                f"{m.league_code}/summary?event={m.event_id}"
+            )
+            try:
+                summary_data = cached_espn_get(summary_url, ttl=15)
+                if summary_data and summary_data.get("header"):
+                    s = extract_snapshot_from_summary(summary_data)
+            except Exception:
+                pass
             lines.append(
                 f"• **{m.home_team} {s.home_score} - {s.away_score} {m.away_team}** "
                 f"({m.league_name}) — Status: `{s.status_detail}`"

@@ -402,6 +402,60 @@ class TestLiveSportsTracker(unittest.TestCase):
         self.assertIn("Stopped live tracking", stop_msg)
         self.assertEqual(len(LIVE_TRACKER.tracked_matches), 0)
 
+    @patch("src.skills.sports.live_tracker.resolve_live_or_next_event")
+    def test_track_this_game_uses_channel_last_match_context(self, mock_resolve):
+        from src.skills.sports.live_tracker import (
+            set_active_channel_id,
+            record_channel_last_match_query,
+            _clean_tracking_query,
+        )
+
+        # Ensure demonstrative phrases strip cleanly to empty string
+        self.assertEqual(_clean_tracking_query("track this game"), "")
+        self.assertEqual(_clean_tracking_query("track the game"), "")
+        self.assertEqual(_clean_tracking_query("track that match"), "")
+
+        set_active_channel_id(99999)
+        record_channel_last_match_query("AS Roma vs Real Madrid", sport="soccer", channel_id=99999)
+
+        mock_resolve.return_value = {
+            "sport_path": "soccer",
+            "league_code": "uefa.champions",
+            "league_name": "UEFA Champions League",
+            "event_id": "4018999",
+            "home_team": "AS Roma",
+            "away_team": "Real Madrid",
+            "snapshot": extract_snapshot_from_summary(
+                _make_summary_payload(state="in", short_detail="55'", home_score="2", away_score="1")
+            ),
+        }
+
+        out = skill_track_live_game(query="this game", action="start")
+        mock_resolve.assert_called_with("AS Roma vs Real Madrid", sport="soccer")
+        self.assertIn("LIVE MATCH TRACKER ACTIVATED", out)
+        self.assertIn("ONGOING, NOT FINISHED", out)
+        self.assertIn("Do NOT say the game ended at 55'", out)
+        LIVE_TRACKER.stop_tracking(99999)
+
+    @patch("src.skills.sports.aggregators.espn_utils.cached_espn_get")
+    def test_parse_match_summary_marks_live_in_progress(self, mock_get):
+        from src.skills.sports.aggregators.espn_utils import parse_match_summary
+        from src.skills.sports.live_tracker import set_active_channel_id, get_channel_last_match_query
+
+        set_active_channel_id(88888)
+        mock_get.return_value = _make_summary_payload(
+            state="in",
+            completed=False,
+            status_name="STATUS_SECOND_HALF",
+            short_detail="74'",
+            home_score="2",
+            away_score="2",
+        )
+        summary_text = parse_match_summary("soccer", "uefa.champions", "4018999")
+        self.assertIn("🔴 LIVE MATCH IN PROGRESS (ONGOING — NOT FINISHED): AS Roma 2 - 2 Real Madrid (Live Clock: 74')", summary_text)
+        self.assertIn("The game is NOT over", summary_text)
+        self.assertEqual(get_channel_last_match_query(88888), ("AS Roma vs Real Madrid", "soccer"))
+
 
 if __name__ == "__main__":
     unittest.main()

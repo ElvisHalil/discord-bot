@@ -91,6 +91,28 @@ def skill_sports_info(
         from src.skills.sports.live_tracker import skill_track_live_game
         return skill_track_live_game(action="start", query=team_raw or query_raw or combined, sport=sport_raw)
 
+    # 0b. If query is a generic follow-up about "the game" / "last goal" / "how's it going" with no team entity,
+    # inherit the channel's last inspected or actively tracked match.
+    if not team_raw and not player_raw:
+        has_known_entity = (
+            any(club in combined for club in _soccer_aggregator.CLUB_LEAGUE_HINTS)
+            or any(bool(re.search(rf'\b{re.escape(k)}\b', combined)) for k in CS_KEYWORDS)
+            or bool(re.search(r'\b(?:f1|formula\s*1|nba|nhl|nfl|mlb|ufc|mma|epl|ucl|laliga|la\s+liga|serie\s*a|bundesliga|ligue\s*1|mls)\b', combined))
+        )
+        is_generic_match_followup = bool(
+            re.search(
+                r'\b(?:this\s+game|that\s+game|the\s+game|this\s+match|that\s+match|the\s+match|hows?\s+the\s+game|how\s+is\s+the\s+game|who\s+scored|last\s+goal|still\s+live|not\s+over|what\s+minute|whats?\s+the\s+score|whats?\s+the\s+status|status\s+of\s+(?:the|that|this)\s+(?:game|match))\b',
+                combined,
+            )
+        )
+        if not has_known_entity and is_generic_match_followup:
+            from src.skills.sports.live_tracker import get_channel_last_match_query
+            last_q, last_s = get_channel_last_match_query()
+            if last_q and last_q.lower() not in combined:
+                combined = f"{last_q.lower()} {combined}".strip()
+                if not sport_raw and last_s:
+                    sport_raw = last_s
+
     # 1. Counter-Strike / Esports Check (guard against NFL "Atlanta Falcons" and substring false positives like 'esl' in 'bundesliga' or 'cs' in 'celtics')
     is_nfl_falcons = "atlanta" in combined or sport_raw.lower() in ("nfl", "football", "american football")
     is_cs = not is_nfl_falcons and (
@@ -240,6 +262,7 @@ def skill_sports_info(
     output += "\n=== CRITICAL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
     output += f"1. TODAY'S DATE: {today_str}. All relative dates ('today', 'tomorrow', 'yesterday', 'this week', 'next week') MUST anchor on this date.\n"
     output += f"2. ALWAYS use the exact day of the week and date specified in the data (e.g. 'Wednesday, October 14, 2026'). NEVER guess, extrapolate, or alter calendar days of the week.\n"
-    output += "3. If a match is marked 🔴 LIVE NOW / CURRENTLY PLAYING RIGHT NOW, ALWAYS report that live match first (including its current score, minute clock, goal scorers, and match stats) before mentioning future fixtures.\n"
-    output += f"4. {guidance} Keep your response formatted cleanly with bold headers, bullet points, and concise details.\n"
+    output += "3. If a match is marked 🔴 LIVE NOW / CURRENTLY PLAYING RIGHT NOW / LIVE MATCH IN PROGRESS, ALWAYS report that live match first (including its current score, minute clock, goal scorers, and match stats) before mentioning future fixtures.\n"
+    output += "4. NEVER claim a live match (marked 🔴 LIVE NOW / IN PROGRESS) has 'ended', 'concluded', 'finished', or 'sealed victory'. A minute clock like (55') or (74') is the CURRENT LIVE MINUTE of an ongoing 90-minute match, NOT a final whistle! Ignore any older scores or minutes from earlier messages in the conversation.\n"
+    output += f"5. {guidance} Keep your response formatted cleanly with bold headers, bullet points, and concise details.\n"
     return output

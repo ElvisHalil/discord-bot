@@ -253,6 +253,70 @@ class TestExtractReplyContext(unittest.TestCase):
         self.assertEqual(extract_reply_context(None), "")
 
 
+class TestSportsFollowupAndMissedToolEnforcement(unittest.TestCase):
+    def test_multi_turn_followup_enrichment_scans_backwards(self):
+        from src.orchestrator import enrich_sports_tool_args
+
+        history = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Jubkill says: whats status of real madrid game"},
+            {"role": "assistant", "content": "AS Roma 2 - 1 Real Madrid (55')"},
+            {"role": "user", "content": "User Jubkill says: track this game"},
+            {"role": "assistant", "content": "Tracking active"},
+            {"role": "user", "content": "User Jubkill says: who scored last goal what time?"},
+            {"role": "assistant", "content": "Malen at 51'"},
+            {"role": "user", "content": "User Jubkill says: hows the game going"},
+        ]
+        enriched = enrich_sports_tool_args({"query": "status"}, history)
+        self.assertIn("real madrid", enriched["query"].lower())
+
+    def test_detect_missed_sports_tool_call_on_track_and_status(self):
+        from src.orchestrator import detect_missed_sports_tool_call
+
+        history_track = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Jubkill says: whats status of real madrid game"},
+            {"role": "tool", "name": "skill_sports_info", "content": "AS Roma 2 - 1 Real Madrid (55')"},
+            {"role": "assistant", "content": "AS Roma 2 - 1 Real Madrid (55')"},
+            {"role": "user", "content": "User Jubkill says: track this game"},
+        ]
+        missed_track = detect_missed_sports_tool_call(history_track, active_channel_id=101)
+        self.assertIsNotNone(missed_track)
+        self.assertEqual(missed_track[0], "skill_track_live_game")
+        self.assertEqual(missed_track[1]["action"], "start")
+        self.assertIn("real madrid", missed_track[1]["query"].lower())
+
+        history_status = history_track + [
+            {"role": "assistant", "content": "Tracking active"},
+            {"role": "user", "content": "User Jubkill says: hows the game going"},
+        ]
+        missed_status = detect_missed_sports_tool_call(history_status, active_channel_id=101)
+        self.assertIsNotNone(missed_status)
+        self.assertEqual(missed_status[0], "skill_sports_info")
+        self.assertIn("real madrid", missed_status[1]["query"].lower())
+
+        # Music reaction / track queries must never trigger sports tracker
+        history_music = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Jubkill reacted with 👍 to 'Song' requesting a similar track."},
+        ]
+        self.assertIsNone(detect_missed_sports_tool_call(history_music, active_channel_id=101))
+
+    def test_trim_history_expires_earlier_sports_snapshots(self):
+        h = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "whats status of real madrid game"},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "skill_sports_info"}}]},
+            {"role": "tool", "name": "skill_sports_info", "content": "AS Roma 2 - 1 Real Madrid (55')"},
+            {"role": "assistant", "content": "AS Roma 2 - 1 Real Madrid (55')"},
+            {"role": "user", "content": "hows the game going"},
+        ]
+        trimmed = trim_history(h, limit=20)
+        old_tool = [m for m in trimmed if m.get("role") == "tool"][0]
+        self.assertIn("EXPIRED SPORTS SNAPSHOT", old_tool["content"])
+        self.assertNotIn("55'", old_tool["content"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

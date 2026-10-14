@@ -136,7 +136,10 @@ class SoccerAggregator(BaseSportsAggregator):
         # 3. Squad Roster, Player Season Stats, Top Scorers, Assists, or Cards
         # Note: Do NOT match bare substring 'stat' (which false-positives on 'status' / 'state'!).
         is_live_or_schedule_query = bool(
-            re.search(r'\b(?:status|current|currently|live|playing|right\s*now|score|scores|next|upcoming|when|schedule|fixtures?|vs\.?)\b', q)
+            re.search(
+                r'\b(?:status|current|currently|live|playing|right\s*now|score|scores|scored|goal|goals|going|minute|half|halftime|winning|losing|next|upcoming|when|schedule|fixtures?|vs\.?)\b',
+                q,
+            )
         )
         is_explicit_roster = bool(re.search(r'\b(?:rosters?|squads?)\b', q))
 
@@ -189,7 +192,7 @@ class SoccerAggregator(BaseSportsAggregator):
                     match_sum = self.get_match_summary(league_code, league_name, q, matched_team=matched_team)
                     if match_sum:
                         # Put live match summary FIRST when a game is currently live or user asks for current status
-                        if is_live_now or any(w in q for w in ("status", "current", "currently", "live", "playing", "score")):
+                        if is_live_now or any(w in q for w in ("status", "current", "currently", "live", "playing", "score", "scored", "goal", "goals", "going", "minute", "winning", "losing", "half")):
                             return f"{match_sum}\n\n{team_sched_block}"
                         return f"{team_sched_block}\n\n{match_sum}"
                 return team_sched_block
@@ -362,7 +365,7 @@ class SoccerAggregator(BaseSportsAggregator):
                 (all_url, {"season": str(cur_year)}),
                 (all_url, {"fixture": "true"}),
             ):
-                s_data = cached_espn_get(u, params=p, ttl=120)
+                s_data = cached_espn_get(u, params=p, ttl=20)
                 if s_data and s_data.get("events"):
                     for ev in s_data["events"]:
                         eid = str(ev.get("id", ""))

@@ -23,6 +23,7 @@ from src.config import MODES
 from src.orchestrator import (
     normalize_tool_args,
     enrich_sports_tool_args,
+    detect_missed_sports_tool_call,
     trim_history,
     apply_auto_ping,
     join_orphan_bullets,
@@ -453,6 +454,35 @@ async def run_agent_turn(channel_id, mode_config):
 
         tool_calls = getattr(response.message, "tool_calls", None)
         if not tool_calls:
+            if iterations == 0 and supports_tools:
+                missed = detect_missed_sports_tool_call(history, active_channel_id=channel_id)
+                if missed and missed[0] in active_tools:
+                    forced_tool_name, forced_raw_args = missed
+                    func = active_tools[forced_tool_name]
+                    forced_args = normalize_tool_args(forced_tool_name, func, forced_raw_args)
+                    history.pop()  # Discard stale non-tool reply from iteration 0
+                    set_active_channel_id(channel_id)
+                    print(f"⚡ [{current_mode.upper()}] Intercepted missed sports tool on turn 0 -> forcing {forced_tool_name}({forced_args})")
+                    try:
+                        tool_output = await asyncio.to_thread(func, **forced_args)
+                    except Exception as e:
+                        print(f"  └─ ❌ Forced tool {forced_tool_name} crashed: {e}")
+                        tool_output = f"Tool execution failed: {e}"
+                    if LIVE_TRACKER.tracked_matches:
+                        LIVE_TRACKER.ensure_loop_running()
+                    history.append({
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{"function": {"name": forced_tool_name, "arguments": forced_args}}],
+                    })
+                    history.append({
+                        "role": "tool",
+                        "name": forced_tool_name,
+                        "content": str(tool_output),
+                    })
+                    iterations += 1
+                    continue
+
             reply = response.message.content or ""
             # Nudge if the model returned nothing after using tools
             if not reply.strip() and iterations > 0 and is_research:
@@ -483,7 +513,7 @@ async def run_agent_turn(channel_id, mode_config):
             if tool_name in active_tools:
                 func = active_tools[tool_name]
                 args = normalize_tool_args(tool_name, func, call.function.arguments or {})
-                if tool_name == "skill_sports_info":
+                if tool_name in ("skill_sports_info", "skill_track_live_game", "skill_betting_odds"):
                     args = enrich_sports_tool_args(args, history)
                 set_active_channel_id(channel_id)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
