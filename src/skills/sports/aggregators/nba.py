@@ -1,24 +1,44 @@
 """
 NBA (Basketball) Sports Aggregator.
-Fetches real-time NBA scores, quarter breakdowns, upcoming matchups,
-and Eastern/Western Conference standings via ESPN's official public API.
+Fetches real-time NBA scores, quarter breakdowns, top game performers,
+team schedules, rosters, player stats, injury reports, and conference standings
+via ESPN's official public v2 API.
 """
 
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from src.skills.sports.aggregators.base import BaseSportsAggregator
+from src.skills.sports.aggregators.espn_utils import (
+    resolve_espn_team,
+    parse_team_schedule,
+    parse_team_roster_and_stats,
+    parse_league_injuries,
+)
 from src.utils.http import fetch_json
 
 
 class NbaAggregator(BaseSportsAggregator):
-    """Aggregator for NBA basketball scores, linescores by quarter, schedules, and standings."""
+    """Aggregator for NBA basketball scores, linescores by quarter, leaders, injuries, rosters, schedules, and standings."""
 
     SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
     STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/basketball/nba/standings"
 
     def get_info(self, query: str = "") -> str:
-        """Entry point for NBA queries. Dispatches between standings, live games, recent results, and weekly/monthly schedules."""
+        """Entry point for NBA queries: standings, injuries, rosters/player stats, team schedules, live games, and results."""
         q = (query or "").lower().strip()
+        matched_team = resolve_espn_team("basketball", "nba", q)
+
+        # 1. Injuries & Player Availability
+        if any(w in q for w in ("injur", "injured", "unavailable", "availability", "day-to-day", "questionable", "out")):
+            return parse_league_injuries("basketball", "nba", "NBA", q)
+
+        # 2. Team Roster & Player Stats
+        if any(w in q for w in ("roster", "squad", "player", "players", "stat", "stats")) and matched_team:
+            return parse_team_roster_and_stats(
+                "basketball", "nba", matched_team["id"], matched_team["displayName"], player_filter=q
+            )
+
+        # 3. Conference Standings
         if any(w in q for w in ("standing", "table", "rank", "conference", "seeds")):
             return self.get_standings()
 
@@ -32,20 +52,47 @@ class NbaAggregator(BaseSportsAggregator):
         is_month = "month" in q and not is_past
         is_week = any(w in q for w in ("week", "upcoming", "schedule", "fixtures", "next games")) and not is_past
 
+        team_sched_block = ""
+        if matched_team:
+            team_sched_block = parse_team_schedule("basketball", "nba", matched_team["id"], matched_team["displayName"])
+
         if is_past and "yesterday" not in q:
-            return self.get_past_schedule_range(days_back=7, scope_label="RECENT NBA RESULTS")
+            res = self.get_past_schedule_range(days_back=7, scope_label="RECENT NBA RESULTS")
         elif is_month:
-            return self.get_schedule_range(days_ahead=30, scope_label="MONTHLY SCHEDULE")
+            res = self.get_schedule_range(days_ahead=30, scope_label="MONTHLY SCHEDULE")
         elif is_week:
-            return self.get_schedule_range(days_ahead=7, scope_label="WEEKLY SCHEDULE")
+            res = self.get_schedule_range(days_ahead=7, scope_label="WEEKLY SCHEDULE")
         elif "yesterday" in q:
             date_param = (now - timedelta(days=1)).strftime("%Y%m%d")
-            return self.get_games(date_param=date_param, filter_query=q)
+            res = self.get_games(date_param=date_param, filter_query=q)
         elif "tomorrow" in q:
             date_param = (now + timedelta(days=1)).strftime("%Y%m%d")
-            return self.get_games(date_param=date_param, filter_query=q)
+            res = self.get_games(date_param=date_param, filter_query=q)
+        else:
+            res = self.get_games(filter_query=q)
 
-        return self.get_games(filter_query=q)
+        if team_sched_block:
+            return f"{team_sched_block}\n\n{res}"
+        return res
+
+    @staticmethod
+    def _extract_team_leaders(competitor: Dict[str, Any]) -> str:
+        """Extract top game stat leaders (Pts, Reb, Ast) for an NBA competitor."""
+        leaders = competitor.get("leaders", [])
+        parts: List[str] = []
+        for l_cat in leaders:
+            cat_name = l_cat.get("name", "")
+            abbr = l_cat.get("abbreviation", "")
+            if cat_name not in ("points", "rebounds", "assists"):
+                continue
+            top_list = l_cat.get("leaders", [])
+            if top_list:
+                top = top_list[0]
+                p_name = top.get("athlete", {}).get("shortName") or top.get("athlete", {}).get("displayName", "")
+                val = top.get("displayValue", "")
+                if p_name and val:
+                    parts.append(f"{p_name} ({val} {abbr})")
+        return ", ".join(parts)
 
     def get_past_schedule_range(self, days_back: int = 7, scope_label: str = "RECENT NBA RESULTS") -> str:
         """Fetches completed NBA games and scores from recent game days."""
@@ -73,10 +120,7 @@ class NbaAggregator(BaseSportsAggregator):
                 return f"=== NBA {scope_label} ===\nNo recent completed games found in the current season calendar."
 
             recent_dates = [d for d in past_dates if datetime.strptime(d, "%Y%m%d").date() >= start_date.date()]
-            if not recent_dates:
-                recent_dates = past_dates[-3:]
-            else:
-                recent_dates = recent_dates[-3:]
+            recent_dates = recent_dates[-3:] if recent_dates else past_dates[-3:]
 
             output_lines = [
                 f"=== NBA {scope_label} ===\n",
@@ -110,6 +154,15 @@ class NbaAggregator(BaseSportsAggregator):
                     meta_str = f" | Arena: {venue}" if venue else ""
 
                     output_lines.append(f"  • {away_team} {away_score} @ {home_team} {home_score} [{status_desc}{meta_str}]")
+                    away_ldr = self._extract_team_leaders(away)
+                    home_ldr = self._extract_team_leaders(home)
+                    if away_ldr or home_ldr:
+                        ldr_bits = []
+                        if away_ldr:
+                            ldr_bits.append(f"{away.get('team', {}).get('abbreviation', away_team)}: {away_ldr}")
+                        if home_ldr:
+                            ldr_bits.append(f"{home.get('team', {}).get('abbreviation', home_team)}: {home_ldr}")
+                        output_lines.append(f"    🌟 Leaders: {' | '.join(ldr_bits)}")
                     total_games += 1
                 output_lines.append("")
 
@@ -144,7 +197,6 @@ class NbaAggregator(BaseSportsAggregator):
                     pass
 
             if not upcoming_dates:
-                # Fallback: check next few days directly
                 for i in range(min(days_ahead, 7)):
                     upcoming_dates.append((now + timedelta(days=i)).strftime("%Y%m%d"))
 
@@ -194,7 +246,7 @@ class NbaAggregator(BaseSportsAggregator):
             return f"⚠️ Error fetching NBA schedule: {e}"
 
     def get_games(self, date_param: Optional[str] = None, filter_query: str = "") -> str:
-        """Fetches live, upcoming, and recent NBA games with scores and quarter breakdowns."""
+        """Fetches live, upcoming, and recent NBA games with scores, quarter breakdowns, and top performers."""
         print(f"  └─ 🏀 [NBA]: Fetching NBA games (Date: {date_param or 'Today'})...")
         now = datetime.now()
         url = self.SCOREBOARD_URL
@@ -205,7 +257,6 @@ class NbaAggregator(BaseSportsAggregator):
             data = fetch_json(url, timeout=8)
             events = data.get("events", [])
 
-            # If no games today and no specific date requested, fetch yesterday's results
             if not events and not date_param:
                 yesterday = (now - timedelta(days=1)).strftime("%Y%m%d")
                 alt_data = fetch_json(f"{self.SCOREBOARD_URL}?dates={yesterday}", timeout=5)
@@ -241,7 +292,6 @@ class NbaAggregator(BaseSportsAggregator):
                 home_score = home.get("score", "0")
                 away_score = away.get("score", "0")
 
-                # Records (e.g. 12-4)
                 home_records = home.get("records") or []
                 away_records = away.get("records") or []
                 home_rec = f" ({home_records[0].get('summary')})" if home_records else ""
@@ -254,16 +304,13 @@ class NbaAggregator(BaseSportsAggregator):
 
                 live_badge = " 🔴 [LIVE]" if is_live else (" ✅ [FINAL]" if is_completed else "")
 
-                # Header
                 output_lines.append(f"🏀 {away_team}{away_rec} {away_score} @ {home_team}{home_rec} {home_score}{live_badge}")
                 output_lines.append(f"   Status: {status_desc}")
 
-                # Quarter breakdown if game started or finished
                 away_quarters = [str(int(l.get("value", 0))) for l in away.get("linescores", [])]
                 home_quarters = [str(int(l.get("value", 0))) for l in home.get("linescores", [])]
                 if away_quarters and home_quarters:
                     q_labels = [f"Q{i+1}" for i in range(len(away_quarters))]
-                    # If overtime
                     if len(q_labels) > 4:
                         for idx in range(4, len(q_labels)):
                             q_labels[idx] = f"OT{idx-3}"
@@ -271,7 +318,16 @@ class NbaAggregator(BaseSportsAggregator):
                     output_lines.append(f"   {away_team[:12]:<12}: {' | '.join(away_quarters)}")
                     output_lines.append(f"   {home_team[:12]:<12}: {' | '.join(home_quarters)}")
 
-                # Venue & Broadcast
+                away_ldr = self._extract_team_leaders(away)
+                home_ldr = self._extract_team_leaders(home)
+                if away_ldr or home_ldr:
+                    ldr_bits = []
+                    if away_ldr:
+                        ldr_bits.append(f"{away.get('team', {}).get('abbreviation', away_team)}: {away_ldr}")
+                    if home_ldr:
+                        ldr_bits.append(f"{home.get('team', {}).get('abbreviation', home_team)}: {home_ldr}")
+                    output_lines.append(f"   🌟 Leaders: {' | '.join(ldr_bits)}")
+
                 venue_name = comp.get("venue", {}).get("fullName")
                 broadcasts = [b.get("names", [""])[0] for b in comp.get("broadcasts", []) if b.get("names")]
                 meta = []
@@ -320,4 +376,3 @@ class NbaAggregator(BaseSportsAggregator):
 
         except Exception as e:
             return f"⚠️ Error fetching NBA standings: {e}"
-

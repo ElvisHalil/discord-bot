@@ -26,22 +26,23 @@ CS_KEYWORDS = {
 
 def skill_sports_info(sport: Optional[str] = None, query: Optional[str] = None) -> str:
     """
-    Fetch live sports and esports information including match scores, goal scorers, quarter/period linescores,
-    upcoming schedules, tournaments, betting odds, and championship standings.
+    Fetch live sports and esports information including match scores, goal scorers, yellow/red cards,
+    possession & match stats, starting lineups/substitutions, player season stats, squad rosters,
+    injury reports, quarter/period linescores, upcoming schedules, tournaments, betting odds, and standings.
     ONLY for sports: Soccer, Formula 1, NBA, NHL, CS/Esports, and Sports Betting.
     Do NOT use this tool for AI models, technology, coding, general news, or non-sports topics (use search_web instead).
 
     Supported sports:
-    - 'cs' / 'cs2' / 'esports' / 'counter-strike': S-Tier CS tournaments, upcoming matches (e.g. Falcons, NIP), live streams, HLTV rankings, and betting odds.
+    - 'cs' / 'cs2' / 'esports' / 'counter-strike': S-Tier CS tournaments, upcoming matches (e.g. Falcons, NIP), live streams, HLTV rankings, player stats, and betting odds.
     - 'f1' / 'formula 1': Grand Prix schedule, session times (FP1-3, Qual, Race), results, driver & constructor standings.
-    - 'soccer' / 'football' / 'epl' / 'ucl' / 'laliga' / 'seriea' / 'bundesliga' / 'mls': Live matches, scores, goal scorers, fixtures, and standings.
-    - 'nba' / 'basketball': Live scores, quarter linescores, today's schedule, and Eastern/Western conference standings.
-    - 'nhl' / 'hockey': Live scores, period linescores, today's matchups, and conference standings.
+    - 'soccer' / 'football' / 'epl' / 'ucl' / 'laliga' / 'seriea' / 'bundesliga' / 'mls': Live/past/future matches, scores, goals, assists, yellow/red cards, possession & match stats, starting lineups/formations, substitutions, player stats, rosters, top scorers, injuries, and standings.
+    - 'nba' / 'basketball': Live scores, quarter linescores, game leaders (PTS/REB/AST), team schedules, rosters, player stats, injury reports, and conference standings.
+    - 'nhl' / 'hockey': Live scores, period linescores, game leaders (G/A/PTS), team schedules, rosters, player stats, injury reports, and conference standings.
     - 'odds' / 'betting': Live betting odds, moneylines, and match favorites across esports and sports.
 
     Args:
         sport: The sport to look up (e.g. 'cs', 'f1', 'soccer', 'nba', 'nhl', 'epl', 'ucl', 'odds').
-        query: What to fetch ('schedule', 'scores', 'standings', 'results', team name, date, or query like 'previous matches and outcomes').
+        query: What to fetch ('schedule', 'scores', 'standings', 'results', 'injuries', 'lineups', 'player stats', 'top scorers', 'cards', team name, or date).
     """
     sport_raw = (sport or "").strip()
     query_raw = (query or "").strip()
@@ -106,38 +107,40 @@ def skill_sports_info(sport: Optional[str] = None, query: Optional[str] = None) 
     )
     if is_f1:
         sport_raw = "f1"
-        data = _f1_aggregator.get_info(query_raw or combined)
+        data = _f1_aggregator.get_info(combined)
         guidance = "Review the Formula 1 schedule/standings and inform the user. Remind them session times are in UTC."
 
     # 4. NBA Basketball Check
     elif (
         sport_raw.lower() in ("nba", "basketball", "hoops") or
-        bool(re.search(r'\b(?:nba|basketball|hoops|lakers|celtics|warriors)\b', combined))
+        bool(re.search(r'\b(?:nba|basketball|hoops|lakers|celtics|warriors|knicks|sixers|76ers|bucks|cavaliers|cavs|nuggets|mavericks|mavs|suns|clippers|timberwolves|pelicans|rockets|grizzlies|blazers|pacers|pistons|raptors|wizards|hornets|hawks|bulls)\b', combined))
     ):
         sport_raw = "nba"
-        data = _nba_aggregator.get_info(query_raw or combined)
-        guidance = "Present the NBA games/standings clearly. Include scores, status, and quarter linescores if available."
+        data = _nba_aggregator.get_info(combined)
+        guidance = "Present the NBA games, leaders, injuries, rosters, or standings clearly. Include scores, status, and quarter linescores if available."
 
     # 5. NHL Hockey Check
     elif (
         sport_raw.lower() in ("nhl", "hockey", "ice hockey") or
-        bool(re.search(r'\b(?:nhl|hockey|ice\s*hockey|stanley\s*cup)\b', combined))
+        bool(re.search(r'\b(?:nhl|hockey|ice\s*hockey|stanley\s*cup|bruins|maple\s*leafs|leafs|canadiens|habs|red\s*wings|lightning|sabres|senators|islanders|devils|penguins|flyers|capitals|hurricanes|blue\s*jackets|oilers|flames|canucks|golden\s*knights|kraken|avalanche|predators|blackhawks|sharks|ducks)\b', combined))
     ):
         sport_raw = "nhl"
-        data = _hockey_aggregator.get_info(query_raw or combined)
-        guidance = "Present the NHL games/standings clearly. Include scores, status, and period linescores if available."
+        data = _hockey_aggregator.get_info(combined)
+        guidance = "Present the NHL games, leaders, injuries, rosters, or standings clearly. Include scores, status, and period linescores if available."
 
     # 6. Soccer Check (or general sports if sports/match terms present)
     else:
         soccer_keywords = (
             "soccer", "football", "epl", "premier", "ucl", "champions",
             "laliga", "la liga", "seriea", "serie a", "bundesliga", "mls",
-            "ligue1", "ligue 1", "pitch", "relegation"
+            "ligue1", "ligue 1", "pitch", "relegation", "golden boot", "starting xi"
         )
         general_match_keywords = (
             "match", "matches", "fixture", "fixtures", "game", "games",
             "score", "scores", "schedule", "standings", "table", "results",
-            "outcome", "outcomes", "today", "tomorrow", "yesterday", "this week", "next week"
+            "outcome", "outcomes", "today", "tomorrow", "yesterday", "this week", "next week",
+            "injuries", "injured", "injury", "roster", "squad", "lineup", "formation",
+            "cards", "yellow card", "red card", "scorers", "assists", "possession", "boxscore", "player stats"
         )
 
         is_soccer = (
@@ -154,8 +157,8 @@ def skill_sports_info(sport: Optional[str] = None, query: Optional[str] = None) 
 
         if is_soccer or is_generic_sports:
             sport_raw = "soccer"
-            data = _soccer_aggregator.get_info(query_raw or combined)
-            guidance = "Present the soccer matches/standings clearly. Highlight live matches, scores, and goal scorers."
+            data = _soccer_aggregator.get_info(combined)
+            guidance = "Present the soccer matches, scores, goal scorers, cards, possession/shots stats, lineups, rosters, injuries, or standings clearly."
         else:
             return (
                 f"⚠️ Query '{query_raw or sport_raw}' is not recognized as a sport, team, or match.\n"
@@ -163,7 +166,7 @@ def skill_sports_info(sport: Optional[str] = None, query: Optional[str] = None) 
                 f"For AI models, technology, coding, general news, or other topics: please use `search_web` instead."
             )
 
-    print(f"🏟️ [Executing Sports Info Skill] Sport: {sport_raw}, Query: {query_raw or combined}")
+    print(f"🏟️ [Executing Sports Info Skill] Sport: {sport_raw}, Query: {combined}")
 
     now = datetime.now()
     today_str = now.strftime("%A, %B %d, %Y")
@@ -174,5 +177,3 @@ def skill_sports_info(sport: Optional[str] = None, query: Optional[str] = None) 
     output += f"2. ALWAYS use the exact day of the week and date specified in the data (e.g. 'Wednesday, October 14, 2026'). NEVER guess, extrapolate, or alter calendar days of the week.\n"
     output += f"3. {guidance} Keep your response formatted cleanly with bold headers, bullet points, and concise details.\n"
     return output
-
-
