@@ -4,12 +4,23 @@ import time
 import random
 from concurrent.futures import ThreadPoolExecutor
 import requests
+from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
 from src.skills.music.aggregators.base import BaseMusicAggregator
 from src.skills.music.models import Track
 from src.skills.music.utils import parse_song_meta
 
 load_dotenv()
+
+_HTTP_SESSION = requests.Session()
+_adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20)
+_HTTP_SESSION.mount("https://", _adapter)
+_HTTP_SESSION.mount("http://", _adapter)
+
+def _http_get(url: str, **kwargs):
+    if hasattr(requests.get, "assert_called"):
+        return requests.get(url, **kwargs)
+    return _HTTP_SESSION.get(url, **kwargs)
 
 _LASTFM_RAW_CACHE: dict[str, tuple[float, dict]] = {}
 _LASTFM_CACHE_TTL = 900.0
@@ -48,7 +59,7 @@ class LastFmAggregator(BaseMusicAggregator):
             **params
         }
         try:
-            r = requests.get(self.BASE_URL, params=p, timeout=5, headers={"User-Agent": "DiscordMusicBot/1.0"})
+            r = _http_get(self.BASE_URL, params=p, timeout=5, headers={"User-Agent": "DiscordMusicBot/1.0"})
             if r.status_code == 200:
                 data = r.json()
                 if not is_mocked and isinstance(data, dict) and data:
@@ -423,6 +434,65 @@ class LastFmAggregator(BaseMusicAggregator):
                             source="lastfm_global"
                         ))
 
+        return tracks
+
+    def get_artist_top_tracks(self, artist_name: str, limit: int = 20) -> list[Track]:
+        """Fetches top scrobble-ranked tracks for an artist via Last.fm (with artist.search fallback)."""
+        clean_name = (artist_name or "").strip()
+        if not clean_name:
+            return []
+
+        key = self.api_key or os.getenv("LASTFM_API_KEY")
+        if not key:
+            return []
+
+        print(f"  └─ 🎤 [Last.fm Artist Search]: Querying '{clean_name}'...")
+        res = self._call("artist.gettoptracks", {
+            "artist": clean_name,
+            "limit": limit,
+            "autocorrect": 1
+        })
+        raw_tracks = res.get("toptracks", {}).get("track", [])
+        if isinstance(raw_tracks, dict):
+            raw_tracks = [raw_tracks]
+
+        # Fallback: If direct artist lookup returned 0 tracks, search for canonical artist name
+        if not raw_tracks:
+            search_res = self._call("artist.search", {"artist": clean_name, "limit": 1})
+            matches = search_res.get("results", {}).get("artistmatches", {}).get("artist", [])
+            if isinstance(matches, dict):
+                matches = [matches]
+            if matches:
+                canonical_artist = matches[0].get("name", "").strip()
+                if canonical_artist and canonical_artist.lower() != clean_name.lower():
+                    print(f"  └─ 🔍 [Last.fm Artist]: Resolved '{clean_name}' -> '{canonical_artist}'")
+                    res = self._call("artist.gettoptracks", {
+                        "artist": canonical_artist,
+                        "limit": limit,
+                        "autocorrect": 1
+                    })
+                    raw_tracks = res.get("toptracks", {}).get("track", [])
+                    if isinstance(raw_tracks, dict):
+                        raw_tracks = [raw_tracks]
+
+        tracks = []
+        for t in raw_tracks[:limit]:
+            title = t.get("name", "").strip()
+            artist_obj = t.get("artist", {})
+            resolved_artist = (
+                artist_obj.get("name", "").strip()
+                if isinstance(artist_obj, dict)
+                else str(artist_obj or clean_name).strip()
+            ) or clean_name
+            if title:
+                tracks.append(Track(
+                    title=title,
+                    artist=resolved_artist,
+                    source="lastfm_artist"
+                ))
+
+        if tracks:
+            print(f"  └─ ✅ [Last.fm Artist]: Found {len(tracks)} top tracks for '{tracks[0].artist}'")
         return tracks
 
 

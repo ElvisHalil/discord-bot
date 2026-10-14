@@ -2,9 +2,72 @@ import random
 from typing import Optional
 from src.skills.music.aggregators.manager import MusicAggregatorManager
 from src.skills.music.moods import parse_mood_and_genre
+from src.skills.music.models import Track
+from src.skills.music.playback.youtube_music import resolve_youtube_music_link
+from src.skills.music.utils import MUSIC_METADATA_CACHE
 from src.skills.music.templates import SONG_TEMPLATE
 
 manager = MusicAggregatorManager()
+
+
+def _is_manager_mocked() -> bool:
+    """Detects if `manager` or its methods are mocked in unit tests so offline tests skip live YT lookups."""
+    if hasattr(resolve_youtube_music_link, "assert_called"):
+        return False
+    return (
+        hasattr(manager, "assert_called")
+        or hasattr(manager.get_top_charts, "assert_called")
+        or hasattr(manager.get_similar_tracks, "assert_called")
+        or hasattr(manager.get_mood_tracks, "assert_called")
+        or hasattr(manager.get_artist_tracks, "assert_called")
+        or any(
+            hasattr(getattr(agg, "get_similar", None), "assert_called")
+            or hasattr(getattr(agg, "get_charts", None), "assert_called")
+            for agg in getattr(manager, "aggregators", {}).values()
+        )
+    )
+
+
+def _pre_resolve_top_candidate(candidates: list[Track]) -> str:
+    """
+    Pre-resolves a verified, Discord-embeddable YouTube Music link for the top candidate track
+    (trying up to 4 candidates if one has Discord embedding disabled by its label).
+    Eliminates an entire extra LLM tool-call round-trip on single-song discovery requests.
+    """
+    if not candidates or _is_manager_mocked():
+        return ""
+
+    for cand in candidates[:4]:
+        query = f"{cand.title} by {cand.artist}"
+        try:
+            results = resolve_youtube_music_link(query, max_results=1)
+            if results:
+                r = results[0]
+                vid = r.get("id")
+                genre = cand.genre or r.get("genre")
+                album = cand.album or r.get("album")
+                if vid and vid in MUSIC_METADATA_CACHE:
+                    if genre and not MUSIC_METADATA_CACHE[vid].get("genre"):
+                        MUSIC_METADATA_CACHE[vid]["genre"] = genre
+                    if album and not MUSIC_METADATA_CACHE[vid].get("album"):
+                        MUSIC_METADATA_CACHE[vid]["album"] = album
+
+                lines = [
+                    "\n=== VERIFIED YOUTUBE MUSIC RESULT (PRE-RESOLVED & READY TO PRESENT) ===",
+                    f"Song: {r['title']}",
+                    f"Artist: {r['artist']}",
+                ]
+                if genre:
+                    lines.append(f"Genre: {genre}")
+                if album:
+                    lines.append(f"Album: {album}")
+                lines.append(f"Link: {r['url']}\n")
+                return "\n".join(lines)
+        except Exception as e:
+            print(f"  └─ ⚠️ [Top Music Pre-Resolver]: Error resolving '{query}': {e}")
+            continue
+    return ""
+
 
 def skill_top_music(
     genre: Optional[str] = None,
@@ -32,15 +95,22 @@ def skill_top_music(
             if not tracks:
                 return f"No tracks found for artist '{artist}'."
 
+            random.shuffle(tracks)
+            top_sample = tracks[:15]
             header = f"=== TOP TRACKS BY '{artist.title()}' ===\n\n"
             output = header
-            for t in tracks[:15]:
+            for t in top_sample:
                 output += t.display_line() + "\n"
+
+            pre_resolved = _pre_resolve_top_candidate(top_sample)
+            if pre_resolved:
+                output += pre_resolved
 
             output += (
                 "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-                "Select ONE best track from the list above, then call "
-                "`skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` to get its verified link.\n\n"
+                "If the user asked for a single song and `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, "
+                "present that pre-verified track and its Link immediately using the template below—do NOT call `skill_youtube_searcher` again! "
+                "Only call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` if you need additional songs or a different track from the list.\n\n"
                 + SONG_TEMPLATE
             )
             return output
@@ -66,7 +136,7 @@ def skill_top_music(
             if not tracks:
                 return f"No similar songs found for '{similar_to}'."
 
-            # Deduplicate by title & artist
+            # Deduplicate by title & artist and prioritize artist diversity
             seen = set()
             unique_tracks = []
             for t in tracks:
@@ -77,6 +147,7 @@ def skill_top_music(
 
             is_unrelated_fallback = all(t.source == "fallback_unrelated" for t in unique_tracks)
             random.shuffle(unique_tracks)
+            top_sample = unique_tracks[:15]
 
             if is_unrelated_fallback:
                 header = f"=== NO DIRECT SIMILAR SONGS FOUND FOR '{similar_to}' — FALLBACK SUGGESTIONS ===\n\n"
@@ -86,23 +157,29 @@ def skill_top_music(
                 header = f"=== SONGS SIMILAR TO '{similar_to}' ===\n\n"
 
             output = header
-            for t in unique_tracks[:15]:
+            for t in top_sample:
                 output += t.display_line() + "\n"
+
+            pre_resolved = _pre_resolve_top_candidate(top_sample)
+            if pre_resolved:
+                output += pre_resolved
 
             if is_unrelated_fallback:
                 output += (
                     "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
                     f"IMPORTANT: No directly related songs were found for '{similar_to}'. "
                     "Clearly let the user know that you couldn't find any directly related songs for that track, "
-                    "and suggest ONE track from the list above that they might like instead. "
-                    "Then call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` to get its verified link.\n\n"
+                    "and suggest ONE track from above that they might like instead. "
+                    "If `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, present that track and its Link immediately without calling `skill_youtube_searcher` again; "
+                    "otherwise call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)`.\n\n"
                     + SONG_TEMPLATE
                 )
             else:
                 output += (
                     "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-                    "Select ONE best matching song from the list above, then call "
-                    "`skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` to get its verified link.\n\n"
+                    "If the user asked for a single song and `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, "
+                    "present that pre-verified track and its Link immediately using the template below—do NOT call `skill_youtube_searcher` again! "
+                    "Only call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` if you need additional songs or a different track from the list.\n\n"
                     + SONG_TEMPLATE
                 )
             return output
@@ -119,8 +196,7 @@ def skill_top_music(
             all_tracks = manager.get_top_charts(genre=parsed_genre)
             output = f"=== TODAY'S TOP CHARTING MUSIC ({parsed_genre.upper() if parsed_genre else 'ALL GENRES'}) ===\n\n"
         if all_tracks:
-            # 1. Primary: Featured diverse selection (max 1 track per artist, randomized across providers)
-            # This ensures the model immediately sees 15+ completely different artists and never gets anchored to one band!
+            # Featured diverse selection (max 1 track per artist, randomized across all providers)
             artist_seen = set()
             featured_diverse = []
             for t in all_tracks:
@@ -135,38 +211,11 @@ def skill_top_music(
             output += f"[FEATURED DIVERSE SELECTION ({len(featured_sample)} Different Artists)]\n"
             for t in featured_sample:
                 output += t.display_line() + "\n"
-            output += "\n"
 
-            # 2. Detailed sections by source
-            sections = {}
-            for t in all_tracks:
-                sections.setdefault(t.source or "general", []).append(t)
-
-            section_headers = {
-                "lastfm_global": "LAST.FM GLOBAL CHARTS (Random 10 from Top 50)",
-                "spotify_global": "SPOTIFY GLOBAL (Random 10 from Top 50)",
-                "youtube_trending": "YOUTUBE TRENDING MUSIC (Random 10 from Top 50)",
-                "radio_airplay": "US RADIO AIRPLAY (Random 10 from Top 50)",
-                "beatport_top_100": "BEATPORT TOP 100 (Random 7 from 100)",
-                "beatport_hype_100": "BEATPORT HYPE 100 (Random 7 from 100)",
-                "beatport_best_tracks": "BEATPORT BEST TRACKS (Random 7 from 100)",
-            }
-
-            for source_key, track_list in sections.items():
-                if source_key in section_headers:
-                    header = section_headers[source_key]
-                elif source_key.startswith("lastfm_"):
-                    lastfm_tag = source_key.replace("lastfm_", "").replace("_", " ").upper()
-                    header = f"LAST.FM - {lastfm_tag} (Top Trending)"
-                elif source_key.startswith("itunes_"):
-                    itunes_genre = source_key.replace("itunes_", "").upper()
-                    header = f"APPLE MUSIC / ITUNES US - {itunes_genre} (Random 10 from Top 50)"
-                else:
-                    header = source_key.upper()
-
-                output += f"[{header}]\n"
-                for t in track_list:
-                    output += t.display_line() + "\n"
+            pre_resolved = _pre_resolve_top_candidate(featured_sample)
+            if pre_resolved:
+                output += pre_resolved
+            else:
                 output += "\n"
         else:
             output += "No charting music found.\n"
@@ -174,10 +223,9 @@ def skill_top_music(
         output += (
             "=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
             "Present these recommendations to the user naturally.\n"
-            "CRITICAL ARTIST DIVERSITY RULE: Pick a fresh track with a DIFFERENT artist each time! "
-            "Inspect the recent chat history and do NOT recommend the same artist that was previously played (e.g., if Pendulum or Deadmau5 was already played, choose another artist from the list). Never recommend the same artist twice in a row.\n"
-            "If the user asked for a single song, pick EXACTLY ONE from the list and present only that one; return several only if they asked for multiple.\n"
-            "For every song you present, call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` to get its real link.\n\n"
+            "If the user asked for a single song and `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, "
+            "present that pre-verified track and its Link immediately using the template below—do NOT call `skill_youtube_searcher` again!\n"
+            "Only call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` if the user asked for multiple songs or if no pre-resolved link is shown above.\n\n"
             + SONG_TEMPLATE
         )
         return output

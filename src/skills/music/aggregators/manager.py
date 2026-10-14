@@ -286,12 +286,65 @@ class MusicAggregatorManager:
         return self._filter_and_deduplicate(all_tracks)
 
     def get_artist_tracks(self, artist: str) -> list[Track]:
-        """Fetches top tracks by a specific artist using Deezer."""
+        """
+        Fetches top tracks by a specific artist concurrently across Last.fm and Deezer.
+        - Last.fm provides scrobble-ranked fan favorites and autocorrected artist resolution.
+        - Deezer provides trending catalog tracks and enriches matching Last.fm tracks with Album metadata.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        lastfm = self.aggregators.get("lastfm")
         deezer = self.aggregators.get("deezer")
+
+        lfm_tracks: list[Track] = []
+        dz_tracks: list[Track] = []
+
+        tasks = []
+        if lastfm and hasattr(lastfm, "get_artist_top_tracks"):
+            tasks.append(("lastfm", lastfm.get_artist_top_tracks))
         if deezer and hasattr(deezer, "get_artist_top_tracks"):
-            tracks = deezer.get_artist_top_tracks(artist)
-            return self._filter_and_deduplicate(tracks)
-        return []
+            tasks.append(("deezer", deezer.get_artist_top_tracks))
+
+        if len(tasks) == 1:
+            name, fn = tasks[0]
+            try:
+                res = fn(artist) or []
+                if name == "lastfm":
+                    lfm_tracks = res
+                else:
+                    dz_tracks = res
+            except Exception:
+                pass
+        elif len(tasks) >= 2:
+            with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+                futs = {name: pool.submit(fn, artist) for name, fn in tasks}
+                for name, fut in futs.items():
+                    try:
+                        res = fut.result() or []
+                        if name == "lastfm":
+                            lfm_tracks = res
+                        else:
+                            dz_tracks = res
+                    except Exception:
+                        pass
+
+        # Map Deezer album titles by normalized track title so Last.fm tracks get Album metadata when available
+        album_by_title = {}
+        for dt in dz_tracks:
+            if dt.album:
+                norm_t = _norm_track_token(dt.title)
+                if norm_t and norm_t not in album_by_title:
+                    album_by_title[norm_t] = dt.album
+
+        combined: list[Track] = []
+        for lt in lfm_tracks:
+            norm_t = _norm_track_token(lt.title)
+            if not lt.album and norm_t in album_by_title:
+                lt.album = album_by_title[norm_t]
+            combined.append(lt)
+
+        combined.extend(dz_tracks)
+        return self._filter_and_deduplicate(combined)
 
 
 

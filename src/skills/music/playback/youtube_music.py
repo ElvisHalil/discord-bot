@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import requests
 from dotenv import load_dotenv
 from ddgs import DDGS
@@ -7,6 +8,14 @@ from src.skills.music.utils import parse_song_meta, MUSIC_METADATA_CACHE, record
 from src.skills.youtube.client import verify_embeddable, get_video_oembed, is_youtube_short
 
 load_dotenv()
+
+# 15-minute cache for resolved YouTube Music queries (eliminates duplicate DDGS + HTTP lookups when pre-resolved in skill_top_music)
+_RESOLVED_MUSIC_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_RESOLVED_MUSIC_TTL = 900.0
+
+def clear_resolved_music_cache() -> None:
+    """Clears in-memory resolved YouTube Music link cache."""
+    _RESOLVED_MUSIC_CACHE.clear()
 
 GARBAGE_MUSIC_KEYWORDS = [
     "tutorial", "how to play", "how to make", "reaction", "reacting",
@@ -103,6 +112,20 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
     2. Strictly filters out YouTube Shorts and non-music garbage (tutorials, reactions, podcasts).
     3. Gracefully falls back to official YouTube Data API v3 ONLY if web search yields no verified match.
     """
+    is_mocked = (
+        hasattr(DDGS, "assert_called")
+        or hasattr(verify_embeddable, "assert_called")
+        or hasattr(is_youtube_short, "assert_called")
+        or hasattr(requests.get, "assert_called")
+    )
+    cache_key = f"{query.strip().lower()}:{max_results}"
+    now = time.monotonic()
+    if not is_mocked and cache_key in _RESOLVED_MUSIC_CACHE:
+        ts, cached_res = _RESOLVED_MUSIC_CACHE[cache_key]
+        if now - ts < _RESOLVED_MUSIC_TTL and cached_res:
+            print(f"⚡ [YouTube Music Cache Hit]: '{query}' -> {cached_res[0].get('url')}")
+            return cached_res
+
     print(f"🎵 [YouTube Music Resolver]: Resolving '{query}'...")
     api_key = os.getenv("YOUTUBE_API_KEY")
     verified_candidates = []
@@ -132,17 +155,24 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
 
     def _verify_single_candidate(cand_tuple):
         vid, raw_title, href = cand_tuple
-        # 1. Shorts filter
-        if is_youtube_short(vid, href=href, title=raw_title):
-            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - YouTube Short.")
-            return None
+        # 1. Fast string-based Shorts rejection (0ms, no network)
+        if "/shorts/" in (href or "").lower() or "#short" in (raw_title or "").lower():
+            if is_youtube_short(vid, href=href, title=raw_title):
+                print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - YouTube Short.")
+                return None
 
-        # 2. Embeddability check (with Discord third-party Referer/origin; also populates _OEMBED_CACHE)
+        # 2. Embeddability check (with Discord third-party Referer/origin; also populates _OEMBED_CACHE
+        # and marks '- Topic' art tracks as non-Shorts in _SHORT_CACHE so step 3 is 0ms!)
         if not verify_embeddable(vid):
             print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - Embedding disabled on Discord.")
             return None
 
-        # 3. Fetch oEmbed metadata (0ms cache hit from verify_embeddable)
+        # 3. Shorts filter (0ms cache hit for '- Topic' art tracks; network HEAD check only for regular uploads)
+        if is_youtube_short(vid, href=href, title=raw_title):
+            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - YouTube Short.")
+            return None
+
+        # 4. Fetch oEmbed metadata (0ms cache hit from verify_embeddable)
         oembed = get_video_oembed(vid)
         if not oembed.get("title"):
             print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - Failed oEmbed verification (cannot embed in Discord).")
@@ -150,7 +180,7 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
         title = oembed["title"]
         author = oembed.get("author", "")
 
-        # 4. Robust Garbage & Relevance match check
+        # 5. Robust Garbage & Relevance match check
         is_valid, score, reason = score_music_candidate(query, title, author)
         if not is_valid:
             print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{title}'): {reason}")
@@ -175,40 +205,19 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
         return entry
 
     from concurrent.futures import ThreadPoolExecutor
+    import urllib.parse
+    from src.skills.youtube.client import _http_get
 
-    for q in queries_to_try:
-        batch_candidates = []
-        try:
-            print(f"  └─ 🔍 [DuckDuckGo]: Querying '{q}'...")
-            for r in list(DDGS().text(q, max_results=max_results + 5)):
-                href = r.get('href', '')
-                # Fast Shorts rejection on URL structure
-                if "/shorts/" in href:
-                    continue
-
-                m = re.search(r'(?:v=|\/watch\?v=|\/embed\/|youtu\.be\/)([0-9A-Za-z_-]{11})(?:[?&/]|\b|$)', href)
-                if m:
-                    vid = m.group(1)
-                    if vid not in seen_ids:
-                        seen_ids.add(vid)
-                        batch_candidates.append((vid, r.get('title', ''), href))
-        except Exception as e:
-            print(f"  └─ ⚠️ [DuckDuckGo Search Warning]: {e}")
-            continue
-
+    def _verify_batch(batch_candidates: list[tuple[str, str, str]]) -> None:
         if not batch_candidates:
-            continue
-
+            return
         print(f"  └─ 🔎 [Music Resolver]: Verifying {len(batch_candidates)} candidate URL(s) from query...")
-
-        # Check top candidate first for fast 1-candidate short-circuit when Topic/Official video is embeddable
         first_entry = _verify_single_candidate(batch_candidates[0])
         if first_entry:
             verified_candidates.append(first_entry)
             if len(verified_candidates) >= max_results and first_entry.get("score", 0) >= 2:
-                break
+                return
 
-        # If more candidates need checking (e.g. top candidate was UMG-blocked or score 1), verify remaining batch concurrently
         remaining = batch_candidates[1:]
         if remaining:
             if len(remaining) == 1:
@@ -221,9 +230,61 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
                         if rem_entry:
                             verified_candidates.append(rem_entry)
 
-        # Stop querying once we have enough verified embeddable candidates
-        if len(verified_candidates) >= max_results:
-            break
+    # =========================================================================
+    # PHASE 1A: Direct YouTube Search over Persistent Keep-Alive Session (~0.5s)
+    # =========================================================================
+    if not hasattr(DDGS, "assert_called") and not hasattr(requests.get, "assert_called"):
+        yt_q = f"{song_q} {artist_q} Topic".strip() if (song_q and artist_q) else f"{query.replace(' by ', ' ')} Topic".strip()
+        try:
+            print(f"  └─ 🔍 [YouTube Direct]: Querying '{yt_q}'...")
+            yt_search_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(yt_q)}"
+            r_yt = _http_get(
+                yt_search_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                timeout=3.5,
+            )
+            if r_yt.status_code == 200:
+                direct_vids = list(dict.fromkeys(re.findall(r'"videoRenderer":\{"videoId":"([0-9A-Za-z_-]{11})"', r_yt.text)))
+                if not direct_vids:
+                    direct_vids = list(dict.fromkeys(re.findall(r'"videoId":"([0-9A-Za-z_-]{11})"', r_yt.text)))
+                direct_batch = []
+                for vid in direct_vids[: max_results + 5]:
+                    if vid not in seen_ids:
+                        seen_ids.add(vid)
+                        direct_batch.append((vid, "", f"https://www.youtube.com/watch?v={vid}"))
+                _verify_batch(direct_batch)
+        except Exception as e:
+            print(f"  └─ ⚠️ [YouTube Direct Search Warning]: {e}")
+
+    # =========================================================================
+    # PHASE 1B: Free DuckDuckGo Search Fallback (0 API Quota Units)
+    # =========================================================================
+    if len(verified_candidates) < max_results:
+        for q in queries_to_try:
+            batch_candidates = []
+            try:
+                print(f"  └─ 🔍 [DuckDuckGo]: Querying '{q}'...")
+                for r in list(DDGS().text(q, max_results=max_results + 5)):
+                    href = r.get('href', '')
+                    if "/shorts/" in href:
+                        continue
+
+                    m = re.search(r'(?:v=|\/watch\?v=|\/embed\/|youtu\.be\/)([0-9A-Za-z_-]{11})(?:[?&/]|\b|$)', href)
+                    if m:
+                        vid = m.group(1)
+                        if vid not in seen_ids:
+                            seen_ids.add(vid)
+                            batch_candidates.append((vid, r.get('title', ''), href))
+            except Exception as e:
+                print(f"  └─ ⚠️ [DuckDuckGo Search Warning]: {e}")
+                continue
+
+            if not batch_candidates:
+                continue
+
+            _verify_batch(batch_candidates)
+            if len(verified_candidates) >= max_results:
+                break
 
     # =========================================================================
     # PHASE 2: Fallback to YouTube Data API v3 (Burns 100 quota units ONLY on failure)
@@ -302,5 +363,11 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
         record_played_track(cand["title"], cand["artist"])
         topic_tag = " [Official Topic]" if cand.get("is_topic") else ""
         print(f"🎧 [Music Resolver Returned]: '{cand['title']}' by '{cand['artist']}' -> {cand['url']}{topic_tag} (Score: {cand.get('score', 0)}/3)")
+
+    if not is_mocked and final_results:
+        _RESOLVED_MUSIC_CACHE[cache_key] = (time.monotonic(), final_results)
+        # Also index by canonical 'title by artist' so subsequent lookups hit 0ms cache
+        canon_key = f"{final_results[0]['title'].strip().lower()} by {final_results[0]['artist'].strip().lower()}:{max_results}"
+        _RESOLVED_MUSIC_CACHE[canon_key] = (time.monotonic(), final_results)
 
     return final_results

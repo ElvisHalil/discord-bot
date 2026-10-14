@@ -129,20 +129,21 @@ async def on_raw_reaction_add(payload):
 
             async with channel.typing():
                 try:
-                    # 1. Fetch original track metadata via YouTube oEmbed
+                    # 1. Resolve original track metadata from message card or in-memory cache (0ms when cached)
                     orig_title = "Unknown Song"
                     orig_artist = ""
-                    try:
-                        oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
-                        r = await asyncio.to_thread(requests.get, oembed_url, timeout=5)
-                        if r.status_code == 200:
-                            data = r.json()
-                            orig_title = data.get("title", "Unknown Song")
-                            orig_artist = data.get("author_name", "").replace(" - Topic", "").strip()
-                    except Exception as e:
-                        print(f"⚠️ [Reaction oEmbed Error]: {e}")
+                    m_card_song = re.search(r'(?im)^\s*(?:\*\*)?(?:Song|Track):\*{0,2}\s*(.+)', message.content)
+                    m_card_art = re.search(r'(?im)^\s*(?:\*\*)?Artist:\*{0,2}\s*(.+)', message.content)
+                    if m_card_song and m_card_art:
+                        orig_title = m_card_song.group(1).strip()
+                        orig_artist = m_card_art.group(1).strip()
+                    else:
+                        seed_meta = await asyncio.to_thread(get_music_metadata, video_id)
+                        if seed_meta.get("song") and seed_meta.get("song") != "Unknown Track":
+                            orig_title = seed_meta["song"]
+                            orig_artist = seed_meta.get("artist", "").replace("Unknown Artist", "").strip()
 
-                    # Fallback title parsing from message content
+                    # Fallback title parsing from message content if still unknown
                     if orig_title == "Unknown Song":
                         for line in message.content.split("\n"):
                             m_title = re.search(r'\[(.*?)\]', line)
@@ -165,7 +166,7 @@ async def on_raw_reaction_add(payload):
                     search_query = f"{clean_title} by {orig_artist}".strip() if orig_artist else clean_title
                     print(f"🎵 [Reaction Target]: Cleaned '{clean_title}' by '{orig_artist}'")
 
-                    # 2. Get recommendations from Last.fm / Deezer / FreqBlog
+                    # 2. Get recommendations (and pre-resolved verified YouTube link) from skill_top_music
                     similar_res = await asyncio.to_thread(tools.skill_top_music, similar_to=search_query)
                     is_unrelated_fallback = "NO DIRECT SIMILAR SONGS FOUND" in similar_res
                     similar_tracks = []
@@ -181,25 +182,39 @@ async def on_raw_reaction_add(payload):
                         is_unrelated_fallback = True
                         print("⚠️ [Reaction Fallback]: No similar tracks found, pulling general charts...")
                         bp_res = await asyncio.to_thread(tools.skill_top_music, genre=None)
+                        similar_res = bp_res
                         for line in bp_res.split("\n"):
                             line = line.strip()
                             if line.startswith("- "):
                                 similar_tracks.append(line[2:].strip())
 
-                    random.shuffle(similar_tracks)
-
-                    # 3. Find verified YouTube Music link for one of the candidates
+                    # 3. Extract pre-resolved verified YouTube Music link if already resolved inside skill_top_music
                     verified_url = None
                     chosen_track = None
-                    for candidate in similar_tracks[:6]:
-                        yt_output = await asyncio.to_thread(tools.skill_youtube_searcher, candidate, max_results=1, is_music=True)
-                        m_url = re.search(r'(https:\/\/music\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})', yt_output)
-                        if not m_url:
-                            m_url = re.search(r'(https:\/\/www\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})', yt_output)
-                        if m_url:
-                            verified_url = m_url.group(1).replace("www.youtube.com", "music.youtube.com")
-                            chosen_track = candidate
-                            break
+                    if "=== VERIFIED YOUTUBE MUSIC RESULT" in similar_res:
+                        pre_block = similar_res.split("=== VERIFIED YOUTUBE MUSIC RESULT", 1)[1]
+                        m_pre_song = re.search(r'(?m)^Song:\s*(.+)$', pre_block)
+                        m_pre_art = re.search(r'(?m)^Artist:\s*(.+)$', pre_block)
+                        m_pre_url = re.search(r'(?m)^Link:\s*(https:\/\/(?:music|www)\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})', pre_block)
+                        if m_pre_url and m_pre_song and m_pre_art:
+                            cand_song = m_pre_song.group(1).strip()
+                            cand_art = m_pre_art.group(1).strip()
+                            if clean_title.lower() not in cand_song.lower():
+                                verified_url = m_pre_url.group(1).replace("www.youtube.com", "music.youtube.com")
+                                chosen_track = f"{cand_song} by {cand_art}"
+
+                    # Fallback candidate resolution loop if not pre-resolved
+                    if not verified_url or not chosen_track:
+                        random.shuffle(similar_tracks)
+                        for candidate in similar_tracks[:6]:
+                            yt_output = await asyncio.to_thread(tools.skill_youtube_searcher, candidate, max_results=1, is_music=True)
+                            m_url = re.search(r'(https:\/\/music\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})', yt_output)
+                            if not m_url:
+                                m_url = re.search(r'(https:\/\/www\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})', yt_output)
+                            if m_url:
+                                verified_url = m_url.group(1).replace("www.youtube.com", "music.youtube.com")
+                                chosen_track = candidate
+                                break
 
                     user_tag = user.mention if user else f"<@{payload.user_id}>"
 
@@ -207,7 +222,7 @@ async def on_raw_reaction_add(payload):
                         await channel.send(f"{user_tag} ⚠️ Found similar songs, but couldn't verify a working YouTube link. Please try again!")
                         return
 
-                    # 4. Generate natural persona intro via active model
+                    # 4. Generate natural persona intro in parallel with metadata lookup
                     mode_config = MODES[current_mode]
                     orig_display = f"'{orig_title}' by '{orig_artist}'" if orig_artist else f"'{orig_title}'"
                     if is_unrelated_fallback:
@@ -231,20 +246,42 @@ async def on_raw_reaction_add(payload):
                         )
                         default_intro = f"Here is a song similar to **{orig_title}** by **{orig_artist}**:"
 
-                    try:
-                        resp = await ollama_client.chat(
-                            model=mode_config["model"],
-                            messages=[
-                                {"role": "system", "content": mode_config["get_prompt"]("")},
-                                {"role": "user", "content": intro_prompt}
-                            ],
-                            options=mode_config["ollama_options"]
-                        )
-                        intro_text = resp.message.content.strip()
-                        intro_text = re.sub(r'https?:\/\/\S+', '', intro_text).strip()
-                    except Exception as e:
-                        print(f"⚠️ [Reaction Ollama Error]: {e}")
-                        intro_text = default_intro
+                    if current_mode == "chat":
+                        light_sys_prompt = "you are a casual, opinionated human in discord. write 1 short, lowercase sentence with modern slang. no links, no emojis."
+                    elif current_mode == "chappie":
+                        light_sys_prompt = "Act as Chappie, the childlike AI raised by South African gangsters. Speak in the third person in 1 short sentence. No links."
+                    else:
+                        light_sys_prompt = "You are a helpful music assistant in Discord. Write a single natural, concise 1-sentence recommendation intro. No links, no markdown URLs, no emojis."
+
+                    reaction_options = {
+                        **mode_config["ollama_options"],
+                        "num_ctx": 1024,
+                        "num_predict": 96,
+                    }
+
+                    m_vid = re.search(r'watch\?v=([0-9A-Za-z_-]{11})', verified_url)
+                    vid = m_vid.group(1) if m_vid else None
+
+                    async def _generate_intro():
+                        try:
+                            resp = await ollama_client.chat(
+                                model=mode_config["model"],
+                                messages=[
+                                    {"role": "system", "content": light_sys_prompt},
+                                    {"role": "user", "content": intro_prompt}
+                                ],
+                                options=reaction_options
+                            )
+                            text = resp.message.content.strip()
+                            return re.sub(r'https?:\/\/\S+', '', text).strip()
+                        except Exception as e:
+                            print(f"⚠️ [Reaction Ollama Error]: {e}")
+                            return default_intro
+
+                    intro_text, meta = await asyncio.gather(
+                        _generate_intro(),
+                        asyncio.to_thread(get_music_metadata, vid, fallback_text=chosen_track)
+                    )
 
                     if not intro_text:
                         intro_text = default_intro
@@ -252,11 +289,6 @@ async def on_raw_reaction_add(payload):
                     # Prepend user @ mention so the channel knows who triggered the recommendation
                     if user_tag not in intro_text:
                         intro_text = f"{user_tag} {intro_text}"
-
-                    m_vid = re.search(r'watch\?v=([0-9A-Za-z_-]{11})', verified_url)
-                    vid = m_vid.group(1) if m_vid else None
-                    # Network-bound (oEmbed/Deezer lookups); keep it off the event loop.
-                    meta = await asyncio.to_thread(get_music_metadata, vid, fallback_text=chosen_track)
 
                     final_reply = format_song_card(
                         song=meta["song"],

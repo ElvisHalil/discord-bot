@@ -445,6 +445,14 @@ class TestMusicDiversityExpansion(unittest.TestCase):
 class TestMoodVibeDiscovery(unittest.TestCase):
     """Tests for mood/vibe parsing, standalone multi-genre vibe profiles, and genre+mood matrix."""
 
+    def setUp(self):
+        from src.skills.music.utils import RECENTLY_PLAYED_TRACKS
+        RECENTLY_PLAYED_TRACKS.clear()
+
+    def tearDown(self):
+        from src.skills.music.utils import RECENTLY_PLAYED_TRACKS
+        RECENTLY_PLAYED_TRACKS.clear()
+
     def test_parse_mood_and_genre(self):
         from src.skills.music.moods import parse_mood_and_genre
 
@@ -516,6 +524,96 @@ class TestMoodVibeDiscovery(unittest.TestCase):
             fake_mgr.get_mood_tracks.assert_called_once_with(mood="love", genre=None)
             self.assertIn("TOP VIBE / MOOD SELECTION: LOVE (MULTI-GENRE MIX)", out)
             self.assertIn("Adorn by Miguel", out)
+
+    @patch("src.skills.music.top_music.resolve_youtube_music_link")
+    def test_skill_top_music_pre_resolves_and_skips_unembeddable(self, mock_resolve):
+        from src.skills.music.top_music import skill_top_music
+        from src.skills.music.models import Track
+
+        fake_mgr = MagicMock()
+        fake_mgr.get_similar_tracks.return_value = [
+            Track(title="Blocked Song", artist="Artist A", genre="House", source="lastfm"),
+            Track(title="Playable Song", artist="Artist B", genre="House", source="deezer"),
+        ]
+
+        def fake_yt(query, max_results=1):
+            if "Blocked Song" in query:
+                return []
+            return [{
+                "id": "playable123",
+                "title": "Playable Song",
+                "artist": "Artist B",
+                "url": "https://music.youtube.com/watch?v=playable123",
+            }]
+
+        mock_resolve.side_effect = fake_yt
+        with patch("src.skills.music.top_music.manager", fake_mgr):
+            out = skill_top_music(similar_to="Strobe by Deadmau5")
+            self.assertIn("=== VERIFIED YOUTUBE MUSIC RESULT (PRE-RESOLVED & READY TO PRESENT) ===", out)
+            self.assertIn("Song: Playable Song", out)
+            self.assertIn("Artist: Artist B", out)
+            self.assertIn("Link: https://music.youtube.com/watch?v=playable123", out)
+
+    @patch("src.skills.youtube.client.requests.head")
+    @patch("src.skills.youtube.client.requests.get")
+    def test_topic_channel_skips_short_head_request(self, mock_get, mock_head):
+        from src.skills.youtube.client import verify_embeddable, is_youtube_short, clear_youtube_caches
+        clear_youtube_caches()
+
+        oembed_resp = MagicMock()
+        oembed_resp.status_code = 200
+        oembed_resp.json.return_value = {"title": "Solar System", "author_name": "Sub Focus - Topic"}
+        embed_resp = MagicMock()
+        embed_resp.status_code = 200
+        embed_resp.text = "<html><body>Playable</body></html>"
+        mock_get.side_effect = [oembed_resp, embed_resp]
+
+        self.assertTrue(verify_embeddable("topicvid123"))
+        # Because author_name has ' - Topic', is_youtube_short should return False in 0ms without calling requests.head
+        self.assertFalse(is_youtube_short("topicvid123"))
+        mock_head.assert_not_called()
+
+    def test_lastfm_artist_top_tracks_and_manager_album_enrichment(self):
+        from src.skills.music.aggregators.lastfm import LastFmAggregator
+        from src.skills.music.aggregators.manager import MusicAggregatorManager
+        from src.skills.music.models import Track
+
+        lfm = LastFmAggregator(api_key="test_key")
+
+        def fake_call(method, params):
+            if method == "artist.gettoptracks":
+                return {
+                    "toptracks": {
+                        "track": [
+                            {"name": "Strobe", "artist": {"name": "deadmau5"}},
+                            {"name": "Ghosts 'n' Stuff", "artist": {"name": "deadmau5"}},
+                        ]
+                    }
+                }
+            return {}
+
+        lfm._call = MagicMock(side_effect=fake_call)
+        lfm_tracks = lfm.get_artist_top_tracks("deadmau5")
+        self.assertEqual(len(lfm_tracks), 2)
+        self.assertEqual(lfm_tracks[0].title, "Strobe")
+        self.assertEqual(lfm_tracks[0].artist, "deadmau5")
+
+        # Verify MusicAggregatorManager.get_artist_tracks merges Last.fm + Deezer and enriches Album metadata
+        mgr = MusicAggregatorManager()
+        mgr.aggregators["lastfm"].get_artist_top_tracks = MagicMock(return_value=[
+            Track(title="Strobe", artist="deadmau5", source="lastfm_artist"),
+            Track(title="I Remember", artist="deadmau5", source="lastfm_artist"),
+        ])
+        mgr.aggregators["deezer"].get_artist_top_tracks = MagicMock(return_value=[
+            Track(title="Strobe", artist="deadmau5", album="For Lack of a Better Name", source="deezer_artist"),
+            Track(title="Monophobia", artist="deadmau5", album="mau5ville: Level 1", source="deezer_artist"),
+        ])
+
+        combined = mgr.get_artist_tracks("deadmau5")
+        self.assertEqual([t.title for t in combined], ["Strobe", "I Remember", "Monophobia"])
+        # Strobe from Last.fm is enriched with Deezer's album metadata
+        self.assertEqual(combined[0].album, "For Lack of a Better Name")
+        self.assertEqual(combined[0].source, "lastfm_artist")
 
 
 if __name__ == "__main__":

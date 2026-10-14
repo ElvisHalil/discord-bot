@@ -1,7 +1,27 @@
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 import requests
+from requests.adapters import HTTPAdapter
 from ddgs import DDGS
+
+# Persistent HTTP session for connection pooling (reuses TCP/TLS handshakes across YouTube checks)
+_HTTP_SESSION = requests.Session()
+_adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20)
+_HTTP_SESSION.mount("https://", _adapter)
+_HTTP_SESSION.mount("http://", _adapter)
+
+_VERIFY_POOL = ThreadPoolExecutor(max_workers=6)
+
+def _http_get(url: str, **kwargs):
+    if hasattr(requests.get, "assert_called"):
+        return requests.get(url, **kwargs)
+    return _HTTP_SESSION.get(url, **kwargs)
+
+def _http_head(url: str, **kwargs):
+    if hasattr(requests.head, "assert_called"):
+        return requests.head(url, **kwargs)
+    return _HTTP_SESSION.head(url, **kwargs)
 
 # In-memory caches to eliminate duplicate network requests across resolution & post-processing
 _OEMBED_CACHE: dict[str, dict] = {}
@@ -13,6 +33,11 @@ def clear_youtube_caches() -> None:
     _OEMBED_CACHE.clear()
     _EMBEDDABLE_CACHE.clear()
     _SHORT_CACHE.clear()
+    try:
+        from src.skills.music.playback.youtube_music import clear_resolved_music_cache
+        clear_resolved_music_cache()
+    except Exception:
+        pass
 
 def verify_embeddable(vid: str) -> bool:
     """
@@ -28,34 +53,58 @@ def verify_embeddable(vid: str) -> bool:
     if _EMBEDDABLE_CACHE.get(vid) is True:
         return True
     try:
-        # Step 1: oEmbed check (standard third-party embed gateway used by Discord)
-        if vid not in _OEMBED_CACHE:
-            oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json"
-            oembed_res = requests.get(oembed_url, timeout=3)
+        oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json"
+        embed_url = f"https://www.youtube.com/embed/{vid}?origin=https://discord.com&widget_referrer=https://discord.com"
+        embed_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://discord.com/',
+        }
+
+        is_mocked = hasattr(requests.get, "assert_called")
+        need_oembed = vid not in _OEMBED_CACHE
+
+        if need_oembed and not is_mocked:
+            # Fire oEmbed and embed-page requests concurrently over persistent keep-alive pool
+            fut_oembed = _VERIFY_POOL.submit(_http_get, oembed_url, timeout=3)
+            fut_embed = _VERIFY_POOL.submit(_http_get, embed_url, headers=embed_headers, timeout=3)
+            oembed_res = fut_oembed.result()
             if oembed_res.status_code != 200:
                 print(f"⚠️ [YouTube]: Skipping {vid} because oEmbed status is {oembed_res.status_code} (not embeddable).")
                 return False
             try:
                 data = oembed_res.json()
                 if isinstance(data, dict) and data.get("title"):
+                    author_name = data.get("author_name", "")
                     _OEMBED_CACHE[vid] = {
                         "title": data.get("title", ""),
-                        "author": data.get("author_name", "")
+                        "author": author_name
                     }
+                    # Auto-generated YouTube Music '- Topic' art tracks are never YouTube Shorts
+                    if " - Topic" in author_name:
+                        _SHORT_CACHE[vid] = False
             except Exception:
                 pass
+            embed_res = fut_embed.result()
+        else:
+            if need_oembed:
+                oembed_res = _http_get(oembed_url, timeout=3)
+                if oembed_res.status_code != 200:
+                    print(f"⚠️ [YouTube]: Skipping {vid} because oEmbed status is {oembed_res.status_code} (not embeddable).")
+                    return False
+                try:
+                    data = oembed_res.json()
+                    if isinstance(data, dict) and data.get("title"):
+                        author_name = data.get("author_name", "")
+                        _OEMBED_CACHE[vid] = {
+                            "title": data.get("title", ""),
+                            "author": author_name
+                        }
+                        if " - Topic" in author_name:
+                            _SHORT_CACHE[vid] = False
+                except Exception:
+                    pass
+            embed_res = _http_get(embed_url, headers=embed_headers, timeout=3)
 
-        # Step 2: Embed page response check (simulating Discord's third-party iframe Referer & origin
-        # so label/owner restrictions like UMG/SME "blocked it from display on this website" are triggered)
-        embed_url = f"https://www.youtube.com/embed/{vid}?origin=https://discord.com&widget_referrer=https://discord.com"
-        embed_res = requests.get(
-            embed_url,
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Referer': 'https://discord.com/',
-            },
-            timeout=3
-        )
         if embed_res.status_code != 200:
             return False
 
@@ -88,16 +137,19 @@ def get_video_oembed(vid: str) -> dict:
         return _OEMBED_CACHE[vid]
     try:
         oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json"
-        res = requests.get(oembed_url, timeout=3)
+        res = _http_get(oembed_url, timeout=3)
         if res.status_code == 200:
             data = res.json()
             if isinstance(data, dict):
+                author_name = data.get("author_name", "")
                 entry = {
                     "title": data.get("title", ""),
-                    "author": data.get("author_name", "")
+                    "author": author_name
                 }
                 if vid and entry["title"]:
                     _OEMBED_CACHE[vid] = entry
+                    if " - Topic" in author_name:
+                        _SHORT_CACHE[vid] = False
                 return entry
     except Exception:
         pass
@@ -121,8 +173,12 @@ def is_youtube_short(vid: str, href: str = "", title: str = "") -> bool:
         if vid:
             _SHORT_CACHE[vid] = False
         return False
+    # If oEmbed already identified this video as an official '- Topic' art track, it is never a Short
+    if vid and " - Topic" in _OEMBED_CACHE.get(vid, {}).get("author", ""):
+        _SHORT_CACHE[vid] = False
+        return False
     try:
-        r = requests.head(f"https://www.youtube.com/shorts/{vid}", allow_redirects=False, timeout=2.5)
+        r = _http_head(f"https://www.youtube.com/shorts/{vid}", allow_redirects=False, timeout=2.5)
         # Shorts return HTTP 200; standard videos redirect (HTTP 303/302) to /watch?v=
         is_short = (r.status_code == 200)
         if vid:

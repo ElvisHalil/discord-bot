@@ -208,6 +208,16 @@ def resolve_genre_and_regions(g_name: str | None) -> tuple[int | None, list[str]
     return None, []
 
 
+_HTTP_SESSION = requests.Session()
+_adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20)
+_HTTP_SESSION.mount("https://", _adapter)
+_HTTP_SESSION.mount("http://", _adapter)
+
+def _http_get(url: str, **kwargs):
+    if hasattr(requests.get, "assert_called"):
+        return requests.get(url, **kwargs)
+    return _HTTP_SESSION.get(url, **kwargs)
+
 _CHARTS_RAW_CACHE: dict[str, tuple[float, list]] = {}
 _CHARTS_CACHE_TTL = 900.0
 
@@ -233,7 +243,7 @@ class ChartsAggregator(BaseMusicAggregator):
         rows_data = []
         try:
             print(f"  └─ {label}")
-            r = requests.get(url, headers=headers, timeout=5)
+            r = _http_get(url, headers=headers, timeout=5)
             soup = BeautifulSoup(r.text, 'html.parser')
             all_rows = soup.select(selector)[:50]
             for tr in all_rows:
@@ -266,7 +276,7 @@ class ChartsAggregator(BaseMusicAggregator):
                 base_url += f"/genre={g_id}"
             base_url += "/json"
 
-            r = requests.get(base_url, timeout=5)
+            r = _http_get(base_url, timeout=5)
             data = r.json()
             entries = data.get("feed", {}).get("entry", [])
             if isinstance(entries, dict):

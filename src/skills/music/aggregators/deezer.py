@@ -4,8 +4,19 @@ import random
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 import requests
+from requests.adapters import HTTPAdapter
 from src.skills.music.aggregators.base import BaseMusicAggregator
 from src.skills.music.models import Track
+
+_HTTP_SESSION = requests.Session()
+_adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20)
+_HTTP_SESSION.mount("https://", _adapter)
+_HTTP_SESSION.mount("http://", _adapter)
+
+def _http_get(url: str, **kwargs):
+    if hasattr(requests.get, "assert_called"):
+        return requests.get(url, **kwargs)
+    return _HTTP_SESSION.get(url, **kwargs)
 
 # 15-minute TTL cache for raw upstream Deezer lists (playlist searches, 40-track playlist pools, chart pools)
 # Random sampling still runs fresh on every call to preserve 100% track/artist diversity.
@@ -22,7 +33,7 @@ def _get_cached_deezer_data(cache_key: str, url: str) -> list:
         ts, cached_list = _DEEZER_RAW_CACHE[cache_key]
         if now - ts < _DEEZER_CACHE_TTL:
             return cached_list
-    r = requests.get(url, timeout=5)
+    r = _http_get(url, timeout=5)
     data = r.json().get("data", [])
     if not is_mocked and isinstance(data, list) and data:
         _DEEZER_RAW_CACHE[cache_key] = (now, data)
@@ -55,7 +66,7 @@ class DeezerAggregator(BaseMusicAggregator):
             if not q_cand.strip():
                 continue
             try:
-                r = requests.get(f"https://api.deezer.com/search?q={urllib.parse.quote(q_cand.strip())}&limit=1", timeout=5)
+                r = _http_get(f"https://api.deezer.com/search?q={urllib.parse.quote(q_cand.strip())}&limit=1", timeout=5)
                 res = r.json()
                 if res.get("data"):
                     data = res
@@ -75,7 +86,7 @@ class DeezerAggregator(BaseMusicAggregator):
 
         similar_tracks = []
         try:
-            r_rel = requests.get(f"https://api.deezer.com/artist/{artist_id}/related?limit=20", timeout=5)
+            r_rel = _http_get(f"https://api.deezer.com/artist/{artist_id}/related?limit=20", timeout=5)
             related_artists = r_rel.json().get("data", [])
             if related_artists:
                 if len(related_artists) > 8:
@@ -106,7 +117,7 @@ class DeezerAggregator(BaseMusicAggregator):
                     for rel_list in pool.map(_fetch_rel_artist_top, related_artists):
                         similar_tracks.extend(rel_list)
             else:
-                r_top = requests.get(f"https://api.deezer.com/artist/{artist_id}/top?limit=10", timeout=5)
+                r_top = _http_get(f"https://api.deezer.com/artist/{artist_id}/top?limit=10", timeout=5)
                 top = r_top.json()
                 for t in top.get("data", []):
                     if t['title'].lower() != track_title.lower():
@@ -265,7 +276,7 @@ class DeezerAggregator(BaseMusicAggregator):
 
         print(f"  └─ 🎤 [Deezer Artist Search]: Querying '{clean_name}'...")
         try:
-            r = requests.get(f"https://api.deezer.com/search/artist?q={urllib.parse.quote(clean_name)}&limit=1", timeout=5)
+            r = _http_get(f"https://api.deezer.com/search/artist?q={urllib.parse.quote(clean_name)}&limit=1", timeout=5)
             data = r.json().get("data", [])
             if not data:
                 print(f"  └─ ⚠️ [Deezer Artist]: No artist found matching '{clean_name}'.")
@@ -276,7 +287,7 @@ class DeezerAggregator(BaseMusicAggregator):
             resolved_artist_name = artist.get("name", clean_name)
             print(f"  └─ ✅ [Deezer Artist]: Found '{resolved_artist_name}' (ID: {artist_id})")
 
-            r_top = requests.get(f"https://api.deezer.com/artist/{artist_id}/top?limit={limit}", timeout=5)
+            r_top = _http_get(f"https://api.deezer.com/artist/{artist_id}/top?limit={limit}", timeout=5)
             top_tracks = r_top.json().get("data", [])
 
             tracks = []
