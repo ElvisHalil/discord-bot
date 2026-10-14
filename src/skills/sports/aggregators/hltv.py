@@ -233,7 +233,7 @@ class HltvAggregator(BaseSportsAggregator):
 
         return None, []
 
-    def _parse_player_profile_soup(self, soup, player_url: str, fallback_name: str = "") -> str:
+    def _parse_player_profile_soup(self, soup, player_url: str, fallback_name: str = "", kr_stats: Optional[dict] = None) -> str:
         """Extracts structured player statistics, ratings, career KDR, and recent matches from an HLTV player profile soup."""
         if not soup:
             return f"[PLAYER STATS: {player_url}]\nCould not extract stats (page unavailable).\n"
@@ -249,12 +249,17 @@ class HltvAggregator(BaseSportsAggregator):
         age_text = age_el.get_text(" ", strip=True).split("Born")[0].strip() if age_el else ""
 
         # Extract Rating 3.0 & Role Attributes (.player-stat)
-        stat_items = []
+        rating_str = ""
+        role_percentiles = []
         for st in soup.select('.player-stat'):
             txt = re.sub(r'\s+', ' ', st.get_text(" ", strip=True)).strip()
             txt = re.sub(r'\s*/\s*100', '/100', txt)
-            if txt and txt not in stat_items:
-                stat_items.append(txt)
+            if not txt:
+                continue
+            if txt.lower().startswith("rating"):
+                rating_str = txt
+            elif txt not in role_percentiles:
+                role_percentiles.append(txt)
 
         # Extract sample window (e.g. "(Past 3 months • 35 maps)")
         sample_period = "Past 3 months"
@@ -270,22 +275,13 @@ class HltvAggregator(BaseSportsAggregator):
         for row in soup.select('.playerInfoRow'):
             row_txt = re.sub(r'\s+', ' ', row.get_text(" ", strip=True)).strip()
             if any(k in row_txt for k in ("Top 20", "Major winner", "Prize money")):
-                # Strip tooltip noise
                 row_txt = re.sub(r'\(\?\)\s*Total team winnings\s*/\s*5', '', row_txt)
                 achievements.append(row_txt.strip())
 
-        # Extract All-Time / Career stats (Matches, Win rate, Average KDR, Headshots) & Recent Matches from tabs
-        career_line = ""
+        # Extract Recent Pro Match Series from the Matches tab (NOTE: intentionally ignore #tab-faceitBox casual pug stats!)
         recent_matches_line = ""
         for tab in tabs:
             t_txt = re.sub(r'\s+', ' ', tab.get_text(" ", strip=True)).strip()
-            if "All time stats for" in t_txt and not career_line:
-                m_career = re.search(
-                    r'All time stats for .*?\s+(\d+\s+Matches\s+[\d.]+%\s+Win rate\s+\d+\s+Win streak\s+[\d.]+\s+Average KDR\s+[\d.]+%\s+Headshots)',
-                    t_txt,
-                )
-                if m_career:
-                    career_line = m_career.group(1)
             if "Latest results for" in t_txt and not recent_matches_line:
                 m_res = re.findall(r'(\d{2}/\d{2}/\d{4})\s+([A-Za-z0-9 .\'-]+?)\s+(\d+)\s*:\s*(\d+)\s+([A-Za-z0-9 .\'-]+?)\s+Stats', t_txt)
                 if m_res:
@@ -293,7 +289,7 @@ class HltvAggregator(BaseSportsAggregator):
                     recent_matches_line = " | ".join(formatted_res)
 
         # Fallback for generic/mocked HTML in unit tests that lacks .playerNickname / .player-stat breakdown
-        if not stat_items and not nick_el:
+        if not rating_str and not role_percentiles and not nick_el:
             stats_texts = []
             for stat_div in soup.select('.playerProfile, .player-stat, .stat, .statistics, .summaryStatBreakdown'):
                 txt = stat_div.get_text(" ", strip=True)
@@ -303,6 +299,17 @@ class HltvAggregator(BaseSportsAggregator):
                 return f"[PLAYER STATS: {player_url}]\nCould not extract stats (might be blocked by Cloudflare or incorrect URL).\n\n"
             text = "\n".join(stats_texts)[:4000]
             return f"[PLAYER STATS: {player_url}]\n{text}\n\n"
+
+        # Fetch official Pro CS2 K/D, ADR, KPR, DPR, HS%, and 30-day map gamelogs from KashRock API when not in mocked unit tests
+        if kr_stats is None:
+            kr_stats = {}
+            if not _is_mocked(fetch_soup):
+                try:
+                    from src.skills.sports.aggregators.kashrock import KashrockAggregator
+                    slug = (nick or player_url.rstrip('/').split('/')[-1]).lower().rstrip('-')
+                    kr_stats = KashrockAggregator().get_player_pro_stats(slug)
+                except Exception:
+                    kr_stats = {}
 
         full_link = f"https://www.hltv.org{player_url}" if player_url.startswith("/") else player_url
         header_parts = [f"👤 **{nick}**"]
@@ -315,27 +322,50 @@ class HltvAggregator(BaseSportsAggregator):
         header_parts.append(f"Profile: <{full_link}>")
 
         lines = [" | ".join(header_parts)]
-        if stat_items:
-            lines.append(f"  • **Current Form ({sample_period})**: {' | '.join(stat_items)}")
+
+        # 1. Recent 30-Day Pro Map Stats (KashRock)
+        r30 = kr_stats.get("recent_30d")
+        if r30:
+            lines.append(
+                f"  • **Current Pro Form (Last {r30['maps']} Maps / {r30['rounds']} Rds)**: "
+                f"K/D: **{r30['kd']}** ({r30['kills']}K/{r30['deaths']}D) | "
+                f"ADR: **{r30['adr']}** | KPR: **{r30['kpr']}** | DPR: **{r30['dpr']}** | HS%: **{r30['hs_pct']}%**"
+            )
+            if r30.get("recent_map_logs"):
+                lines.append(f"  • **Recent Map Boxscores**: {' | '.join(r30['recent_map_logs'])}")
+
+        # 2. Official Pro Career Stats (KashRock / bo3.gg)
+        c_pro = kr_stats.get("career_pro")
+        if c_pro:
+            lines.append(
+                f"  • **Pro Career Stats ({c_pro['maps']} Pro Maps)**: "
+                f"K/D: **{c_pro['kd']}** ({c_pro['kd_diff']:+d}) | "
+                f"ADR: **{c_pro['adr']}** | KPR: **{c_pro['kpr']}** | DPR: **{c_pro['dpr']}** | "
+                f"HS%: **{c_pro['hs_pct']}%** | Opening K/Rd: {c_pro['fk_pr']} | Clutches Won: {c_pro['clutches_won']}"
+            )
+
+        # 3. HLTV Rating 3.0 & Role Percentiles
+        if rating_str or role_percentiles:
+            combined_hltv = " | ".join(([rating_str] if rating_str else []) + role_percentiles)
+            lines.append(f"  • **HLTV Rating & Role Percentiles ({sample_period}, 0-100 scale)**: {combined_hltv}")
         else:
-            lines.append("  • **Current Form**: No recent 3-month HLTV rating breakdown available")
-        if career_line:
-            lines.append(f"  • **Career / FACEIT Stats**: {career_line}")
+            lines.append("  • **HLTV Rating**: No recent 3-month HLTV rating breakdown available")
+
         if achievements:
             lines.append(f"  • **Achievements**: {' ; '.join(achievements)}")
         if recent_matches_line:
-            lines.append(f"  • **Recent Matches**: {recent_matches_line}")
+            lines.append(f"  • **Recent Series Results**: {recent_matches_line}")
 
         return "\n".join(lines) + "\n"
 
-    def _fetch_single_player(self, name: str, player_url: str) -> str:
+    def _fetch_single_player(self, name: str, player_url: str, kr_stats: Optional[dict] = None) -> str:
         full_url = f"https://www.hltv.org{player_url}" if player_url.startswith("/") else player_url
         soup = self._get_cached_or_fetch_soup(full_url, timeout=30)
-        return self._parse_player_profile_soup(soup, player_url, fallback_name=name)
+        return self._parse_player_profile_soup(soup, player_url, fallback_name=name, kr_stats=kr_stats)
 
     def get_player_stats(self, player_url: Optional[str] = None) -> str:
         """
-        Fetches statistics for a specific CS player OR all active players on a CS team from HLTV.
+        Fetches statistics for a specific CS player OR all active players on a CS team from HLTV + KashRock API.
         Accepts an HLTV player path ('/player/3741/niko'), a player name ('NiKo', 'm0NESY'),
         or a team name/query ('Falcons', 'whats falcons player current stats').
         """
@@ -352,19 +382,54 @@ class HltvAggregator(BaseSportsAggregator):
                     f"Could not find HLTV player or team matching '{target_str}'.\n\n"
                 )
 
+            props_section = ""
+            kr_map: dict[str, dict] = {}
+            if not _is_mocked(fetch_soup):
+                try:
+                    from src.skills.sports.aggregators.kashrock import KashrockAggregator
+                    kr = KashrockAggregator()
+                    if kr.is_configured():
+                        props_query = team_label or (targets[0][0] if len(targets) == 1 else target_str)
+                        props_section = kr.get_props_for_query(props_query)
+
+                        with ThreadPoolExecutor(max_workers=min(5, len(targets))) as ex:
+                            slug_list = [(p_name, p_href.rstrip('/').split('/')[-1].lower().rstrip('-')) for p_name, p_href in targets]
+                            futs = {p_name: ex.submit(kr.get_player_pro_stats, slug) for p_name, slug in slug_list}
+                            for p_name, fut in futs.items():
+                                kr_map[p_name] = fut.result()
+
+                        # If any teammate has recent_30d match_slugs, backfill teammates whose /gamelogs was still warming
+                        team_match_slugs: list[str] = []
+                        for st in kr_map.values():
+                            ms = (st.get("recent_30d") or {}).get("match_slugs") or []
+                            if ms:
+                                team_match_slugs = ms
+                                break
+                        if team_match_slugs:
+                            for p_name, slug in slug_list:
+                                if not kr_map.get(p_name, {}).get("recent_30d"):
+                                    backfilled = kr.backfill_recent_from_match_boxscores(team_match_slugs, slug)
+                                    if backfilled:
+                                        kr_map.setdefault(p_name, {})["recent_30d"] = backfilled
+                except Exception:
+                    pass
+
             if len(targets) == 1 and not team_label:
                 p_name, p_href = targets[0]
-                block = self._fetch_single_player(p_name, p_href)
+                block = self._fetch_single_player(p_name, p_href, kr_stats=kr_map.get(p_name) if kr_map else None)
                 if block.startswith("[PLAYER STATS:"):
-                    return block
-                return f"[PLAYER STATS: {p_name} ({p_href})]\n{block}\n"
+                    return block + props_section
+                return f"[PLAYER STATS: {p_name} ({p_href})]\n{block}\n" + props_section
 
             # Multiple players (e.g. full team roster like Team Falcons) -> fetch concurrently!
             header = f"[TEAM PLAYER STATS: {team_label or target_str}]\n"
             with ThreadPoolExecutor(max_workers=min(5, len(targets))) as executor:
-                futures = [executor.submit(self._fetch_single_player, p_name, p_href) for p_name, p_href in targets]
+                futures = [
+                    executor.submit(self._fetch_single_player, p_name, p_href, kr_map.get(p_name) if kr_map else None)
+                    for p_name, p_href in targets
+                ]
                 blocks = [f.result() for f in futures]
 
-            return header + "\n".join(blocks) + "\n"
+            return header + "\n".join(blocks) + "\n" + props_section
         except Exception as e:
             return f"[PLAYER STATS]\nError fetching player stats: {e}\n\n"

@@ -34,7 +34,7 @@ def skill_csgo_esports(query_type: Optional[str] = 'all', event_page: Optional[s
 
     # Normalize query_type to prevent empty data when models pass natural language
     q_type = (query_type or "all").lower().strip()
-    if any(w in q_type for w in ("odd", "bet", "moneyline", "payout", "win")):
+    if any(w in q_type for w in ("odd", "bet", "moneyline", "payout", "win", "prop", "line")):
         q_type = "odds"
     elif any(w in q_type for w in ("stat", "rating", "kdr", "kd")) or q_type == "player_stats" or player_url:
         q_type = "player_stats"
@@ -81,7 +81,7 @@ def skill_csgo_esports(query_type: Optional[str] = 'all', event_page: Optional[s
 
     # 6. BETTING ODDS / TEAM MATCHUP
     if q_type in ['odds', 'betting'] or (matchup and q_type not in ['player_stats', 'event_info']):
-        target = matchup or event_page or "Falcons vs Ninjas in Pyjamas"
+        target = matchup or event_page or player_url or "Falcons vs Ninjas in Pyjamas"
         output += _odds_aggregator.get_odds(target, sport='cs2')
 
     output += """=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===
@@ -103,13 +103,14 @@ Use this exact live data to answer the user's questions about CS esports.
    - Only list active participating teams from `=== PARTICIPATING TEAMS ===` and `=== TOURNAMENT ROSTERS (Active Players & Coaches) ===` (withdrawn teams are already separated under `Withdrawn / Replaced Teams`).
    - Do NOT dump long walls of bracketed player names like `Team Falcons (p1, p2, p3, p4, p5, coach)` unless rosters are requested.
    - If the user asks for rosters/players, list active players and coach cleanly on an indented sub-bullet:
-     - **Team Falcons**: NiKo, TeSeS, m0NESY, kyousuke, k3y *(Coach: zonic)*
-4. When asked about match odds or betting lines:
-   - Use `query_type='odds'` or `skill_betting_odds` with the matchup (e.g. 'Falcons vs Ninjas in Pyjamas').
-   - State the favorite, underdog, decimal/American odds, and win probabilities directly.
+     - **Team Falcons**: NiKo, TeSeS, m0NESY, kyousuke, karrigan *(Coach: zonic)*
+4. When asked about match odds, betting lines, or player props:
+   - Use `query_type='odds'` or `skill_betting_odds` with the matchup or player (e.g. 'Falcons vs Ninjas in Pyjamas').
+   - State the favorite, underdog, decimal/American odds, win probabilities, and any `LIVE CS2 PLAYER PROPS` (Over/Under kills, headshots) directly.
    - NEVER claim that you cannot check odds or tell the user to visit websites manually!
 5. When asked for player stats or a team's player stats (e.g. "whats falcons player current stats", "m0NESY stats"):
-   - Present the statistics from `[PLAYER STATS]` or `[TEAM PLAYER STATS]` clearly for each player: **Rating 3.0**, key role scores (`Firepower`, `Opening`, `Clutching`, `Sniping`, `Trading`, `Utility`), **Career KDR / Headshot % / Win Rate**, and notable achievements.
+   - Prioritize real pro CS2 metrics from **Current Pro Form (Last 30 Days)** and **Pro Career Stats**: **K/D Ratio**, **ADR (Average Damage/Round)**, **KPR / DPR**, **Headshot %**, **Opening Kills/Rd**, **Clutches Won**, and **HLTV Rating 3.0**.
+   - Note that the `0-100` role numbers (`Firepower`, `Opening`, `Sniping`, etc.) are **HLTV Role Percentiles (out of 100)**, not raw stats.
    - NEVER expose internal tool instructions, parameter names (`query_type='player_stats'`, `player_url`), or tell the user how to call the tool!
 6. When presenting a LIVE match from YouTube:
    - Parse the title to determine who is playing and the stage (e.g. Grand Final, Semifinal).

@@ -74,7 +74,7 @@ def skill_sports_info(sport: Optional[str] = None, query: Optional[str] = None) 
     if is_cs:
         sport_raw = "cs"
         named_event = query_raw if any(t in combined for t in ("thunderpick", "pgl", "blast", "iem", "esl", "major", "bucharest", "chengdu", "atlanta")) else None
-        if "odd" in combined or "bet" in combined:
+        if any(k in combined for k in ("odd", "bet", "prop", "moneyline")):
             return _odds_aggregator.get_odds(query_raw or combined, sport="cs2")
         elif any(k in combined for k in ("stat", "stats", "rating", "kdr", "kd")):
             return skill_csgo_esports(query_type="player_stats", player_url=query_raw or combined)

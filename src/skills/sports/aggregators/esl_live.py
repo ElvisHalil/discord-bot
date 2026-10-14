@@ -36,6 +36,15 @@ class EslLiveAggregator(BaseSportsAggregator):
                     video_id = video['id'].get('videoId', '')
                     link = f"https://www.youtube.com/watch?v={video_id}"
                     output += f"- Title: {title}\n  Link: {link}\n"
+
+            try:
+                from src.skills.sports.aggregators.kashrock import KashrockAggregator
+                kr_live = KashrockAggregator().get_live_scoreboards()
+                if kr_live:
+                    output += "\n" + kr_live.strip() + "\n"
+            except Exception:
+                pass
+
             return output + "\n"
         except Exception as e:
             return f"[LIVE STREAMS]\nError fetching live streams: {e}\n\n"

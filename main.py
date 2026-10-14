@@ -75,12 +75,14 @@ def clear_tool_caches():
         from src.skills.music.aggregators.charts import clear_charts_cache
         from src.skills.sports.aggregators.liquipedia import clear_liquipedia_cache
         from src.skills.sports.aggregators.hltv import clear_hltv_cache
+        from src.skills.sports.aggregators.kashrock import clear_kashrock_cache
         clear_youtube_caches()
         clear_deezer_cache()
         clear_lastfm_cache()
         clear_charts_cache()
         clear_liquipedia_cache()
         clear_hltv_cache()
+        clear_kashrock_cache()
     except Exception:
         pass
 

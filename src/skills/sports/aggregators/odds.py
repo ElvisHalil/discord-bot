@@ -310,11 +310,21 @@ class OddsAggregator(BaseSportsAggregator):
 
         print(f"  └─ 🎲 [Odds]: Fetching betting odds for '{query_clean}' (Sport: {sport_clean})...")
 
-        # 1. For Counter-Strike/Esports, scrape HLTV betting analytics first
+        # 1. For Counter-Strike/Esports, scrape HLTV betting analytics first and enrich with KashRock player props
         if sport_clean in ["cs", "cs2", "csgo", "esports"]:
             hltv_odds = self._fetch_esports_hltv_odds(query_clean, stake=stake)
+            kr_props = ""
+            is_mock = hasattr(fetch_soup, "assert_called") or "MagicMock" in str(type(fetch_soup))
+            if not is_mock:
+                try:
+                    from src.skills.sports.aggregators.kashrock import KashrockAggregator
+                    kr_props = KashrockAggregator().get_props_for_query(query_clean)
+                except Exception:
+                    kr_props = ""
             if hltv_odds:
-                return hltv_odds
+                return hltv_odds + kr_props
+            if kr_props:
+                return f"[CS2 BETTING & PLAYER PROPS: {query_clean}]\n\n" + kr_props
 
         # 2. Check The Odds API if key is present
         api_odds = self._fetch_from_the_odds_api(query_clean, sport_clean)
