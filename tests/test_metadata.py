@@ -253,7 +253,7 @@ class TestDeezerExpansion(unittest.TestCase):
         self.assertEqual(tracks[0].album, "Random Album Title")
 
     @patch("src.skills.music.aggregators.deezer.requests.get")
-    def test_deezer_charts_with_genre(self, mock_get):
+    def test_deezer_global_charts(self, mock_get):
         from unittest.mock import MagicMock
         from src.skills.music.aggregators.deezer import DeezerAggregator
         mock_resp = MagicMock()
@@ -263,7 +263,7 @@ class TestDeezerExpansion(unittest.TestCase):
         mock_get.return_value = mock_resp
 
         deezer = DeezerAggregator()
-        tracks = deezer.get_charts(genre="electronic")
+        tracks = deezer.get_charts(genre=None)
         self.assertEqual(len(tracks), 1)
         self.assertEqual(tracks[0].title, "Dracula")
         self.assertEqual(tracks[0].artist, "Tame Impala")
@@ -636,6 +636,37 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         # Strobe from Last.fm is enriched with Deezer's album metadata
         self.assertEqual(combined[0].album, "For Lack of a Better Name")
         self.assertEqual(combined[0].source, "lastfm_artist")
+
+    def test_garbage_keywords_and_set_filtering(self):
+        from src.skills.music.playback.youtube_music import is_garbage_music_title
+        from src.skills.music.aggregators.manager import MusicAggregatorManager
+        from src.skills.music.models import Track
+
+        # Rejects slowed, reverb, tracklist, and DJ/live/full sets
+        self.assertTrue(is_garbage_music_title("PASSO BEM SOLTO - Slowed", ""))
+        self.assertTrue(is_garbage_music_title("One Chance (Slowed + Reverb)", ""))
+        self.assertTrue(is_garbage_music_title("Phonk Mix 2026 (w/ Tracklist)", ""))
+        self.assertTrue(is_garbage_music_title("Charlotte de Witte - Full Set", ""))
+        self.assertTrue(is_garbage_music_title("Sub Focus (DJ Set)", ""))
+        self.assertTrue(is_garbage_music_title("Amelie Lens [Live Set]", ""))
+        self.assertTrue(is_garbage_music_title("Hard Techno Set 2026", ""))
+        self.assertTrue(is_garbage_music_title("Close Eyes", "", author="Phonk Slowed & Reverb"))
+
+        # Preserves legitimate song titles containing "set"
+        self.assertFalse(is_garbage_music_title("Set Fire to the Rain", "Set Fire to the Rain by Adele"))
+        self.assertFalse(is_garbage_music_title("Set Me Free", "Set Me Free by Avicii"))
+        self.assertFalse(is_garbage_music_title("Sunset Lover", "Sunset Lover by Petit Biscuit"))
+
+        # Manager filters out slowed/reverb/set/tracklist tracks upstream
+        mgr = MusicAggregatorManager()
+        raw_tracks = [
+            Track(title="PASSO BEM SOLTO - Slowed", artist="ATLXS", source="lastfm"),
+            Track(title="Techno Mix (Tracklist)", artist="Various", source="deezer"),
+            Track(title="Live Set @ Tomorrowland", artist="Anyma", source="deezer"),
+            Track(title="Murder In My Mind", artist="Kordhell", source="lastfm"),
+        ]
+        filtered = mgr._filter_and_deduplicate(raw_tracks)
+        self.assertEqual([t.title for t in filtered], ["Murder In My Mind"])
 
 
 if __name__ == "__main__":

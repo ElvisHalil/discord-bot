@@ -22,19 +22,40 @@ GARBAGE_MUSIC_KEYWORDS = [
     "reacts", "review", "podcast", "interview", "behind the scenes",
     "gameplay", "walkthrough", "tier list", "parody", "lesson",
     "drum cover", "synth tutorial", "unboxing", "vlog", "prank",
-    "meme", "tiktok compilation", "nightcore", "sped up", "slowed",
-    "vocal coach", "reverb", "top 50", "top 100", "top 20", "top 10",
+    "meme", "tiktok compilation", "nightcore", "sped up", "speed up",
+    "slowed", "super slowed", "ultra slowed", "vocal coach", "reverb",
+    "reverbed", "top 50", "top 100", "top 20", "top 10",
     "top 25", "most viral", "compilation", "playlist", "best of",
-    "1 hour", "10 hours", "full album"
+    "1 hour", "10 hours", "full album", "tracklist", "track list",
+    "full set", "dj set", "live set", "club set", "festival set",
+    "b2b set", "vinyl set", "radio set", "closing set", "opening set",
+    "extended set", "boiler room", "continuous mix", "megamix",
+    "hour mix", "min mix", "guest mix", "promo mix", "yearmix",
 ]
 
-def is_garbage_music_title(title: str, query: str) -> bool:
-    """Detects if candidate title contains tutorial, reaction, or non-song keywords."""
-    title_low = title.lower()
-    query_low = query.lower()
+# Matches DJ/live set markers like "(Set)", "[Live Set]", "| Set", "- Set", "Techno Set", "Live @"
+# while preserving normal song titles like "Set Fire to the Rain", "Set Me Free", "Sunset", "Mindset"
+_GARBAGE_SET_RE = re.compile(
+    r'(?:'
+    r'[\(\[\{][^\)\]\}]*\bset\b[^\)\]\}]*[\)\]\}]'
+    r'|[-–—|]\s*(?:full\s+|dj\s+|live\s+)?set\b'
+    r'|\b(?:full|dj|live|club|festival|b2b|vinyl|radio|closing|opening|extended|warmup|warm-up|rooftop|warehouse|stream|rave|techno|house|dnb|phonk|trance|hardstyle|dubstep|edm|electronic|mix)\s+set\b'
+    r'|\b(?:set|live)\s+@\s+\w+'
+    r')',
+    re.IGNORECASE,
+)
+
+def is_garbage_music_title(title: str, query: str = "", author: str = "") -> bool:
+    """Detects if candidate title or channel contains tutorial, reaction, slowed/reverb, tracklist, or DJ set keywords."""
+    title_low = (title or "").lower()
+    author_low = (author or "").lower()
+    combined_low = f"{title_low} {author_low}".strip()
+    query_low = (query or "").lower()
     for kw in GARBAGE_MUSIC_KEYWORDS:
-        if kw in title_low and kw not in query_low:
+        if kw in combined_low and kw not in query_low:
             return True
+    if _GARBAGE_SET_RE.search(title or "") and not _GARBAGE_SET_RE.search(query or ""):
+        return True
     return False
 
 def extract_music_tokens(text: str) -> set[str]:
@@ -56,7 +77,7 @@ def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, in
     - priority_score 2: Official Artist channel / VEVO with matching song & artist
     - priority_score 1: Third-party video with strong title & artist token match
     """
-    if is_garbage_music_title(title, query):
+    if is_garbage_music_title(title, query, author=author):
         return False, 0, "Rejected: contains non-music keyword"
 
     q_tokens = extract_music_tokens(query)
@@ -155,11 +176,14 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
 
     def _verify_single_candidate(cand_tuple):
         vid, raw_title, href = cand_tuple
-        # 1. Fast string-based Shorts rejection (0ms, no network)
+        # 1. Fast string-based Shorts & Garbage rejection (0ms, no network)
         if "/shorts/" in (href or "").lower() or "#short" in (raw_title or "").lower():
             if is_youtube_short(vid, href=href, title=raw_title):
                 print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - YouTube Short.")
                 return None
+        if raw_title and is_garbage_music_title(raw_title, query):
+            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}'): Rejected: contains non-music keyword")
+            return None
 
         # 2. Embeddability check (with Discord third-party Referer/origin; also populates _OEMBED_CACHE
         # and marks '- Topic' art tracks as non-Shorts in _SHORT_CACHE so step 3 is 0ms!)
@@ -317,7 +341,7 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
                     if is_youtube_short(vid, title=item_title):
                         print(f"  └─ ⚠️ [Music API Fallback]: Skipping {vid} - Short.")
                         continue
-                    if is_garbage_music_title(item_title, query):
+                    if is_garbage_music_title(item_title, query, author=item_channel):
                         print(f"  └─ ⚠️ [Music API Fallback]: Skipping {vid} - Non-music keyword.")
                         continue
                     if not verify_embeddable(vid):

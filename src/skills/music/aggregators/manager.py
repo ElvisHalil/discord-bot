@@ -53,11 +53,16 @@ class MusicAggregatorManager:
             if art_raw.lower() not in ("unknown artist", "unknown", ""):
                 seed_artist_norm = _norm_track_token(art_raw)
 
+        from src.skills.music.playback.youtube_music import is_garbage_music_title
+
         seen = set()
         deduped = []
         fresh = []
 
         for t in tracks:
+            if is_garbage_music_title(t.title, query="", author=t.artist):
+                continue
+
             key = (t.title.lower().strip(), t.artist.lower().strip())
             if key in seen:
                 continue

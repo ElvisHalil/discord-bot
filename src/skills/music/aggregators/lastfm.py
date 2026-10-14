@@ -318,6 +318,7 @@ class LastFmAggregator(BaseMusicAggregator):
         if genre and genre.lower() not in ("all", "general", "none"):
             from collections import Counter
             from src.skills.music.utils import is_recently_played, RECENTLY_PLAYED_TRACKS, _norm_track_token
+            from src.skills.music.playback.youtube_music import is_garbage_music_title
             tag = genre.lower().strip()
             print(f"  └─ 📻 [Last.fm]: Fetching top tracks & verified genre artists for tag '{tag}'...")
 
@@ -348,6 +349,17 @@ class LastFmAggregator(BaseMusicAggregator):
             # Step A: Candidate tracks from tag.gettoptracks cross-verified against tag.gettopartists
             sampled_candidates = []
             if raw:
+                clean_raw = [
+                    t for t in raw
+                    if not is_garbage_music_title(
+                        t.get("name", ""),
+                        query="",
+                        author=t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))
+                    )
+                ]
+                if clean_raw:
+                    raw = clean_raw
+
                 if verified_genre_artists:
                     verified_raw = [
                         t for t in raw
@@ -476,14 +488,21 @@ class LastFmAggregator(BaseMusicAggregator):
                 if isinstance(top_trks, dict):
                     top_trks = [top_trks]
                 if top_trks:
-                    unplayed_trks = [
+                    clean_trks = [
                         tk for tk in top_trks[:8]
+                        if tk.get("name") and not is_garbage_music_title(tk.get("name", ""), query="", author=a_name)
+                    ]
+                    active_trks = clean_trks if clean_trks else top_trks[:5]
+                    unplayed_trks = [
+                        tk for tk in active_trks
                         if tk.get("name") and not is_recently_played(tk.get("name", ""), a_name)
                     ]
-                    pool_trks = unplayed_trks if unplayed_trks else top_trks[:5]
+                    pool_trks = unplayed_trks if unplayed_trks else active_trks
+                    if not pool_trks:
+                        return None
                     chosen_t = random.choice(pool_trks)
                     t_title = chosen_t.get("name", "")
-                    if t_title:
+                    if t_title and not is_garbage_music_title(t_title, query="", author=a_name):
                         return Track(
                             title=t_title,
                             artist=a_name,

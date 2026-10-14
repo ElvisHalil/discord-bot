@@ -133,44 +133,18 @@ class DeezerAggregator(BaseMusicAggregator):
 
         return similar_tracks
 
-    GENRE_MAP = {
-        "pop": 132,
-        "rap": 116,
-        "hip hop": 116,
-        "hiphop": 116,
-        "rock": 152,
-        "dance": 113,
-        "electronic": 113,
-        "techno": 113,
-        "house": 113,
-        "edm": 113,
-        "deep house": 113,
-        "tech house": 113,
-        "electro": 106,
-        "r&b": 165,
-        "rnb": 165,
-        "alternative": 85,
-        "metal": 464,
-        "latin": 173,
-        "classical": 98,
-        "jazz": 129,
-        "reggae": 144,
-        "folk": 466,
-    }
-
     def get_charts(self, genre: str = None) -> list[Track]:
-        """Fetch trending chart tracks globally or for a specific genre from Deezer."""
+        """Fetch curated playlist tracks for a query/vibe or global chart tracks from Deezer."""
         clean_g = (genre or "").lower().strip()
         tracks = []
 
-        # Strategy 1: For specific subgenres or Beatport chart queries, pool across up to 4 curated playlists
+        # Strategy 1: For specific playlist/vibe/Beatport queries, pool across up to 4 curated playlists
         if clean_g and clean_g not in ("all", "global", "general", "none"):
-            search_term = "drum and bass" if clean_g in ("dnb", "drum and bass", "drumnbass", "drum & bass") else clean_g
             try:
-                print(f"  └─ 🎧 [Deezer]: Searching curated playlists for '{search_term}'...")
+                print(f"  └─ 🎧 [Deezer]: Searching curated playlists for '{clean_g}'...")
                 playlists = _get_cached_deezer_data(
-                    f"pl_search:{search_term}",
-                    f"https://api.deezer.com/search/playlist?q={urllib.parse.quote(search_term)}&limit=10"
+                    f"pl_search:{clean_g}",
+                    f"https://api.deezer.com/search/playlist?q={urllib.parse.quote(clean_g)}&limit=10"
                 )
                 if playlists:
                     valid_pls = [p for p in playlists if p.get("id") and p.get("nb_tracks", 0) >= 15]
@@ -232,24 +206,19 @@ class DeezerAggregator(BaseMusicAggregator):
                         return tracks[:25]
             except Exception as e:
                 print(f"  └─ ⚠️ [Deezer Playlist Search Warning]: {e}")
-
-        # Strategy 2: Official genre chart endpoint
-        genre_id = self.GENRE_MAP.get(clean_g, 0) if clean_g else 0
-        if clean_g and clean_g not in ("all", "global", "general", "none") and genre_id == 0:
-            # If an unknown specific genre was requested and no playlist matched, do not return global pop!
-            print(f"  └─ ⚠️ [Deezer Charts]: Unrecognized genre '{clean_g}' with no playlist match.")
             return []
 
-        endpoint = f"https://api.deezer.com/chart/{genre_id}/tracks?limit=25" if genre_id else "https://api.deezer.com/chart/0/tracks?limit=25"
+        # Strategy 2: Official global chart endpoint when no specific query is provided
+        endpoint = "https://api.deezer.com/chart/0/tracks?limit=25"
         try:
-            print(f"  └─ 🎧 [Deezer Charts]: Fetching {'genre ' + str(genre) if genre else 'Global'} charts...")
-            data = _get_cached_deezer_data(f"chart:{genre_id}", endpoint)
+            print("  └─ 🎧 [Deezer Charts]: Fetching Global charts...")
+            data = _get_cached_deezer_data("chart:0", endpoint)
             for t in data:
                 tracks.append(Track(
                     title=t.get("title", "Unknown"),
                     artist=t.get("artist", {}).get("name", "Unknown"),
                     album=t.get("album", {}).get("title"),
-                    genre=clean_g.title() if clean_g else "Pop",
+                    genre="Pop",
                     source="deezer_charts"
                 ))
             return tracks
