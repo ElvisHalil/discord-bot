@@ -414,6 +414,7 @@ class TestMusicDiversityExpansion(unittest.TestCase):
                         "track": [
                             {"name": "Solar System", "artist": {"name": "Sub Focus"}},
                             {"name": "Afterglow", "artist": {"name": "Wilkinson"}},
+                            {"name": "LALALALA", "artist": {"name": "Stray Kids"}},  # Off-genre tag spam, should be filtered out
                         ]
                     }
                 }
@@ -422,6 +423,7 @@ class TestMusicDiversityExpansion(unittest.TestCase):
                     "topartists": {
                         "artist": [
                             {"name": "Sub Focus"},  # Already in Step A, should be skipped in Step B
+                            {"name": "Wilkinson"},  # Verified genre artist in Step A
                             {"name": "Noisia"},
                             {"name": "Netsky"},
                         ]
@@ -440,6 +442,26 @@ class TestMusicDiversityExpansion(unittest.TestCase):
         tracks = lfm.get_charts(genre="dnb")
         artists = {t.artist for t in tracks}
         self.assertEqual(artists, {"Sub Focus", "Wilkinson", "Noisia", "Netsky"})
+        self.assertNotIn("Stray Kids", artists)
+
+    def test_get_top_charts_skips_deezer_when_lastfm_succeeds(self):
+        from src.skills.music.aggregators.manager import MusicAggregatorManager
+        from src.skills.music.models import Track
+
+        mgr = MusicAggregatorManager()
+        mgr.aggregators["lastfm"].get_charts = MagicMock(return_value=[
+            Track(title="Murder In My Mind", artist="Kordhell", genre="Phonk", source="lastfm_phonk")
+        ])
+        mgr.aggregators["beatport"].get_charts = MagicMock(return_value=[])
+        mgr.aggregators["charts"].get_charts = MagicMock(return_value=[])
+        mgr.aggregators["deezer"].get_charts = MagicMock(return_value=[
+            Track(title="Off-Genre Playlist Track", artist="Random User", genre="Phonk", source="deezer_phonk")
+        ])
+
+        tracks = mgr.get_top_charts(genre="phonk")
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0].artist, "Kordhell")
+        mgr.aggregators["deezer"].get_charts.assert_not_called()
 
 
 class TestMoodVibeDiscovery(unittest.TestCase):

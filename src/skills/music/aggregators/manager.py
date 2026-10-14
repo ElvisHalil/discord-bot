@@ -212,7 +212,7 @@ class MusicAggregatorManager:
         if target_genre:
             canon_genre = GENRE_CANONICAL_MAP.get(target_genre.lower().strip(), target_genre.lower().strip())
             profile = GENRE_MOOD_MATRIX.get((canon_genre, canon_mood)) or {
-                "deezer_queries": [f"{canon_mood} {target_genre}", f"{target_genre} {canon_mood}"],
+                "deezer_queries": [],
                 "lastfm_tags": [f"{canon_mood} {target_genre}", target_genre],
                 "beatport_query": None,
             }
@@ -271,7 +271,7 @@ class MusicAggregatorManager:
             return self.get_mood_tracks(mood=parsed_mood, genre=parsed_genre)
 
         all_tracks = []
-        provider_names = ("lastfm", "beatport", "deezer", "charts")
+        provider_names = ("lastfm", "beatport", "charts")
         active_providers = [self.aggregators[name] for name in provider_names if self.aggregators.get(name)]
 
         if active_providers:
@@ -282,6 +282,13 @@ class MusicAggregatorManager:
                         all_tracks.extend(fut.result() or [])
                     except Exception:
                         pass
+
+        # Safety net if Last.fm API key is missing and no other provider returned tracks
+        if not all_tracks and self.aggregators.get("deezer"):
+            try:
+                all_tracks.extend(self.aggregators["deezer"].get_charts(genre=parsed_genre) or [])
+            except Exception:
+                pass
 
         return self._filter_and_deduplicate(all_tracks)
 

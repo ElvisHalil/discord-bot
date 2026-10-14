@@ -328,27 +328,42 @@ class LastFmAggregator(BaseMusicAggregator):
                 "edm": "electronic",
             }
             tag = genre_aliases.get(tag, tag)
-            page = random.choice([1, 2])
-            print(f"  └─ 📻 [Last.fm]: Fetching top tracks (page {page}) & rotating artists for tag '{tag}'...")
+            print(f"  └─ 📻 [Last.fm]: Fetching top tracks & verified genre artists for tag '{tag}'...")
 
             with ThreadPoolExecutor(max_workers=2) as pool:
-                f_tracks = pool.submit(self._call, "tag.gettoptracks", {"tag": tag, "limit": 50, "page": page})
-                f_artists = pool.submit(self._call, "tag.gettopartists", {"tag": tag, "limit": 30})
+                f_tracks = pool.submit(self._call, "tag.gettoptracks", {"tag": tag, "limit": 100, "page": 1})
+                f_artists = pool.submit(self._call, "tag.gettopartists", {"tag": tag, "limit": 100})
                 res = f_tracks.result()
                 art_res = f_artists.result()
 
             raw = res.get("tracks", {}).get("track", [])
-            if not raw and page != 1:
-                res = self._call("tag.gettoptracks", {"tag": tag, "limit": 50, "page": 1})
-                raw = res.get("tracks", {}).get("track", [])
             if isinstance(raw, dict):
                 raw = [raw]
+
+            raw_artists = art_res.get("topartists", {}).get("artist", [])
+            if isinstance(raw_artists, dict):
+                raw_artists = [raw_artists]
+
+            verified_genre_artists = set()
+            for a in raw_artists:
+                a_name = a.get("name", "") if isinstance(a, dict) else str(a)
+                if a_name and a_name.strip():
+                    verified_genre_artists.add(a_name.lower().strip())
 
             artist_seen = set()
             source_name = f"lastfm_{tag.replace(' ', '_')}"
 
-            # Step A: Sample up to 6 diverse tagged tracks (max 1 per artist)
+            # Step A: Sample up to 6 diverse tagged tracks (max 1 per artist), cross-verified against top genre artists
             if raw:
+                if verified_genre_artists:
+                    verified_raw = [
+                        t for t in raw
+                        if (t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))).lower().strip()
+                        in verified_genre_artists
+                    ]
+                    if verified_raw:
+                        raw = verified_raw
+
                 diverse_raw = []
                 for t in raw:
                     art = t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))
@@ -373,16 +388,13 @@ class LastFmAggregator(BaseMusicAggregator):
                         ))
 
             # Step B: Rotate through top genre artists via tag.gettopartists -> artist.gettoptracks concurrently
-            raw_artists = art_res.get("topartists", {}).get("artist", [])
-            if isinstance(raw_artists, dict):
-                raw_artists = [raw_artists]
             if raw_artists:
                 cand_artists = []
-                for a in raw_artists:
+                for a in raw_artists[:40]:
                     a_name = a.get("name", "") if isinstance(a, dict) else str(a)
                     if a_name and a_name.lower().strip() not in artist_seen:
                         cand_artists.append(a_name)
-                selected_artists = random.sample(cand_artists, min(4, len(cand_artists)))
+                selected_artists = random.sample(cand_artists, min(6, len(cand_artists)))
 
                 def _fetch_tag_artist_top(a_name: str):
                     top_res = self._call("artist.gettoptracks", {"artist": a_name, "limit": 5, "autocorrect": 1})
@@ -402,7 +414,7 @@ class LastFmAggregator(BaseMusicAggregator):
                     return None
 
                 if selected_artists:
-                    with ThreadPoolExecutor(max_workers=min(4, len(selected_artists))) as pool:
+                    with ThreadPoolExecutor(max_workers=min(6, len(selected_artists))) as pool:
                         for trk in pool.map(_fetch_tag_artist_top, selected_artists):
                             if trk:
                                 artist_seen.add(trk.artist.lower().strip())
