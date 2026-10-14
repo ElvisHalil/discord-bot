@@ -509,6 +509,100 @@ class TestSportsEspnUpgrade(unittest.TestCase):
         self.assertIn("**Sevilla** @ **Real Madrid** [Spanish LALIGA]", sched_out)
         self.assertLess(sched_out.index("AS Roma"), sched_out.index("Sevilla"))
 
+    @patch("src.skills.sports.aggregators.odds.fetch_json")
+    @patch("src.skills.sports.aggregators.espn_utils.espn_search_auto_discover")
+    def test_madrid_live_odds_espn_and_odds_api(self, mock_disc, mock_fetch_json):
+        from src.skills.sports.aggregators.odds import OddsAggregator
+        import os
+
+        mock_disc.return_value = {
+            "entity_type": "team",
+            "display_name": "Real Madrid",
+            "sport": "soccer",
+            "league": "esp.1",
+            "team_id": "86",
+        }
+
+        def fetch_side_effect(url, timeout=8):
+            if "/soccer/all/teams/86/schedule" in url:
+                return {
+                    "events": [
+                        {
+                            "id": "401915414",
+                            "date": "2026-10-14T19:00Z",
+                            "league": {"name": "UEFA Champions League", "slug": "uefa.champions"},
+                            "competitions": [
+                                {
+                                    "status": {"type": {"state": "in", "detail": "14'"}},
+                                    "competitors": [
+                                        {"homeAway": "home", "team": {"displayName": "AS Roma"}, "score": {"displayValue": "0"}},
+                                        {"homeAway": "away", "team": {"displayName": "Real Madrid"}, "score": {"displayValue": "0"}},
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            if "/events/401915414/competitions/401915414/odds" in url:
+                return {
+                    "items": [
+                        {
+                            "provider": {"name": "DraftKings - Live Odds"},
+                            "details": "RMA +100",
+                            "overUnder": 2.5,
+                            "overOdds": -157.0,
+                            "underOdds": 126.0,
+                            "spread": 0.5,
+                            "homeTeamOdds": {
+                                "moneyLine": 240,
+                                "current": {"pointSpread": {"american": "+0.5"}, "moneyLine": {"decimal": 3.4, "american": "+240"}},
+                            },
+                            "awayTeamOdds": {
+                                "moneyLine": 100,
+                                "current": {"pointSpread": {"american": "-0.5"}, "moneyLine": {"decimal": 2.0, "american": "+100"}},
+                            },
+                            "drawOdds": {"moneyLine": 275.0},
+                        }
+                    ]
+                }
+            if "api.the-odds-api.com/v4/sports/soccer_uefa_champs_league/odds" in url:
+                return [
+                    {
+                        "sport_title": "UEFA Champions League",
+                        "commence_time": "2026-10-14T19:00:00Z",
+                        "home_team": "AS Roma",
+                        "away_team": "Real Madrid",
+                        "bookmakers": [
+                            {
+                                "title": "FanDuel",
+                                "markets": [
+                                    {
+                                        "key": "h2h",
+                                        "outcomes": [
+                                            {"name": "AS Roma", "price": 3.4},
+                                            {"name": "Real Madrid", "price": 2.05},
+                                            {"name": "Draw", "price": 3.6},
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            return []
+
+        mock_fetch_json.side_effect = fetch_side_effect
+        agg = OddsAggregator()
+        with patch.dict(os.environ, {"THE_ODDS_API_KEY": "test_key"}):
+            res = agg.get_odds("if I bet $100 on madrid game right now", sport="")
+
+        self.assertIn("[LIVE & PRE-MATCH BETTING ODDS: AS Roma vs Real Madrid]", res)
+        self.assertIn("DraftKings - Live Odds", res)
+        self.assertIn("Bet Payout Simulation ($100.00 Stake)", res)
+        self.assertIn("[SPORTSBOOK CONSENSUS ODDS: AS Roma vs Real Madrid]", res)
+        self.assertIn("FanDuel", res)
+
 
 if __name__ == "__main__":
     unittest.main()
+
