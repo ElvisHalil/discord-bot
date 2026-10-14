@@ -5,7 +5,7 @@ import requests
 from dotenv import load_dotenv
 from ddgs import DDGS
 from src.skills.music.utils import parse_song_meta, MUSIC_METADATA_CACHE, record_played_track
-from src.skills.youtube.client import verify_embeddable, get_video_oembed, is_youtube_short
+from src.skills.youtube.client import verify_embeddable, get_video_oembed, is_youtube_short, _OEMBED_CACHE
 
 load_dotenv()
 
@@ -13,9 +13,68 @@ load_dotenv()
 _RESOLVED_MUSIC_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _RESOLVED_MUSIC_TTL = 900.0
 
+# Short-lived negative cache (15s) to prevent duplicate lookups within the same turn when all uploads are blocked
+_FAILED_MUSIC_CACHE: dict[str, float] = {}
+_FAILED_MUSIC_TTL = 15.0
+
+# Tracks queries where official Topic/VEVO/Artist uploads were found on YouTube but blocked from Discord embedding by the label
+_LAST_BLOCKED_OFFICIAL: dict[str, dict] = {}
+
+# Tracks video IDs already presented in Discord song cards per normalized song/query so retries pick a different link
+SERVED_SONG_VIDS: dict[str, set[str]] = {}
+
+
+def _norm_lookup_key(query: str) -> str:
+    meta = parse_song_meta(query)
+    song = re.sub(r'[^a-z0-9]+', ' ', (meta.get("song") or "").lower()).strip()
+    artist = re.sub(r'[^a-z0-9]+', ' ', (meta.get("artist") or "").lower()).strip()
+    if artist in ("unknown artist", "unknown"):
+        artist = ""
+    if song and artist:
+        return f"{song} by {artist}"
+    return re.sub(r'[^a-z0-9]+', ' ', (query or "").lower()).strip()
+
+
+def record_served_song_vid(song: str, artist: str = "", vid: str = "") -> None:
+    """Records a video ID that was formatted into a Discord song card so subsequent retry searches try a different link."""
+    if not vid or not song:
+        return
+    q = f"{song} by {artist}".strip() if artist else song
+    key = _norm_lookup_key(q)
+    if key:
+        SERVED_SONG_VIDS.setdefault(key, set()).add(vid)
+    raw_key = re.sub(r'[^a-z0-9]+', ' ', f"{song} {artist}".lower()).strip()
+    if raw_key:
+        SERVED_SONG_VIDS.setdefault(raw_key, set()).add(vid)
+
+
+def get_served_song_vids(query: str) -> set[str]:
+    """Returns any video IDs already presented to the user for this song query."""
+    if not query:
+        return set()
+    key = _norm_lookup_key(query)
+    raw_key = re.sub(r'[^a-z0-9]+', ' ', query.replace(" by ", " ").lower()).strip()
+    vids: set[str] = set()
+    if key in SERVED_SONG_VIDS:
+        vids.update(SERVED_SONG_VIDS[key])
+    if raw_key in SERVED_SONG_VIDS:
+        vids.update(SERVED_SONG_VIDS[raw_key])
+    return vids
+
+
+def get_blocked_official_info(query: str) -> dict | None:
+    """Returns metadata about official Topic/VEVO/Artist uploads that were blocked from Discord embedding for this query."""
+    if not query:
+        return None
+    return _LAST_BLOCKED_OFFICIAL.get(_norm_lookup_key(query)) or _LAST_BLOCKED_OFFICIAL.get(query.strip().lower())
+
+
 def clear_resolved_music_cache() -> None:
     """Clears in-memory resolved YouTube Music link cache."""
     _RESOLVED_MUSIC_CACHE.clear()
+    _FAILED_MUSIC_CACHE.clear()
+    _LAST_BLOCKED_OFFICIAL.clear()
+    SERVED_SONG_VIDS.clear()
 
 GARBAGE_MUSIC_KEYWORDS = [
     "tutorial", "how to play", "how to make", "reaction", "reacting",
@@ -31,6 +90,7 @@ GARBAGE_MUSIC_KEYWORDS = [
     "b2b set", "vinyl set", "radio set", "closing set", "opening set",
     "extended set", "boiler room", "continuous mix", "megamix",
     "hour mix", "min mix", "guest mix", "promo mix", "yearmix",
+    "bootleg", "ai cover", "ai version", "type beat", "karaoke",
 ]
 
 # Matches DJ/live set markers like "(Set)", "[Live Set]", "| Set", "- Set", "Techno Set", "Live @"
@@ -42,6 +102,21 @@ _GARBAGE_SET_RE = re.compile(
     r'|\b(?:full|dj|live|club|festival|b2b|vinyl|radio|closing|opening|extended|warmup|warm-up|rooftop|warehouse|stream|rave|techno|house|dnb|phonk|trance|hardstyle|dubstep|edm|electronic|mix)\s+set\b'
     r'|\b(?:set|live)\s+@\s+\w+'
     r')',
+    re.IGNORECASE,
+)
+
+# Matches clickbait fake official+year tags on unverified third-party channels, e.g. "(Official Music 2026)", "[Official Video 2025]", "(Official 2026)"
+_FAKE_OFFICIAL_YEAR_RE = re.compile(
+    r'(?:'
+    r'[\(\[\{][^\)\]\}]*\bofficial\b[^\)\]\}]*\b(202[4-9])\b[^\)\]\}]*[\)\]\}]'
+    r'|\bofficial\s+(?:music|video|audio|song|track)?\s*(202[4-9])\b'
+    r')',
+    re.IGNORECASE,
+)
+
+# Channel names that indicate unofficial mix/bootleg/re-upload accounts when the channel is not the artist or Topic
+_UNVERIFIED_MIX_CHANNEL_RE = re.compile(
+    r'\b(?:mix|mixes|remix|remixes|mashup|mashups|bootleg|bootlegs|sped\s+up|slowed|reverb|8d|bass\s+boost(?:ed)?|type\s+beats?|karaoke)\b',
     re.IGNORECASE,
 )
 
@@ -84,13 +159,18 @@ def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, in
     if not q_tokens:
         return True, 1, "Generic match (no query tokens)"
 
-    cand_text = f"{title} {author}"
-    cand_tokens = extract_music_tokens(cand_text)
+    title_tokens = extract_music_tokens(title)
+    author_tokens = extract_music_tokens(author)
+    cand_tokens = title_tokens.union(author_tokens)
     overlap = q_tokens.intersection(cand_tokens)
+
+    # A valid music candidate must share at least one meaningful query token in its video title
+    if title_tokens and not title_tokens.intersection(q_tokens):
+        return False, 0, "Rejected: video title has no token overlap with query"
 
     # Check for official Topic channel (true Song Mode with album artwork)
     is_topic = " - Topic" in author or "Topic" in author
-    
+
     meta = parse_song_meta(query)
     exp_song_tokens = extract_music_tokens(meta.get("song", ""))
     artist_name = meta.get("artist", "")
@@ -99,38 +179,70 @@ def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, in
     else:
         exp_artist_tokens = extract_music_tokens(artist_name)
 
+    # If the query didn't use 'by' or '-' (so exp_artist_tokens is empty), isolate the song tokens
+    # by subtracting known channel/artist tokens when non-empty.
+    effective_song_tokens = exp_song_tokens
+    if not exp_artist_tokens and author_tokens and (q_tokens - author_tokens):
+        effective_song_tokens = q_tokens - author_tokens
+
+    if not effective_song_tokens:
+        song_match = True
+    elif len(effective_song_tokens) <= 2:
+        song_match = effective_song_tokens.issubset(title_tokens)
+    else:
+        req_count = max(2, int(len(effective_song_tokens) * 0.6))
+        song_match = len(effective_song_tokens.intersection(title_tokens)) >= req_count
+
     if is_topic:
-        song_match = not exp_song_tokens or bool(exp_song_tokens.intersection(cand_tokens))
         artist_match = not exp_artist_tokens or bool(exp_artist_tokens.intersection(cand_tokens))
         if song_match and artist_match:
             return True, 3, "Topic channel match (song & artist verified)"
-        if len(overlap) >= max(1, len(q_tokens) * 0.5):
+        if song_match and len(overlap) >= max(1, len(q_tokens) * 0.5):
             return True, 3, f"Topic channel match via token overlap ({len(overlap)}/{len(q_tokens)})"
+        return False, 0, f"Rejected: Topic channel track mismatch (song_match={song_match}, artist_match={artist_match})"
 
     # Non-topic channels:
     if exp_song_tokens and exp_artist_tokens:
-        song_overlap = exp_song_tokens.intersection(cand_tokens)
         artist_overlap = exp_artist_tokens.intersection(cand_tokens)
-        if song_overlap and artist_overlap:
-            author_tokens = extract_music_tokens(author)
+        if song_match and artist_overlap:
             is_artist_channel = bool(exp_artist_tokens.intersection(author_tokens)) or "vevo" in author.lower()
+            if not is_artist_channel:
+                m_fake_yr = _FAKE_OFFICIAL_YEAR_RE.search(title or "")
+                if m_fake_yr:
+                    yr = m_fake_yr.group(1) or m_fake_yr.group(2) or ""
+                    if yr not in query.lower():
+                        return False, 0, f"Rejected: unverified channel with fake official year tag ({yr})"
+                m_mix_chan = _UNVERIFIED_MIX_CHANNEL_RE.search(author or "")
+                if m_mix_chan and m_mix_chan.group(0).lower() not in query.lower():
+                    return False, 0, f"Rejected: unverified mix/re-upload channel ('{author}')"
             score = 2 if is_artist_channel else 1
             channel_type = "artist channel/VEVO" if is_artist_channel else "standard channel"
             return True, score, f"Song and artist match on {channel_type}"
-        return False, 0, f"Missing song or artist match (song={bool(song_overlap)}, artist={bool(artist_overlap)})"
+        return False, 0, f"Missing song or artist match (song={song_match}, artist={bool(artist_overlap)})"
+
+    if not song_match:
+        return False, 0, "Rejected: candidate title does not match song tokens"
 
     # General query overlap ratio
     ratio = len(overlap) / len(q_tokens)
     if ratio >= 0.5:
+        m_fake_yr = _FAKE_OFFICIAL_YEAR_RE.search(title or "")
+        if m_fake_yr:
+            yr = m_fake_yr.group(1) or m_fake_yr.group(2) or ""
+            if yr not in query.lower():
+                return False, 0, f"Rejected: unverified channel with fake official year tag ({yr})"
+        m_mix_chan = _UNVERIFIED_MIX_CHANNEL_RE.search(author or "")
+        if m_mix_chan and m_mix_chan.group(0).lower() not in query.lower():
+            return False, 0, f"Rejected: unverified mix/re-upload channel ('{author}')"
         return True, 1, f"Token overlap ({len(overlap)}/{len(q_tokens)} tokens, ratio {ratio:.2f})"
 
     return False, 0, f"Low token overlap ({len(overlap)}/{len(q_tokens)} tokens, ratio {ratio:.2f})"
 
-def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
+def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: set[str] | None = None) -> list[dict]:
     """
     Finds verified YouTube Music links for a song query.
     1. Prioritizes free DuckDuckGo search (0 API quota units) targeting official '- Topic' channels.
-    2. Strictly filters out YouTube Shorts and non-music garbage (tutorials, reactions, podcasts).
+    2. Strictly filters out YouTube Shorts and non-music garbage (tutorials, reactions, podcasts, fake re-uploads).
     3. Gracefully falls back to official YouTube Data API v3 ONLY if web search yields no verified match.
     """
     is_mocked = (
@@ -139,18 +251,26 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
         or hasattr(is_youtube_short, "assert_called")
         or hasattr(requests.get, "assert_called")
     )
+    excluded = set(exclude_ids or ())
     cache_key = f"{query.strip().lower()}:{max_results}"
+    norm_key = _norm_lookup_key(query)
     now = time.monotonic()
-    if not is_mocked and cache_key in _RESOLVED_MUSIC_CACHE:
-        ts, cached_res = _RESOLVED_MUSIC_CACHE[cache_key]
-        if now - ts < _RESOLVED_MUSIC_TTL and cached_res:
-            print(f"⚡ [YouTube Music Cache Hit]: '{query}' -> {cached_res[0].get('url')}")
-            return cached_res
 
-    print(f"🎵 [YouTube Music Resolver]: Resolving '{query}'...")
+    if not is_mocked and not excluded:
+        if cache_key in _RESOLVED_MUSIC_CACHE:
+            ts, cached_res = _RESOLVED_MUSIC_CACHE[cache_key]
+            if now - ts < _RESOLVED_MUSIC_TTL and cached_res:
+                print(f"⚡ [YouTube Music Cache Hit]: '{query}' -> {cached_res[0].get('url')}")
+                return cached_res
+        if cache_key in _FAILED_MUSIC_CACHE and (now - _FAILED_MUSIC_CACHE[cache_key]) < _FAILED_MUSIC_TTL:
+            print(f"⚡ [YouTube Music Negative Cache Hit]: '{query}' recently verified as having 0 embeddable uploads.")
+            return []
+
+    print(f"🎵 [YouTube Music Resolver]: Resolving '{query}'" + (f" (excluding {excluded})..." if excluded else "..."))
     api_key = os.getenv("YOUTUBE_API_KEY")
     verified_candidates = []
-    seen_ids = set()
+    blocked_official = []
+    seen_ids = set(excluded)
 
     # =========================================================================
     # PHASE 1: Free DuckDuckGo Search (0 API Quota Units)
@@ -188,6 +308,16 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
         # 2. Embeddability check (with Discord third-party Referer/origin; also populates _OEMBED_CACHE
         # and marks '- Topic' art tracks as non-Shorts in _SHORT_CACHE so step 3 is 0ms!)
         if not verify_embeddable(vid):
+            cached_oe = _OEMBED_CACHE.get(vid)
+            if cached_oe and cached_oe.get("title"):
+                u_valid, u_score, _ = score_music_candidate(query, cached_oe["title"], cached_oe.get("author", ""))
+                if u_valid and u_score >= 2:
+                    blocked_official.append({
+                        "id": vid,
+                        "title": cached_oe["title"],
+                        "author": cached_oe.get("author", ""),
+                        "score": u_score,
+                    })
             print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - Embedding disabled on Discord.")
             return None
 
@@ -313,7 +443,7 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
     # =========================================================================
     # PHASE 2: Fallback to YouTube Data API v3 (Burns 100 quota units ONLY on failure)
     # =========================================================================
-    if not verified_candidates and api_key:
+    if not verified_candidates and api_key and (not is_mocked or hasattr(requests.get, "assert_called")):
         print(f"⚠️ [Music Resolver Fallback]: Web search yielded no verified match. Falling back to YouTube Data API for '{query}'...")
         try:
             url = "https://www.googleapis.com/youtube/v3/search"
@@ -337,14 +467,22 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
                     item_title = item['snippet'].get('title', '')
                     item_channel = item['snippet'].get('channelTitle', '')
 
-                    # Apply Shorts & Garbage filtering to API results as well
+                    # Apply Shorts, Garbage, and Relevance scoring to API results as well
                     if is_youtube_short(vid, title=item_title):
                         print(f"  └─ ⚠️ [Music API Fallback]: Skipping {vid} - Short.")
                         continue
-                    if is_garbage_music_title(item_title, query, author=item_channel):
-                        print(f"  └─ ⚠️ [Music API Fallback]: Skipping {vid} - Non-music keyword.")
+                    is_valid, score, reason = score_music_candidate(query, item_title, item_channel)
+                    if not is_valid:
+                        print(f"  └─ ⚠️ [Music API Fallback]: Skipping {vid} ('{item_title}'): {reason}")
                         continue
                     if not verify_embeddable(vid):
+                        if score >= 2:
+                            blocked_official.append({
+                                "id": vid,
+                                "title": item_title,
+                                "author": item_channel,
+                                "score": score,
+                            })
                         print(f"  └─ ⚠️ [Music API Fallback]: Skipping {vid} - Embedding disabled.")
                         continue
 
@@ -360,7 +498,7 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
                         "album": meta.get("album"),
                         "url": link,
                         "is_topic": is_topic,
-                        "score": 3 if is_topic else 1
+                        "score": score
                     }
                     verified_candidates.append(entry)
                     print(f"  └─ ✅ [Music API Match]: Found '{meta['song']}' by '{meta['artist']}' (Channel: '{item_channel}') -> {link}")
@@ -368,7 +506,26 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
             print(f"⚠️ [YouTube Music API Fallback Error]: {e}")
 
     if not verified_candidates:
-        print(f"❌ [Music Resolver]: No verified music tracks found for '{query}'.")
+        if blocked_official:
+            best_blocked = max(blocked_official, key=lambda x: x.get("score", 0))
+            b_meta = parse_song_meta(best_blocked["title"], best_blocked["author"], query=query)
+            info = {
+                "song": b_meta["song"],
+                "artist": b_meta["artist"],
+                "author": best_blocked["author"],
+                "id": best_blocked["id"],
+            }
+            if norm_key:
+                _LAST_BLOCKED_OFFICIAL[norm_key] = info
+            _LAST_BLOCKED_OFFICIAL[query.strip().lower()] = info
+            print(
+                f"❌ [Music Resolver]: All official uploads of '{b_meta['song']}' by '{b_meta['artist']}' "
+                f"({best_blocked['author']}) have third-party Discord embedding disabled by the record label."
+            )
+        else:
+            print(f"❌ [Music Resolver]: No verified music tracks found for '{query}'.")
+        if not is_mocked and not excluded:
+            _FAILED_MUSIC_CACHE[cache_key] = time.monotonic()
         return []
 
     # Sort candidates by match quality score descending (Topic channels first)

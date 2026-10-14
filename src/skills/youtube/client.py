@@ -50,6 +50,9 @@ def verify_embeddable(vid: str) -> bool:
     """
     if not vid or not re.match(r'^[0-9A-Za-z_-]{11}$', vid):
         return False
+    is_mocked = hasattr(requests.get, "assert_called")
+    if not is_mocked and vid in _EMBEDDABLE_CACHE:
+        return _EMBEDDABLE_CACHE[vid]
     if _EMBEDDABLE_CACHE.get(vid) is True:
         return True
     try:
@@ -60,7 +63,6 @@ def verify_embeddable(vid: str) -> bool:
             'Referer': 'https://discord.com/',
         }
 
-        is_mocked = hasattr(requests.get, "assert_called")
         need_oembed = vid not in _OEMBED_CACHE
 
         if need_oembed and not is_mocked:
@@ -70,6 +72,7 @@ def verify_embeddable(vid: str) -> bool:
             oembed_res = fut_oembed.result()
             if oembed_res.status_code != 200:
                 print(f"⚠️ [YouTube]: Skipping {vid} because oEmbed status is {oembed_res.status_code} (not embeddable).")
+                _EMBEDDABLE_CACHE[vid] = False
                 return False
             try:
                 data = oembed_res.json()
@@ -90,6 +93,8 @@ def verify_embeddable(vid: str) -> bool:
                 oembed_res = _http_get(oembed_url, timeout=3)
                 if oembed_res.status_code != 200:
                     print(f"⚠️ [YouTube]: Skipping {vid} because oEmbed status is {oembed_res.status_code} (not embeddable).")
+                    if not is_mocked:
+                        _EMBEDDABLE_CACHE[vid] = False
                     return False
                 try:
                     data = oembed_res.json()
@@ -106,6 +111,8 @@ def verify_embeddable(vid: str) -> bool:
             embed_res = _http_get(embed_url, headers=embed_headers, timeout=3)
 
         if embed_res.status_code != 200:
+            if not is_mocked:
+                _EMBEDDABLE_CACHE[vid] = False
             return False
 
         embed_text = embed_res.text
@@ -123,6 +130,8 @@ def verify_embeddable(vid: str) -> bool:
         )
         if any(marker in embed_text for marker in unplayable_markers):
             print(f"⚠️ [YouTube]: Skipping {vid} because embed page indicated unplayable/disabled on Discord.")
+            if not is_mocked:
+                _EMBEDDABLE_CACHE[vid] = False
             return False
 
         _EMBEDDABLE_CACHE[vid] = True

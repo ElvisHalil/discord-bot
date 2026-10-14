@@ -181,6 +181,13 @@ def format_song_card(song: str, artist: str, url: str, genre: str = None, album:
         lines.append("")
 
     record_played_track(song, artist)
+    m_vid = re.search(r'(?:v=|youtu\.be\/)([0-9A-Za-z_-]{11})', url or "")
+    if m_vid:
+        try:
+            from src.skills.music.playback.youtube_music import record_served_song_vid
+            record_served_song_vid(song, artist, m_vid.group(1))
+        except Exception:
+            pass
 
     lines.append(f"**Song:** {song.strip()}")
     lines.append(f"**Artist:** {artist.strip()}")

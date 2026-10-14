@@ -1,7 +1,12 @@
 import re
 from typing import Optional
 from src.skills.youtube.client import search_youtube
-from src.skills.music.playback.youtube_music import resolve_youtube_music_link
+from src.skills.music.playback.youtube_music import (
+    resolve_youtube_music_link,
+    get_served_song_vids,
+    record_served_song_vid,
+    get_blocked_official_info,
+)
 from src.skills.music.templates import SONG_TEMPLATE
 
 MAX_YOUTUBE_RESULTS = 5
@@ -49,20 +54,44 @@ def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music:
                 from src.skills.music.top_music import skill_top_music
                 return skill_top_music(genre=genre_term)
 
-            results = resolve_youtube_music_link(query, max_results=max_results)
+            previously_served = get_served_song_vids(query)
+            if previously_served:
+                try:
+                    results = resolve_youtube_music_link(query, max_results=max_results, exclude_ids=previously_served)
+                except TypeError:
+                    results = resolve_youtube_music_link(query, max_results=max_results)
+            else:
+                results = resolve_youtube_music_link(query, max_results=max_results)
+
             if not results:
                 print(f"❌ [YouTube Search Skill]: No music tracks found for '{query}'.")
+                blocked_info = get_blocked_official_info(query)
+                if blocked_info:
+                    reason_detail = (
+                        f"Found the official YouTube upload(s) of '{blocked_info['song']}' by '{blocked_info['artist']}' "
+                        f"(channel: '{blocked_info['author']}'), but the record label has disabled third-party playback/embedding on Discord for all real uploads of this song."
+                    )
+                elif previously_served:
+                    reason_detail = (
+                        f"Searched for alternative uploads of '{query}' (excluding previously served ID(s): {', '.join(sorted(previously_served))}), "
+                        f"but no other verified, Discord-embeddable upload exists on YouTube."
+                    )
+                else:
+                    reason_detail = f"Could not find any embeddable YouTube Music link for '{query}' (all uploads blocked third-party Discord embeds or were unavailable)."
                 return (
-                    f"NO_TRACKS_FOUND: Could not find any embeddable YouTube Music link for '{query}' (all uploads blocked third-party Discord embeds or were unavailable).\n"
+                    f"NO_TRACKS_FOUND: {reason_detail}\n"
                     f"CRITICAL INSTRUCTIONS FOR YOUR RESPONSE:\n"
                     f"1. If you were picking a song from a `skill_top_music` list, immediately call `skill_youtube_searcher(query='<Another Song Title> by <Artist Name>', is_music=True)` for a DIFFERENT track from that list.\n"
                     f"2. Otherwise, do NOT output the '**Song:**' or '**Artist:**' template and do NOT output any URL or placeholder.\n"
-                    f"3. Simply inform the user in a short conversational sentence that you could not find an embeddable playback link for that track on YouTube."
+                    f"3. Simply inform the user in a short conversational sentence that the record label has disabled Discord playback for that track on YouTube (or that no working alternative upload exists)."
                 )
 
             print(f"✅ [YouTube Search Skill]: Returning {len(results)} music link(s) for '{query}'")
             formatted_results = ""
             for i, r in enumerate(results):
+                if r.get("id"):
+                    record_served_song_vid(r.get("title", ""), r.get("artist", ""), r["id"])
+                    record_served_song_vid(query, "", r["id"])
                 formatted_results += f"{i+1}. Song: {r['title']}\n   Artist: {r['artist']}\n   Link: {r['url']}\n\n"
 
             return f"""

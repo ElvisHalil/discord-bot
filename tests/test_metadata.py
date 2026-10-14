@@ -668,10 +668,116 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         filtered = mgr._filter_and_deduplicate(raw_tracks)
         self.assertEqual([t.title for t in filtered], ["Murder In My Mind"])
 
+    def test_score_music_candidate_rejects_fake_and_wrong_topic_songs(self):
+        from src.skills.music.playback.youtube_music import score_music_candidate
+
+        # 1. Wrong song on the right artist's Topic channel must NEVER match
+        valid_gin, score_gin, _ = score_music_candidate(
+            "Lay Low by Snoop Dogg", "Gin and Juice", "Snoop Dogg - Topic"
+        )
+        self.assertFalse(valid_gin)
+        self.assertEqual(score_gin, 0)
+
+        valid_gin_bare, _, _ = score_music_candidate(
+            "Snoop Dogg Lay Low", "Gin and Juice", "Snoop Dogg - Topic"
+        )
+        self.assertFalse(valid_gin_bare)
+
+        # 2. Fake re-upload with clickbait year on unverified mix channel ('RASPY MIX') must be rejected
+        valid_fake, score_fake, _ = score_music_candidate(
+            "Lay Low by Snoop Dogg",
+            "Snoop Dogg - Lay Low (Official Music 2026)",
+            "RASPY MIX",
+        )
+        self.assertFalse(valid_fake)
+        self.assertEqual(score_fake, 0)
+
+        valid_fake_yr, _, _ = score_music_candidate(
+            "Lay Low by Snoop Dogg",
+            "Snoop Dogg - Lay Low (Official 2026)",
+            "Random Channel",
+        )
+        self.assertFalse(valid_fake_yr)
+
+        # 3. Genuine Topic, VEVO/Artist, and legitimate standard/label uploads continue to pass
+        valid_topic, score_topic, _ = score_music_candidate(
+            "Lay Low by Snoop Dogg", "Lay Low", "Snoop Dogg - Topic"
+        )
+        self.assertTrue(valid_topic)
+        self.assertEqual(score_topic, 3)
+
+        valid_vevo, score_vevo, _ = score_music_candidate(
+            "Lay Low by Snoop Dogg",
+            "Snoop Dogg - Lay Low (Official Music Video)",
+            "SnoopDoggVEVO",
+        )
+        self.assertTrue(valid_vevo)
+        self.assertEqual(score_vevo, 2)
+
+        valid_label, score_label, _ = score_music_candidate(
+            "Running by Anyma",
+            "Anyma - Running [Original Mix]",
+            "Afterlife",
+        )
+        self.assertTrue(valid_label)
+        self.assertEqual(score_label, 1)
+
+    @patch("src.skills.music.playback.youtube_music.is_youtube_short")
+    @patch("src.skills.music.playback.youtube_music.get_video_oembed")
+    @patch("src.skills.music.playback.youtube_music.verify_embeddable")
+    @patch("src.skills.music.playback.youtube_music.DDGS")
+    def test_retry_exclusion_and_blocked_official_tracking(self, mock_ddgs, mock_verify, mock_oembed, mock_short):
+        from src.skills.youtube.client import clear_youtube_caches, _OEMBED_CACHE
+        from src.skills.music.playback.youtube_music import get_blocked_official_info
+        from src.skills.youtube.searcher import skill_youtube_searcher
+
+        clear_youtube_caches()
+        mock_short.return_value = False
+
+        # Part A: All real uploads of "Lay Low by Snoop Dogg" are embed-blocked, and fake upload is rejected
+        mock_ddgs_instance = MagicMock()
+        mock_ddgs_instance.text.return_value = [
+            {"href": "https://www.youtube.com/watch?v=mG9UXeDvsTA", "title": "Lay Low - Snoop Dogg - Topic"},
+            {"href": "https://www.youtube.com/watch?v=-2f1baeNfLE", "title": "Snoop Dogg - Lay Low (Official Music 2026)"},
+        ]
+        mock_ddgs.return_value = mock_ddgs_instance
+
+        _OEMBED_CACHE["mG9UXeDvsTA"] = {"title": "Lay Low", "author": "Snoop Dogg - Topic"}
+        _OEMBED_CACHE["-2f1baeNfLE"] = {"title": "Snoop Dogg - Lay Low (Official Music 2026)", "author": "RASPY MIX"}
+
+        def fake_verify(vid):
+            return vid != "mG9UXeDvsTA"
+
+        mock_verify.side_effect = fake_verify
+        mock_oembed.side_effect = lambda vid: _OEMBED_CACHE.get(vid, {"title": "", "author": ""})
+
+        out_blocked = skill_youtube_searcher("Lay Low by Snoop Dogg", max_results=1, is_music=True)
+        self.assertIn("NO_TRACKS_FOUND", out_blocked)
+        self.assertIn("record label has disabled third-party playback/embedding", out_blocked)
+        self.assertIsNotNone(get_blocked_official_info("Lay Low by Snoop Dogg"))
+
+        # Part B: Retry exclusion skips previously served video ID and picks the second valid candidate
+        clear_youtube_caches()
+        mock_ddgs_instance.text.return_value = [
+            {"href": "https://www.youtube.com/watch?v=firstvid111", "title": "Strobe - deadmau5"},
+            {"href": "https://www.youtube.com/watch?v=secondvid22", "title": "Strobe (Radio Edit) - deadmau5"},
+        ]
+        mock_verify.side_effect = None
+        mock_verify.return_value = True
+        mock_oembed.side_effect = lambda vid: {
+            "firstvid111": {"title": "Strobe", "author": "deadmau5 - Topic"},
+            "secondvid22": {"title": "Strobe (Radio Edit)", "author": "deadmau5 - Topic"},
+        }[vid]
+
+        first_res = skill_youtube_searcher("Strobe by deadmau5", max_results=1, is_music=True)
+        self.assertIn("firstvid111", first_res)
+
+        # Second call for the same song automatically excludes firstvid111 and serves secondvid22
+        second_res = skill_youtube_searcher("Strobe by deadmau5", max_results=1, is_music=True)
+        self.assertIn("secondvid22", second_res)
+        self.assertNotIn("firstvid111", second_res)
+
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
 
