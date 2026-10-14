@@ -81,7 +81,8 @@ def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
     )
     clean = re.sub(r'[\(\[\{](?:feat\.|ft\.).*?[\)\]\}]', '', clean, flags=re.IGNORECASE).strip()
 
-    clean_author = re.sub(r'\s*-\s*Topic$', '', author or "").strip()
+    clean_author = re.sub(r'\s*-\s*Topic$', '', author or "", flags=re.IGNORECASE).strip()
+    is_topic_author = bool(re.search(r'\s*-\s*Topic$', author or "", flags=re.IGNORECASE))
     artist = None
     song = None
 
@@ -94,6 +95,16 @@ def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
         parts = clean.split(delim, 1)
         artist = parts[0].strip(" -–—\"'")
         song = parts[1].strip(" -–—\"'")
+    elif not is_topic_author and query and " by " in query:
+        parts = query.split(" by ", 1)
+        q_song = parts[0].strip(" -–—\"'")
+        artist = parts[1].strip(" -–—\"'")
+        song = clean.strip(" -–—\"'")
+        if song.lower().startswith(artist.lower()):
+            song = song[len(artist):].strip(" -–—\"'")
+        song = re.sub(r'\s+\b(?:ft|feat)\.?\s+.*$', '', song, flags=re.IGNORECASE).strip(" -–—\"'")
+        if not song:
+            song = q_song
     elif clean_author and clean_author.lower() not in ("youtube", "various artists", "unknown"):
         artist = clean_author
         song = clean.strip(" -–—\"'")
@@ -320,7 +331,7 @@ def standardize_song_reply(reply: str) -> str:
                         f"⚠️ [standardize_song_reply]: Stale/mismatched Video ID {vid} ('{meta.get('song')}' by '{meta.get('artist')}') "
                         f"for card '{extracted_song}' by '{extracted_artist}'. Auto-resolving correct link..."
                     )
-                elif is_embeddable:
+                elif is_embeddable or meta.get("is_official_fallback"):
                     music_url = full_url.replace("www.youtube.com", "music.youtube.com")
                 else:
                     print(f"⚠️ [standardize_song_reply]: Video ID {vid} is not embeddable in Discord. Attempting auto-resolution for a working link...")

@@ -48,38 +48,51 @@ def _pre_resolve_top_candidate(candidates: list[Track]) -> str:
     fresh_any = [c for c in candidates if not is_recently_played(c.title, c.artist)]
     ordered_candidates = fresh_diff_artist or fresh_any or candidates
 
+    best_fallback = None
     for cand in ordered_candidates[:4]:
         query = f"{cand.title} by {cand.artist}"
         try:
             results = resolve_youtube_music_link(query, max_results=1)
             if results:
                 r = results[0]
-                record_played_track(cand.title, cand.artist)
-                record_played_track(r["title"], r["artist"])
-                vid = r.get("id")
-                genre = cand.genre or r.get("genre")
-                album = cand.album or r.get("album")
-                if vid and vid in MUSIC_METADATA_CACHE:
-                    if genre and not MUSIC_METADATA_CACHE[vid].get("genre"):
-                        MUSIC_METADATA_CACHE[vid]["genre"] = genre
-                    if album and not MUSIC_METADATA_CACHE[vid].get("album"):
-                        MUSIC_METADATA_CACHE[vid]["album"] = album
-
-                lines = [
-                    "\n=== VERIFIED YOUTUBE MUSIC RESULT (PRE-RESOLVED & READY TO PRESENT) ===",
-                    f"Song: {r['title']}",
-                    f"Artist: {r['artist']}",
-                ]
-                if genre:
-                    lines.append(f"Genre: {genre}")
-                if album:
-                    lines.append(f"Album: {album}")
-                lines.append(f"Link: {r['url']}\n")
-                return "\n".join(lines)
+                if r.get("is_official_fallback"):
+                    if best_fallback is None:
+                        best_fallback = (cand, r)
+                    continue
+                return _format_pre_resolved_entry(cand, r)
         except Exception as e:
             print(f"  └─ ⚠️ [Top Music Pre-Resolver]: Error resolving '{query}': {e}")
             continue
+
+    if best_fallback is not None:
+        return _format_pre_resolved_entry(best_fallback[0], best_fallback[1])
     return ""
+
+
+def _format_pre_resolved_entry(cand: Track, r: dict) -> str:
+    from src.skills.music.utils import record_played_track
+    record_played_track(cand.title, cand.artist)
+    record_played_track(r["title"], r["artist"])
+    vid = r.get("id")
+    genre = cand.genre or r.get("genre")
+    album = cand.album or r.get("album")
+    if vid and vid in MUSIC_METADATA_CACHE:
+        if genre and not MUSIC_METADATA_CACHE[vid].get("genre"):
+            MUSIC_METADATA_CACHE[vid]["genre"] = genre
+        if album and not MUSIC_METADATA_CACHE[vid].get("album"):
+            MUSIC_METADATA_CACHE[vid]["album"] = album
+
+    lines = [
+        "\n=== VERIFIED YOUTUBE MUSIC RESULT (PRE-RESOLVED & READY TO PRESENT) ===",
+        f"Song: {r['title']}",
+        f"Artist: {r['artist']}",
+    ]
+    if genre:
+        lines.append(f"Genre: {genre}")
+    if album:
+        lines.append(f"Album: {album}")
+    lines.append(f"Link: {r['url']}\n")
+    return "\n".join(lines)
 
 
 def skill_top_music(

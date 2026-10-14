@@ -726,15 +726,16 @@ class TestMoodVibeDiscovery(unittest.TestCase):
     @patch("src.skills.music.playback.youtube_music.get_video_oembed")
     @patch("src.skills.music.playback.youtube_music.verify_embeddable")
     @patch("src.skills.music.playback.youtube_music.DDGS")
-    def test_retry_exclusion_and_blocked_official_tracking(self, mock_ddgs, mock_verify, mock_oembed, mock_short):
+    def test_retry_exclusion_and_official_fallback_hierarchy(self, mock_ddgs, mock_verify, mock_oembed, mock_short):
         from src.skills.youtube.client import clear_youtube_caches, _OEMBED_CACHE
-        from src.skills.music.playback.youtube_music import get_blocked_official_info
+        from src.skills.music.playback.youtube_music import get_blocked_official_info, resolve_youtube_music_link
         from src.skills.youtube.searcher import skill_youtube_searcher
 
         clear_youtube_caches()
         mock_short.return_value = False
 
-        # Part A: All real uploads of "Lay Low by Snoop Dogg" are embed-blocked, and fake upload is rejected
+        # Part A: Official 'Lay Low by Snoop Dogg' upload is embed-blocked while fake upload is rejected ->
+        # Tier 2 Official Fallback returns the genuine Snoop Dogg - Topic link (mG9UXeDvsTA)
         mock_ddgs_instance = MagicMock()
         mock_ddgs_instance.text.return_value = [
             {"href": "https://www.youtube.com/watch?v=mG9UXeDvsTA", "title": "Lay Low - Snoop Dogg - Topic"},
@@ -751,12 +752,40 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         mock_verify.side_effect = fake_verify
         mock_oembed.side_effect = lambda vid: _OEMBED_CACHE.get(vid, {"title": "", "author": ""})
 
-        out_blocked = skill_youtube_searcher("Lay Low by Snoop Dogg", max_results=1, is_music=True)
-        self.assertIn("NO_TRACKS_FOUND", out_blocked)
-        self.assertIn("record label has disabled third-party playback/embedding", out_blocked)
+        out_fallback = skill_youtube_searcher("Lay Low by Snoop Dogg", max_results=1, is_music=True)
+        self.assertIn("https://music.youtube.com/watch?v=mG9UXeDvsTA", out_fallback)
+        self.assertNotIn("-2f1baeNfLE", out_fallback)
         self.assertIsNotNone(get_blocked_official_info("Lay Low by Snoop Dogg"))
 
-        # Part B: Retry exclusion skips previously served video ID and picks the second valid candidate
+        # Verify standardize_song_reply preserves the official fallback URL even though verify_embeddable is False
+        with patch("src.skills.youtube.client.verify_embeddable", return_value=False):
+            card = standardize_song_reply(
+                "**Song:** Lay Low\n"
+                "**Artist:** Snoop Dogg\n\n"
+                "https://music.youtube.com/watch?v=mG9UXeDvsTA"
+            )
+            self.assertIn("https://music.youtube.com/watch?v=mG9UXeDvsTA", card)
+
+        # Part B: 'Drop It Like It's Hot by Snoop Dogg' -> official Snoop Dogg - Topic (embed-blocked)
+        # MUST beat unverified standard re-upload channel ('CuentasXXX Online', embeddable=True)
+        clear_youtube_caches()
+        mock_ddgs_instance.text.return_value = [
+            {"href": "https://www.youtube.com/watch?v=T6bjORaYktk", "title": "Drop It Like It's Hot"},
+            {"href": "https://www.youtube.com/watch?v=VYOoqeldaUE", "title": "Snoop Dogg   Drop It Like It's Hot ft  Pharrell Williams"},
+        ]
+        _OEMBED_CACHE["T6bjORaYktk"] = {"title": "Drop It Like It's Hot", "author": "Snoop Dogg - Topic"}
+        _OEMBED_CACHE["VYOoqeldaUE"] = {
+            "title": "Snoop Dogg   Drop It Like It's Hot ft  Pharrell Williams",
+            "author": "CuentasXXX Online",
+        }
+        mock_verify.side_effect = lambda vid: vid == "VYOoqeldaUE"
+        res_drop = resolve_youtube_music_link("Drop It Like It's Hot by Snoop Dogg", max_results=1)
+        self.assertEqual(len(res_drop), 1)
+        self.assertEqual(res_drop[0]["id"], "T6bjORaYktk")
+        self.assertEqual(res_drop[0]["artist"], "Snoop Dogg")
+        self.assertTrue(res_drop[0]["is_official_fallback"])
+
+        # Part C: Retry exclusion skips previously served video ID and picks the second valid candidate
         clear_youtube_caches()
         mock_ddgs_instance.text.return_value = [
             {"href": "https://www.youtube.com/watch?v=firstvid111", "title": "Strobe - deadmau5"},
@@ -780,4 +809,5 @@ class TestMoodVibeDiscovery(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

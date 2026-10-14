@@ -238,12 +238,31 @@ def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, in
 
     return False, 0, f"Low token overlap ({len(overlap)}/{len(q_tokens)} tokens, ratio {ratio:.2f})"
 
+_TRUSTED_MUSIC_LABELS = (
+    "afterlife", "ukf", "hospital records", "spinnin", "monstercat",
+    "armada music", "defected", "ultra music", "ultra records", "drumcode",
+    "anjunadeep", "anjunabeats", "liquicity", "blackout music", "ram records",
+    "selected.", "mrsuicidesheep", "suicidesheep", "proximity", "stmpd rcrds",
+    "musical freedom", "kontor.tv", "napalm records", "nuclear blast",
+    "fueled by ramen", "atlantic records", "interscope", "death row",
+    "aftermath", "shady records", "top dawg", "empire", "epitaph",
+    "sub pop", "xl recordings", "warp records", "ninja tune", "owsla",
+    "mad decent", "spinning records", "ministry of sound",
+)
+
+
+def _is_trusted_music_label(author: str) -> bool:
+    auth_low = (author or "").lower().strip()
+    return bool(auth_low and any(lbl in auth_low for lbl in _TRUSTED_MUSIC_LABELS))
+
+
 def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: set[str] | None = None) -> list[dict]:
     """
-    Finds verified YouTube Music links for a song query.
-    1. Prioritizes free DuckDuckGo search (0 API quota units) targeting official '- Topic' channels.
-    2. Strictly filters out YouTube Shorts and non-music garbage (tutorials, reactions, podcasts, fake re-uploads).
-    3. Gracefully falls back to official YouTube Data API v3 ONLY if web search yields no verified match.
+    Finds verified YouTube Music links for a song query using a 3-tier priority hierarchy:
+    1. Tier 1 (official_embeddable): Official '- Topic', Artist/VEVO, or Trusted Label upload that embeds inline in Discord.
+    2. Tier 2 (official_blocked): Official '- Topic' or Artist/VEVO upload whose inline embed is disabled by the record label
+       (preferred over sketchy third-party re-uploads when an official upload exists).
+    3. Tier 3 (standard_embeddable): Clean standard upload, used ONLY when no official upload exists at all.
     """
     is_mocked = (
         hasattr(DDGS, "assert_called")
@@ -263,17 +282,18 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
                 print(f"⚡ [YouTube Music Cache Hit]: '{query}' -> {cached_res[0].get('url')}")
                 return cached_res
         if cache_key in _FAILED_MUSIC_CACHE and (now - _FAILED_MUSIC_CACHE[cache_key]) < _FAILED_MUSIC_TTL:
-            print(f"⚡ [YouTube Music Negative Cache Hit]: '{query}' recently verified as having 0 embeddable uploads.")
+            print(f"⚡ [YouTube Music Negative Cache Hit]: '{query}' recently verified as having 0 valid uploads.")
             return []
 
     print(f"🎵 [YouTube Music Resolver]: Resolving '{query}'" + (f" (excluding {excluded})..." if excluded else "..."))
     api_key = os.getenv("YOUTUBE_API_KEY")
-    verified_candidates = []
-    blocked_official = []
+    official_embeddable: list[dict] = []
+    official_blocked: list[dict] = []
+    standard_embeddable: list[dict] = []
     seen_ids = set(excluded)
 
     # =========================================================================
-    # PHASE 1: Free DuckDuckGo Search (0 API Quota Units)
+    # PHASE 1: Web Search Queries
     # =========================================================================
     meta_q = parse_song_meta(query)
     song_q = meta_q.get("song", "").strip()
@@ -308,16 +328,34 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
         # 2. Embeddability check (with Discord third-party Referer/origin; also populates _OEMBED_CACHE
         # and marks '- Topic' art tracks as non-Shorts in _SHORT_CACHE so step 3 is 0ms!)
         if not verify_embeddable(vid):
-            cached_oe = _OEMBED_CACHE.get(vid)
-            if cached_oe and cached_oe.get("title"):
-                u_valid, u_score, _ = score_music_candidate(query, cached_oe["title"], cached_oe.get("author", ""))
+            cached_oe = _OEMBED_CACHE.get(vid) or get_video_oembed(vid)
+            b_title = (cached_oe or {}).get("title", "")
+            b_author = (cached_oe or {}).get("author", "")
+            if b_title and not is_youtube_short(vid, href=href, title=b_title):
+                u_valid, u_score, u_reason = score_music_candidate(query, b_title, b_author)
                 if u_valid and u_score >= 2:
-                    blocked_official.append({
+                    is_topic = " - Topic" in b_author or "Topic" in b_author
+                    link = f"https://music.youtube.com/watch?v={vid}"
+                    b_meta = parse_song_meta(b_title, b_author, query=query)
+                    official_blocked.append({
                         "id": vid,
-                        "title": cached_oe["title"],
-                        "author": cached_oe.get("author", ""),
+                        "title": b_meta["song"],
+                        "artist": b_meta["artist"],
+                        "genre": b_meta.get("genre"),
+                        "album": b_meta.get("album"),
+                        "author": b_author,
+                        "url": link,
+                        "is_topic": is_topic,
                         "score": u_score,
+                        "embeddable": False,
+                        "is_official_fallback": True,
+                        "reason": u_reason,
                     })
+                    print(
+                        f"  └─ 📌 [Music Resolver]: Recorded official upload {vid} ('{b_meta['song']}' by '{b_meta['artist']}', "
+                        f"Channel: '{b_author}', Score: {u_score}/3) as fallback (Discord inline embed disabled by label)."
+                    )
+                    return None
             print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - Embedding disabled on Discord.")
             return None
 
@@ -341,6 +379,7 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
             return None
 
         is_topic = " - Topic" in author or "Topic" in author
+        is_trusted_official = (score >= 2) or _is_trusted_music_label(author)
         link = f"https://music.youtube.com/watch?v={vid}"
         meta = parse_song_meta(title, author, query=query)
 
@@ -350,13 +389,23 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
             "artist": meta["artist"],
             "genre": meta.get("genre"),
             "album": meta.get("album"),
+            "author": author,
             "url": link,
             "is_topic": is_topic,
-            "score": score
+            "score": score,
+            "is_trusted_official": is_trusted_official,
+            "embeddable": True,
+            "is_official_fallback": False,
         }
         channel_desc = "Topic channel" if is_topic else (f"Channel: '{author}'" if author else "Standard")
         print(f"  └─ ✅ [Music Match]: Found '{meta['song']}' by '{meta['artist']}' ({channel_desc}) -> {link} [Score: {score}/3 | Reason: {reason}]")
         return entry
+
+    def _record_verified_entry(entry: dict) -> None:
+        if entry.get("is_trusted_official"):
+            official_embeddable.append(entry)
+        else:
+            standard_embeddable.append(entry)
 
     from concurrent.futures import ThreadPoolExecutor
     import urllib.parse
@@ -368,8 +417,8 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
         print(f"  └─ 🔎 [Music Resolver]: Verifying {len(batch_candidates)} candidate URL(s) from query...")
         first_entry = _verify_single_candidate(batch_candidates[0])
         if first_entry:
-            verified_candidates.append(first_entry)
-            if len(verified_candidates) >= max_results and first_entry.get("score", 0) >= 2:
+            _record_verified_entry(first_entry)
+            if len(official_embeddable) >= max_results:
                 return
 
         remaining = batch_candidates[1:]
@@ -377,12 +426,12 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
             if len(remaining) == 1:
                 rem_entry = _verify_single_candidate(remaining[0])
                 if rem_entry:
-                    verified_candidates.append(rem_entry)
+                    _record_verified_entry(rem_entry)
             else:
                 with ThreadPoolExecutor(max_workers=min(4, len(remaining))) as pool:
                     for rem_entry in pool.map(_verify_single_candidate, remaining):
                         if rem_entry:
-                            verified_candidates.append(rem_entry)
+                            _record_verified_entry(rem_entry)
 
     # =========================================================================
     # PHASE 1A: Direct YouTube Search over Persistent Keep-Alive Session (~0.5s)
@@ -413,8 +462,11 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
     # =========================================================================
     # PHASE 1B: Free DuckDuckGo Search Fallback (0 API Quota Units)
     # =========================================================================
-    if len(verified_candidates) < max_results:
-        for q in queries_to_try:
+    if len(official_embeddable) < max_results and not (standard_embeddable and not official_blocked):
+        # If Phase 1A already found official_blocked uploads (e.g. Topic/VEVO blocked by label),
+        # only check at most 1 DDG query in case an alternate official upload is embeddable.
+        ddg_queries = queries_to_try[:1] if official_blocked else queries_to_try
+        for q in ddg_queries:
             batch_candidates = []
             try:
                 print(f"  └─ 🔍 [DuckDuckGo]: Querying '{q}'...")
@@ -437,13 +489,13 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
                 continue
 
             _verify_batch(batch_candidates)
-            if len(verified_candidates) >= max_results:
+            if len(official_embeddable) >= max_results or (len(standard_embeddable) >= max_results and not official_blocked):
                 break
 
     # =========================================================================
     # PHASE 2: Fallback to YouTube Data API v3 (Burns 100 quota units ONLY on failure)
     # =========================================================================
-    if not verified_candidates and api_key and (not is_mocked or hasattr(requests.get, "assert_called")):
+    if not official_embeddable and not official_blocked and not standard_embeddable and api_key and (not is_mocked or hasattr(requests.get, "assert_called")):
         print(f"⚠️ [Music Resolver Fallback]: Web search yielded no verified match. Falling back to YouTube Data API for '{query}'...")
         try:
             url = "https://www.googleapis.com/youtube/v3/search"
@@ -475,20 +527,27 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
                     if not is_valid:
                         print(f"  └─ ⚠️ [Music API Fallback]: Skipping {vid} ('{item_title}'): {reason}")
                         continue
-                    if not verify_embeddable(vid):
-                        if score >= 2:
-                            blocked_official.append({
-                                "id": vid,
-                                "title": item_title,
-                                "author": item_channel,
-                                "score": score,
-                            })
-                        print(f"  └─ ⚠️ [Music API Fallback]: Skipping {vid} - Embedding disabled.")
-                        continue
-
                     is_topic = " - Topic" in item_channel or "Topic" in item_channel
                     link = f"https://music.youtube.com/watch?v={vid}"
                     meta = parse_song_meta(item_title, item_channel, query=query)
+
+                    if not verify_embeddable(vid):
+                        if score >= 2:
+                            official_blocked.append({
+                                "id": vid,
+                                "title": meta["song"],
+                                "artist": meta["artist"],
+                                "genre": meta.get("genre"),
+                                "album": meta.get("album"),
+                                "author": item_channel,
+                                "url": link,
+                                "is_topic": is_topic,
+                                "score": score,
+                                "embeddable": False,
+                                "is_official_fallback": True,
+                            })
+                        print(f"  └─ ⚠️ [Music API Fallback]: Skipping {vid} - Embedding disabled.")
+                        continue
 
                     entry = {
                         "id": vid,
@@ -496,41 +555,51 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
                         "artist": meta["artist"],
                         "genre": meta.get("genre"),
                         "album": meta.get("album"),
+                        "author": item_channel,
                         "url": link,
                         "is_topic": is_topic,
-                        "score": score
+                        "score": score,
+                        "is_trusted_official": (score >= 2) or _is_trusted_music_label(item_channel),
+                        "embeddable": True,
+                        "is_official_fallback": False,
                     }
-                    verified_candidates.append(entry)
+                    _record_verified_entry(entry)
                     print(f"  └─ ✅ [Music API Match]: Found '{meta['song']}' by '{meta['artist']}' (Channel: '{item_channel}') -> {link}")
         except Exception as e:
             print(f"⚠️ [YouTube Music API Fallback Error]: {e}")
 
-    if not verified_candidates:
-        if blocked_official:
-            best_blocked = max(blocked_official, key=lambda x: x.get("score", 0))
-            b_meta = parse_song_meta(best_blocked["title"], best_blocked["author"], query=query)
-            info = {
-                "song": b_meta["song"],
-                "artist": b_meta["artist"],
-                "author": best_blocked["author"],
-                "id": best_blocked["id"],
-            }
-            if norm_key:
-                _LAST_BLOCKED_OFFICIAL[norm_key] = info
-            _LAST_BLOCKED_OFFICIAL[query.strip().lower()] = info
-            print(
-                f"❌ [Music Resolver]: All official uploads of '{b_meta['song']}' by '{b_meta['artist']}' "
-                f"({best_blocked['author']}) have third-party Discord embedding disabled by the record label."
-            )
-        else:
-            print(f"❌ [Music Resolver]: No verified music tracks found for '{query}'.")
+    # =========================================================================
+    # PHASE 3: 3-Tier Decision Engine
+    # =========================================================================
+    if official_embeddable:
+        official_embeddable.sort(key=lambda x: x.get("score", 0), reverse=True)
+        final_results = official_embeddable[:max_results]
+    elif official_blocked:
+        # Sort official blocked candidates so '- Topic' (score 3) beats VEVO/Artist (score 2)
+        official_blocked.sort(key=lambda x: x.get("score", 0), reverse=True)
+        best_blocked = official_blocked[0]
+        info = {
+            "song": best_blocked["title"],
+            "artist": best_blocked["artist"],
+            "author": best_blocked.get("author", ""),
+            "id": best_blocked["id"],
+        }
+        if norm_key:
+            _LAST_BLOCKED_OFFICIAL[norm_key] = info
+        _LAST_BLOCKED_OFFICIAL[query.strip().lower()] = info
+        print(
+            f"📌 [Music Resolver Official Fallback]: No inline-embeddable official upload exists for '{best_blocked['title']}' "
+            f"by '{best_blocked['artist']}'. Returning official '{best_blocked.get('author')}' link ({best_blocked['url']}) instead of third-party junk."
+        )
+        final_results = official_blocked[:max_results]
+    elif standard_embeddable:
+        standard_embeddable.sort(key=lambda x: x.get("score", 0), reverse=True)
+        final_results = standard_embeddable[:max_results]
+    else:
+        print(f"❌ [Music Resolver]: No verified music tracks found for '{query}'.")
         if not is_mocked and not excluded:
             _FAILED_MUSIC_CACHE[cache_key] = time.monotonic()
         return []
-
-    # Sort candidates by match quality score descending (Topic channels first)
-    verified_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
-    final_results = verified_candidates[:max_results]
 
     # Populate in-memory metadata cache for Discord card rendering
     for cand in final_results:
@@ -539,11 +608,14 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
             "artist": cand["artist"],
             "genre": cand.get("genre"),
             "album": cand.get("album"),
-            "url": cand["url"]
+            "url": cand["url"],
+            "embeddable": cand.get("embeddable", True),
+            "is_official_fallback": cand.get("is_official_fallback", False),
         }
         record_played_track(cand["title"], cand["artist"])
         topic_tag = " [Official Topic]" if cand.get("is_topic") else ""
-        print(f"🎧 [Music Resolver Returned]: '{cand['title']}' by '{cand['artist']}' -> {cand['url']}{topic_tag} (Score: {cand.get('score', 0)}/3)")
+        fb_tag = " [Official Link - Inline Embed Disabled by Label]" if cand.get("is_official_fallback") else ""
+        print(f"🎧 [Music Resolver Returned]: '{cand['title']}' by '{cand['artist']}' -> {cand['url']}{topic_tag}{fb_tag} (Score: {cand.get('score', 0)}/3)")
 
     if not is_mocked and final_results:
         _RESOLVED_MUSIC_CACHE[cache_key] = (time.monotonic(), final_results)
@@ -552,3 +624,4 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
         _RESOLVED_MUSIC_CACHE[canon_key] = (time.monotonic(), final_results)
 
     return final_results
+

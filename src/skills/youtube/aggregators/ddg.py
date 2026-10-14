@@ -17,6 +17,7 @@ class DuckDuckGoYouTubeAggregator(BaseYouTubeSearchAggregator):
         ]
         seen_ids = set()
         verified_results = []
+        fallback_blocked = []
 
         for q in queries_to_try:
             batch_candidates = []
@@ -40,6 +41,15 @@ class DuckDuckGoYouTubeAggregator(BaseYouTubeSearchAggregator):
                     print(f"  └─ ⚠️ [YouTube DDG]: Skipping {vid} ('{raw_title}') - YouTube Short")
                     continue
                 if self.verify_embeddable and not self.verify_embeddable(vid):
+                    oembed_fb = self.get_video_oembed(vid) if self.get_video_oembed else {"title": "", "author": ""}
+                    if oembed_fb.get("title"):
+                        fallback_blocked.append({
+                            "id": vid,
+                            "title": oembed_fb["title"],
+                            "channel": oembed_fb.get("author", ""),
+                            "url": f"https://www.youtube.com/watch?v={vid}",
+                            "embeddable": False,
+                        })
                     print(f"  └─ ⚠️ [YouTube DDG]: Skipping {vid} ('{raw_title}') - Embedding disabled")
                     continue
 
@@ -54,12 +64,18 @@ class DuckDuckGoYouTubeAggregator(BaseYouTubeSearchAggregator):
                     "id": vid,
                     "title": title,
                     "channel": author,
-                    "url": f"https://www.youtube.com/watch?v={vid}"
+                    "url": f"https://www.youtube.com/watch?v={vid}",
+                    "embeddable": True,
                 })
                 print(f"  └─ ✅ [YouTube DDG]: Verified candidate {vid} ('{title}')")
 
                 if len(verified_results) >= max_results:
                     return verified_results
 
+        if not verified_results and fallback_blocked:
+            print(f"  └─ 📌 [YouTube DDG]: No inline-embeddable video found; returning official oEmbed-verified fallback {fallback_blocked[0]['id']}.")
+            return fallback_blocked[:max_results]
+
         return verified_results
+
 
