@@ -426,8 +426,89 @@ class TestSportsEspnUpgrade(unittest.TestCase):
         self.assertIn("**HR:** 30", overview)
         self.assertIn("Ohtani is batting cleanup Wednesday.", overview)
 
+    @patch("src.skills.sports.aggregators.espn_utils.cached_espn_get")
+    def test_madrid_team_priority_and_all_competitions_schedule(self, mock_get):
+        from src.skills.sports.aggregators.espn_utils import espn_search_auto_discover
+
+        # 1. Verify 'Madrid' prioritizes team group ('Real Madrid') over partial surname player matches ('Sal Madrid')
+        mock_get.return_value = {
+            "results": [
+                {
+                    "type": "player",
+                    "contents": [
+                        {
+                            "displayName": "Sal Madrid",
+                            "subtitle": "Chicago Cubs",
+                            "sport": "baseball",
+                            "defaultLeagueSlug": "mlb",
+                            "uid": "s:1~l:10~a:24519",
+                        }
+                    ],
+                },
+                {
+                    "type": "team",
+                    "contents": [
+                        {
+                            "displayName": "Real Madrid",
+                            "sport": "soccer",
+                            "defaultLeagueSlug": "esp.1",
+                            "uid": "s:600~t:86",
+                        }
+                    ],
+                },
+            ]
+        }
+        disc = espn_search_auto_discover("next Madrid game")
+        self.assertIsNotNone(disc)
+        self.assertEqual(disc["entity_type"], "team")
+        self.assertEqual(disc["display_name"], "Real Madrid")
+        self.assertEqual(disc["sport"], "soccer")
+        self.assertEqual(disc["team_id"], "86")
+
+        # 2. Verify parse_team_schedule merges /soccer/all/teams/{id}/schedule?fixture=true (UEFA Champions League + La Liga)
+        def sched_side_effect(url, params=None, ttl=120):
+            if "/soccer/all/teams/86/schedule" in url and params and params.get("fixture") == "true":
+                return {
+                    "events": [
+                        {
+                            "id": "ucl_today",
+                            "date": "2026-10-14T19:00Z",
+                            "league": {"name": "UEFA Champions League", "slug": "uefa.champions"},
+                            "competitions": [
+                                {
+                                    "status": {"type": {"state": "pre", "completed": False}},
+                                    "competitors": [
+                                        {"homeAway": "home", "team": {"displayName": "AS Roma"}, "score": {"displayValue": "0"}},
+                                        {"homeAway": "away", "team": {"displayName": "Real Madrid"}, "score": {"displayValue": "0"}},
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "id": "laliga_sun",
+                            "date": "2026-10-18T19:00Z",
+                            "league": {"name": "Spanish LALIGA", "slug": "esp.1"},
+                            "competitions": [
+                                {
+                                    "status": {"type": {"state": "pre", "completed": False}},
+                                    "competitors": [
+                                        {"homeAway": "home", "team": {"displayName": "Real Madrid"}, "score": {"displayValue": "0"}},
+                                        {"homeAway": "away", "team": {"displayName": "Sevilla"}, "score": {"displayValue": "0"}},
+                                    ],
+                                }
+                            ],
+                        },
+                    ]
+                }
+            return {"events": []}
+
+        mock_get.side_effect = sched_side_effect
+        sched_out = parse_team_schedule("soccer", "esp.1", "86", "Real Madrid")
+        self.assertIn("REAL MADRID TEAM SCHEDULE & RESULTS (ALL COMPETITIONS)", sched_out)
+        self.assertIn("**Real Madrid** @ **AS Roma** [UEFA Champions League]", sched_out)
+        self.assertIn("**Sevilla** @ **Real Madrid** [Spanish LALIGA]", sched_out)
+        self.assertLess(sched_out.index("AS Roma"), sched_out.index("Sevilla"))
+
 
 if __name__ == "__main__":
     unittest.main()
-
-

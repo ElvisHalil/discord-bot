@@ -5,7 +5,7 @@ starting lineups, substitutions, team schedules, player season stats, league lea
 injuries, and league standings across major soccer competitions via ESPN's public v2 API.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Tuple
 from src.skills.sports.aggregators.base import BaseSportsAggregator
 from src.skills.sports.aggregators.espn_utils import (
@@ -72,15 +72,15 @@ class SoccerAggregator(BaseSportsAggregator):
     CLUB_LEAGUE_HINTS = {
         "arsenal": "epl", "chelsea": "epl", "liverpool": "epl", "manchester city": "epl",
         "man city": "epl", "manchester united": "epl", "man utd": "epl", "tottenham": "epl",
-        "spurs": "epl", "aston villa": "epl", "newcastle": "epl", "leeds": "epl",
+        "spurs": "epl", "aston villa": "epl", "villa": "epl", "newcastle": "epl", "leeds": "epl",
         "brighton": "epl", "west ham": "epl", "wolves": "epl", "wolverhampton": "epl",
-        "fulham": "epl", "brentford": "epl", "crystal palace": "epl", "everton": "epl",
+        "fulham": "epl", "brentford": "epl", "crystal palace": "epl", "palace": "epl", "everton": "epl",
         "bournemouth": "epl", "nottingham": "epl", "forest": "epl", "sunderland": "epl",
         "burnley": "epl", "leicester": "epl",
-        "real madrid": "laliga", "barcelona": "laliga", "barca": "laliga", "atletico": "laliga",
-        "sevilla": "laliga", "real sociedad": "laliga", "villarreal": "laliga", "betis": "laliga",
-        "athletic bilbao": "laliga", "valencia": "laliga", "girona": "laliga",
-        "bayern": "bundesliga", "dortmund": "bundesliga", "leverkusen": "bundesliga",
+        "real madrid": "laliga", "madrid": "laliga", "barcelona": "laliga", "barca": "laliga", "atletico": "laliga",
+        "sevilla": "laliga", "real sociedad": "laliga", "sociedad": "laliga", "villarreal": "laliga", "betis": "laliga",
+        "athletic bilbao": "laliga", "bilbao": "laliga", "valencia": "laliga", "girona": "laliga",
+        "bayern": "bundesliga", "munich": "bundesliga", "dortmund": "bundesliga", "leverkusen": "bundesliga",
         "leipzig": "bundesliga", "frankfurt": "bundesliga", "stuttgart": "bundesliga",
         "inter": "seriea", "milan": "seriea", "juventus": "seriea", "juve": "seriea",
         "napoli": "seriea", "roma": "seriea", "lazio": "seriea", "atalanta": "seriea", "fiorentina": "seriea",
@@ -104,7 +104,7 @@ class SoccerAggregator(BaseSportsAggregator):
 
         # Auto-discover any worldwide soccer club or player via ESPN Search v2 if not found in default league
         if not matched_team:
-            disc = espn_search_auto_discover(q)
+            disc = espn_search_auto_discover(q, sport_hint="soccer")
             if disc and disc.get("sport") == "soccer":
                 disc_league = disc.get("league") or league_code
                 league_code = disc_league
@@ -171,27 +171,31 @@ class SoccerAggregator(BaseSportsAggregator):
         is_month = "month" in q and not is_past
         is_week = any(w in q for w in ("week", "upcoming", "next", "fixtures", "schedule", "soon", "weekend", "saturday", "sunday")) and not is_past
 
-        team_sched_block = ""
         if matched_team:
             team_sched_block = parse_team_schedule("soccer", league_code, matched_team["id"], matched_team["displayName"])
+            if team_sched_block:
+                if "🔥 **TODAY" in team_sched_block or "🔴 **LIVE" in team_sched_block or is_past:
+                    match_sum = self.get_match_summary(league_code, league_name, q, matched_team=matched_team)
+                    if match_sum:
+                        return f"{team_sched_block}\n\n{match_sum}"
+                return team_sched_block
 
+        effective_filter = matched_team["displayName"] if matched_team else q
         if is_past and "yesterday" not in q:
-            res = self.get_past_schedule_range(league_code, league_name, days_back=7, scope_label="RECENT MATCH RESULTS", filter_query=q)
+            res = self.get_past_schedule_range(league_code, league_name, days_back=7, scope_label="RECENT MATCH RESULTS", filter_query=effective_filter)
         elif is_month:
-            res = self.get_schedule_range(league_code, league_name, days_ahead=30, scope_label="MONTHLY FIXTURES", filter_query=q)
+            res = self.get_schedule_range(league_code, league_name, days_ahead=30, scope_label="MONTHLY FIXTURES", filter_query=effective_filter)
         elif is_week:
-            res = self.get_schedule_range(league_code, league_name, days_ahead=8, scope_label="WEEKLY FIXTURES", filter_query=q)
+            res = self.get_schedule_range(league_code, league_name, days_ahead=8, scope_label="WEEKLY FIXTURES", filter_query=effective_filter)
         elif "yesterday" in q:
             date_param = (now - timedelta(days=1)).strftime("%Y%m%d")
-            res = self.get_matches(league_code, league_name, date_param=date_param, filter_query=q)
+            res = self.get_matches(league_code, league_name, date_param=date_param, filter_query=effective_filter)
         elif "tomorrow" in q:
             date_param = (now + timedelta(days=1)).strftime("%Y%m%d")
-            res = self.get_matches(league_code, league_name, date_param=date_param, filter_query=q)
+            res = self.get_matches(league_code, league_name, date_param=date_param, filter_query=effective_filter)
         else:
-            res = self.get_matches(league_code, league_name, date_param=None, filter_query=q)
+            res = self.get_matches(league_code, league_name, date_param=None, filter_query=effective_filter)
 
-        if team_sched_block:
-            return f"{team_sched_block}\n\n{res}"
         return res
 
     def _detect_league(self, query: str) -> str:
@@ -330,24 +334,46 @@ class SoccerAggregator(BaseSportsAggregator):
     ) -> str:
         """Locate the most relevant match event_id and return its full ESPN /summary (lineups, subs, cards, stats)."""
         event_id = None
+        summary_league = league_code
 
-        # 1. If a specific team was matched, check its schedule for the latest completed or live match
+        # 1. If a specific team was matched, check its schedule across all competitions for the latest completed, live, or today's match
         if matched_team:
             sched_url = f"{self.SCOREBOARD_BASE}/{league_code}/teams/{matched_team['id']}/schedule"
-            sched_data = cached_espn_get(sched_url, ttl=300)
-            if sched_data and sched_data.get("events"):
-                events = list(sched_data["events"])
+            all_url = f"{self.SCOREBOARD_BASE}/all/teams/{matched_team['id']}/schedule"
+            cur_year = datetime.now(timezone.utc).year
+            events: List[Dict[str, Any]] = []
+            seen_ids = set()
+            for u, p in (
+                (sched_url, None),
+                (all_url, {"season": str(cur_year)}),
+                (all_url, {"fixture": "true"}),
+            ):
+                s_data = cached_espn_get(u, params=p, ttl=120)
+                if s_data and s_data.get("events"):
+                    for ev in s_data["events"]:
+                        eid = str(ev.get("id", ""))
+                        if eid and eid not in seen_ids:
+                            seen_ids.add(eid)
+                            events.append(ev)
+
+            if events:
                 events.sort(key=lambda e: e.get("date", ""))
-                # Prefer live or most recently completed match
+                today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                live_or_today = [
+                    ev for ev in events
+                    if ev.get("competitions", [{}])[0].get("status", {}).get("type", {}).get("state") == "in"
+                    or ev.get("date", "").startswith(today_utc)
+                ]
                 live_or_done = [
                     ev for ev in events
                     if ev.get("competitions", [{}])[0].get("status", {}).get("type", {}).get("state") in ("in", "post")
                     or ev.get("competitions", [{}])[0].get("status", {}).get("type", {}).get("completed")
                 ]
-                if live_or_done:
-                    event_id = str(live_or_done[-1].get("id", ""))
-                elif events:
-                    event_id = str(events[-1].get("id", ""))
+                chosen = live_or_today[-1] if live_or_today else (live_or_done[-1] if live_or_done else events[-1])
+                event_id = str(chosen.get("id", ""))
+                ev_slug = chosen.get("league", {}).get("slug")
+                if ev_slug:
+                    summary_league = ev_slug
 
         # 2. Otherwise inspect current/recent league scoreboard
         if not event_id:
@@ -359,7 +385,7 @@ class SoccerAggregator(BaseSportsAggregator):
 
         if not event_id:
             return ""
-        return parse_match_summary("soccer", league_code, event_id)
+        return parse_match_summary("soccer", summary_league, event_id)
 
     def get_past_schedule_range(self, league_code: str, league_name: str, days_back: int = 7, scope_label: str = "RECENT MATCH RESULTS", filter_query: str = "") -> str:
         """Fetches completed matches and results from recent matchdays with goals, yellow/red cards, and team stats."""

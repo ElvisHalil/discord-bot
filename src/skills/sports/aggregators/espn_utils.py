@@ -1,5 +1,5 @@
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 import requests
 
@@ -88,10 +88,16 @@ TEAM_ALIASES: Dict[str, str] = {
     "atletico madrid": "atlético madrid",
     "athletic bilbao": "athletic club",
     "bayern": "bayern munich",
+    "munich": "bayern munich",
     "leverkusen": "bayer leverkusen",
     "dortmund": "borussia dortmund",
+    "frankfurt": "eintracht frankfurt",
     "barca": "barcelona",
     "real": "real madrid",
+    "madrid": "real madrid",
+    "sociedad": "real sociedad",
+    "villa": "aston villa",
+    "palace": "crystal palace",
     # NBA
     "sixers": "philadelphia 76ers",
     "76ers": "philadelphia 76ers",
@@ -215,9 +221,9 @@ def match_team_in_query(team_name: str, short_name: str, abbr: str, query: str) 
         c_low = (candidate or "").lower().strip()
         if len(c_low) >= 3 and c_low in expanded:
             return True
-        # Also check significant tokens (len >= 4) excluding generic suffixes
+        # Also check significant tokens (len >= 4) excluding generic suffixes and shared city names when another club is specified
         for tok in c_low.split():
-            if len(tok) >= 4 and tok not in ("united", "city", "real", "club", "sporting", "athletic", "fc", "sc"):
+            if len(tok) >= 4 and tok not in ("united", "city", "real", "club", "sporting", "athletic", "fc", "sc", "madrid", "milan", "manchester"):
                 if tok in expanded:
                     return True
     if abbr and len(abbr) >= 3 and abbr.lower() in expanded.split():
@@ -233,20 +239,30 @@ def parse_team_schedule(
     max_past: int = 5,
     max_future: int = 5,
 ) -> str:
-    """Fetch and format a specific team's past results and upcoming schedule from ESPN."""
+    """Fetch and format a specific team's past results and upcoming schedule from ESPN (across all competitions for soccer)."""
     url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_code}/teams/{team_id}/schedule"
-    data = cached_espn_get(url, ttl=300)
-    if not data:
-        return ""
+    data = cached_espn_get(url, ttl=120)
 
-    events = list(data.get("events", []))
+    events: List[Dict[str, Any]] = list(data.get("events", [])) if data else []
+    seen_ids = {str(e.get("id")) for e in events if e.get("id")}
+
     if sport_path == "soccer":
-        fix_data = cached_espn_get(url, params={"fixture": "true"}, ttl=300)
-        if fix_data and fix_data.get("events"):
-            seen_ids = {str(e.get("id")) for e in events if e.get("id")}
-            for fev in fix_data["events"]:
-                if str(fev.get("id")) not in seen_ids:
-                    events.append(fev)
+        # Fetch across ALL competitions (/soccer/all/teams/{id}/schedule) so UEFA Champions League,
+        # Europa League, and domestic cup matches are included alongside domestic league games.
+        all_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/teams/{team_id}/schedule"
+        cur_year = datetime.now(timezone.utc).year
+        for extra_url, extra_params in (
+            (all_url, {"fixture": "true"}),
+            (all_url, {"season": str(cur_year)}),
+            (url, {"fixture": "true"}),
+        ):
+            extra_data = cached_espn_get(extra_url, params=extra_params, ttl=120)
+            if extra_data and extra_data.get("events"):
+                for fev in extra_data["events"]:
+                    ev_id = str(fev.get("id", ""))
+                    if ev_id and ev_id not in seen_ids:
+                        seen_ids.add(ev_id)
+                        events.append(fev)
 
     if not events:
         return ""
@@ -254,12 +270,14 @@ def parse_team_schedule(
     # Always sort chronologically (oldest -> newest) so [-max_past:] are the latest results and [:max_future] are next up
     events.sort(key=lambda e: e.get("date", ""))
 
+    now_utc_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     past_lines: List[str] = []
     live_lines: List[str] = []
     future_lines: List[str] = []
 
     for ev in events:
-        date_str = format_espn_iso_date(ev.get("date", ""))
+        raw_date = ev.get("date", "")
+        date_str = format_espn_iso_date(raw_date)
         comp = ev.get("competitions", [{}])[0]
         status_obj = comp.get("status", {}).get("type", {})
         state = status_obj.get("state", "pre")
@@ -267,6 +285,9 @@ def parse_team_schedule(
         competitors = comp.get("competitors", [])
         if len(competitors) < 2:
             continue
+
+        league_label = ev.get("league", {}).get("name") or ev.get("season", {}).get("name") or ""
+        comp_tag = f" [{league_label}]" if (sport_path == "soccer" and league_label) else ""
 
         home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
         away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
@@ -276,13 +297,15 @@ def parse_team_schedule(
         a_score = extract_score_str(away.get("score"))
 
         if state == "post" or status_obj.get("completed"):
-            past_lines.append(f"• **{date_str}**: **{h_name}** {h_score} - {a_score} **{a_name}** ({detail or 'FT'})")
+            past_lines.append(f"• **{date_str}**: **{h_name}** {h_score} - {a_score} **{a_name}** ({detail or 'FT'}){comp_tag}")
         elif state == "in":
-            live_lines.append(f"• 🔴 **LIVE ({detail})**: **{h_name}** {h_score} - {a_score} **{a_name}**")
+            live_lines.append(f"• 🔴 **LIVE NOW ({detail})**: **{h_name}** {h_score} - {a_score} **{a_name}**{comp_tag}")
         else:
-            future_lines.append(f"• **{date_str}**: **{a_name}** @ **{h_name}**")
+            is_today = raw_date.startswith(now_utc_date)
+            today_prefix = "🔥 **TODAY — " if is_today else "**"
+            future_lines.append(f"• {today_prefix}{date_str}**: **{a_name}** @ **{h_name}**{comp_tag}")
 
-    out = f"=== 📅 {team_name.upper()} TEAM SCHEDULE & RESULTS ===\n"
+    out = f"=== 📅 {team_name.upper()} TEAM SCHEDULE & RESULTS (ALL COMPETITIONS) ===\n"
     if live_lines:
         out += "🔴 **Live Now:**\n" + "\n".join(live_lines) + "\n\n"
     if past_lines:
@@ -681,10 +704,15 @@ def parse_match_summary(sport_path: str, league_code: str, event_id: str) -> str
                         p_stats.append(f"{val}{abbr}")
                 stat_suffix = f" [{' '.join(p_stats)}]" if p_stats else ""
 
+                sub_out_raw = p.get("subbedOut")
+                sub_in_raw = p.get("subbedIn")
+                did_sub_out = sub_out_raw.get("didSub", False) if isinstance(sub_out_raw, dict) else bool(sub_out_raw)
+                did_sub_in = sub_in_raw.get("didSub", False) if isinstance(sub_in_raw, dict) else bool(sub_in_raw)
+
                 if p.get("starter"):
-                    sub_mark = " 🔻" if p.get("subbedOut") else ""
+                    sub_mark = " 🔻" if did_sub_out else ""
                     starters.append(f"{j_str}**{p_name}** ({pos}){stat_suffix}{sub_mark}")
-                elif p.get("subbedIn"):
+                elif did_sub_in:
                     subs_used.append(f"🔺 {j_str}**{p_name}** ({pos}){stat_suffix}")
 
             if starters:
@@ -729,7 +757,7 @@ def clean_entity_search_query(query: str) -> str:
     return cleaned
 
 
-def espn_search_auto_discover(query: str) -> Optional[Dict[str, Any]]:
+def espn_search_auto_discover(query: str, sport_hint: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Universal ESPN Auto-Discovery via https://site.web.api.espn.com/apis/search/v2.
     Given any team, player, or league query, returns a normalized dict:
@@ -764,31 +792,48 @@ def espn_search_auto_discover(query: str) -> Optional[Dict[str, Any]]:
         "golf": "pga",
     }
 
-    # Check team and player results first
+    groups_by_type: Dict[str, List[Dict[str, Any]]] = {}
     for group in data.get("results", []):
         g_type = group.get("type", "")
-        if g_type not in ("team", "player", "league"):
-            continue
-        for item in group.get("contents", []):
-            sport = (item.get("sport") or "").lower().strip()
-            if not sport:
-                continue
-            league = (item.get("defaultLeagueSlug") or DEFAULT_SPORT_LEAGUE.get(sport, "")).lower().strip()
-            uid = item.get("uid") or ""
-            m_t = _re.search(r"t:(\d+)", uid)
-            m_a = _re.search(r"a:(\d+)", uid)
-            team_id = m_t.group(1) if m_t else (str(item.get("id")) if g_type == "team" and str(item.get("id", "")).isdigit() else None)
-            athlete_id = m_a.group(1) if m_a else (str(item.get("id")) if g_type == "player" and str(item.get("id", "")).isdigit() else None)
+        if g_type in ("team", "player", "league"):
+            groups_by_type[g_type] = group.get("contents", [])
 
-            return {
-                "entity_type": g_type,
-                "display_name": item.get("displayName", cleaned),
-                "subtitle": item.get("subtitle") or "",
-                "sport": sport,
-                "league": league,
-                "team_id": team_id,
-                "athlete_id": athlete_id,
-            }
+    def _build_entry(g_type: str, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        sport = (item.get("sport") or "").lower().strip()
+        if not sport:
+            return None
+        if sport_hint and sport != sport_hint.lower():
+            return None
+        league = (item.get("defaultLeagueSlug") or DEFAULT_SPORT_LEAGUE.get(sport, "")).lower().strip()
+        uid = item.get("uid") or ""
+        m_t = _re.search(r"t:(\d+)", uid)
+        m_a = _re.search(r"a:(\d+)", uid)
+        team_id = m_t.group(1) if m_t else (str(item.get("id")) if g_type == "team" and str(item.get("id", "")).isdigit() else None)
+        athlete_id = m_a.group(1) if m_a else (str(item.get("id")) if g_type == "player" and str(item.get("id", "")).isdigit() else None)
+        return {
+            "entity_type": g_type,
+            "display_name": item.get("displayName", cleaned),
+            "subtitle": item.get("subtitle") or "",
+            "sport": sport,
+            "league": league,
+            "team_id": team_id,
+            "athlete_id": athlete_id,
+        }
+
+    # 1. If a player is an exact full-name match (e.g., "LeBron James", "Lamine Yamal"), return it first
+    cleaned_low = cleaned.lower()
+    for item in groups_by_type.get("player", []):
+        if (item.get("displayName") or "").lower().strip() == cleaned_low:
+            entry = _build_entry("player", item)
+            if entry:
+                return entry
+
+    # 2. Prioritize teams and leagues over partial surname player matches (so "Madrid" -> "Real Madrid", not "Sal Madrid")
+    for g_type in ("team", "league", "player"):
+        for item in groups_by_type.get(g_type, []):
+            entry = _build_entry(g_type, item)
+            if entry:
+                return entry
     return None
 
 
