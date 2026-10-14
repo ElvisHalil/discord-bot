@@ -1,5 +1,5 @@
 from src.skills.sports.aggregators.base import BaseSportsAggregator
-from src.skills.sports.aggregators.liquipedia import LiquipediaAggregator
+from src.skills.sports.aggregators.liquipedia import LiquipediaAggregator, clear_liquipedia_cache
 from src.skills.sports.aggregators.hltv import HltvAggregator
 from src.skills.sports.aggregators.esl_live import EslLiveAggregator
 from src.skills.sports.aggregators.f1 import F1Aggregator
@@ -11,6 +11,7 @@ from src.skills.sports.aggregators.odds import OddsAggregator
 __all__ = [
     "BaseSportsAggregator",
     "LiquipediaAggregator",
+    "clear_liquipedia_cache",
     "HltvAggregator",
     "EslLiveAggregator",
     "F1Aggregator",

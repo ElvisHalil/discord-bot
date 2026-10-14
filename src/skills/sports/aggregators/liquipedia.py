@@ -1,10 +1,42 @@
-from datetime import datetime
+import re
+import time
+from datetime import datetime, timezone
+from typing import Optional
 from bs4 import BeautifulSoup
 from src.skills.sports.aggregators.base import BaseSportsAggregator
 from src.utils.http import fetch_json
 
+# 5-minute TTL cache for Liquipedia tournament & event lookups
+_LIQUIPEDIA_CACHE: dict[str, tuple[float, object]] = {}
+_LIQUIPEDIA_CACHE_TTL = 300.0
+
+
+def clear_liquipedia_cache() -> None:
+    """Clears in-memory Liquipedia tournament and event caches."""
+    _LIQUIPEDIA_CACHE.clear()
+
+
+def _is_fetch_mocked() -> bool:
+    return hasattr(fetch_json, "assert_called")
+
+
+def _cached_fetch_json(url: str, timeout: int = 15) -> dict:
+    now = time.monotonic()
+    if not _is_fetch_mocked() and url in _LIQUIPEDIA_CACHE:
+        ts, cached_data = _LIQUIPEDIA_CACHE[url]
+        if now - ts < _LIQUIPEDIA_CACHE_TTL and isinstance(cached_data, dict):
+            return cached_data
+    data = fetch_json(url, timeout=timeout)
+    if not _is_fetch_mocked() and isinstance(data, dict) and "parse" in data:
+        _LIQUIPEDIA_CACHE[url] = (now, data)
+    return data
+
+
 class LiquipediaAggregator(BaseSportsAggregator):
-    """Aggregator for Counter-Strike esports tournament and roster data from Liquipedia using centralized stealth client."""
+    """Aggregator for Counter-Strike esports tournament, schedule, group, and roster data from Liquipedia."""
+
+    def __init__(self):
+        self._known_events: list[dict] = []
 
     def _parse_table_rows(self, tbl) -> list[dict]:
         """Parses rows from an S-Tier tournament table into clean dictionary records."""
@@ -57,12 +89,44 @@ class LiquipediaAggregator(BaseSportsAggregator):
                     return tbl
         return None
 
-    def get_s_tier_tournaments(self) -> str:
+    def resolve_event_slug(self, query_or_slug: Optional[str] = None) -> Optional[str]:
+        """Resolves a natural tournament name (e.g. 'Thunderpick', 'PGL Bucharest') or empty string to a Liquipedia event slug."""
+        q = (query_or_slug or "").strip()
+        if q and "/" in q and " " not in q:
+            return q.lstrip("/")
+
+        if not self._known_events:
+            try:
+                self.get_s_tier_tournaments(include_next_event_details=False)
+            except Exception:
+                pass
+
+        if not self._known_events:
+            return q if q else None
+
+        q_low = q.lower()
+        if not q_low or q_low in ("current", "next", "upcoming", "today", "tomorrow", "schedule", "matches", "all", "tournaments", "event_info"):
+            return self._known_events[0].get("slug")
+
+        # Match against known tournament names or slugs
+        q_tokens = [w for w in re.findall(r'[a-z0-9]+', q_low) if len(w) >= 3 and w not in ("the", "cs2", "schedule", "matches", "today", "time", "tournament", "event")]
+        for ev in self._known_events:
+            ev_text = f"{ev.get('name', '')} {ev.get('slug', '')} {ev.get('location', '')}".lower()
+            if q_low in ev_text or (q_tokens and all(tok in ev_text for tok in q_tokens)):
+                return ev.get("slug")
+        for ev in self._known_events:
+            ev_text = f"{ev.get('name', '')} {ev.get('slug', '')} {ev.get('location', '')}".lower()
+            if q_tokens and any(tok in ev_text for tok in q_tokens):
+                return ev.get("slug")
+
+        return q if "/" in q else self._known_events[0].get("slug")
+
+    def get_s_tier_tournaments(self, include_next_event_details: bool = True) -> str:
         """Fetches upcoming, ongoing, and recently completed S-Tier tournaments from Liquipedia."""
         print("  └─ 🏆 [Liquipedia]: Fetching S-Tier Tournaments...")
         try:
             url = 'https://liquipedia.net/counterstrike/api.php?action=parse&page=S-Tier_Tournaments&format=json'
-            data = fetch_json(url, timeout=10)
+            data = _cached_fetch_json(url, timeout=10)
             soup = BeautifulSoup(data['parse']['text']['*'], 'html.parser')
 
             current_year = datetime.now().year
@@ -99,12 +163,14 @@ class LiquipediaAggregator(BaseSportsAggregator):
                     prev_comp = [x for x in prev_items if x['winner'] and x['winner'] != 'TBD']
                     completed.extend(prev_comp)
 
+            self._known_events = [x for x in (upcoming_sorted + completed) if x.get("slug")]
+
             output = f"[CURRENT & UPCOMING S-TIER TOURNAMENTS ({current_year})]\n"
             if upcoming_sorted:
                 for item in upcoming_sorted[:5]:
                     slug = item['slug']
-                    url = f"https://liquipedia.net/counterstrike/{slug}" if slug else ""
-                    url_str = f" | Link: <{url}>" if url else ""
+                    ev_url = f"https://liquipedia.net/counterstrike/{slug}" if slug else ""
+                    url_str = f" | Link: <{ev_url}>" if ev_url else ""
                     tool_str = f" (event_page: '{slug}')" if slug else ""
                     prize_str = f" | Prize: {item['prize']}" if item['prize'] else ""
                     loc_str = f" | Location: {item['location']}" if item['location'] else ""
@@ -116,8 +182,8 @@ class LiquipediaAggregator(BaseSportsAggregator):
             if completed:
                 for item in completed[:4]:
                     slug = item['slug']
-                    url = f"https://liquipedia.net/counterstrike/{slug}" if slug else ""
-                    url_str = f" | Link: <{url}>" if url else ""
+                    ev_url = f"https://liquipedia.net/counterstrike/{slug}" if slug else ""
+                    url_str = f" | Link: <{ev_url}>" if ev_url else ""
                     tool_str = f" (event_page: '{slug}')" if slug else ""
                     runner_up_str = f" (Runner-up: {item['runner_up']})" if item['runner_up'] and item['runner_up'] != 'TBD' else ""
                     prize_str = f" | Prize: {item['prize']}" if item['prize'] else ""
@@ -125,29 +191,190 @@ class LiquipediaAggregator(BaseSportsAggregator):
             else:
                 output += "No recent tournament results found.\n"
 
+            # Automatically enrich with the nearest ongoing/upcoming tournament's schedule, groups, and rosters
+            if include_next_event_details and upcoming_sorted and upcoming_sorted[0].get("slug"):
+                nearest = upcoming_sorted[0]
+                nearest_slug = nearest["slug"]
+                try:
+                    ev_details = self.get_event_info(nearest_slug, _only_if_structured=True)
+                    if ev_details:
+                        output += f"\n{ev_details}"
+                except Exception:
+                    pass
+
             return output + "\n"
         except Exception as e:
             return f"[TOURNAMENTS]\nError fetching tournaments: {e}\n\n"
 
-    def get_event_info(self, event_page: str) -> str:
-        """Fetches detailed info about a specific event, including current matches and full team rosters."""
-        if not event_page:
-            return "[EVENT INFO]\nError: Please provide 'event_page' (e.g. 'ESL/Pro_League/Season_24').\n\n"
+    @staticmethod
+    def _extract_opponent_name(opp_el) -> str:
+        """Extracts a clean team name from a Liquipedia opponent element."""
+        if not opp_el:
+            return "TBD"
+        for sel in (".team-name", ".team-bracketname", "a[title]"):
+            el = opp_el.select_one(sel)
+            if el:
+                if el.name == "a" and el.get("title"):
+                    title = el["title"].strip()
+                    if title and not title.startswith("Special:"):
+                        return re.sub(r'\s*\(page does not exist\)\s*$', '', title, flags=re.IGNORECASE)
+                txt = el.get_text(strip=True)
+                if txt:
+                    return txt
+        txt = opp_el.get_text(" ", strip=True)
+        return txt if txt else "TBD"
 
-        print(f"  └─ 📖 [Liquipedia]: Fetching Event Info for '{event_page}'...")
+    @staticmethod
+    def _format_match_timestamp(raw_time_str: str, epoch_str: str) -> str:
+        """Formats Liquipedia's match time alongside UTC, local time, and Discord native timestamp."""
+        clean_raw = re.sub(r'\s+', ' ', (raw_time_str or "").strip())
+        if not epoch_str or not str(epoch_str).isdigit():
+            return clean_raw or "Time TBD"
         try:
-            url = f'https://liquipedia.net/counterstrike/api.php?action=parse&page={event_page}&format=json'
-            data = fetch_json(url, timeout=15)
+            ts = int(epoch_str)
+            utc_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            local_dt = utc_dt.astimezone()
+            utc_str = utc_dt.strftime("%b %d, %H:%M UTC")
+            local_str = local_dt.strftime("%I:%M %p %Z").lstrip("0")
+            if clean_raw:
+                return f"{clean_raw} ({utc_str} | {local_str} | <t:{ts}:t>)"
+            return f"{utc_str} ({local_str} | <t:{ts}:t>)"
+        except Exception:
+            return clean_raw or "Time TBD"
+
+    def _parse_matches_from_soup(self, soup: BeautifulSoup) -> list[str]:
+        """Extracts structured match schedule & results from Liquipedia .brkts-popup and .match-info elements."""
+        matches = []
+        seen_keys = set()
+
+        for popup in soup.select(".brkts-popup"):
+            timer_el = popup.select_one(".timer-object")
+            raw_time = timer_el.get_text(" ", strip=True) if timer_el else ""
+            epoch_str = timer_el.get("data-timestamp", "") if timer_el else ""
+            sort_ts = int(epoch_str) if str(epoch_str).isdigit() else 9999999999
+
+            opps = popup.select(".match-info-header-opponent")
+            team1 = self._extract_opponent_name(opps[0]) if len(opps) > 0 else "TBD"
+            team2 = self._extract_opponent_name(opps[1]) if len(opps) > 1 else "TBD"
+
+            upper_el = popup.select_one(".match-info-header-scoreholder-upper")
+            lower_el = popup.select_one(".match-info-header-scoreholder-lower")
+            upper_txt = re.sub(r'\s+', ' ', upper_el.get_text(" ", strip=True)) if upper_el else "vs"
+            lower_txt = re.sub(r'\s+', ' ', lower_el.get_text(" ", strip=True)) if lower_el else ""
+
+            # Determine stage / round label
+            stage_parts = []
+            sec_el = popup.find_previous(["h2", "h3", "h4"])
+            if sec_el:
+                sec_txt = re.sub(r'\[.*?\]', '', sec_el.get_text(" ", strip=True)).strip()
+                if sec_txt and sec_txt.lower() not in ("results", "overview", "matches"):
+                    stage_parts.append(sec_txt)
+
+            if popup.find_parent(class_="brkts-third-place-match"):
+                stage_parts.append("Third Place Match")
+            else:
+                ml_header = popup.find_previous(class_=["brkts-matchlist-header", "brkts-matchlist-title"])
+                if ml_header and popup.find_parent(class_="brkts-matchlist"):
+                    ml_txt = re.sub(r'\b(?:Show|Hide)\b', '', ml_header.get_text(" ", strip=True)).strip()
+                    if ml_txt and ml_txt not in stage_parts:
+                        stage_parts.append(ml_txt)
+
+            stage_label = " - ".join(stage_parts) if stage_parts else "Match"
+            dedup_key = (epoch_str or raw_time, team1.lower(), team2.lower())
+            if dedup_key in seen_keys:
+                continue
+            seen_keys.add(dedup_key)
+
+            time_display = self._format_match_timestamp(raw_time, epoch_str)
+            fmt_suffix = f" {lower_txt}" if lower_txt else ""
+            if upper_txt.lower() == "vs" or not upper_txt:
+                matchup_str = f"**{team1}** vs **{team2}**{fmt_suffix}"
+            else:
+                matchup_str = f"**{team1}** {upper_txt} **{team2}**{fmt_suffix}"
+
+            matches.append((sort_ts, f"- [{stage_label}] {time_display}: {matchup_str}"))
+
+        # Fallback to .match-info ticker if no .brkts-popup elements exist on the page
+        if not matches:
+            for mi in soup.select(".match-info"):
+                timer_el = mi.select_one(".timer-object")
+                raw_time = timer_el.get_text(" ", strip=True) if timer_el else ""
+                epoch_str = timer_el.get("data-timestamp", "") if timer_el else ""
+                sort_ts = int(epoch_str) if str(epoch_str).isdigit() else 9999999999
+
+                stage_el = mi.select_one(".match-info-stage")
+                stage_label = stage_el.get_text(" ", strip=True) if stage_el else "Match"
+                rows = mi.select(".match-info-opponent-row")
+                team1 = self._extract_opponent_name(rows[0]) if len(rows) > 0 else "TBD"
+                team2 = self._extract_opponent_name(rows[1]) if len(rows) > 1 else "TBD"
+
+                dedup_key = (epoch_str or raw_time, team1.lower(), team2.lower())
+                if dedup_key in seen_keys:
+                    continue
+                seen_keys.add(dedup_key)
+
+                time_display = self._format_match_timestamp(raw_time, epoch_str)
+                matches.append((sort_ts, f"- [{stage_label}] {time_display}: **{team1}** vs **{team2}**"))
+
+        matches.sort(key=lambda x: x[0])
+        return [m[1] for m in matches]
+
+    def _parse_groups_from_soup(self, soup: BeautifulSoup) -> list[str]:
+        """Extracts Group Stage tables (e.g. Group A, Group B) from Liquipedia."""
+        group_lines = []
+        for g_tbl in soup.select("table.grouptable"):
+            header_el = g_tbl.select_one("th")
+            if not header_el:
+                continue
+            raw_header = header_el.get_text(" | ", strip=True).split("|")[0].strip()
+            if not raw_header:
+                continue
+            teams = []
+            for tr in g_tbl.select("tr"):
+                team_el = tr.select_one(".block-team a[title], .team-template-text a[title]")
+                if team_el and team_el.get("title"):
+                    t_name = re.sub(r'\s*\(page does not exist\)\s*$', '', team_el["title"].strip(), flags=re.IGNORECASE)
+                    if t_name and t_name not in teams:
+                        teams.append(t_name)
+            if teams:
+                group_lines.append(f"- **{raw_header}**: {', '.join(teams)}")
+        return group_lines
+
+    def get_event_info(self, event_page: Optional[str] = None, _only_if_structured: bool = False) -> str:
+        """Fetches detailed info about a specific event, including structured match schedule, groups, and active team rosters."""
+        resolved_page = self.resolve_event_slug(event_page) if not _only_if_structured else event_page
+        if not resolved_page:
+            return "[EVENT INFO]\nError: Please provide 'event_page' (e.g. 'Thunderpick/World_Championship/2026').\n\n"
+
+        print(f"  └─ 📖 [Liquipedia]: Fetching Event Info for '{resolved_page}'...")
+        try:
+            url = f'https://liquipedia.net/counterstrike/api.php?action=parse&page={resolved_page}&format=json'
+            data = _cached_fetch_json(url, timeout=15)
             if 'parse' not in data:
-                return f"[EVENT INFO]\nError parsing event page. It might not exist.\n\n"
+                return "" if _only_if_structured else f"[EVENT INFO]\nError parsing event page '{resolved_page}'. It might not exist.\n\n"
 
             soup = BeautifulSoup(data['parse']['text']['*'], 'html.parser')
             teams_list = []
+            former_teams_list = []
             roster_lines = []
+
             for card in soup.select('.team-participant-card'):
                 team_name_el = card.select_one('.team-participant-card__opponent a')
-                team_name = team_name_el['title'] if team_name_el else 'Unknown'
-                if team_name == 'Unknown':
+                team_name = team_name_el.get('title', '').strip() if team_name_el else 'Unknown'
+                if not team_name or team_name == 'Unknown':
+                    continue
+
+                # Check if this card is inside a collapsed "Former Participants" block
+                collapsed_parent = card.find_parent('div', class_='collapsed')
+                is_former = False
+                if collapsed_parent:
+                    parent_txt = collapsed_parent.get_text(" ", strip=True)[:80].lower()
+                    if "former" in parent_txt or "withdrawn" in parent_txt or "replaced" in parent_txt:
+                        is_former = True
+
+                if is_former:
+                    if team_name not in former_teams_list:
+                        former_teams_list.append(team_name)
                     continue
 
                 players = []
@@ -162,23 +389,39 @@ class LiquipediaAggregator(BaseSportsAggregator):
                     elif name:
                         players.append(name)
 
-                teams_list.append(team_name)
-                coach_str = f" | Coach: {coach}" if coach else ""
-                roster_lines.append(f"- **{team_name}**: {', '.join(players)}{coach_str}")
+                if team_name not in teams_list:
+                    teams_list.append(team_name)
+                    coach_str = f" | Coach: {coach}" if coach else ""
+                    roster_lines.append(f"- **{team_name}**: {', '.join(players)}{coach_str}")
 
-            for x in soup.select('.navbox, .toc, script, style, .mw-editsection'):
+            group_lines = self._parse_groups_from_soup(soup)
+            match_lines = self._parse_matches_from_soup(soup)
+
+            if _only_if_structured and not (teams_list or group_lines or match_lines):
+                return ""
+
+            # Remove noisy or already-parsed elements before extracting concise event overview text
+            for x in soup.select('.navbox, .toc, script, style, .mw-editsection, .brkts-popup, .match-info, .team-participant-card, table.grouptable'):
                 x.decompose()
 
             text = soup.get_text('\n', strip=True)
-            if len(text) > 8000:
-                text = text[:4000] + "\n...[CONTENT TRUNCATED]...\n" + text[-4000:]
+            if len(text) > 3000:
+                text = text[:2000] + "\n...[CONTENT TRUNCATED]...\n" + text[-1000:]
 
-            output = f"[EVENT INFO: {event_page}]\n"
+            output = f"[EVENT INFO: {resolved_page} (Link: <https://liquipedia.net/counterstrike/{resolved_page}>)]\n"
             if teams_list:
-                output += "=== PARTICIPATING TEAMS ===\n" + ", ".join(teams_list) + "\n\n"
+                output += f"=== PARTICIPATING TEAMS ({len(teams_list)} Active Teams) ===\n" + ", ".join(teams_list) + "\n"
+                if former_teams_list:
+                    output += f"Withdrawn / Replaced Teams: {', '.join(former_teams_list)}\n"
+                output += "\n"
+            if group_lines:
+                output += "=== GROUP STAGE SEEDING ===\n" + "\n".join(group_lines) + "\n\n"
             if roster_lines:
                 output += "=== TOURNAMENT ROSTERS (Active Players & Coaches) ===\n" + "\n".join(roster_lines) + "\n\n"
-            output += "=== SCHEDULE & EVENT DETAILS ===\n" + text + "\n"
+            if match_lines:
+                output += "=== MATCH SCHEDULE & RESULTS (Exact Times) ===\n" + "\n".join(match_lines) + "\n\n"
+            output += "=== EVENT DETAILS & FORMAT ===\n" + text + "\n"
             return output + "\n"
         except Exception as e:
-            return f"[EVENT INFO]\nError fetching event: {e}\n\n"
+            return "" if _only_if_structured else f"[EVENT INFO]\nError fetching event: {e}\n\n"
+

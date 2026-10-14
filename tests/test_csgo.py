@@ -71,7 +71,7 @@ class TestLiquipediaAggregator(unittest.TestCase):
         self.assertNotIn("[event_page:", output)
 
     @patch("src.skills.sports.aggregators.liquipedia.fetch_json")
-    def test_get_event_info_extracts_rosters(self, mock_fetch):
+    def test_get_event_info_extracts_rosters_groups_and_matches(self, mock_fetch):
         mock_html = """
         <div class="team-participant-card">
           <div class="team-participant-card__opponent"><a title="Team Vitality">Vitality</a></div>
@@ -79,14 +79,55 @@ class TestLiquipediaAggregator(unittest.TestCase):
           <div class="team-participant-card__member"><span class="name"><a>apEX</a></span></div>
           <div class="team-participant-card__member"><span class="name"><a>XTQZZZ</a></span><div class="team-participant-card__member-role-right">Coach</div></div>
         </div>
+        <div class="general-collapsible collapsed">
+          <div>Former Participants</div>
+          <div class="team-participant-card">
+            <div class="team-participant-card__opponent"><a title="Virtus.pro">Virtus.pro</a></div>
+            <div class="team-participant-card__member"><span class="name"><a>Jame</a></span></div>
+          </div>
+          <ul><li>Virtus.pro withdrew from the event and were replaced by Ninjas in Pyjamas.</li></ul>
+        </div>
+        <table class="grouptable">
+          <tr><th>Group A</th></tr>
+          <tr><td><span class="block-team"><a title="Team Falcons">Falcons</a></span></td></tr>
+          <tr><td><span class="block-team"><a title="Ninjas in Pyjamas">NIP</a></span></td></tr>
+        </table>
+        <div class="brkts-matchlist">
+          <div class="brkts-matchlist-title">Group A - Opening Matches</div>
+          <div class="brkts-popup">
+            <div class="match-info-header">
+              <div class="match-info-header-opponent"><a title="Team Falcons">Falcons</a></div>
+              <div class="match-info-header-scoreholder">
+                <span class="match-info-header-scoreholder-upper">vs</span>
+                <span class="match-info-header-scoreholder-lower">(Bo3)</span>
+              </div>
+              <div class="match-info-header-opponent"><a title="Ninjas in Pyjamas">NIP</a></div>
+            </div>
+            <span class="timer-object" data-timestamp="1791966600">October 14, 2026 - 10:30 CEST</span>
+          </div>
+        </div>
         <p>Tournament details and bracket info.</p>
         """
         mock_fetch.return_value = {"parse": {"text": {"*": mock_html}}}
 
-        res = self.agg.get_event_info("ESL/Pro_League/Season_24")
+        res = self.agg.get_event_info("Thunderpick/World_Championship/2026")
         self.assertIn("PARTICIPATING TEAMS", res)
-        self.assertIn("Team Vitality", res)
+        self.assertIn("TOURNAMENT ROSTERS (Active Players & Coaches)", res)
         self.assertIn("- **Team Vitality**: ZywOo, apEX | Coach: XTQZZZ", res)
+        # Collapsed Former Participants (Virtus.pro) must NOT appear as an active roster bullet
+        self.assertNotIn("- **Virtus.pro**:", res)
+        self.assertIn("Withdrawn / Replaced Teams: Virtus.pro", res)
+
+        # Group table extraction
+        self.assertIn("GROUP STAGE SEEDING", res)
+        self.assertIn("- **Group A**: Team Falcons, Ninjas in Pyjamas", res)
+
+        # Exact match schedule & timestamp extraction
+        self.assertIn("MATCH SCHEDULE & RESULTS (Exact Times)", res)
+        self.assertIn("[Group A - Opening Matches]", res)
+        self.assertIn("**Team Falcons** vs **Ninjas in Pyjamas** (Bo3)", res)
+        self.assertIn("08:30 UTC", res)
+        self.assertIn("<t:1791966600:t>", res)
 
 
 class TestCsgoSkill(unittest.TestCase):
@@ -105,9 +146,30 @@ class TestCsgoSkill(unittest.TestCase):
         self.assertIn("No matches.", res)
         self.assertIn("Tourney", res)
         self.assertIn("1. Spirit", res)
-        # Check LLM instructions contain synthesis and link guidelines
+        # Check LLM instructions contain synthesis, exact schedule, and link guidelines
         self.assertIn("NEVER output pseudo-links", res)
         self.assertIn("DO NOT create a prominent empty section", res)
+        self.assertIn("MATCH SCHEDULE & RESULTS (Exact Times)", res)
+
+    @patch("src.skills.sports.csgo._liquipedia_aggregator.get_event_info")
+    @patch("src.skills.sports.csgo._liquipedia_aggregator.get_s_tier_tournaments")
+    def test_skill_csgo_esports_honors_event_page_across_query_types(self, mock_tournaments, mock_event_info):
+        mock_tournaments.return_value = "[CURRENT & UPCOMING S-TIER TOURNAMENTS]\n"
+        mock_event_info.return_value = "=== EVENT DETAILS: Thunderpick/World_Championship/2026 ===\n"
+
+        res = skill_csgo_esports(query_type="tournaments", event_page="Thunderpick/World_Championship/2026")
+        mock_tournaments.assert_called_once_with(include_next_event_details=False)
+        mock_event_info.assert_called_once_with("Thunderpick/World_Championship/2026")
+        self.assertIn("EVENT DETAILS: Thunderpick/World_Championship/2026", res)
+
+    @patch("src.skills.sports.sports.skill_csgo_esports")
+    def test_sports_info_routes_cs_match_time_queries_to_schedule(self, mock_csgo):
+        from src.skills.sports.sports import skill_sports_info
+        mock_csgo.return_value = "CS SCHEDULE DATA"
+
+        res = skill_sports_info(sport="cs", query="what time are matches today?")
+        mock_csgo.assert_called_once_with(query_type="tournaments", event_page=None)
+        self.assertEqual(res, "CS SCHEDULE DATA")
 
     def test_tool_arg_aliases_for_csgo(self):
         # Model passing 'category' or 'tournament' or 'type'

@@ -73,16 +73,24 @@ def skill_sports_info(sport: Optional[str] = None, query: Optional[str] = None) 
     )
     if is_cs:
         sport_raw = "cs"
+        named_event = query_raw if any(t in combined for t in ("thunderpick", "pgl", "blast", "iem", "esl", "major", "bucharest", "chengdu", "atlanta")) else None
         if "odd" in combined or "bet" in combined:
             return _odds_aggregator.get_odds(query_raw or combined, sport="cs2")
-        elif any(k in combined for k in ("tourn", "schedule", "next", "upcoming", "event")):
-            return skill_csgo_esports(query_type="tournaments")
+        elif any(k in combined for k in ("roster", "player", "lineup", "group", "bracket", "teams")):
+            return skill_csgo_esports(query_type="event_info", event_page=named_event or (query_raw if query_raw not in ("schedule", "") else None))
+        elif any(k in combined for k in ("tourn", "schedule", "next", "upcoming", "event", "match", "matches", "time", "today", "tomorrow", "when", "play")):
+            return skill_csgo_esports(query_type="tournaments", event_page=named_event)
         elif any(k in combined for k in ("rank", "top", "leader", "standings")):
             return skill_csgo_esports(query_type="rankings")
         elif any(k in combined for k in ("live", "stream", "broadcast")):
             return skill_csgo_esports(query_type="live_streams")
         else:
-            return skill_csgo_esports(query_type="all", matchup=query_raw if query_raw not in ("schedule", "") else None)
+            is_team_matchup = " vs " in combined or sum(1 for t in _odds_aggregator.CS_TEAMS if t in combined) >= 2
+            return skill_csgo_esports(
+                query_type="all",
+                event_page=named_event,
+                matchup=query_raw if is_team_matchup else None,
+            )
 
     # 2. Betting odds check for traditional sports
     if "odd" in combined or "bet" in combined or sport_raw.lower() in ("odds", "betting"):
