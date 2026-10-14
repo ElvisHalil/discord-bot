@@ -119,7 +119,6 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
 
     queries_to_try = []
     if song_q and artist_q:
-        queries_to_try.append(f'site:youtube.com "{song_q}" "{artist_q}" Topic')
         queries_to_try.append(f'site:youtube.com {song_q} {artist_q} Topic')
         queries_to_try.append(f'site:music.youtube.com {song_q} {artist_q}')
         queries_to_try.append(f'site:youtube.com {song_q} {artist_q}')
@@ -130,6 +129,52 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
         queries_to_try.append(f'site:music.youtube.com {clean_q}')
         queries_to_try.append(f'site:youtube.com {clean_q}')
         queries_to_try.append(f'site:youtube.com {clean_q} audio')
+
+    def _verify_single_candidate(cand_tuple):
+        vid, raw_title, href = cand_tuple
+        # 1. Shorts filter
+        if is_youtube_short(vid, href=href, title=raw_title):
+            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - YouTube Short.")
+            return None
+
+        # 2. Embeddability check (with Discord third-party Referer/origin; also populates _OEMBED_CACHE)
+        if not verify_embeddable(vid):
+            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - Embedding disabled on Discord.")
+            return None
+
+        # 3. Fetch oEmbed metadata (0ms cache hit from verify_embeddable)
+        oembed = get_video_oembed(vid)
+        if not oembed.get("title"):
+            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - Failed oEmbed verification (cannot embed in Discord).")
+            return None
+        title = oembed["title"]
+        author = oembed.get("author", "")
+
+        # 4. Robust Garbage & Relevance match check
+        is_valid, score, reason = score_music_candidate(query, title, author)
+        if not is_valid:
+            print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{title}'): {reason}")
+            return None
+
+        is_topic = " - Topic" in author or "Topic" in author
+        link = f"https://music.youtube.com/watch?v={vid}"
+        meta = parse_song_meta(title, author, query=query)
+
+        entry = {
+            "id": vid,
+            "title": meta["song"],
+            "artist": meta["artist"],
+            "genre": meta.get("genre"),
+            "album": meta.get("album"),
+            "url": link,
+            "is_topic": is_topic,
+            "score": score
+        }
+        channel_desc = "Topic channel" if is_topic else (f"Channel: '{author}'" if author else "Standard")
+        print(f"  └─ ✅ [Music Match]: Found '{meta['song']}' by '{meta['artist']}' ({channel_desc}) -> {link} [Score: {score}/3 | Reason: {reason}]")
+        return entry
+
+    from concurrent.futures import ThreadPoolExecutor
 
     for q in queries_to_try:
         batch_candidates = []
@@ -156,48 +201,25 @@ def resolve_youtube_music_link(query: str, max_results: int = 1) -> list[dict]:
 
         print(f"  └─ 🔎 [Music Resolver]: Verifying {len(batch_candidates)} candidate URL(s) from query...")
 
-        for vid, raw_title, href in batch_candidates:
-            # 1. Shorts filter
-            if is_youtube_short(vid, href=href, title=raw_title):
-                print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - YouTube Short.")
-                continue
+        # Check top candidate first for fast 1-candidate short-circuit when Topic/Official video is embeddable
+        first_entry = _verify_single_candidate(batch_candidates[0])
+        if first_entry:
+            verified_candidates.append(first_entry)
+            if len(verified_candidates) >= max_results and first_entry.get("score", 0) >= 2:
+                break
 
-            # 2. Embeddability check (with Discord third-party Referer/origin)
-            if not verify_embeddable(vid):
-                print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - Embedding disabled on Discord.")
-                continue
-
-            # 3. Fetch oEmbed metadata (0 API quota units)
-            oembed = get_video_oembed(vid)
-            if not oembed.get("title"):
-                print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{raw_title}') - Failed oEmbed verification (cannot embed in Discord).")
-                continue
-            title = oembed["title"]
-            author = oembed.get("author", "")
-
-            # 4. Robust Garbage & Relevance match check
-            is_valid, score, reason = score_music_candidate(query, title, author)
-            if not is_valid:
-                print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{title}'): {reason}")
-                continue
-
-            is_topic = " - Topic" in author or "Topic" in author
-            link = f"https://music.youtube.com/watch?v={vid}"
-            meta = parse_song_meta(title, author, query=query)
-
-            entry = {
-                "id": vid,
-                "title": meta["song"],
-                "artist": meta["artist"],
-                "genre": meta.get("genre"),
-                "album": meta.get("album"),
-                "url": link,
-                "is_topic": is_topic,
-                "score": score
-            }
-            verified_candidates.append(entry)
-            channel_desc = "Topic channel" if is_topic else (f"Channel: '{author}'" if author else "Standard")
-            print(f"  └─ ✅ [Music Match]: Found '{meta['song']}' by '{meta['artist']}' ({channel_desc}) -> {link} [Score: {score}/3 | Reason: {reason}]")
+        # If more candidates need checking (e.g. top candidate was UMG-blocked or score 1), verify remaining batch concurrently
+        remaining = batch_candidates[1:]
+        if remaining:
+            if len(remaining) == 1:
+                rem_entry = _verify_single_candidate(remaining[0])
+                if rem_entry:
+                    verified_candidates.append(rem_entry)
+            else:
+                with ThreadPoolExecutor(max_workers=min(4, len(remaining))) as pool:
+                    for rem_entry in pool.map(_verify_single_candidate, remaining):
+                        if rem_entry:
+                            verified_candidates.append(rem_entry)
 
         # Stop querying once we have enough verified embeddable candidates
         if len(verified_candidates) >= max_results:

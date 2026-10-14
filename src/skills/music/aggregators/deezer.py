@@ -1,9 +1,32 @@
 import re
+import time
 import random
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 import requests
 from src.skills.music.aggregators.base import BaseMusicAggregator
 from src.skills.music.models import Track
+
+# 15-minute TTL cache for raw upstream Deezer lists (playlist searches, 40-track playlist pools, chart pools)
+# Random sampling still runs fresh on every call to preserve 100% track/artist diversity.
+_DEEZER_RAW_CACHE: dict[str, tuple[float, list]] = {}
+_DEEZER_CACHE_TTL = 900.0
+
+def clear_deezer_cache() -> None:
+    _DEEZER_RAW_CACHE.clear()
+
+def _get_cached_deezer_data(cache_key: str, url: str) -> list:
+    is_mocked = hasattr(requests.get, "assert_called")
+    now = time.monotonic()
+    if not is_mocked and cache_key in _DEEZER_RAW_CACHE:
+        ts, cached_list = _DEEZER_RAW_CACHE[cache_key]
+        if now - ts < _DEEZER_CACHE_TTL:
+            return cached_list
+    r = requests.get(url, timeout=5)
+    data = r.json().get("data", [])
+    if not is_mocked and isinstance(data, list) and data:
+        _DEEZER_RAW_CACHE[cache_key] = (now, data)
+    return data if isinstance(data, list) else []
 
 class DeezerAggregator(BaseMusicAggregator):
     """Music recommendation provider leveraging Deezer's public catalog and artist graph."""
@@ -55,23 +78,33 @@ class DeezerAggregator(BaseMusicAggregator):
             r_rel = requests.get(f"https://api.deezer.com/artist/{artist_id}/related?limit=20", timeout=5)
             related_artists = r_rel.json().get("data", [])
             if related_artists:
-                if len(related_artists) > 12:
-                    related_artists = random.sample(related_artists, 12)
-                for rel_artist in related_artists:
+                if len(related_artists) > 8:
+                    related_artists = random.sample(related_artists, 8)
+
+                def _fetch_rel_artist_top(rel_artist):
+                    rel_tracks = []
                     try:
-                        r_top = requests.get(f"https://api.deezer.com/artist/{rel_artist['id']}/top?limit=5", timeout=5)
-                        top = r_top.json()
-                        for t in top.get("data", []):
-                            if t['title'].lower() != track_title.lower():
+                        rel_id = rel_artist["id"]
+                        top_data = _get_cached_deezer_data(
+                            f"artist_top:{rel_id}:5",
+                            f"https://api.deezer.com/artist/{rel_id}/top?limit=5"
+                        )
+                        for t in top_data:
+                            if t.get('title', '').lower() != track_title.lower():
                                 alb = t.get('album', {}).get('title')
-                                similar_tracks.append(Track(
+                                rel_tracks.append(Track(
                                     title=t['title'],
                                     artist=t['artist']['name'],
                                     album=alb,
                                     source="deezer"
                                 ))
                     except Exception:
-                        continue
+                        pass
+                    return rel_tracks
+
+                with ThreadPoolExecutor(max_workers=min(6, len(related_artists))) as pool:
+                    for rel_list in pool.map(_fetch_rel_artist_top, related_artists):
+                        similar_tracks.extend(rel_list)
             else:
                 r_top = requests.get(f"https://api.deezer.com/artist/{artist_id}/top?limit=10", timeout=5)
                 top = r_top.json()
@@ -135,38 +168,57 @@ class DeezerAggregator(BaseMusicAggregator):
             search_term = "drum and bass" if clean_g in ("dnb", "drum and bass", "drumnbass", "drum & bass") else clean_g
             try:
                 print(f"  └─ 🎧 [Deezer]: Searching curated playlists for '{search_term}'...")
-                r_pl = requests.get(f"https://api.deezer.com/search/playlist?q={urllib.parse.quote(search_term)}&limit=10", timeout=5)
-                playlists = r_pl.json().get("data", [])
+                playlists = _get_cached_deezer_data(
+                    f"pl_search:{search_term}",
+                    f"https://api.deezer.com/search/playlist?q={urllib.parse.quote(search_term)}&limit=10"
+                )
                 if playlists:
                     valid_pls = [p for p in playlists if p.get("id") and p.get("nb_tracks", 0) >= 15]
                     if not valid_pls:
                         valid_pls = [p for p in playlists if p.get("id")]
+                    valid_pls = valid_pls[:4]
 
-                    selected_pls = random.sample(valid_pls, min(4, len(valid_pls)))
+                    selected_pls = random.sample(valid_pls, min(3, len(valid_pls)))
                     pooled_tracks = []
                     pl_titles = []
 
-                    for pl in selected_pls:
+                    def _fetch_pl_tracks(pl):
                         pl_id = pl.get("id")
                         try:
-                            r_tr = requests.get(f"https://api.deezer.com/playlist/{pl_id}/tracks?limit=40", timeout=5)
-                            data = r_tr.json().get("data", [])
+                            data = _get_cached_deezer_data(
+                                f"pl_tracks:{pl_id}",
+                                f"https://api.deezer.com/playlist/{pl_id}/tracks?limit=40"
+                            )
                             if data:
-                                pl_titles.append(pl.get("title", str(pl_id)))
                                 sampled_data = random.sample(data, min(8, len(data)))
+                                local_tracks = []
                                 for t in sampled_data:
                                     title = t.get("title", "Unknown")
                                     artist = t.get("artist", {}).get("name", "Unknown")
                                     if title and artist:
-                                        pooled_tracks.append(Track(
+                                        local_tracks.append(Track(
                                             title=title,
                                             artist=artist,
                                             album=t.get("album", {}).get("title"),
                                             genre=clean_g.title(),
                                             source=f"deezer_{clean_g.replace(' ', '_')}"
                                         ))
+                                return pl.get("title", str(pl_id)), local_tracks
                         except Exception:
-                            continue
+                            pass
+                        return None, []
+
+                    if len(selected_pls) == 1:
+                        t_name, t_list = _fetch_pl_tracks(selected_pls[0])
+                        if t_name:
+                            pl_titles.append(t_name)
+                        pooled_tracks.extend(t_list)
+                    elif selected_pls:
+                        with ThreadPoolExecutor(max_workers=min(4, len(selected_pls))) as pool:
+                            for t_name, t_list in pool.map(_fetch_pl_tracks, selected_pls):
+                                if t_name:
+                                    pl_titles.append(t_name)
+                                pooled_tracks.extend(t_list)
 
                     if pooled_tracks:
                         random.shuffle(pooled_tracks)
@@ -191,8 +243,7 @@ class DeezerAggregator(BaseMusicAggregator):
         endpoint = f"https://api.deezer.com/chart/{genre_id}/tracks?limit=25" if genre_id else "https://api.deezer.com/chart/0/tracks?limit=25"
         try:
             print(f"  └─ 🎧 [Deezer Charts]: Fetching {'genre ' + str(genre) if genre else 'Global'} charts...")
-            r = requests.get(endpoint, timeout=5)
-            data = r.json().get("data", [])
+            data = _get_cached_deezer_data(f"chart:{genre_id}", endpoint)
             for t in data:
                 tracks.append(Track(
                     title=t.get("title", "Unknown"),

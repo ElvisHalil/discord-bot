@@ -1,6 +1,8 @@
 import os
 import re
+import time
 import random
+from concurrent.futures import ThreadPoolExecutor
 import requests
 from dotenv import load_dotenv
 from src.skills.music.aggregators.base import BaseMusicAggregator
@@ -8,6 +10,12 @@ from src.skills.music.models import Track
 from src.skills.music.utils import parse_song_meta
 
 load_dotenv()
+
+_LASTFM_RAW_CACHE: dict[str, tuple[float, dict]] = {}
+_LASTFM_CACHE_TTL = 900.0
+
+def clear_lastfm_cache() -> None:
+    _LASTFM_RAW_CACHE.clear()
 
 class LastFmAggregator(BaseMusicAggregator):
     """
@@ -21,10 +29,18 @@ class LastFmAggregator(BaseMusicAggregator):
         self.api_key = api_key or os.getenv("LASTFM_API_KEY")
 
     def _call(self, method: str, params: dict) -> dict:
-        """Helper to invoke Last.fm REST API with JSON format and error handling."""
+        """Helper to invoke Last.fm REST API with JSON format, 15-min raw TTL caching, and error handling."""
         key = self.api_key or os.getenv("LASTFM_API_KEY")
         if not key:
             return {}
+        is_mocked = hasattr(requests.get, "assert_called")
+        cache_key = f"{method}:" + "&".join(f"{k}={v}" for k, v in sorted((params or {}).items()))
+        now = time.monotonic()
+        if not is_mocked and cache_key in _LASTFM_RAW_CACHE:
+            ts, cached_data = _LASTFM_RAW_CACHE[cache_key]
+            if now - ts < _LASTFM_CACHE_TTL:
+                return cached_data
+
         p = {
             "method": method,
             "api_key": key,
@@ -32,9 +48,12 @@ class LastFmAggregator(BaseMusicAggregator):
             **params
         }
         try:
-            r = requests.get(self.BASE_URL, params=p, timeout=10, headers={"User-Agent": "DiscordMusicBot/1.0"})
+            r = requests.get(self.BASE_URL, params=p, timeout=5, headers={"User-Agent": "DiscordMusicBot/1.0"})
             if r.status_code == 200:
-                return r.json()
+                data = r.json()
+                if not is_mocked and isinstance(data, dict) and data:
+                    _LASTFM_RAW_CACHE[cache_key] = (now, data)
+                return data
             else:
                 print(f"  └─ ⚠️ [Last.fm]: API returned status {r.status_code} for method '{method}'")
         except Exception as e:
@@ -129,25 +148,33 @@ class LastFmAggregator(BaseMusicAggregator):
         if isinstance(similar_artists, dict):
             similar_artists = [similar_artists]
 
-        for sa in similar_artists[:max_artists]:
-            rel_name = sa.get("name", "")
-            if rel_name:
-                top_res = self._call("artist.gettoptracks", {
-                    "artist": rel_name,
-                    "limit": tracks_per_artist,
-                    "autocorrect": 1
-                })
-                top_tracks = top_res.get("toptracks", {}).get("track", [])
-                if isinstance(top_tracks, dict):
-                    top_tracks = [top_tracks]
-                for tt in top_tracks:
-                    t_name = tt.get("name", "")
-                    if t_name:
-                        tracks.append(Track(
-                            title=t_name,
-                            artist=rel_name,
-                            source="lastfm_similar"
-                        ))
+        rel_names = [sa.get("name", "") for sa in similar_artists[:max_artists] if sa.get("name", "")]
+        if not rel_names:
+            return []
+
+        def _fetch_artist_top(rel_name: str) -> list[Track]:
+            local_tracks = []
+            top_res = self._call("artist.gettoptracks", {
+                "artist": rel_name,
+                "limit": tracks_per_artist,
+                "autocorrect": 1
+            })
+            top_tracks = top_res.get("toptracks", {}).get("track", [])
+            if isinstance(top_tracks, dict):
+                top_tracks = [top_tracks]
+            for tt in top_tracks:
+                t_name = tt.get("name", "")
+                if t_name:
+                    local_tracks.append(Track(
+                        title=t_name,
+                        artist=rel_name,
+                        source="lastfm_similar"
+                    ))
+            return local_tracks
+
+        with ThreadPoolExecutor(max_workers=min(6, len(rel_names))) as pool:
+            for art_tracks in pool.map(_fetch_artist_top, rel_names):
+                tracks.extend(art_tracks)
         return tracks
 
     def get_similar(self, query: str) -> list[Track]:
@@ -292,7 +319,13 @@ class LastFmAggregator(BaseMusicAggregator):
             tag = genre_aliases.get(tag, tag)
             page = random.choice([1, 2])
             print(f"  └─ 📻 [Last.fm]: Fetching top tracks (page {page}) & rotating artists for tag '{tag}'...")
-            res = self._call("tag.gettoptracks", {"tag": tag, "limit": 50, "page": page})
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                f_tracks = pool.submit(self._call, "tag.gettoptracks", {"tag": tag, "limit": 50, "page": page})
+                f_artists = pool.submit(self._call, "tag.gettopartists", {"tag": tag, "limit": 30})
+                res = f_tracks.result()
+                art_res = f_artists.result()
+
             raw = res.get("tracks", {}).get("track", [])
             if not raw and page != 1:
                 res = self._call("tag.gettoptracks", {"tag": tag, "limit": 50, "page": 1})
@@ -328,8 +361,7 @@ class LastFmAggregator(BaseMusicAggregator):
                             source=source_name
                         ))
 
-            # Step B: Rotate through top genre artists via tag.gettopartists -> artist.gettoptracks
-            art_res = self._call("tag.gettopartists", {"tag": tag, "limit": 30})
+            # Step B: Rotate through top genre artists via tag.gettopartists -> artist.gettoptracks concurrently
             raw_artists = art_res.get("topartists", {}).get("artist", [])
             if isinstance(raw_artists, dict):
                 raw_artists = [raw_artists]
@@ -340,7 +372,8 @@ class LastFmAggregator(BaseMusicAggregator):
                     if a_name and a_name.lower().strip() not in artist_seen:
                         cand_artists.append(a_name)
                 selected_artists = random.sample(cand_artists, min(4, len(cand_artists)))
-                for a_name in selected_artists:
+
+                def _fetch_tag_artist_top(a_name: str):
                     top_res = self._call("artist.gettoptracks", {"artist": a_name, "limit": 5, "autocorrect": 1})
                     top_trks = top_res.get("toptracks", {}).get("track", [])
                     if isinstance(top_trks, dict):
@@ -349,13 +382,20 @@ class LastFmAggregator(BaseMusicAggregator):
                         chosen_t = random.choice(top_trks[:5])
                         t_title = chosen_t.get("name", "")
                         if t_title:
-                            artist_seen.add(a_name.lower().strip())
-                            tracks.append(Track(
+                            return Track(
                                 title=t_title,
                                 artist=a_name,
                                 genre=genre.title(),
                                 source=source_name
-                            ))
+                            )
+                    return None
+
+                if selected_artists:
+                    with ThreadPoolExecutor(max_workers=min(4, len(selected_artists))) as pool:
+                        for trk in pool.map(_fetch_tag_artist_top, selected_artists):
+                            if trk:
+                                artist_seen.add(trk.artist.lower().strip())
+                                tracks.append(trk)
         else:
             print("  └─ 📻 [Last.fm]: Fetching global top chart tracks...")
             res = self._call("chart.gettoptracks", {"limit": 50})

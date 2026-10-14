@@ -225,60 +225,63 @@ class MusicAggregatorManager:
             }
             print(f"  └─ 🎭 [Mood Discovery]: Resolving standalone multi-genre vibe '{canon_mood}'...")
 
+        from concurrent.futures import ThreadPoolExecutor
         all_tracks = []
         deezer = self.aggregators.get("deezer")
         lastfm = self.aggregators.get("lastfm")
         beatport = self.aggregators.get("beatport")
 
+        tasks = []
         # 1. Deezer curated vibe playlists (sample up to 4 cross-genre or subgenre queries)
         dz_queries = list(profile.get("deezer_queries", []))
         if deezer and dz_queries:
             selected_dz = random.sample(dz_queries, min(4, len(dz_queries)))
             for q in selected_dz:
-                all_tracks.extend(deezer.get_charts(genre=q))
+                tasks.append((deezer.get_charts, q))
 
         # 2. Last.fm vibe/subgenre tags (sample up to 2 tags)
         lfm_tags = list(profile.get("lastfm_tags", []))
         if lastfm and lfm_tags:
             selected_tags = random.sample(lfm_tags, min(2, len(lfm_tags)))
             for tag in selected_tags:
-                all_tracks.extend(lastfm.get_charts(genre=tag))
+                tasks.append((lastfm.get_charts, tag))
 
         # 3. Beatport via Deezer (when applicable for electronic vibes)
         bp_query = profile.get("beatport_query")
         if beatport and bp_query:
-            all_tracks.extend(beatport.get_charts(genre=bp_query))
+            tasks.append((beatport.get_charts, bp_query))
+
+        if tasks:
+            with ThreadPoolExecutor(max_workers=min(7, len(tasks))) as pool:
+                futures = [pool.submit(fn, genre=arg) for fn, arg in tasks]
+                for fut in futures:
+                    try:
+                        all_tracks.extend(fut.result() or [])
+                    except Exception:
+                        pass
 
         random.shuffle(all_tracks)
         return self._filter_and_deduplicate(all_tracks, exclude_query=similar_to)
 
     def get_top_charts(self, genre: str = None, mood: str = None) -> list[Track]:
-        """Fetches trending and charting music across Last.fm, Beatport, and global charts, or delegates to mood discovery."""
+        """Fetches trending and charting music across Last.fm, Beatport, and global charts concurrently, or delegates to mood discovery."""
+        from concurrent.futures import ThreadPoolExecutor
         parsed_genre, parsed_mood = parse_mood_and_genre(genre, mood)
         if parsed_mood:
             return self.get_mood_tracks(mood=parsed_mood, genre=parsed_genre)
 
         all_tracks = []
+        provider_names = ("lastfm", "beatport", "deezer", "charts")
+        active_providers = [self.aggregators[name] for name in provider_names if self.aggregators.get(name)]
 
-        # 1. Last.fm charts (global trending or genre tag)
-        lastfm = self.aggregators.get("lastfm")
-        if lastfm:
-            all_tracks.extend(lastfm.get_charts(genre=parsed_genre))
-
-        # 2. Beatport charts
-        beatport = self.aggregators.get("beatport")
-        if beatport:
-            all_tracks.extend(beatport.get_charts(genre=parsed_genre))
-
-        # 3. Deezer charts (reliable public API with genre support)
-        deezer = self.aggregators.get("deezer")
-        if deezer:
-            all_tracks.extend(deezer.get_charts(genre=parsed_genre))
-
-        # 4. Global streaming and radio charts (Spotify, YouTube, Kworb, iTunes)
-        charts = self.aggregators.get("charts")
-        if charts:
-            all_tracks.extend(charts.get_charts(genre=parsed_genre))
+        if active_providers:
+            with ThreadPoolExecutor(max_workers=len(active_providers)) as pool:
+                futures = [pool.submit(prov.get_charts, genre=parsed_genre) for prov in active_providers]
+                for fut in futures:
+                    try:
+                        all_tracks.extend(fut.result() or [])
+                    except Exception:
+                        pass
 
         return self._filter_and_deduplicate(all_tracks)
 

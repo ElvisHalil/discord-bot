@@ -3,23 +3,47 @@ import re
 import requests
 from ddgs import DDGS
 
+# In-memory caches to eliminate duplicate network requests across resolution & post-processing
+_OEMBED_CACHE: dict[str, dict] = {}
+_EMBEDDABLE_CACHE: dict[str, bool] = {}
+_SHORT_CACHE: dict[str, bool] = {}
+
+def clear_youtube_caches() -> None:
+    """Clears in-memory YouTube verification and oEmbed caches."""
+    _OEMBED_CACHE.clear()
+    _EMBEDDABLE_CACHE.clear()
+    _SHORT_CACHE.clear()
+
 def verify_embeddable(vid: str) -> bool:
     """
     Verifies that a YouTube video can be embedded on third-party sites like Discord.
     Checks:
     1. Valid 11-char YouTube ID.
-    2. Official YouTube oEmbed API returns 200 OK (returns 401 if owner disabled embedding or video is age-restricted).
-    3. Embed page (https://www.youtube.com/embed/{vid}) does not contain unplayable or disabled markers.
+    2. Official YouTube oEmbed API returns 200 OK (and caches title/author for 0ms reuse).
+    3. Embed page (https://www.youtube.com/embed/{vid}) with Discord's third-party Referer/origin
+       does not contain unplayable or label-disabled markers.
     """
     if not vid or not re.match(r'^[0-9A-Za-z_-]{11}$', vid):
         return False
+    if _EMBEDDABLE_CACHE.get(vid) is True:
+        return True
     try:
         # Step 1: oEmbed check (standard third-party embed gateway used by Discord)
-        oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json"
-        oembed_res = requests.get(oembed_url, timeout=3)
-        if oembed_res.status_code != 200:
-            print(f"⚠️ [YouTube]: Skipping {vid} because oEmbed status is {oembed_res.status_code} (not embeddable).")
-            return False
+        if vid not in _OEMBED_CACHE:
+            oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json"
+            oembed_res = requests.get(oembed_url, timeout=3)
+            if oembed_res.status_code != 200:
+                print(f"⚠️ [YouTube]: Skipping {vid} because oEmbed status is {oembed_res.status_code} (not embeddable).")
+                return False
+            try:
+                data = oembed_res.json()
+                if isinstance(data, dict) and data.get("title"):
+                    _OEMBED_CACHE[vid] = {
+                        "title": data.get("title", ""),
+                        "author": data.get("author_name", "")
+                    }
+            except Exception:
+                pass
 
         # Step 2: Embed page response check (simulating Discord's third-party iframe Referer & origin
         # so label/owner restrictions like UMG/SME "blocked it from display on this website" are triggered)
@@ -52,37 +76,58 @@ def verify_embeddable(vid: str) -> bool:
             print(f"⚠️ [YouTube]: Skipping {vid} because embed page indicated unplayable/disabled on Discord.")
             return False
 
+        _EMBEDDABLE_CACHE[vid] = True
         return True
     except Exception as e:
         print(f"⚠️ [YouTube]: Verification failed for {vid}: {e}")
         return False
 
 def get_video_oembed(vid: str) -> dict:
-    """Fetches video title and channel author via YouTube oEmbed."""
+    """Fetches video title and channel author via YouTube oEmbed (using in-memory cache when available)."""
+    if vid and vid in _OEMBED_CACHE:
+        return _OEMBED_CACHE[vid]
     try:
         oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json"
         res = requests.get(oembed_url, timeout=3)
         if res.status_code == 200:
             data = res.json()
-            return {
-                "title": data.get("title", ""),
-                "author": data.get("author_name", "")
-            }
+            if isinstance(data, dict):
+                entry = {
+                    "title": data.get("title", ""),
+                    "author": data.get("author_name", "")
+                }
+                if vid and entry["title"]:
+                    _OEMBED_CACHE[vid] = entry
+                return entry
     except Exception:
         pass
     return {"title": "", "author": ""}
 
 def is_youtube_short(vid: str, href: str = "", title: str = "") -> bool:
     """Detects if a YouTube video is a Short via URL structure, title tags, or HTTP redirect check."""
-    if "/shorts/" in (href or "").lower():
+    href_low = (href or "").lower()
+    title_low = (title or "").lower()
+    if "/shorts/" in href_low:
+        if vid:
+            _SHORT_CACHE[vid] = True
         return True
-    if "#shorts" in (title or "").lower() or "#short" in (title or "").lower():
+    if "#shorts" in title_low or "#short" in title_low:
+        if vid:
+            _SHORT_CACHE[vid] = True
         return True
+    if vid and vid in _SHORT_CACHE:
+        return _SHORT_CACHE[vid]
+    if "music.youtube.com" in href_low:
+        if vid:
+            _SHORT_CACHE[vid] = False
+        return False
     try:
-        r = requests.head(f"https://www.youtube.com/shorts/{vid}", allow_redirects=False, timeout=3)
+        r = requests.head(f"https://www.youtube.com/shorts/{vid}", allow_redirects=False, timeout=2.5)
         # Shorts return HTTP 200; standard videos redirect (HTTP 303/302) to /watch?v=
-        if r.status_code == 200:
-            return True
+        is_short = (r.status_code == 200)
+        if vid:
+            _SHORT_CACHE[vid] = is_short
+        return is_short
     except Exception:
         pass
     return False

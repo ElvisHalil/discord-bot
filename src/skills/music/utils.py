@@ -132,12 +132,11 @@ def get_music_metadata(vid: str, fallback_text: str = "", fallback_title: str = 
 
     if vid:
         try:
-            oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json"
-            r = requests.get(oembed_url, timeout=3)
-            if r.status_code == 200:
-                data = r.json()
+            from src.skills.youtube.client import get_video_oembed
+            data = get_video_oembed(vid)
+            if data and data.get("title"):
                 title = data.get("title", title)
-                author = data.get("author_name", author)
+                author = data.get("author", author)
                 oembed_success = True
         except Exception:
             pass

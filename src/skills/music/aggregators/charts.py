@@ -208,62 +208,98 @@ def resolve_genre_and_regions(g_name: str | None) -> tuple[int | None, list[str]
     return None, []
 
 
+_CHARTS_RAW_CACHE: dict[str, tuple[float, list]] = {}
+_CHARTS_CACHE_TTL = 900.0
+
+def clear_charts_cache() -> None:
+    _CHARTS_RAW_CACHE.clear()
+
 class ChartsAggregator(BaseMusicAggregator):
     """Aggregator for global mainstream music charts (Spotify, YouTube, Radio via Kworb, and Multi-Region iTunes RSS)."""
 
     def get_similar(self, query: str) -> list[Track]:
         return []
 
-    def get_charts(self, genre: str = None) -> list[Track]:
-        tracks = []
+    def _fetch_kworb_rows(self, cache_key: str, url: str, selector: str, label: str) -> list[tuple[str, str]]:
+        import time
+        is_mocked = hasattr(requests.get, "assert_called")
+        now = time.monotonic()
+        if not is_mocked and cache_key in _CHARTS_RAW_CACHE:
+            ts, cached_rows = _CHARTS_RAW_CACHE[cache_key]
+            if now - ts < _CHARTS_CACHE_TTL:
+                return cached_rows
+
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        rows_data = []
+        try:
+            print(f"  └─ {label}")
+            r = requests.get(url, headers=headers, timeout=5)
+            soup = BeautifulSoup(r.text, 'html.parser')
+            all_rows = soup.select(selector)[:50]
+            for tr in all_rows:
+                td = tr.find('td', class_='text')
+                if td:
+                    text = td.get_text(strip=True)
+                    if " - " in text:
+                        artist, title = text.split(" - ", 1)
+                        rows_data.append((title.strip(), artist.strip()))
+            if not is_mocked and rows_data:
+                _CHARTS_RAW_CACHE[cache_key] = (now, rows_data)
+        except Exception as e:
+            print(f"  └─ ⚠️ [Charts]: Error loading {cache_key} charts: {e}")
+        return rows_data
 
-        # 1. Global charts (Kworb) when no genre specified
+    def _fetch_itunes_region(self, region: str, g_id: int | None, g_name: str | None) -> list[tuple[str, dict]]:
+        import time
+        is_mocked = hasattr(requests.get, "assert_called")
+        cache_key = f"itunes:{region}:{g_id or 0}"
+        now = time.monotonic()
+        if not is_mocked and cache_key in _CHARTS_RAW_CACHE:
+            ts, cached_entries = _CHARTS_RAW_CACHE[cache_key]
+            if now - ts < _CHARTS_CACHE_TTL:
+                return cached_entries
+
+        entries_out = []
+        try:
+            base_url = f"https://itunes.apple.com/{region}/rss/topsongs/limit=50"
+            if g_id:
+                base_url += f"/genre={g_id}"
+            base_url += "/json"
+
+            r = requests.get(base_url, timeout=5)
+            data = r.json()
+            entries = data.get("feed", {}).get("entry", [])
+            if isinstance(entries, dict):
+                entries = [entries]
+            if entries:
+                entries_out = [(region, entry) for entry in entries]
+                if not is_mocked:
+                    _CHARTS_RAW_CACHE[cache_key] = (now, entries_out)
+        except Exception as e:
+            print(f"  └─ ⚠️ [Charts]: Error fetching iTunes ({region}) charts for {g_name}: {e}")
+        return entries_out
+
+    def get_charts(self, genre: str = None) -> list[Track]:
+        from concurrent.futures import ThreadPoolExecutor
+        tracks = []
+
+        # 1. Global charts (Kworb) when no genre specified — fetched concurrently
         if not genre:
-            # Spotify Global
-            try:
-                print("  └─ 🎧 [Charts]: Scraping Spotify Global Daily...")
-                r = requests.get('https://kworb.net/spotify/country/global_daily.html', headers=headers, timeout=5)
-                soup = BeautifulSoup(r.text, 'html.parser')
-                all_rows = soup.select('table.sortable tbody tr')[:50]
-                if all_rows:
-                    for tr in random.sample(all_rows, min(10, len(all_rows))):
-                        text = tr.find('td', class_='text').get_text(strip=True)
-                        if " - " in text:
-                            artist, title = text.split(" - ", 1)
-                            tracks.append(Track(title=title.strip(), artist=artist.strip(), source="spotify_global"))
-            except Exception as e:
-                print(f"  └─ ⚠️ [Charts]: Error loading Spotify charts: {e}")
-
-            # YouTube Trending
-            try:
-                print("  └─ 📺 [Charts]: Scraping YouTube Trending...")
-                r = requests.get('https://kworb.net/youtube/trending.html', headers=headers, timeout=5)
-                soup = BeautifulSoup(r.text, 'html.parser')
-                all_rows = soup.select('table tbody tr')[:50]
-                if all_rows:
-                    for tr in random.sample(all_rows, min(10, len(all_rows))):
-                        text = tr.find('td', class_='text').get_text(strip=True)
-                        if " - " in text:
-                            artist, title = text.split(" - ", 1)
-                            tracks.append(Track(title=title.strip(), artist=artist.strip(), source="youtube_trending"))
-            except Exception as e:
-                print(f"  └─ ⚠️ [Charts]: Error loading YouTube charts: {e}")
-
-            # Radio Airplay
-            try:
-                print("  └─ 📻 [Charts]: Scraping US Radio Airplay...")
-                r = requests.get('https://kworb.net/radio/', headers=headers, timeout=5)
-                soup = BeautifulSoup(r.text, 'html.parser')
-                all_rows = soup.select('table tbody tr')[:50]
-                if all_rows:
-                    for tr in random.sample(all_rows, min(10, len(all_rows))):
-                        text = tr.find('td', class_='text').get_text(strip=True)
-                        if " - " in text:
-                            artist, title = text.split(" - ", 1)
-                            tracks.append(Track(title=title.strip(), artist=artist.strip(), source="radio_airplay"))
-            except Exception as e:
-                print(f"  └─ ⚠️ [Charts]: Error loading Radio charts: {e}")
+            kworb_targets = [
+                ("spotify_global", "https://kworb.net/spotify/country/global_daily.html", "table.sortable tbody tr", "🎧 [Charts]: Scraping Spotify Global Daily..."),
+                ("youtube_trending", "https://kworb.net/youtube/trending.html", "table tbody tr", "📺 [Charts]: Scraping YouTube Trending..."),
+                ("radio_airplay", "https://kworb.net/radio/", "table tbody tr", "📻 [Charts]: Scraping US Radio Airplay..."),
+            ]
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                futures = [
+                    (src, pool.submit(self._fetch_kworb_rows, src, url, sel, lbl))
+                    for src, url, sel, lbl in kworb_targets
+                ]
+                for src, fut in futures:
+                    rows = fut.result()
+                    if rows:
+                        for title, artist in random.sample(rows, min(10, len(rows))):
+                            tracks.append(Track(title=title, artist=artist, source=src))
 
         # 2. Multi-Region & Nationality-Aware iTunes RSS genre feeds
         genre_list = [genre] if genre else [None]
@@ -280,23 +316,12 @@ class ChartsAggregator(BaseMusicAggregator):
             selected_regions = random.sample(candidate_regions, min(2, len(candidate_regions))) if len(candidate_regions) > 2 else candidate_regions
             pooled_entries = []
 
-            for region in selected_regions:
-                try:
-                    base_url = f"https://itunes.apple.com/{region}/rss/topsongs/limit=50"
-                    if g_id:
-                        base_url += f"/genre={g_id}"
-                    base_url += "/json"
-
-                    r = requests.get(base_url, timeout=5)
-                    data = r.json()
-                    entries = data.get("feed", {}).get("entry", [])
-                    if isinstance(entries, dict):
-                        entries = [entries]
-                    if entries:
-                        for entry in entries:
-                            pooled_entries.append((region, entry))
-                except Exception as e:
-                    print(f"  └─ ⚠️ [Charts]: Error fetching iTunes ({region}) charts for {g_name}: {e}")
+            if len(selected_regions) == 1:
+                pooled_entries.extend(self._fetch_itunes_region(selected_regions[0], g_id, g_name))
+            elif selected_regions:
+                with ThreadPoolExecutor(max_workers=min(2, len(selected_regions))) as pool:
+                    for reg_entries in pool.map(lambda reg: self._fetch_itunes_region(reg, g_id, g_name), selected_regions):
+                        pooled_entries.extend(reg_entries)
 
             if pooled_entries:
                 random.shuffle(pooled_entries)

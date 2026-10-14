@@ -121,6 +121,14 @@ class TestMusicMetadata(unittest.TestCase):
 class TestEmbeddability(unittest.TestCase):
     """Test suite ensuring YouTube links are embeddable and playable in Discord."""
 
+    def setUp(self):
+        from src.skills.youtube.client import clear_youtube_caches
+        clear_youtube_caches()
+
+    def tearDown(self):
+        from src.skills.youtube.client import clear_youtube_caches
+        clear_youtube_caches()
+
     def test_verify_embeddable_invalid_id(self):
         from src.skills.youtube.client import verify_embeddable
         self.assertFalse(verify_embeddable(""))
@@ -159,14 +167,22 @@ class TestEmbeddability(unittest.TestCase):
 
     @patch("src.skills.youtube.client.requests.get")
     def test_verify_embeddable_success(self, mock_get):
-        from src.skills.youtube.client import verify_embeddable
+        from src.skills.youtube.client import verify_embeddable, get_video_oembed
         oembed_resp = MagicMock()
         oembed_resp.status_code = 200
+        oembed_resp.json.return_value = {"title": "Strobe", "author_name": "deadmau5 - Topic"}
         embed_resp = MagicMock()
         embed_resp.status_code = 200
         embed_resp.text = "<html><body><div>Normal playable video player</div></body></html>"
         mock_get.side_effect = [oembed_resp, embed_resp]
         self.assertTrue(verify_embeddable("12345678901"))
+        self.assertEqual(mock_get.call_count, 2)
+
+        # Subsequent get_video_oembed and verify_embeddable calls for the same ID hit memory cache (0 network calls)
+        cached_oembed = get_video_oembed("12345678901")
+        self.assertEqual(cached_oembed, {"title": "Strobe", "author": "deadmau5 - Topic"})
+        self.assertTrue(verify_embeddable("12345678901"))
+        self.assertEqual(mock_get.call_count, 2)
 
     @patch("src.skills.youtube.client.verify_embeddable")
     @patch("src.skills.music.playback.youtube_music.resolve_youtube_music_link")
