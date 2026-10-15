@@ -28,7 +28,7 @@ _FALLBACK_CHANNEL_ID: Optional[int] = None
 _CHANNEL_LAST_MATCH_QUERY: Dict[int, Tuple[str, Optional[str]]] = {}
 
 SAFETY_TIMEOUT_SECONDS: int = 4 * 3600  # 4-hour maximum lifetime per tracked match
-DEFAULT_POLL_INTERVAL_SECONDS: int = 45
+DEFAULT_POLL_INTERVAL_SECONDS: int = 25
 
 
 def set_active_channel_id(channel_id: Optional[int]) -> None:
@@ -194,11 +194,18 @@ def extract_snapshot_from_summary(
     home_score = extract_score_str(home.get("score")) or "0"
     away_score = extract_score_str(away.get("score")) or "0"
 
+    team_id_to_name: Dict[str, str] = {}
+    for comp_item in competitors:
+        tid = str(comp_item.get("team", {}).get("id") or "")
+        tname = comp_item.get("team", {}).get("displayName") or comp_item.get("team", {}).get("shortDisplayName") or ""
+        if tid and tname:
+            team_id_to_name[tid] = tname
+
     notable_events: List[Tuple[str, str]] = []
     seen_ids: Set[str] = set()
 
     # 1. Parse soccer/general keyEvents
-    for kev in (summary_data or {}).get("keyEvents", []):
+    for kev in (summary_data or {}).get("keyEvents") or []:
         ev_id = str(kev.get("id") or "")
         ev_type = (kev.get("type", {}).get("text") or "").strip()
         clock = kev.get("clock", {}).get("displayValue", "")
@@ -213,8 +220,8 @@ def extract_snapshot_from_summary(
                 seen_ids.add(key)
                 notable_events.append((key, desc))
 
-    # 2. Parse NFL/NHL/MLB/NBA scoringPlays if present
-    for sp in (summary_data or {}).get("scoringPlays", []):
+    # 2. Parse NFL/MLB/NBA scoringPlays if present
+    for sp in (summary_data or {}).get("scoringPlays") or []:
         sp_id = str(sp.get("id") or "")
         clock = sp.get("clock", {}).get("displayValue", "")
         period_num = sp.get("period", {}).get("number", "")
@@ -227,7 +234,54 @@ def extract_snapshot_from_summary(
                 seen_ids.add(key)
                 notable_events.append((key, desc))
 
-    # 3. Extract brief team statistics (Possession, Shots, etc.)
+    # 3. Parse NHL / MLB / Soccer goals and scoring plays from `plays` when keyEvents/scoringPlays are absent
+    plays_list = (summary_data or {}).get("plays") or []
+    if plays_list and not notable_events:
+        scoring_plays = [
+            p for p in plays_list
+            if p.get("scoringPlay") or "goal" in (p.get("type", {}).get("text") or "").lower()
+        ]
+        # Avoid dumping 100+ basketball jump shots/free throws; NHL/Soccer/MLB/NFL have <= 35 scoring plays
+        is_goal_sport = any("goal" in (p.get("type", {}).get("text") or "").lower() for p in scoring_plays)
+        if is_goal_sport or len(scoring_plays) <= 35:
+            for p in scoring_plays:
+                p_id = str(p.get("id") or "")
+                ev_type = (p.get("type", {}).get("text") or "").strip()
+                clock = p.get("clock", {}).get("displayValue", "")
+                p_disp = (
+                    p.get("period", {}).get("displayValue")
+                    or (f"P{p.get('period', {}).get('number')}" if p.get("period", {}).get("number") else "")
+                )
+                strength = (p.get("strength", {}).get("text") or "").strip()
+                strength_tag = (
+                    f" [{strength}]"
+                    if strength and strength.lower() not in ("even strength", "none", "regular")
+                    else ""
+                )
+                t_id = str(p.get("team", {}).get("id") or "")
+                t_name = team_id_to_name.get(t_id, "")
+                team_tag = f" — {t_name}" if t_name else ""
+                text = (p.get("text") or ev_type).strip()
+                time_label = " ".join(x for x in (p_disp, clock) if x).strip()
+                icon = "🚨 GOAL!" if "goal" in ev_type.lower() or is_goal_sport else "🔥 SCORING PLAY"
+                desc = f"{icon} ({time_label}{strength_tag}{team_tag}): {text}".strip()
+                key = p_id or desc
+                if key not in seen_ids:
+                    seen_ids.add(key)
+                    notable_events.append((key, desc))
+
+                # If `plays` updated a few seconds before `header` on ESPN's CDN, sync the live score
+                try:
+                    p_home = p.get("homeScore")
+                    p_away = p.get("awayScore")
+                    if p_home is not None and int(p_home) > int(home_score):
+                        home_score = str(int(p_home))
+                    if p_away is not None and int(p_away) > int(away_score):
+                        away_score = str(int(p_away))
+                except (ValueError, TypeError):
+                    pass
+
+    # 4. Extract brief team statistics (Soccer, NHL, NFL, NBA)
     stat_parts: List[str] = []
     box_teams = (summary_data or {}).get("boxscore", {}).get("teams", [])
     if len(box_teams) >= 2:
@@ -239,12 +293,16 @@ def extract_snapshot_from_summary(
             ("possessionPct", "Possession"),
             ("totalShots", "Shots"),
             ("shotsOnTarget", "On Target"),
+            ("shotsTotal", "Shots on Goal"),
+            ("hits", "Hits"),
+            ("powerPlayGoals", "Power Play Goals"),
+            ("faceoffPercent", "Faceoffs"),
             ("wonCorners", "Corners"),
             ("totalYards", "Total Yards"),
             ("turnovers", "Turnovers"),
         ):
             if s_key in t1_stats and s_key in t2_stats:
-                suffix = "%" if s_key == "possessionPct" else ""
+                suffix = "%" if s_key in ("possessionPct", "faceoffPercent") else ""
                 stat_parts.append(f"{s_label}: {t1_name} {t1_stats[s_key]}{suffix} - {t2_stats[s_key]}{suffix} {t2_name}")
 
     return MatchSnapshot(
@@ -377,14 +435,25 @@ def resolve_live_or_next_event(
             sport_hint = "soccer"
             break
 
-    if not sport_hint and sport_clean in ("soccer", "epl", "ucl", "laliga", "seriea", "bundesliga", "ligue1", "mls"):
-        sport_hint = "soccer"
+    if not sport_hint:
+        if sport_clean in ("soccer", "epl", "ucl", "laliga", "seriea", "bundesliga", "ligue1", "mls"):
+            sport_hint = "soccer"
+        elif sport_clean in ("nhl", "hockey", "ice hockey") or re.search(r'\b(?:nhl|hockey)\b', target.lower()):
+            sport_hint = "hockey"
+            club_league = "nhl"
+        elif sport_clean in ("nba", "basketball", "hoops") or re.search(r'\b(?:nba|basketball)\b', target.lower()):
+            sport_hint = "basketball"
+            club_league = "nba"
+
+    # Strip sport/league name tokens from candidate targets so team resolution is clean
+    target_for_team = re.sub(r'\b(?:hockey|nhl|basketball|nba|soccer|football|baseball|mlb|nfl)\b', ' ', target, flags=re.IGNORECASE)
+    target_for_team = " ".join(target_for_team.split()).strip() or target
 
     # If target is a matchup (e.g. "as roma vs real madrid"), try each side so team auto-discovery succeeds
-    candidate_targets = [target]
-    if re.search(r'\b(?:vs|v)\b', target, flags=re.IGNORECASE):
-        parts = [p.strip() for p in re.split(r'\b(?:vs|v)\b', target, flags=re.IGNORECASE) if p.strip()]
-        candidate_targets = parts + [target]
+    candidate_targets = [target_for_team] if target_for_team == target else [target_for_team, target]
+    if re.search(r'\b(?:vs|v)\b', target_for_team, flags=re.IGNORECASE):
+        parts = [p.strip() for p in re.split(r'\b(?:vs|v)\b', target_for_team, flags=re.IGNORECASE) if p.strip()]
+        candidate_targets = parts + candidate_targets
 
     disc = None
     for cand_t in candidate_targets:
@@ -406,7 +475,7 @@ def resolve_live_or_next_event(
                 break
 
     sport_path = sport_path or "soccer"
-    league_code = league_code or club_league or "eng.1"
+    league_code = league_code or club_league or ("nhl" if sport_path == "hockey" else ("nba" if sport_path == "basketball" else "eng.1"))
 
     if not team_id:
         for cand_t in candidate_targets:
@@ -568,7 +637,7 @@ class LiveSportsTracker:
                 f"{match.league_code}/summary?event={match.event_id}"
             )
             try:
-                summary_data = await asyncio.to_thread(fetch_json, summary_url, 8)
+                summary_data = await asyncio.to_thread(fetch_json, summary_url, timeout=8)
                 if not summary_data:
                     continue
             except Exception as e:
@@ -587,11 +656,13 @@ class LiveSportsTracker:
             curr_snapshot.seen_event_ids = merged_seen
             match.last_snapshot = curr_snapshot
 
-            if triggers and self._notify_callback is not None:
-                try:
-                    await self._notify_callback(match, curr_snapshot, triggers)
-                except Exception as e:
-                    print(f"  └─ ⚠️ [Live Tracker Notification Error]: {e}")
+            if triggers:
+                print(f"🔔 [Live Tracker Alert ({match.home_team} vs {match.away_team})]: {len(triggers)} event(s) -> {triggers}")
+                if self._notify_callback is not None:
+                    try:
+                        await self._notify_callback(match, curr_snapshot, triggers)
+                    except Exception as e:
+                        print(f"  └─ ⚠️ [Live Tracker Notification Error]: {e}")
 
             # 3. Self-stop tracking this match once it reaches Full-Time / Final or is postponed/aborted
             if curr_snapshot.is_finished or curr_snapshot.is_aborted:
@@ -648,11 +719,17 @@ class LiveSportsTracker:
         self.tracked_matches[key] = tracked
         self.ensure_loop_running()
 
+        extra_details = ""
         if snap.state == "in":
             status_badge = (
                 f"🔴 LIVE IN PROGRESS RIGHT NOW (Current Match Clock: {snap.status_detail} — ONGOING, NOT FINISHED) — "
                 f"Live Score: **{snap.home_team} {snap.home_score} - {snap.away_score} {snap.away_team}**"
             )
+            if snap.notable_events:
+                ev_lines = "\n".join(f"  - {desc}" for _, desc in snap.notable_events)
+                extra_details += f"\n• **Goals / Scoring Plays So Far:**\n{ev_lines}"
+            if snap.stats_summary:
+                extra_details += f"\n• **Live Match Stats:** {snap.stats_summary}"
             llm_instruction = (
                 f"\n\n=== CRITICAL INSTRUCTION FOR YOU (THE LLM) ===\n"
                 f"1. Live tracking is NOW ACTIVE and RUNNING in the background for {snap.home_team} vs {snap.away_team}.\n"
@@ -671,8 +748,9 @@ class LiveSportsTracker:
         return (
             f"📡 **LIVE MATCH TRACKER ACTIVATED**\n"
             f"• **Match:** {snap.home_team} vs {snap.away_team} ({info['league_name']})\n"
-            f"• **Current Status:** {status_badge}\n"
-            f"• **Tracking Rules:** Polling every {self.poll_interval}s for kickoff, goals/score changes, red cards, halftime, and full-time. "
+            f"• **Current Status:** {status_badge}"
+            f"{extra_details}\n"
+            f"• **Tracking Rules:** Polling every {self.poll_interval}s for kickoff, goals/score changes, red cards, halftime/period breaks, and full-time. "
             f"The tracker will remain active while the game is in play and will automatically stop once Full-Time (FT) is reached."
             f"{llm_instruction}"
         )

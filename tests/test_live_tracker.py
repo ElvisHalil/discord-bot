@@ -456,6 +456,134 @@ class TestLiveSportsTracker(unittest.TestCase):
         self.assertIn("The game is NOT over", summary_text)
         self.assertEqual(get_channel_last_match_query(88888), ("AS Roma vs Real Madrid", "soccer"))
 
+    def test_nhl_plays_goal_extraction_and_poll_once_signature(self):
+        nhl_summary_initial = {
+            "header": {
+                "competitions": [
+                    {
+                        "status": {
+                            "period": 1,
+                            "type": {
+                                "state": "in",
+                                "completed": False,
+                                "name": "STATUS_IN_PROGRESS",
+                                "shortDetail": "12:00 - 1st",
+                            },
+                        },
+                        "competitors": [
+                            {"homeAway": "home", "team": {"id": "23", "displayName": "Washington Capitals"}, "score": "1"},
+                            {"homeAway": "away", "team": {"id": "10", "displayName": "Montreal Canadiens"}, "score": "1"},
+                        ],
+                    }
+                ]
+            },
+            "plays": [
+                {
+                    "id": "p1",
+                    "type": {"text": "Goal"},
+                    "text": "Josh Anderson Goal (3) Snap Shot, assists: Alex Newhook (2)",
+                    "awayScore": 1,
+                    "homeScore": 0,
+                    "period": {"number": 1, "displayValue": "1st"},
+                    "clock": {"displayValue": "4:29"},
+                    "scoringPlay": True,
+                    "team": {"id": "10"},
+                    "strength": {"text": "Even Strength"},
+                },
+                {
+                    "id": "p2",
+                    "type": {"text": "Goal"},
+                    "text": "Jordan Kyrou Goal (2) Snap Shot, assists: Cole Hutson (3)",
+                    "awayScore": 1,
+                    "homeScore": 1,
+                    "period": {"number": 1, "displayValue": "1st"},
+                    "clock": {"displayValue": "7:56"},
+                    "scoringPlay": True,
+                    "team": {"id": "23"},
+                    "strength": {"text": "Even Strength"},
+                },
+            ],
+            "boxscore": {
+                "teams": [
+                    {"team": {"shortDisplayName": "Canadiens"}, "statistics": [{"name": "shotsTotal", "displayValue": "8"}, {"name": "hits", "displayValue": "10"}]},
+                    {"team": {"shortDisplayName": "Capitals"}, "statistics": [{"name": "shotsTotal", "displayValue": "9"}, {"name": "hits", "displayValue": "8"}]},
+                ]
+            },
+        }
+
+        snap1 = extract_snapshot_from_summary(nhl_summary_initial)
+        self.assertEqual(len(snap1.notable_events), 2)
+        self.assertIn("Shots on Goal: Canadiens 8 - 9 Capitals", snap1.stats_summary)
+
+        # Simulate a new Capitals Power Play goal scored on the next poll
+        nhl_summary_goal = dict(nhl_summary_initial)
+        nhl_summary_goal["header"] = {
+            "competitions": [
+                {
+                    "status": {
+                        "period": 1,
+                        "type": {
+                            "state": "in",
+                            "completed": False,
+                            "name": "STATUS_IN_PROGRESS",
+                            "shortDetail": "19:34 - 1st",
+                        },
+                    },
+                    "competitors": [
+                        {"homeAway": "home", "team": {"id": "23", "displayName": "Washington Capitals"}, "score": "2"},
+                        {"homeAway": "away", "team": {"id": "10", "displayName": "Montreal Canadiens"}, "score": "1"},
+                    ],
+                }
+            ]
+        }
+        nhl_summary_goal["plays"] = list(nhl_summary_initial["plays"]) + [
+            {
+                "id": "p3",
+                "type": {"text": "Goal"},
+                "text": "Ivan Miroshnichenko Goal (1) Wrist Shot, assists: Ilya Protas (3)",
+                "awayScore": 1,
+                "homeScore": 2,
+                "period": {"number": 1, "displayValue": "1st"},
+                "clock": {"displayValue": "19:34"},
+                "scoringPlay": True,
+                "team": {"id": "23"},
+                "strength": {"text": "Power Play"},
+            }
+        ]
+
+        tracker = LiveSportsTracker(poll_interval=1)
+        notifications = []
+
+        async def fake_notify(match, snapshot, triggers):
+            notifications.append((match.event_id, snapshot.home_score, snapshot.away_score, triggers))
+
+        tracker.set_notify_callback(fake_notify)
+        tracker.tracked_matches[(55555, "401892504")] = TrackedMatch(
+            channel_id=55555,
+            sport_path="hockey",
+            league_code="nhl",
+            league_name="NHL",
+            event_id="401892504",
+            home_team="Washington Capitals",
+            away_team="Montreal Canadiens",
+            last_snapshot=snap1,
+        )
+
+        # Ensure poll_once passes timeout as a keyword argument (not headers=8)
+        def strict_fetch_json(url, headers=None, timeout=10.0, **kwargs):
+            if headers is not None and not isinstance(headers, dict):
+                raise TypeError("headers must be dict or None")
+            return nhl_summary_goal
+
+        with patch("src.skills.sports.live_tracker.fetch_json", side_effect=strict_fetch_json):
+            asyncio.run(tracker.poll_once())
+
+        self.assertEqual(len(notifications), 1)
+        _, h_score, a_score, trigs = notifications[0]
+        self.assertEqual(h_score, "2")
+        self.assertEqual(a_score, "1")
+        self.assertTrue(any("Ivan Miroshnichenko Goal" in t and "[Power Play]" in t for t in trigs))
+
 
 if __name__ == "__main__":
     unittest.main()

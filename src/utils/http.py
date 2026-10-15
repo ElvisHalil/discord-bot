@@ -67,6 +67,10 @@ def _fetch_public(
     if _is_private_or_local_host(parsed.hostname):
         raise BlockedRedirectError(f"Access to private/local host '{parsed.hostname}' is blocked.")
 
+    if isinstance(headers, (int, float, tuple)):
+        timeout = headers
+        headers = None
+
     req_headers = {"User-Agent": DEFAULT_UA}
     if headers:
         req_headers.update(headers)

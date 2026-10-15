@@ -10,10 +10,12 @@ import re
 from typing import Optional, Dict, Any, List
 from src.skills.sports.aggregators.base import BaseSportsAggregator
 from src.skills.sports.aggregators.espn_utils import (
+    cached_espn_get,
     resolve_espn_team,
     parse_team_schedule,
     parse_team_roster_and_stats,
     parse_league_injuries,
+    parse_match_summary,
 )
 from src.utils.http import fetch_json
 
@@ -23,6 +25,26 @@ class HockeyAggregator(BaseSportsAggregator):
 
     SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard"
     STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/hockey/nhl/standings"
+
+    def _get_team_match_summary(self, team_id: str) -> str:
+        """Fetch deep match summary (scoring timeline & team stats) for a team's live or most recent game."""
+        sched_url = f"https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/teams/{team_id}/schedule"
+        sched_data = cached_espn_get(sched_url, ttl=20)
+        events = list((sched_data or {}).get("events", []))
+        if not events:
+            return ""
+        for ev in events:
+            st = (ev.get("competitions") or [{}])[0].get("status", {}).get("type", {}).get("state", "")
+            if st == "in":
+                return parse_match_summary("hockey", "nhl", str(ev.get("id", "")))
+        done = [
+            e for e in events
+            if (e.get("competitions") or [{}])[0].get("status", {}).get("type", {}).get("state") == "post"
+        ]
+        if done:
+            done.sort(key=lambda e: e.get("date", ""))
+            return parse_match_summary("hockey", "nhl", str(done[-1].get("id", "")))
+        return ""
 
     def get_info(self, query: str = "") -> str:
         """Entry point for Hockey queries: standings, injuries, rosters/player stats, team schedules, live games, and results."""
@@ -34,7 +56,12 @@ class HockeyAggregator(BaseSportsAggregator):
             return parse_league_injuries("hockey", "nhl", "NHL", q)
 
         # 2. Team Roster & Player Stats
-        is_live_or_sched = bool(re.search(r'\b(?:status|current|currently|live|playing|right\s*now|score|scores|next|upcoming|when|schedule)\b', q))
+        is_live_or_sched = bool(
+            re.search(
+                r'\b(?:status|current|currently|live|playing|right\s*now|score|scores|scored|goal|goals|going|period|next|upcoming|when|schedule)\b',
+                q,
+            )
+        )
         if (
             re.search(r'\b(?:rosters?|squads?)\b', q)
             or (not is_live_or_sched and re.search(r'\b(?:players?|stats|statistics)\b', q))
@@ -58,8 +85,12 @@ class HockeyAggregator(BaseSportsAggregator):
         is_week = any(w in q for w in ("week", "upcoming", "schedule", "fixtures", "next games")) and not is_past
 
         team_sched_block = ""
+        match_sum_block = ""
         if matched_team:
             team_sched_block = parse_team_schedule("hockey", "nhl", matched_team["id"], matched_team["displayName"])
+            is_live_now = "🔴 **LIVE" in team_sched_block
+            if is_live_now or is_live_or_sched or is_past or any(w in q for w in ("boxscore", "summary", "who scored", "goal", "goals")):
+                match_sum_block = self._get_team_match_summary(matched_team["id"])
 
         if is_past and "yesterday" not in q:
             res = self.get_past_schedule_range(days_back=7, scope_label="RECENT NHL RESULTS")
@@ -76,9 +107,8 @@ class HockeyAggregator(BaseSportsAggregator):
         else:
             res = self.get_games(filter_query=q)
 
-        if team_sched_block:
-            return f"{team_sched_block}\n\n{res}"
-        return res
+        blocks = [b for b in (match_sum_block, team_sched_block, res) if b]
+        return "\n\n".join(blocks)
 
     @staticmethod
     def _extract_team_leaders(competitor: Dict[str, Any]) -> str:

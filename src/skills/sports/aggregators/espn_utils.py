@@ -647,8 +647,8 @@ def parse_match_summary(sport_path: str, league_code: str, event_id: str) -> str
     if info_bits:
         out_sections.append(" | ".join(info_bits))
 
-    # 3. Key Match Events Timeline (Goals, Yellow Cards, Red Cards, Substitutions, Injury Delays)
-    key_events = data.get("keyEvents", [])
+    # 3. Key Match Events Timeline (Goals, Yellow Cards, Red Cards, Substitutions, Injury Delays, NHL/NFL Scoring Plays)
+    key_events = data.get("keyEvents") or []
     if key_events:
         timeline_lines: List[str] = []
         for ev in key_events:
@@ -678,6 +678,53 @@ def parse_match_summary(sport_path: str, league_code: str, event_id: str) -> str
 
         if timeline_lines:
             out_sections.append("⏱️ **Match Timeline (Goals, Cards, Subs & Injuries):**\n" + "\n".join(timeline_lines))
+    else:
+        team_id_to_name: Dict[str, str] = {}
+        for comp_item in competitors:
+            tid = str(comp_item.get("team", {}).get("id") or "")
+            tname = comp_item.get("team", {}).get("displayName") or comp_item.get("team", {}).get("shortDisplayName") or ""
+            if tid and tname:
+                team_id_to_name[tid] = tname
+
+        scoring_lines: List[str] = []
+        for sp in data.get("scoringPlays") or []:
+            clock = sp.get("clock", {}).get("displayValue") or ""
+            p_num = sp.get("period", {}).get("number")
+            p_prefix = f"P{p_num} " if p_num else ""
+            text = (sp.get("text") or "").strip()
+            if text:
+                scoring_lines.append(f"  🔥 **{p_prefix}{clock}** {text}".strip())
+
+        plays_list = data.get("plays") or []
+        if not scoring_lines and plays_list:
+            scoring_plays = [
+                p for p in plays_list
+                if p.get("scoringPlay") or "goal" in (p.get("type", {}).get("text") or "").lower()
+            ]
+            is_goal_sport = any("goal" in (p.get("type", {}).get("text") or "").lower() for p in scoring_plays)
+            if is_goal_sport or len(scoring_plays) <= 35:
+                for p in scoring_plays:
+                    ev_type = (p.get("type", {}).get("text") or "").strip()
+                    clock = p.get("clock", {}).get("displayValue") or ""
+                    p_disp = (
+                        p.get("period", {}).get("displayValue")
+                        or (f"P{p.get('period', {}).get('number')}" if p.get("period", {}).get("number") else "")
+                    )
+                    strength = (p.get("strength", {}).get("text") or "").strip()
+                    strength_tag = (
+                        f" [{strength}]"
+                        if strength and strength.lower() not in ("even strength", "none", "regular")
+                        else ""
+                    )
+                    t_id = str(p.get("team", {}).get("id") or "")
+                    t_name = team_id_to_name.get(t_id, "")
+                    team_tag = f" ({t_name})" if t_name else ""
+                    text = (p.get("text") or ev_type).strip()
+                    time_label = " ".join(x for x in (p_disp, clock) if x).strip()
+                    scoring_lines.append(f"  🚨 **{time_label}**{strength_tag}{team_tag}: {text}")
+
+        if scoring_lines:
+            out_sections.append("⏱️ **Scoring Timeline (Goals & Key Plays):**\n" + "\n".join(scoring_lines))
 
     # 4. Team Boxscore Comparison
     box_teams = data.get("boxscore", {}).get("teams", [])
@@ -693,6 +740,13 @@ def parse_match_summary(sport_path: str, league_code: str, event_id: str) -> str
             ("possessionPct", "Possession %"),
             ("totalShots", "Total Shots"),
             ("shotsOnTarget", "Shots on Target"),
+            ("shotsTotal", "Shots on Goal"),
+            ("hits", "Hits"),
+            ("blockedShots", "Blocked Shots"),
+            ("powerPlayGoals", "Power Play Goals"),
+            ("powerPlayOpportunities", "Power Play Opportunities"),
+            ("faceoffPercent", "Faceoff %"),
+            ("penaltyMinutes", "Penalty Minutes"),
             ("wonCorners", "Corners"),
             ("foulsCommitted", "Fouls"),
             ("yellowCards", "🟨 Yellow Cards"),
@@ -701,13 +755,15 @@ def parse_match_summary(sport_path: str, league_code: str, event_id: str) -> str
             ("saves", "Saves"),
             ("accuratePasses", "Accurate Passes"),
             ("effectiveTackles", "Effective Tackles"),
+            ("totalYards", "Total Yards"),
+            ("turnovers", "Turnovers"),
         ]
         stat_lines: List[str] = []
         for key, label in wanted_stats:
             if key in s1 or key in s2:
                 v1 = s1.get(key, "0")
                 v2 = s2.get(key, "0")
-                if key == "possessionPct":
+                if key in ("possessionPct", "faceoffPercent"):
                     v1 = f"{v1}%" if not str(v1).endswith("%") else v1
                     v2 = f"{v2}%" if not str(v2).endswith("%") else v2
                 stat_lines.append(f"  • **{label}:** {t1_name} {v1} — {v2} {t2_name}")
