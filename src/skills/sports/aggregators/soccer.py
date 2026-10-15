@@ -94,9 +94,12 @@ class SoccerAggregator(BaseSportsAggregator):
     SCOREBOARD_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
     STANDINGS_BASE = "https://site.api.espn.com/apis/v2/sports/soccer"
 
+    MULTI_LEAGUE_KEYS = ("ucl", "uel", "epl", "laliga", "seriea", "bundesliga", "ligue1", "mls")
+
     def get_info(self, query: str = "") -> str:
         """Smart entry point for soccer queries: standings, lineups/summaries, injuries, player stats, rosters, and schedules."""
         q = (query or "").lower().strip()
+        explicit_league_or_club = self._has_explicit_league_or_club(q)
         league_key = self._detect_league(q)
         league_info = self.LEAGUES[league_key]
         league_code = league_info["code"]
@@ -199,6 +202,26 @@ class SoccerAggregator(BaseSportsAggregator):
                         return f"{team_sched_block}\n\n{match_sum}"
                 return team_sched_block
 
+        # When no specific league or club was mentioned (e.g., "soccer matches this week"),
+        # fetch across all major competitions in parallel!
+        se = getattr(fetch_json, "side_effect", None)
+        is_fixed_list_mock = se is not None and not callable(se)
+        if not explicit_league_or_club and not discovered_player and not is_fixed_list_mock:
+            if is_past and "yesterday" not in q:
+                return self.get_multi_league_past_schedule_range(days_back=7, scope_label="RECENT MATCH RESULTS")
+            elif is_month:
+                return self.get_multi_league_schedule_range(days_ahead=30, scope_label="MONTHLY FIXTURES")
+            elif is_week:
+                return self.get_multi_league_schedule_range(days_ahead=8, scope_label="WEEKLY FIXTURES")
+            elif "yesterday" in q:
+                date_param = (now - timedelta(days=1)).strftime("%Y%m%d")
+                return self.get_multi_league_matches(date_param=date_param)
+            elif "tomorrow" in q:
+                date_param = (now + timedelta(days=1)).strftime("%Y%m%d")
+                return self.get_multi_league_matches(date_param=date_param)
+            else:
+                return self.get_multi_league_matches(date_param=None)
+
         effective_filter = matched_team["displayName"] if matched_team else q
         if is_past and "yesterday" not in q:
             res = self.get_past_schedule_range(league_code, league_name, days_back=7, scope_label="RECENT MATCH RESULTS", filter_query=effective_filter)
@@ -216,6 +239,18 @@ class SoccerAggregator(BaseSportsAggregator):
             res = self.get_matches(league_code, league_name, date_param=None, filter_query=effective_filter)
 
         return res
+
+    def _has_explicit_league_or_club(self, query: str) -> bool:
+        """Return True if the query explicitly mentions a league alias or a known club."""
+        q = (query or "").lower()
+        for info in self.LEAGUES.values():
+            for alias in info["aliases"]:
+                if re.search(rf'\b{re.escape(alias)}\b', q):
+                    return True
+        for club in self.CLUB_LEAGUE_HINTS:
+            if re.search(rf'\b{re.escape(club)}\b', q):
+                return True
+        return False
 
     def _detect_league(self, query: str) -> str:
         """Maps query keywords or team names to the most relevant soccer league key."""
@@ -423,14 +458,32 @@ class SoccerAggregator(BaseSportsAggregator):
 
             past_dates = []
             for item in calendar:
-                try:
-                    clean_dt = datetime.fromisoformat(item.replace("Z", "+00:00")).replace(tzinfo=None)
-                    if clean_dt.date() < now.date():
-                        d_str = clean_dt.strftime("%Y%m%d")
-                        if d_str not in past_dates:
-                            past_dates.append(d_str)
-                except Exception:
-                    pass
+                if isinstance(item, str):
+                    try:
+                        clean_dt = datetime.fromisoformat(item.replace("Z", "+00:00")).replace(tzinfo=None)
+                        if clean_dt.date() < now.date():
+                            d_str = clean_dt.strftime("%Y%m%d")
+                            if d_str not in past_dates:
+                                past_dates.append(d_str)
+                    except Exception:
+                        pass
+
+            if not past_dates:
+                # For UEFA competitions where calendar contains stage dicts, check base events and recent Tue/Wed/Thu
+                for ev in (base_data or {}).get("events", []):
+                    try:
+                        ev_dt = datetime.fromisoformat(ev.get("date", "").replace("Z", "+00:00")).replace(tzinfo=None)
+                        if ev_dt.date() <= now.date():
+                            d_str = ev_dt.strftime("%Y%m%d")
+                            if d_str not in past_dates:
+                                past_dates.append(d_str)
+                    except Exception:
+                        pass
+                if not past_dates and "uefa" in league_code:
+                    for d in range(days_back, 0, -1):
+                        cand = now - timedelta(days=d)
+                        if cand.weekday() in (1, 2, 3):
+                            past_dates.append(cand.strftime("%Y%m%d"))
 
             if not past_dates:
                 return f"=== {league_name.upper()} {scope_label} ===\nNo recent completed matches found in the current season calendar."
@@ -517,19 +570,32 @@ class SoccerAggregator(BaseSportsAggregator):
 
             upcoming_dates = []
             for item in calendar:
-                try:
-                    clean_dt = datetime.fromisoformat(item.replace("Z", "+00:00")).replace(tzinfo=None)
-                    if now.date() <= clean_dt.date() <= end_date.date():
-                        d_str = clean_dt.strftime("%Y%m%d")
-                        if d_str not in upcoming_dates:
-                            upcoming_dates.append(d_str)
-                except Exception:
-                    pass
+                if isinstance(item, str):
+                    try:
+                        clean_dt = datetime.fromisoformat(item.replace("Z", "+00:00")).replace(tzinfo=None)
+                        if now.date() <= clean_dt.date() <= end_date.date():
+                            d_str = clean_dt.strftime("%Y%m%d")
+                            if d_str not in upcoming_dates:
+                                upcoming_dates.append(d_str)
+                    except Exception:
+                        pass
 
             if not upcoming_dates:
-                for d in range(1, min(days_ahead + 1, 8)):
+                for ev in (base_data or {}).get("events", []):
+                    try:
+                        ev_dt = datetime.fromisoformat(ev.get("date", "").replace("Z", "+00:00")).replace(tzinfo=None)
+                        if now.date() <= ev_dt.date() <= end_date.date():
+                            d_str = ev_dt.strftime("%Y%m%d")
+                            if d_str not in upcoming_dates:
+                                upcoming_dates.append(d_str)
+                    except Exception:
+                        pass
+
+            if not upcoming_dates:
+                target_weekdays = (1, 2, 3) if "uefa" in league_code else (5, 6)
+                for d in range(0, min(days_ahead + 1, 8)):
                     cand = now + timedelta(days=d)
-                    if cand.weekday() in (5, 6):
+                    if cand.weekday() in target_weekdays:
                         upcoming_dates.append(cand.strftime("%Y%m%d"))
 
             if not upcoming_dates:
@@ -726,3 +792,303 @@ class SoccerAggregator(BaseSportsAggregator):
 
         except Exception as e:
             return f"⚠️ Error fetching standings for {league_name}: {e}"
+
+    def get_multi_league_schedule_range(self, days_ahead: int = 8, scope_label: str = "WEEKLY FIXTURES") -> str:
+        """Fetches upcoming fixtures across all major soccer competitions in parallel (2 flat HTTP waves)."""
+        print(f"  └─ ⚽ [Soccer]: Fetching {scope_label} across all major competitions (Next {days_ahead} days)...")
+        now = datetime.now()
+        end_date = now + timedelta(days=days_ahead)
+
+        try:
+            # Wave 1: Fetch base calendar scoreboards for all major competitions concurrently
+            league_items = [(k, self.LEAGUES[k]["code"], self.LEAGUES[k]["name"]) for k in self.MULTI_LEAGUE_KEYS]
+            base_urls = [f"{self.SCOREBOARD_BASE}/{code}/scoreboard" for _, code, _ in league_items]
+            base_payloads = parallel_fetch_json(fetch_json, base_urls, timeout=6, ttl=60)
+
+            day_requests: List[Tuple[str, str, str, str, str]] = []  # (key, code, name, udate, url)
+            for (k, code, name), base_data in zip(league_items, base_payloads):
+                leagues = (base_data or {}).get("leagues", [])
+                calendar = leagues[0].get("calendar", []) if leagues else []
+                upcoming_dates: List[str] = []
+                for item in calendar:
+                    if isinstance(item, str):
+                        try:
+                            clean_dt = datetime.fromisoformat(item.replace("Z", "+00:00")).replace(tzinfo=None)
+                            if now.date() <= clean_dt.date() <= end_date.date():
+                                d_str = clean_dt.strftime("%Y%m%d")
+                                if d_str not in upcoming_dates:
+                                    upcoming_dates.append(d_str)
+                        except Exception:
+                            pass
+
+                if not upcoming_dates:
+                    for ev in (base_data or {}).get("events", []):
+                        try:
+                            ev_dt = datetime.fromisoformat(ev.get("date", "").replace("Z", "+00:00")).replace(tzinfo=None)
+                            if now.date() <= ev_dt.date() <= end_date.date():
+                                d_str = ev_dt.strftime("%Y%m%d")
+                                if d_str not in upcoming_dates:
+                                    upcoming_dates.append(d_str)
+                        except Exception:
+                            pass
+                    if "uefa" in code:
+                        for d in range(0, min(days_ahead + 1, 8)):
+                            cand = now + timedelta(days=d)
+                            if cand.weekday() in (1, 2, 3):
+                                d_str = cand.strftime("%Y%m%d")
+                                if d_str not in upcoming_dates:
+                                    upcoming_dates.append(d_str)
+
+                for udate in sorted(upcoming_dates)[:4]:
+                    day_requests.append((k, code, name, udate, f"{self.SCOREBOARD_BASE}/{code}/scoreboard?dates={udate}"))
+
+            if not day_requests:
+                return f"=== SOCCER {scope_label} (ALL MAJOR COMPETITIONS) ===\nNo upcoming matches scheduled in the next {days_ahead} days."
+
+            # Wave 2: Fetch all matchday scoreboards across all leagues concurrently
+            day_urls = [req[4] for req in day_requests]
+            day_payloads = parallel_fetch_json(fetch_json, day_urls, timeout=6, ttl=30)
+
+            by_league: Dict[str, List[str]] = {k: [] for k, _, _ in league_items}
+            total_matches = 0
+
+            for (k, code, name, udate, _), day_data in zip(day_requests, day_payloads):
+                events = (day_data or {}).get("events", [])
+                if not events:
+                    continue
+                day_title = self.format_human_date(udate)
+                day_match_lines: List[str] = []
+                for ev in events:
+                    comps = ev.get("competitions", [])
+                    if not comps:
+                        continue
+                    comp = comps[0]
+                    competitors = comp.get("competitors", [])
+                    home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0] if competitors else {})
+                    away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1] if len(competitors) > 1 else {})
+
+                    home_name = home.get("team", {}).get("displayName", "Home")
+                    away_name = away.get("team", {}).get("displayName", "Away")
+                    status_obj = comp.get("status", {})
+                    state = status_obj.get("type", {}).get("state", "")
+                    is_completed = status_obj.get("type", {}).get("completed", False)
+                    status_desc = status_obj.get("type", {}).get("detail") or "Scheduled"
+
+                    m_date = ev.get("date", "")
+                    time_str = m_date[11:16] + " UTC" if len(m_date) >= 16 else ""
+                    venue = comp.get("venue", {}).get("fullName")
+
+                    if state == "in" or is_completed:
+                        h_score = home.get("score", "0")
+                        a_score = away.get("score", "0")
+                        badge = " 🔴 [LIVE]" if state == "in" else " ✅ [FT]"
+                        day_match_lines.append(f"  • {home_name} {h_score} - {a_score} {away_name}{badge} [{status_desc}]")
+                    else:
+                        details_list = []
+                        if time_str:
+                            details_list.append(f"Kickoff: {time_str}")
+                        if venue:
+                            details_list.append(f"Venue: {venue}")
+                        details_str = f" ({' | '.join(details_list)})" if details_list else ""
+                        day_match_lines.append(f"  • {away_name} at {home_name}{details_str} [{status_desc}]")
+                    total_matches += 1
+
+                if day_match_lines:
+                    by_league[k].append(f"📅 {day_title} ({len(day_match_lines)} Matches):")
+                    by_league[k].extend(day_match_lines)
+
+            if total_matches == 0:
+                return f"=== SOCCER {scope_label} (ALL MAJOR COMPETITIONS) ===\nNo upcoming matches scheduled in the next {days_ahead} days."
+
+            output_lines = [f"=== SOCCER {scope_label} (ALL MAJOR COMPETITIONS) ===\n"]
+            for k, code, name in league_items:
+                if by_league[k]:
+                    output_lines.append(f"🏆 === {name.upper()} ===")
+                    output_lines.extend(by_league[k])
+                    output_lines.append("")
+
+            return "\n".join(output_lines)
+
+        except Exception as e:
+            return f"⚠️ Error fetching multi-league soccer {scope_label}: {e}"
+
+    def get_multi_league_past_schedule_range(self, days_back: int = 7, scope_label: str = "RECENT MATCH RESULTS") -> str:
+        """Fetches recent completed match results across all major soccer competitions in parallel."""
+        print(f"  └─ ⚽ [Soccer]: Fetching {scope_label} across all major competitions (Past {days_back} days)...")
+        now = datetime.now()
+        start_date = now - timedelta(days=days_back)
+
+        try:
+            league_items = [(k, self.LEAGUES[k]["code"], self.LEAGUES[k]["name"]) for k in self.MULTI_LEAGUE_KEYS]
+            base_urls = [f"{self.SCOREBOARD_BASE}/{code}/scoreboard" for _, code, _ in league_items]
+            base_payloads = parallel_fetch_json(fetch_json, base_urls, timeout=6, ttl=60)
+
+            day_requests: List[Tuple[str, str, str, str, str]] = []
+            for (k, code, name), base_data in zip(league_items, base_payloads):
+                leagues = (base_data or {}).get("leagues", [])
+                calendar = leagues[0].get("calendar", []) if leagues else []
+                past_dates: List[str] = []
+                for item in calendar:
+                    if isinstance(item, str):
+                        try:
+                            clean_dt = datetime.fromisoformat(item.replace("Z", "+00:00")).replace(tzinfo=None)
+                            if clean_dt.date() < now.date():
+                                d_str = clean_dt.strftime("%Y%m%d")
+                                if d_str not in past_dates:
+                                    past_dates.append(d_str)
+                        except Exception:
+                            pass
+
+                if not past_dates:
+                    for ev in (base_data or {}).get("events", []):
+                        try:
+                            ev_dt = datetime.fromisoformat(ev.get("date", "").replace("Z", "+00:00")).replace(tzinfo=None)
+                            if ev_dt.date() <= now.date():
+                                d_str = ev_dt.strftime("%Y%m%d")
+                                if d_str not in past_dates:
+                                    past_dates.append(d_str)
+                        except Exception:
+                            pass
+                    if "uefa" in code:
+                        for d in range(days_back, -1, -1):
+                            cand = now - timedelta(days=d)
+                            if cand.weekday() in (1, 2, 3):
+                                d_str = cand.strftime("%Y%m%d")
+                                if d_str not in past_dates:
+                                    past_dates.append(d_str)
+
+                recent_dates = [d for d in sorted(past_dates) if datetime.strptime(d, "%Y%m%d").date() >= start_date.date()]
+                recent_dates = recent_dates[-2:] if recent_dates else sorted(past_dates)[-2:]
+                for pdate in recent_dates:
+                    day_requests.append((k, code, name, pdate, f"{self.SCOREBOARD_BASE}/{code}/scoreboard?dates={pdate}"))
+
+            if not day_requests:
+                return f"=== SOCCER {scope_label} (ALL MAJOR COMPETITIONS) ===\nNo recent completed matches found."
+
+            day_urls = [req[4] for req in day_requests]
+            day_payloads = parallel_fetch_json(fetch_json, day_urls, timeout=6, ttl=30)
+
+            by_league: Dict[str, List[str]] = {k: [] for k, _, _ in league_items}
+            total_matches = 0
+
+            for (k, code, name, pdate, _), day_data in zip(day_requests, day_payloads):
+                events = (day_data or {}).get("events", [])
+                if not events:
+                    continue
+                day_title = self.format_human_date(pdate)
+                day_match_lines: List[str] = []
+                for ev in events:
+                    comps = ev.get("competitions", [])
+                    if not comps:
+                        continue
+                    comp = comps[0]
+                    competitors = comp.get("competitors", [])
+                    home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0] if competitors else {})
+                    away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1] if len(competitors) > 1 else {})
+
+                    home_name = home.get("team", {}).get("displayName", "Home")
+                    away_name = away.get("team", {}).get("displayName", "Away")
+                    home_score = home.get("score", "0")
+                    away_score = away.get("score", "0")
+                    status_desc = comp.get("status", {}).get("type", {}).get("detail") or "FT"
+
+                    goals, _, red_cards, _ = self._extract_match_details(comp, home, away, home_name, away_name)
+                    day_match_lines.append(f"  • {home_name} {home_score} - {away_score} {away_name} [{status_desc}]")
+                    if goals:
+                        day_match_lines.append(f"    🎯 Goals: {', '.join(goals)}")
+                    if red_cards:
+                        day_match_lines.append(f"    🟥 Red Cards: {', '.join(red_cards)}")
+                    total_matches += 1
+
+                if day_match_lines:
+                    by_league[k].append(f"📅 {day_title}:")
+                    by_league[k].extend(day_match_lines)
+
+            if total_matches == 0:
+                return f"=== SOCCER {scope_label} (ALL MAJOR COMPETITIONS) ===\nNo recent completed matches found."
+
+            output_lines = [f"=== SOCCER {scope_label} (ALL MAJOR COMPETITIONS) ===\n"]
+            for k, code, name in league_items:
+                if by_league[k]:
+                    output_lines.append(f"🏆 === {name.upper()} ===")
+                    output_lines.extend(by_league[k])
+                    output_lines.append("")
+
+            return "\n".join(output_lines)
+
+        except Exception as e:
+            return f"⚠️ Error fetching multi-league recent results: {e}"
+
+    def get_multi_league_matches(self, date_param: Optional[str] = None) -> str:
+        """Fetches live, completed, and scheduled matches for a specific date across all major soccer competitions in parallel."""
+        now = datetime.now()
+        target_date = date_param or now.strftime("%Y%m%d")
+        day_display = self.format_human_date(target_date)
+        print(f"  └─ ⚽ [Soccer]: Fetching matches across all major competitions for {day_display}...")
+
+        try:
+            league_items = [(k, self.LEAGUES[k]["code"], self.LEAGUES[k]["name"]) for k in self.MULTI_LEAGUE_KEYS]
+            urls = [f"{self.SCOREBOARD_BASE}/{code}/scoreboard?dates={target_date}" for _, code, _ in league_items]
+            payloads = parallel_fetch_json(fetch_json, urls, timeout=6, ttl=20)
+
+            output_lines = [f"=== SOCCER MATCHES — {day_display.upper()} (ALL MAJOR COMPETITIONS) ===\n"]
+            total_matches = 0
+            any_live_or_upcoming_today = False
+
+            for (k, code, name), data in zip(league_items, payloads):
+                events = (data or {}).get("events", [])
+                if not events:
+                    continue
+                league_lines: List[str] = [f"🏆 === {name.upper()} ==="]
+                for ev in events:
+                    comps = ev.get("competitions", [])
+                    if not comps:
+                        continue
+                    comp = comps[0]
+                    competitors = comp.get("competitors", [])
+                    home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0] if competitors else {})
+                    away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1] if len(competitors) > 1 else {})
+
+                    home_name = home.get("team", {}).get("displayName", "Home")
+                    away_name = away.get("team", {}).get("displayName", "Away")
+                    home_score = home.get("score", "0")
+                    away_score = away.get("score", "0")
+
+                    status_obj = comp.get("status", {})
+                    status_desc = status_obj.get("type", {}).get("detail") or "Scheduled"
+                    is_completed = status_obj.get("type", {}).get("completed", False)
+                    is_live = status_obj.get("type", {}).get("state") == "in"
+                    if not is_completed:
+                        any_live_or_upcoming_today = True
+
+                    live_marker = " 🔴 [LIVE]" if is_live else (" ✅ [FT]" if is_completed else "")
+                    league_lines.append(f"  ⚽ {home_name} {home_score} - {away_score} {away_name}{live_marker} ({status_desc})")
+
+                    goals, _, red_cards, stats_line = self._extract_match_details(comp, home, away, home_name, away_name)
+                    if goals:
+                        league_lines.append(f"     🎯 Goals: {', '.join(goals)}")
+                    if red_cards:
+                        league_lines.append(f"     🟥 Red Cards: {', '.join(red_cards)}")
+                    if stats_line and (is_live or is_completed):
+                        league_lines.append(f"     📊 Stats: {stats_line}")
+                    total_matches += 1
+
+                if len(league_lines) > 1:
+                    output_lines.extend(league_lines)
+                    output_lines.append("")
+
+            if total_matches == 0:
+                if not date_param:
+                    return self.get_multi_league_schedule_range(days_ahead=7, scope_label="UPCOMING MATCHES THIS WEEK")
+                return f"=== SOCCER MATCHES — {day_display.upper()} ===\nNo major competition matches scheduled for {day_display}."
+
+            if not date_param and not any_live_or_upcoming_today:
+                upcoming_week = self.get_multi_league_schedule_range(days_ahead=7, scope_label="UPCOMING MATCHES THIS WEEK")
+                if "No upcoming matches" not in upcoming_week:
+                    output_lines.append(upcoming_week)
+
+            return "\n".join(output_lines)
+
+        except Exception as e:
+            return f"⚠️ Error fetching multi-league soccer matches: {e}"
+

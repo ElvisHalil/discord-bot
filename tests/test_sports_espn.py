@@ -802,6 +802,78 @@ class TestSportsEspnUpgrade(unittest.TestCase):
             finally:
                 LIVE_TRACKER.tracked_matches.clear()
 
+    @patch("src.skills.sports.aggregators.soccer.fetch_json")
+    @patch("src.skills.sports.aggregators.espn_utils.espn_search_auto_discover")
+    @patch("src.skills.sports.aggregators.espn_utils.resolve_espn_team")
+    def test_multi_league_soccer_weekly_fixtures(self, mock_resolve, mock_disc, mock_fetch):
+        from datetime import datetime, timedelta
+
+        mock_resolve.return_value = None
+        mock_disc.return_value = None
+        tomorrow_dt = datetime.now() + timedelta(days=1)
+        t_iso = tomorrow_dt.strftime("%Y-%m-%dT19:00Z")
+        t_ymd = tomorrow_dt.strftime("%Y%m%d")
+
+        def side_effect(url, timeout=6):
+            if "uefa.champions/scoreboard" in url and "dates=" not in url:
+                return {"leagues": [{"calendar": [{"label": "League Phase"}]}], "events": [{"date": t_iso}]}
+            if f"uefa.champions/scoreboard?dates={t_ymd}" in url:
+                return {
+                    "events": [{
+                        "date": t_iso,
+                        "competitions": [{
+                            "status": {"type": {"state": "pre", "detail": "Tomorrow 3:00 PM"}},
+                            "competitors": [
+                                {"homeAway": "home", "team": {"displayName": "Real Madrid"}},
+                                {"homeAway": "away", "team": {"displayName": "Bayern Munich"}},
+                            ],
+                        }],
+                    }]
+                }
+            if "eng.1/scoreboard" in url and "dates=" not in url:
+                return {"leagues": [{"calendar": [t_iso]}]}
+            if f"eng.1/scoreboard?dates={t_ymd}" in url:
+                return {
+                    "events": [{
+                        "date": t_iso,
+                        "competitions": [{
+                            "status": {"type": {"state": "pre", "detail": "Tomorrow 10:00 AM"}},
+                            "competitors": [
+                                {"homeAway": "home", "team": {"displayName": "Arsenal"}},
+                                {"homeAway": "away", "team": {"displayName": "Liverpool"}},
+                            ],
+                        }],
+                    }]
+                }
+            if "esp.1/scoreboard" in url and "dates=" not in url:
+                return {"leagues": [{"calendar": [t_iso]}]}
+            if f"esp.1/scoreboard?dates={t_ymd}" in url:
+                return {
+                    "events": [{
+                        "date": t_iso,
+                        "competitions": [{
+                            "status": {"type": {"state": "pre", "detail": "Tomorrow 12:00 PM"}},
+                            "competitors": [
+                                {"homeAway": "home", "team": {"displayName": "Barcelona"}},
+                                {"homeAway": "away", "team": {"displayName": "Atletico Madrid"}},
+                            ],
+                        }],
+                    }]
+                }
+            return {"leagues": [{"calendar": []}], "events": []}
+
+        mock_fetch.side_effect = side_effect
+        agg = SoccerAggregator()
+        out = agg.get_info("soccer matches this week")
+        self.assertIn("SOCCER WEEKLY FIXTURES (ALL MAJOR COMPETITIONS)", out)
+        self.assertIn("UEFA CHAMPIONS LEAGUE", out)
+        self.assertIn("Bayern Munich at Real Madrid", out)
+        self.assertIn("ENGLISH PREMIER LEAGUE", out)
+        self.assertIn("Liverpool at Arsenal", out)
+        self.assertIn("SPANISH LA LIGA", out)
+        self.assertIn("Atletico Madrid at Barcelona", out)
+
 
 if __name__ == "__main__":
     unittest.main()
+
