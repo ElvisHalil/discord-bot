@@ -33,6 +33,7 @@ from src.orchestrator import (
     extract_reply_context,
 )
 from src.telegram_bridge import (
+    broadcast_mode_switch,
     is_telegram_channel,
     send_telegram_message,
     start_telegram_bridge,
@@ -55,6 +56,7 @@ ollama_client = AsyncClient()
 # Global state
 chat_history = {}
 known_users = {}
+active_channels = set()
 # One lock per channel so overlapping mentions don't interleave tool calls in a shared history.
 channel_locks = defaultdict(asyncio.Lock)
 # (message_id, user_id) pairs already handled by the 👍 recommender, to avoid duplicate runs.
@@ -79,29 +81,35 @@ except ValueError:
 
 
 def clear_tool_caches(channel_id: int = None):
-    tools.VISITED_URLS.clear()
-    tools.URL_CACHE.clear()
-    tools.SEARCH_CACHE.clear()
-    tools.YOUTUBE_CACHE.clear()
+    if channel_id is None:
+        tools.VISITED_URLS.clear()
+        tools.URL_CACHE.clear()
+        tools.SEARCH_CACHE.clear()
+        tools.YOUTUBE_CACHE.clear()
     try:
         from src.skills.youtube.client import clear_youtube_caches
         from src.skills.music.aggregators.deezer import clear_deezer_cache
         from src.skills.music.aggregators.lastfm import clear_lastfm_cache
         from src.skills.music.aggregators.charts import clear_charts_cache
         from src.skills.music.spectrum import clear_channel_played_songs
+        from src.skills.music.utils import clear_recently_played_tracks
+        from src.skills.sports.live_tracker import clear_channel_last_match_query
         from src.skills.sports.aggregators.liquipedia import clear_liquipedia_cache
         from src.skills.sports.aggregators.hltv import clear_hltv_cache
         from src.skills.sports.aggregators.kashrock import clear_kashrock_cache
         from src.skills.sports.aggregators.espn_utils import clear_espn_cache
-        clear_youtube_caches()
-        clear_deezer_cache()
-        clear_lastfm_cache()
-        clear_charts_cache()
         clear_channel_played_songs(channel_id)
-        clear_liquipedia_cache()
-        clear_hltv_cache()
-        clear_kashrock_cache()
-        clear_espn_cache()
+        clear_recently_played_tracks(channel_id)
+        clear_channel_last_match_query(channel_id)
+        if channel_id is None:
+            clear_youtube_caches()
+            clear_deezer_cache()
+            clear_lastfm_cache()
+            clear_charts_cache()
+            clear_liquipedia_cache()
+            clear_hltv_cache()
+            clear_kashrock_cache()
+            clear_espn_cache()
     except Exception:
         pass
 
@@ -596,6 +604,7 @@ async def on_message(message):
     
     # Mode Switching Logic
     if user_input.lower().startswith("!mode"):
+        active_channels.add(message.channel.id)
         if BOT_OWNER_ID is None or message.author.id != BOT_OWNER_ID:
             print(f"🔒 [!mode denied]: {message.author} ({message.author.id})")
             await message.channel.send("🔒 Only the bot owner can switch modes.")
@@ -618,12 +627,19 @@ async def on_message(message):
             # system prompt/persona. Wipe them all, not just this channel.
             chat_history.clear()
             clear_tool_caches()
-            await message.channel.send(f"🔄 Switched to **{new_mode.upper()}** mode (Model: `{new_model}`). Memory and context wiped.")
+            status_msg = f"🔄 Switched to **{new_mode.upper()}** mode (Model: `{new_model}`). Memory and context wiped."
+            await message.channel.send(status_msg)
+            await broadcast_mode_switch(
+                sys.modules[__name__],
+                status_msg,
+                origin_channel_id=message.channel.id,
+            )
         else:
             await message.channel.send(f"⚠️ Unknown mode. Available modes: {', '.join(MODES.keys())}")
         return
 
     if user_input.lower() == "!reset":
+        active_channels.add(message.channel.id)
         chat_history.pop(message.channel.id, None)
         clear_tool_caches(message.channel.id)
         await message.channel.send("🧹 Memory and context wiped for this channel.")
@@ -631,6 +647,7 @@ async def on_message(message):
 
     # Direct Live Sports Tracker Commands (!track <team>, !untrack [team], !tracked)
     if user_input.lower().startswith("!track "):
+        active_channels.add(message.channel.id)
         target_q = user_input[7:].strip()
         set_active_channel_id(message.channel.id)
         res = await asyncio.to_thread(skill_track_live_game, action="start", query=target_q)
@@ -639,6 +656,7 @@ async def on_message(message):
         return
 
     if user_input.lower().startswith("!untrack"):
+        active_channels.add(message.channel.id)
         target_q = user_input[8:].strip()
         set_active_channel_id(message.channel.id)
         res = await asyncio.to_thread(skill_track_live_game, action="stop", query=target_q)
@@ -646,6 +664,7 @@ async def on_message(message):
         return
 
     if user_input.lower() in ("!tracked", "!track"):
+        active_channels.add(message.channel.id)
         set_active_channel_id(message.channel.id)
         res = await asyncio.to_thread(skill_track_live_game, action="list")
         await message.channel.send(res)
@@ -658,6 +677,7 @@ async def on_message(message):
         return
 
     channel_id = message.channel.id
+    active_channels.add(channel_id)
 
     # Serialize turns per channel: two overlapping mentions would otherwise
     # interleave their tool calls/results in the same history list.

@@ -200,6 +200,88 @@ async def send_telegram_message(channel_or_chat_id: int, text: str, token: Optio
     return last_msg_id
 
 
+async def _discover_recent_discord_channels(client: Any) -> Set[int]:
+    """
+    If no Discord channel has interacted yet in this process run, find the text channel(s)
+    in the bot's guilds where the bot most recently posted a message.
+    """
+    found: Set[int] = set()
+    if not client or not getattr(client, "guilds", None):
+        return found
+    bot_user = getattr(client, "user", None)
+    for guild in client.guilds:
+        best_cid = None
+        best_ts = None
+        for ch in getattr(guild, "text_channels", []):
+            try:
+                perms = ch.permissions_for(guild.me) if getattr(guild, "me", None) else None
+                if perms and not (perms.send_messages and perms.read_message_history):
+                    continue
+                async for msg in ch.history(limit=8):
+                    if bot_user and getattr(msg, "author", None) and msg.author.id == bot_user.id:
+                        if best_ts is None or msg.created_at > best_ts:
+                            best_ts = msg.created_at
+                            best_cid = ch.id
+                        break
+            except Exception:
+                continue
+        if best_cid is not None:
+            found.add(best_cid)
+        elif getattr(guild, "system_channel", None):
+            found.add(guild.system_channel.id)
+    return found
+
+
+async def broadcast_mode_switch(
+    main_mod: Any,
+    status_msg: str,
+    origin_channel_id: int,
+    bot_token: Optional[str] = None,
+) -> None:
+    """
+    Broadcast a global mode switch notification to all other active Discord and Telegram chats
+    (excluding origin_channel_id, which already received the direct reply).
+    Never includes any user names, chat IDs, or conversation content.
+    """
+    print(f"🔄 [Global Mode Switch]: {status_msg}")
+    active_set: Set[int] = getattr(main_mod, "active_channels", set())
+    targets: Set[int] = set(active_set)
+
+    # If no Discord channel is recorded yet (e.g., mode switched in Telegram right after startup),
+    # discover the Discord channel where the bot was most recently active.
+    has_discord_target = any(not is_telegram_channel(cid) and cid > 0 for cid in targets)
+    if not has_discord_target and hasattr(main_mod, "client"):
+        discovered = await _discover_recent_discord_channels(main_mod.client)
+        targets.update(discovered)
+        active_set.update(discovered)
+
+    # If Telegram is enabled and no Telegram chat is recorded yet (e.g., mode switched in Discord
+    # right after startup), include TELEGRAM_OWNER_ID DM if configured.
+    if is_telegram_enabled():
+        has_tg_target = any(is_telegram_channel(cid) for cid in targets)
+        if not has_tg_target:
+            tg_owner = get_telegram_owner_id()
+            if tg_owner is not None:
+                tg_cid = to_tg_channel_id(tg_owner)
+                targets.add(tg_cid)
+                active_set.add(tg_cid)
+
+    for cid in targets:
+        if cid == origin_channel_id or cid == 0:
+            continue
+        try:
+            if is_telegram_channel(cid):
+                await send_telegram_message(cid, status_msg, token=bot_token)
+            elif hasattr(main_mod, "client"):
+                ch = main_mod.client.get_channel(cid)
+                if not ch:
+                    ch = await main_mod.client.fetch_channel(cid)
+                if ch:
+                    await ch.send(status_msg)
+        except Exception as e:
+            print(f"⚠️ [Mode Broadcast Warning (channel={cid})]: {e}")
+
+
 async def _handle_telegram_reaction(
     reaction_obj: Dict[str, Any],
     main_mod: Any,
@@ -341,6 +423,8 @@ async def handle_telegram_update(
         return
 
     internal_cid = to_tg_channel_id(int(chat_id))
+    if hasattr(main_mod, "active_channels"):
+        main_mod.active_channels.add(internal_cid)
     user_display = sender.get("first_name") or sender.get("username") or f"User_{user_id}"
     normalized_input = _normalize_command(raw_text, bot_username=bot_username)
 
@@ -389,12 +473,21 @@ async def handle_telegram_update(
                     pass
             main_mod.current_mode = new_mode
             main_mod.chat_history.clear()
-            if hasattr(main_mod, "reset_channel_memory"):
+            if hasattr(main_mod, "clear_tool_caches"):
+                main_mod.clear_tool_caches()
+            elif hasattr(main_mod, "reset_channel_memory"):
                 main_mod.reset_channel_memory(internal_cid)
+            status_msg = f"🔄 Switched to **{new_mode.upper()}** mode (Model: `{new_model}`). Memory and context wiped."
             await send_telegram_message(
                 internal_cid,
-                f"🔄 Switched to **{new_mode.upper()}** mode (Model: `{new_model}`). Memory and context wiped.",
+                status_msg,
                 token=bot_token,
+            )
+            await broadcast_mode_switch(
+                main_mod,
+                status_msg,
+                origin_channel_id=internal_cid,
+                bot_token=bot_token,
             )
         else:
             await send_telegram_message(
@@ -406,7 +499,9 @@ async def handle_telegram_update(
 
     if low_input == "!reset":
         main_mod.chat_history.pop(internal_cid, None)
-        if hasattr(main_mod, "reset_channel_memory"):
+        if hasattr(main_mod, "clear_tool_caches"):
+            main_mod.clear_tool_caches(internal_cid)
+        elif hasattr(main_mod, "reset_channel_memory"):
             main_mod.reset_channel_memory(internal_cid)
         await send_telegram_message(internal_cid, "🧹 Memory and context wiped for this chat.", token=bot_token)
         return
@@ -484,9 +579,6 @@ async def handle_telegram_update(
                 main_mod.chat_history[internal_cid],
                 mode_config.get("history_limit", 40),
             )
-
-            if main_mod.current_mode == "chat":
-                reply = apply_auto_ping(reply, main_mod.known_users)
 
             if is_research:
                 reply = join_orphan_bullets(reply)

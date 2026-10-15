@@ -233,14 +233,14 @@ def record_channel_played_song(
     ui_zone: Optional[str] = None,
     channel_id: Optional[int] = None,
 ) -> None:
-    """Record the most recently served song in a Discord channel along with its genre and spectrum zone."""
+    """Record the most recently served song in a channel along with its genre and spectrum zone."""
     s_clean = (song or "").strip()
     a_clean = (artist or "").strip()
     if not s_clean or s_clean.lower() in ("unknown track", "unknown"):
         return
 
     cid = _get_channel_id(channel_id)
-    prev = _CHANNEL_LAST_PLAYED_SONG.get(cid) or _CHANNEL_LAST_PLAYED_SONG.get(0) or {}
+    prev = _CHANNEL_LAST_PLAYED_SONG.get(cid) or {}
     same_track = (
         _norm_token(prev.get("song") or "") == _norm_token(s_clean)
         and _norm_token(prev.get("artist") or "") == _norm_token(a_clean)
@@ -258,22 +258,22 @@ def record_channel_played_song(
         "ui_zone": eff_zone,
     }
     _CHANNEL_LAST_PLAYED_SONG[cid] = entry
-    _CHANNEL_LAST_PLAYED_SONG[0] = entry
 
 
 def get_channel_last_played_song(channel_id: Optional[int] = None) -> Optional[Dict[str, Optional[str]]]:
-    """Retrieve the most recently served song in a Discord channel."""
+    """Retrieve the most recently served song in a specific channel."""
     cid = _get_channel_id(channel_id)
     if cid in _CHANNEL_LAST_PLAYED_SONG:
         return dict(_CHANNEL_LAST_PLAYED_SONG[cid])
-    if 0 in _CHANNEL_LAST_PLAYED_SONG:
-        return dict(_CHANNEL_LAST_PLAYED_SONG[0])
     return None
 
 
-def clear_channel_played_songs() -> None:
-    """Clear per-channel active song state (used on reset/tests)."""
-    _CHANNEL_LAST_PLAYED_SONG.clear()
+def clear_channel_played_songs(channel_id: Optional[int] = None) -> None:
+    """Clear per-channel active song state (for one channel if channel_id is given, else all)."""
+    if channel_id is not None:
+        _CHANNEL_LAST_PLAYED_SONG.pop(channel_id, None)
+    else:
+        _CHANNEL_LAST_PLAYED_SONG.clear()
 
 
 def classify_genre_to_zone(genre_or_tags: Union[str, List[str], None]) -> Optional[str]:

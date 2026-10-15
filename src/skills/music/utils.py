@@ -1,12 +1,45 @@
 import re
-from collections import deque
+from collections import defaultdict, deque
 import requests
 
 # Global in-memory cache of resolved music metadata
 MUSIC_METADATA_CACHE = {}
 
 # Rolling session history of recently played/recommended tracks to prevent repeats across turns
-RECENTLY_PLAYED_TRACKS = deque(maxlen=30)
+# Scoped per channel_id so one chat's music history never affects another chat.
+_CHANNEL_RECENTLY_PLAYED_TRACKS = defaultdict(lambda: deque(maxlen=30))
+
+
+class _ChannelAwareDeque(deque):
+    def clear(self) -> None:
+        super().clear()
+        _CHANNEL_RECENTLY_PLAYED_TRACKS.clear()
+
+
+RECENTLY_PLAYED_TRACKS = _ChannelAwareDeque(maxlen=30)
+
+
+def _get_music_channel_deque(channel_id: int = None) -> deque:
+    if channel_id is None:
+        try:
+            from src.skills.sports.live_tracker import get_active_channel_id
+            channel_id = get_active_channel_id()
+        except Exception:
+            channel_id = 0
+    if not channel_id:
+        return RECENTLY_PLAYED_TRACKS
+    return _CHANNEL_RECENTLY_PLAYED_TRACKS[channel_id]
+
+
+def clear_recently_played_tracks(channel_id: int = None) -> None:
+    if channel_id is not None:
+        if channel_id == 0:
+             super(_ChannelAwareDeque, RECENTLY_PLAYED_TRACKS).clear()
+        else:
+            _CHANNEL_RECENTLY_PLAYED_TRACKS.pop(channel_id, None)
+    else:
+        RECENTLY_PLAYED_TRACKS.clear()
+
 
 def _norm_track_token(text: str) -> str:
     return re.sub(r'[^a-z0-9]+', '', (text or '').lower())
@@ -17,23 +50,25 @@ def _clean_song_token(text: str) -> str:
     s = re.sub(r'\s+[-–—|/]\s+.*$', '', s)
     return _norm_track_token(s)
 
-def record_played_track(song: str, artist: str) -> None:
-    """Records a song and artist in the rolling session exclusion deque."""
+def record_played_track(song: str, artist: str, channel_id: int = None) -> None:
+    """Records a song and artist in the channel's rolling session exclusion deque."""
     s_norm = _norm_track_token(song)
     s_clean = _clean_song_token(song)
     a_norm = _norm_track_token(artist)
     if not s_norm or s_norm in ("unknowntrack", "unknownsong", "unknown"):
         return
+    target_deque = _get_music_channel_deque(channel_id)
     for tok in {s_norm, s_clean}:
         if tok:
             entry = (tok, a_norm)
-            if entry in RECENTLY_PLAYED_TRACKS:
-                RECENTLY_PLAYED_TRACKS.remove(entry)
-            RECENTLY_PLAYED_TRACKS.append(entry)
+            if entry in target_deque:
+                target_deque.remove(entry)
+            target_deque.append(entry)
 
-def is_recently_played(song: str, artist: str = "") -> bool:
-    """Checks whether a candidate track matches a recently played song in this session."""
-    if not RECENTLY_PLAYED_TRACKS:
+def is_recently_played(song: str, artist: str = "", channel_id: int = None) -> bool:
+    """Checks whether a candidate track matches a recently played song in this channel's session."""
+    target_deque = _get_music_channel_deque(channel_id)
+    if not target_deque:
         return False
     s_norm = _norm_track_token(song)
     s_clean = _clean_song_token(song)
@@ -41,7 +76,7 @@ def is_recently_played(song: str, artist: str = "") -> bool:
     if not s_norm:
         return False
     candidate_tokens = {t for t in (s_norm, s_clean) if t}
-    for rec_s, rec_a in RECENTLY_PLAYED_TRACKS:
+    for rec_s, rec_a in target_deque:
         if rec_s in candidate_tokens and (not a_norm or not rec_a or a_norm == rec_a or a_norm in rec_a or rec_a in a_norm):
             return True
     return False

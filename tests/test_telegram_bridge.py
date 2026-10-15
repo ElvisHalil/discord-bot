@@ -226,6 +226,86 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
                     similar_to="Harder, Better, Faster, Stronger by Daft Punk"
                 )
 
+    async def test_mode_switch_broadcasts_globally_and_no_cross_chat_leakage(self):
+        from src.skills.music.spectrum import (
+            clear_channel_played_songs,
+            get_channel_last_played_song,
+            record_channel_played_song,
+        )
+        from src.skills.music.utils import (
+            clear_recently_played_tracks,
+            is_recently_played,
+            record_played_track,
+        )
+        from src.skills.sports.live_tracker import (
+            clear_channel_last_match_query,
+            get_channel_last_match_query,
+            record_channel_last_match_query,
+        )
+
+        discord_cid = 987654321
+        tg_cid = to_tg_channel_id(123456789)
+
+        # 1. Verify per-channel music & sports state never leaks between Discord and Telegram
+        clear_channel_played_songs()
+        clear_recently_played_tracks()
+        clear_channel_last_match_query()
+
+        record_channel_played_song("Strobe", "Deadmau5", "Progressive House", channel_id=discord_cid)
+        record_played_track("Strobe", "Deadmau5", channel_id=discord_cid)
+        record_channel_last_match_query("Washington Capitals vs Montreal Canadiens", "nhl", channel_id=discord_cid)
+
+        self.assertIsNotNone(get_channel_last_played_song(discord_cid))
+        self.assertIsNone(get_channel_last_played_song(tg_cid))
+        self.assertTrue(is_recently_played("Strobe", "Deadmau5", channel_id=discord_cid))
+        self.assertFalse(is_recently_played("Strobe", "Deadmau5", channel_id=tg_cid))
+        self.assertEqual(get_channel_last_match_query(tg_cid), ("", None))
+
+        # 2. Verify /mode switch in Telegram broadcasts to active Discord channel
+        mock_discord_channel = SimpleNamespace(send=AsyncMock())
+        mock_client = SimpleNamespace(
+            get_channel=MagicMock(return_value=mock_discord_channel),
+            fetch_channel=AsyncMock(return_value=mock_discord_channel),
+            guilds=[],
+        )
+        main_mod = SimpleNamespace(
+            current_mode="research-gemma",
+            chat_history={discord_cid: [{"role": "user", "content": "hi"}]},
+            active_channels={discord_cid},
+            channel_locks=defaultdict(MagicMock),
+            clear_tool_caches=MagicMock(),
+            ollama_client=SimpleNamespace(generate=AsyncMock()),
+            client=mock_client,
+        )
+
+        mode_update = {
+            "update_id": 10,
+            "message": {
+                "message_id": 50,
+                "from": {"id": 123456789, "is_bot": False, "first_name": "Halil"},
+                "chat": {"id": 123456789, "type": "private"},
+                "text": "/mode chat",
+            },
+        }
+        with patch.dict(
+            os.environ,
+            {"TELEGRAM_OWNER_ID": "123456789", "TELEGRAM_ALLOWED_IDS": ""},
+            clear=False,
+        ), patch("src.telegram_bridge._tg_api_post") as mock_post:
+            mock_post.return_value = {"ok": True, "result": {"message_id": 51}}
+            await handle_telegram_update(
+                mode_update,
+                main_mod=main_mod,
+                bot_token="fake-token",
+                bot_username="TestBot",
+                bot_id=111,
+            )
+
+        self.assertEqual(main_mod.current_mode, "chat")
+        mock_discord_channel.send.assert_awaited_once()
+        sent_discord_msg = mock_discord_channel.send.call_args[0][0]
+        self.assertIn("Switched to **CHAT** mode", sent_discord_msg)
+
     async def test_start_telegram_bridge_disabled_or_missing_token(self):
         main_mod = SimpleNamespace()
         # Disabled -> returns immediately without calling Telegram API

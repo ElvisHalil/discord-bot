@@ -32,15 +32,14 @@ DEFAULT_POLL_INTERVAL_SECONDS: int = 25
 
 
 def set_active_channel_id(channel_id: Optional[int]) -> None:
-    """Set the active Discord channel ID for the current turn/thread."""
+    """Set the active channel ID for the current turn/thread."""
     global _FALLBACK_CHANNEL_ID
     ACTIVE_CHANNEL_ID.set(channel_id)
-    if channel_id is not None:
-        _FALLBACK_CHANNEL_ID = channel_id
+    _FALLBACK_CHANNEL_ID = channel_id
 
 
 def get_active_channel_id() -> int:
-    """Retrieve the active Discord channel ID (defaults to 0 in standalone unit tests)."""
+    """Retrieve the active channel ID (defaults to 0 in standalone unit tests)."""
     cid = ACTIVE_CHANNEL_ID.get()
     if cid is not None:
         return cid
@@ -50,7 +49,7 @@ def get_active_channel_id() -> int:
 
 
 def record_channel_last_match_query(query: str, sport: Optional[str] = None, channel_id: Optional[int] = None) -> None:
-    """Record the most recently discussed team or matchup in a Discord channel."""
+    """Record the most recently discussed team or matchup in a channel."""
     cleaned = _clean_tracking_query(query)
     if not cleaned:
         return
@@ -59,16 +58,23 @@ def record_channel_last_match_query(query: str, sport: Optional[str] = None, cha
 
 
 def get_channel_last_match_query(channel_id: Optional[int] = None) -> Tuple[str, Optional[str]]:
-    """Retrieve the most recently discussed team or matchup in a Discord channel."""
+    """Retrieve the most recently discussed team or matchup in a specific channel."""
     cid = channel_id if channel_id is not None else get_active_channel_id()
     if cid in _CHANNEL_LAST_MATCH_QUERY:
         return _CHANNEL_LAST_MATCH_QUERY[cid]
-    if 0 in _CHANNEL_LAST_MATCH_QUERY:
-        return _CHANNEL_LAST_MATCH_QUERY[0]
     for (t_cid, _), m in LIVE_TRACKER.tracked_matches.items():
         if t_cid == cid:
             return (f"{m.home_team} vs {m.away_team}", m.sport_path)
     return ("", None)
+
+
+def clear_channel_last_match_query(channel_id: Optional[int] = None) -> None:
+    """Clear per-channel last match query state (for one channel if channel_id is given, else all)."""
+    if channel_id is not None:
+        _CHANNEL_LAST_MATCH_QUERY.pop(channel_id, None)
+    else:
+        _CHANNEL_LAST_MATCH_QUERY.clear()
+        set_active_channel_id(None)
 
 
 @dataclass
