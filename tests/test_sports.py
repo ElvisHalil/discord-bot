@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 from src.skills.sports.aggregators.f1 import F1Aggregator
 from src.skills.sports.aggregators.soccer import SoccerAggregator
@@ -224,10 +225,12 @@ class TestSoccerAggregator(unittest.TestCase):
 
     @patch("src.skills.sports.aggregators.soccer.fetch_json")
     def test_get_schedule_range(self, mock_fetch):
+        d1 = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT07:00Z")
+        d2 = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%dT07:00Z")
         mock_fetch.side_effect = [
             {
                 "leagues": [{
-                    "calendar": ["2026-10-17T07:00Z", "2026-10-18T07:00Z"]
+                    "calendar": [d1, d2]
                 }]
             },
             {
@@ -260,10 +263,11 @@ class TestSoccerAggregator(unittest.TestCase):
 
     @patch("src.skills.sports.aggregators.soccer.fetch_json")
     def test_get_past_schedule_range(self, mock_fetch):
+        past_d = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%dT07:00Z")
         mock_fetch.side_effect = [
             {
                 "leagues": [{
-                    "calendar": ["2026-10-10T07:00Z"]
+                    "calendar": [past_d]
                 }]
             },
             {
@@ -330,10 +334,11 @@ class TestNbaAggregator(unittest.TestCase):
 
     @patch("src.skills.sports.aggregators.nba.fetch_json")
     def test_get_schedule_range(self, mock_fetch):
+        future_d = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT07:00Z")
         mock_fetch.side_effect = [
             {
                 "leagues": [{
-                    "calendar": ["2026-10-14T07:00Z"]
+                    "calendar": [future_d]
                 }]
             },
             {
@@ -356,10 +361,11 @@ class TestNbaAggregator(unittest.TestCase):
 
     @patch("src.skills.sports.aggregators.nba.fetch_json")
     def test_get_past_schedule_range(self, mock_fetch):
+        past_d = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%dT07:00Z")
         mock_fetch.side_effect = [
             {
                 "leagues": [{
-                    "calendar": ["2026-10-10T07:00Z"]
+                    "calendar": [past_d]
                 }]
             },
             {
@@ -418,10 +424,11 @@ class TestHockeyAggregator(unittest.TestCase):
 
     @patch("src.skills.sports.aggregators.hockey.fetch_json")
     def test_get_schedule_range(self, mock_fetch):
+        future_d = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT07:00Z")
         mock_fetch.side_effect = [
             {
                 "leagues": [{
-                    "calendar": ["2026-10-14T07:00Z"]
+                    "calendar": [future_d]
                 }]
             },
             {
@@ -444,10 +451,11 @@ class TestHockeyAggregator(unittest.TestCase):
 
     @patch("src.skills.sports.aggregators.hockey.fetch_json")
     def test_get_past_schedule_range(self, mock_fetch):
+        past_d = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%dT07:00Z")
         mock_fetch.side_effect = [
             {
                 "leagues": [{
-                    "calendar": ["2026-10-10T07:00Z"]
+                    "calendar": [past_d]
                 }]
             },
             {

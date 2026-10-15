@@ -32,6 +32,11 @@ from src.orchestrator import (
     sanitize_agent_reply,
     extract_reply_context,
 )
+from src.telegram_bridge import (
+    is_telegram_channel,
+    send_telegram_message,
+    start_telegram_bridge,
+)
 
 load_dotenv()
 
@@ -103,13 +108,16 @@ def clear_tool_caches(channel_id: int = None):
 
 async def handle_live_match_update(match, snapshot, triggers):
     """Callback invoked by LIVE_TRACKER when a tracked game has a score change, red card, halftime, or full-time."""
-    channel = client.get_channel(match.channel_id)
-    if not channel:
-        try:
-            channel = await client.fetch_channel(match.channel_id)
-        except Exception as e:
-            print(f"⚠️ [Live Tracker]: Could not fetch channel {match.channel_id}: {e}")
-            return
+    is_tg = is_telegram_channel(match.channel_id)
+    channel = None
+    if not is_tg:
+        channel = client.get_channel(match.channel_id)
+        if not channel:
+            try:
+                channel = await client.fetch_channel(match.channel_id)
+            except Exception as e:
+                print(f"⚠️ [Live Tracker]: Could not fetch channel {match.channel_id}: {e}")
+                return
 
     trigger_block = "\n".join(f"- {t}" for t in triggers)
     stats_line = f"\nLive Match Stats: {snapshot.stats_summary}" if snapshot.stats_summary else ""
@@ -169,7 +177,10 @@ async def handle_live_match_update(match, snapshot, triggers):
             llm_text = ""
 
         final_msg = f"📡 **LIVE UPDATE ({match.league_name})**\n{llm_text}" if llm_text else fallback_msg
-        await channel.send(final_msg)
+        if is_tg:
+            await send_telegram_message(match.channel_id, final_msg)
+        else:
+            await channel.send(final_msg)
 
         if match.channel_id not in chat_history:
             system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
@@ -192,6 +203,7 @@ async def on_ready():
     bind_tracker_event_loop(asyncio.get_running_loop())
     LIVE_TRACKER.set_notify_callback(handle_live_match_update)
     LIVE_TRACKER.ensure_loop_running()
+    asyncio.create_task(start_telegram_bridge(sys.modules[__name__]))
 
 
 @client.event
