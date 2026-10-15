@@ -1,8 +1,16 @@
 import os
 import re
+import unicodedata
 from typing import Optional
 from src.skills.sports.aggregators.base import BaseSportsAggregator
 from src.utils.http import fetch_soup, fetch_json
+
+
+def _strip_accents(text: str) -> str:
+    """Normalize Unicode accents/diacritics (e.g. 'Montréal' -> 'Montreal')."""
+    if not text:
+        return ""
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
 
 
 def decimal_to_american(dec: float) -> str:
@@ -88,27 +96,31 @@ class OddsAggregator(BaseSportsAggregator):
     def _clean_query_target(query: str) -> str:
         """Strips betting/conversational filler words and expands short team aliases."""
         from src.skills.sports.aggregators.espn_utils import TEAM_ALIASES
-        clean = query.lower()
+        clean = _strip_accents(query.lower())
         for phrase in [
             "if i bet", "i bet", "bet on", "will i win and how much",
             "will i win", "how much", "what are the", "can you check",
             "right now", "next game", "next match", "moneyline", "betting line",
             "betting odds", "live odds", "match odds", "game odds",
-            "point spread", "over under",
+            "point spread", "over under", "tracked games", "tracked matches",
+            "tracked game", "tracked match", "both games", "both matches",
+            "these games", "these matches", "the games", "the matches",
         ]:
             clean = re.sub(rf'\b{re.escape(phrase)}\b', ' ', clean, flags=re.IGNORECASE)
         for word in [
-            "bet", "betting", "odds", "odd", "line", "spread", "moneyline",
+            "bet", "betting", "odds", "odd", "line", "lines", "spread", "moneyline",
             "tomorrow", "today", "tonight", "live", "now", "currently",
-            "next", "match", "game", "soccer", "football", "basketball", "hockey",
-            "dollars", "bucks", "usd", "on", "for", "the", "in", "at", "get", "check", "why", "cant",
+            "next", "match", "matches", "game", "games", "tracked", "tracking", "track",
+            "soccer", "football", "basketball", "hockey", "nhl", "nba", "nfl", "mlb",
+            "dollars", "bucks", "usd", "on", "for", "the", "in", "at", "of", "are", "is",
+            "what", "whats", "please", "both", "these", "those", "get", "check", "why", "cant",
         ]:
             clean = re.sub(rf'\b{re.escape(word)}\b', ' ', clean, flags=re.IGNORECASE)
         clean = re.sub(r'[\$0-9]+(?:\.[0-9]{2})?', ' ', clean)
         clean = re.sub(r'[^\w\s]', ' ', clean)
         clean = ' '.join(clean.split()).strip()
         if not clean:
-            return query.strip()
+            return ""
 
         # Expand known short aliases (e.g. 'madrid' -> 'real madrid', 'munich' -> 'bayern munich')
         if clean in TEAM_ALIASES:
@@ -131,7 +143,7 @@ class OddsAggregator(BaseSportsAggregator):
         stake: Optional[float] = None,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """
-        Discovers the live or next upcoming match for a team via ESPN and fetches
+        Discovers the live or next upcoming match for a team/matchup via ESPN and fetches
         ESPN's live/pre-match DraftKings & Bet365 odds, spread, and over/under.
         Returns (formatted_odds_str, discovered_espn_league_slug, canonical_team_name).
         """
@@ -142,29 +154,88 @@ class OddsAggregator(BaseSportsAggregator):
             return None, None, None
 
         try:
-            from src.skills.sports.aggregators.espn_utils import espn_search_auto_discover
+            from src.skills.sports.aggregators.espn_utils import espn_search_auto_discover, resolve_espn_team
             from src.skills.sports.aggregators.soccer import SoccerAggregator
 
-            target = self._clean_query_target(query)
-            sport_hint = "soccer" if sport in ("soccer", "epl", "ucl", "laliga", "seriea", "bundesliga", "ligue1", "mls") else None
+            target = self._clean_query_target(query) or query.strip()
+            sport_l = (sport or "").lower().strip()
+            q_low = query.lower()
+
+            sport_hint = None
+            club_league = None
 
             # Check if target matches a known soccer club hint
-            club_league = None
             for club, lg in sorted(SoccerAggregator.CLUB_LEAGUE_HINTS.items(), key=lambda x: len(x[0]), reverse=True):
                 if re.search(rf'\b{re.escape(club)}\b', target.lower()):
                     club_league = SoccerAggregator.LEAGUES.get(lg, {}).get("code", lg)
                     sport_hint = "soccer"
                     break
 
-            disc = espn_search_auto_discover(target, sport_hint=sport_hint)
+            if not sport_hint:
+                if sport_l in ("soccer", "epl", "ucl", "laliga", "seriea", "bundesliga", "ligue1", "mls"):
+                    sport_hint = "soccer"
+                elif sport_l in ("nhl", "hockey", "ice hockey") or re.search(r'\b(?:nhl|hockey)\b', q_low):
+                    sport_hint = "hockey"
+                    club_league = "nhl"
+                elif sport_l in ("nba", "basketball", "hoops") or re.search(r'\b(?:nba|basketball)\b', q_low):
+                    sport_hint = "basketball"
+                    club_league = "nba"
+                elif sport_l in ("nfl", "football", "american football") or re.search(r'\b(?:nfl)\b', q_low):
+                    sport_hint = "football"
+                    club_league = "nfl"
+                elif sport_l in ("mlb", "baseball") or re.search(r'\b(?:mlb|baseball)\b', q_low):
+                    sport_hint = "baseball"
+                    club_league = "mlb"
+
+            # Split matchup strings (e.g. "washington capitals vs montreal canadiens") so team auto-discovery succeeds
+            candidate_targets = [target]
+            if re.search(r'\b(?:vs|v|versus)\b', target, flags=re.IGNORECASE):
+                parts = [p.strip() for p in re.split(r'\b(?:vs|v|versus)\b', target, flags=re.IGNORECASE) if p.strip()]
+                candidate_targets = parts + [target]
+
+            disc = None
+            matched_cand = target
+            for cand_t in candidate_targets:
+                d = espn_search_auto_discover(cand_t, sport_hint=sport_hint)
+                ent_t = (d or {}).get("entity_type") or (d or {}).get("type")
+                t_id = (d or {}).get("team_id") or (d or {}).get("id")
+                if d and ent_t == "team" and t_id:
+                    disc = d
+                    matched_cand = cand_t
+                    break
+
             ent_type = (disc or {}).get("entity_type") or (disc or {}).get("type")
             team_id = (disc or {}).get("team_id") or (disc or {}).get("id")
-            if not disc or ent_type != "team" or not team_id:
-                return None, club_league, None
+            sport_path = (disc or {}).get("sport") or sport_hint or "soccer"
+            league_code = (disc or {}).get("league") or club_league or (
+                "nhl" if sport_path == "hockey" else ("nba" if sport_path == "basketball" else ("nfl" if sport_path == "football" else "eng.1"))
+            )
+            team_name = (disc or {}).get("display_name") or (disc or {}).get("name") or matched_cand.title()
 
-            sport_path = disc.get("sport") or (sport_hint or "soccer")
-            league_code = disc.get("league") or club_league or "eng.1"
-            team_name = disc.get("display_name") or disc.get("name") or target.title()
+            if (not disc or ent_type != "team" or not team_id) and not is_json_mock:
+                # Fallback to resolve_espn_team across candidate targets
+                fallback_leagues = [(sport_path, league_code)] if sport_hint else [
+                    ("hockey", "nhl"),
+                    ("basketball", "nba"),
+                    ("football", "nfl"),
+                    ("baseball", "mlb"),
+                    ("soccer", "eng.1"),
+                ]
+                for sp, lg in fallback_leagues:
+                    for cand_t in candidate_targets:
+                        resolved = resolve_espn_team(sp, lg, cand_t)
+                        if resolved and resolved.get("id"):
+                            team_id = str(resolved["id"])
+                            sport_path = sp
+                            league_code = lg
+                            team_name = resolved.get("displayName") or resolved.get("name") or cand_t.title()
+                            ent_type = "team"
+                            break
+                    if team_id:
+                        break
+
+            if ent_type != "team" or not team_id:
+                return None, club_league, None
 
             # Fetch schedule (for soccer, use /all/teams/{id}/schedule?fixture=true to include UCL/cups)
             if sport_path == "soccer":
@@ -181,18 +252,45 @@ class OddsAggregator(BaseSportsAggregator):
             if not events:
                 return None, league_code, team_name
 
-            # Pick live ('in') or earliest upcoming ('pre') event
+            # Pick live ('in') or earliest upcoming ('pre') event (preferring opponent match if 'vs' was specified)
+            candidate_events = events
+            if len(candidate_targets) >= 3:
+                opp_tokens = [
+                    w for w in re.split(r'\s+', _strip_accents(candidate_targets[1]).lower())
+                    if len(w) >= 3
+                ]
+                if opp_tokens:
+                    opp_matched = []
+                    for ev in events:
+                        comp = (ev.get("competitions") or [{}])[0]
+                        comp_names = " ".join(
+                            _strip_accents((c.get("team") or {}).get("displayName", "")).lower()
+                            for c in comp.get("competitors", [])
+                        )
+                        if any(tok in comp_names for tok in opp_tokens):
+                            opp_matched.append(ev)
+                    if opp_matched:
+                        candidate_events = opp_matched
+
             chosen_ev = None
-            for ev in events:
+            for ev in candidate_events:
                 comp = (ev.get("competitions") or [{}])[0]
                 state = comp.get("status", {}).get("type", {}).get("state", "")
                 if state == "in":
                     chosen_ev = ev
                     break
-                if state == "pre" and chosen_ev is None:
-                    chosen_ev = ev
             if not chosen_ev:
-                chosen_ev = events[0]
+                pre_evs = [
+                    ev for ev in candidate_events
+                    if (ev.get("competitions") or [{}])[0].get("status", {}).get("type", {}).get("state", "") == "pre"
+                ]
+                if pre_evs:
+                    pre_evs.sort(key=lambda e: e.get("date", "9999"))
+                    chosen_ev = pre_evs[0]
+            if not chosen_ev:
+                post_evs = list(candidate_events)
+                post_evs.sort(key=lambda e: e.get("date", ""))
+                chosen_ev = post_evs[-1]
 
             ev_id = str(chosen_ev.get("id", ""))
             ev_league_obj = chosen_ev.get("league", {})
@@ -224,6 +322,23 @@ class OddsAggregator(BaseSportsAggregator):
             odds_url = f"https://sports.core.api.espn.com/v2/sports/{sport_path}/leagues/{ev_league_slug}/events/{ev_id}/competitions/{ev_id}/odds"
             odds_data = fetch_json(odds_url, timeout=8)
             items = (odds_data or {}).get("items", [])
+
+            # If live scores are omitted on /schedule or Core API odds items are empty, check /summary
+            if not is_json_mock and ((state == "in" and (not home_score or not away_score)) or not items):
+                try:
+                    summary_url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{ev_league_slug}/summary?event={ev_id}"
+                    summary_data = fetch_json(summary_url, timeout=8) or {}
+                    header_comps = (summary_data.get("header") or {}).get("competitions") or []
+                    if header_comps:
+                        h_c = next((c for c in header_comps[0].get("competitors", []) if c.get("homeAway") == "home"), {})
+                        a_c = next((c for c in header_comps[0].get("competitors", []) if c.get("homeAway") == "away"), {})
+                        home_score = home_score or _score_str(h_c)
+                        away_score = away_score or _score_str(a_c)
+                    if not items:
+                        items = summary_data.get("pickcenter") or summary_data.get("odds") or []
+                except Exception:
+                    pass
+
             if not items:
                 return None, ev_league_slug, team_name
 
@@ -284,8 +399,14 @@ class OddsAggregator(BaseSportsAggregator):
 
                 extra_markets = []
                 if spread_val is not None:
-                    h_sp = ((home_o.get("current") or {}).get("pointSpread") or {}).get("american")
-                    a_sp = ((away_o.get("current") or {}).get("pointSpread") or {}).get("american")
+                    h_sp = (
+                        ((home_o.get("current") or {}).get("pointSpread") or {}).get("american")
+                        or ((home_o.get("close") or home_o.get("open") or {}).get("pointSpread") or {}).get("american")
+                    )
+                    a_sp = (
+                        ((away_o.get("current") or {}).get("pointSpread") or {}).get("american")
+                        or ((away_o.get("close") or away_o.get("open") or {}).get("pointSpread") or {}).get("american")
+                    )
                     if h_sp or a_sp:
                         extra_markets.append(f"Spread: {home_name} {h_sp or ''} / {away_name} {a_sp or ''}")
                 if over_under is not None:
@@ -312,7 +433,8 @@ class OddsAggregator(BaseSportsAggregator):
             if not provider_blocks:
                 return None, ev_league_slug, team_name
 
-            status_banner = f"🔴 LIVE NOW ({status_detail}) — Score: {home_name} {home_score} - {away_score} {away_name}" if state == "in" else f"{status_detail} ({ev_date})"
+            score_part = f" — Score: {home_name} {home_score} - {away_score} {away_name}" if (home_score or away_score) else ""
+            status_banner = f"🔴 LIVE NOW ({status_detail}){score_part}" if state == "in" else f"{status_detail} ({ev_date})"
             favorite = min([o for o in primary_outcomes if o[0] != "Draw"], key=lambda x: x[1], default=(None, 0))[0]
             fav_str = f"Favorite: **{favorite}**\n" if favorite else ""
 
@@ -401,7 +523,7 @@ class OddsAggregator(BaseSportsAggregator):
 
         # 2. Check if query matches a known soccer club to prioritize UCL + its domestic league
         from src.skills.sports.aggregators.soccer import SoccerAggregator
-        target_clean = (canonical_team or self._clean_query_target(query)).lower()
+        target_clean = _strip_accents(canonical_team or self._clean_query_target(query) or query).lower()
         for club, lg in sorted(SoccerAggregator.CLUB_LEAGUE_HINTS.items(), key=lambda x: len(x[0]), reverse=True):
             if re.search(rf'\b{re.escape(club)}\b', target_clean):
                 for k in ("soccer_uefa_champs_league", self.ESPN_TO_ODDS_API_LEAGUE.get(lg)):
@@ -432,11 +554,25 @@ class OddsAggregator(BaseSportsAggregator):
                 ]
 
         ignore_words = {
-            "vs", "versus", "the", "and", "odds", "odd", "match", "game", "moneyline",
-            "spread", "who", "will", "win", "right", "now", "today", "tomorrow", "live",
-            "bet", "betting", "line", "soccer", "football", "next", "for", "check", "get",
+            "vs", "versus", "the", "and", "odds", "odd", "match", "matches", "game", "games",
+            "moneyline", "spread", "who", "will", "win", "right", "now", "today", "tomorrow",
+            "live", "bet", "betting", "line", "lines", "soccer", "football", "basketball",
+            "hockey", "nhl", "nba", "nfl", "mlb", "next", "for", "check", "get", "tracked",
+            "tracking", "track", "both", "these", "those", "what", "whats", "are", "please",
         }
-        query_tokens = [w for w in re.split(r'[\s\-_/]+', target_clean) if len(w) >= 3 and w not in ignore_words]
+        full_query_norm = _strip_accents(self._clean_query_target(query) or query).lower()
+        query_tokens = [
+            w for w in re.split(r'[\s\-_/]+', f"{target_clean} {full_query_norm}".strip())
+            if len(w) >= 3 and w not in ignore_words
+        ]
+        # Preserve token order while deduplicating
+        seen_toks = set()
+        dedup_tokens = []
+        for t in query_tokens:
+            if t not in seen_toks:
+                seen_toks.add(t)
+                dedup_tokens.append(t)
+        query_tokens = dedup_tokens
 
         matched_games = []
         for sport_key in candidate_keys[:4]:
@@ -449,16 +585,24 @@ class OddsAggregator(BaseSportsAggregator):
                 for game in data:
                     home = game.get("home_team", "")
                     away = game.get("away_team", "")
-                    home_l, away_l = home.lower(), away.lower()
+                    home_l = _strip_accents(home).lower()
+                    away_l = _strip_accents(away).lower()
 
                     score = 0
-                    if target_clean and (target_clean in home_l or target_clean in away_l):
+                    home_hits = sum(1 for t in query_tokens if t in home_l)
+                    away_hits = sum(1 for t in query_tokens if t in away_l)
+                    token_hits = home_hits + away_hits
+
+                    if home_hits >= 1 and away_hits >= 1:
+                        score = 100
+                    elif target_clean and (target_clean in home_l or target_clean in away_l):
                         score = 100
                     elif query_tokens:
-                        token_hits = sum(1 for t in query_tokens if t in home_l or t in away_l)
                         if token_hits == len(query_tokens):
                             score = 80
-                        elif token_hits > 0 and len(query_tokens) == 1:
+                        elif token_hits >= 2:
+                            score = 60
+                        elif token_hits > 0 and len(query_tokens) <= 2:
                             score = 50
 
                     if score > 0 and game.get("bookmakers"):
@@ -658,6 +802,76 @@ class OddsAggregator(BaseSportsAggregator):
                 "Odds typically open closer to the scheduled match start time.\n\n"
             )
 
+    def _get_single_match_odds(
+        self,
+        query_clean: str,
+        sport_clean: str,
+        stake: Optional[float] = None,
+    ) -> str:
+        """Fetches odds for a single matchup or team query."""
+        q_lower = query_clean.lower()
+        traditional_sport_keywords = (
+            "nfl", "nhl", "nba", "mlb", "ucl", "epl", "laliga", "la liga",
+            "serie a", "bundesliga", "hockey", "basketball", "soccer",
+            "american football", "atlanta falcons",
+        )
+        has_traditional_sport = (
+            sport_clean in ("nhl", "hockey", "nba", "basketball", "nfl", "football", "mlb", "baseball", "soccer", "ucl", "epl", "laliga", "seriea", "bundesliga")
+            or any(k in q_lower for k in traditional_sport_keywords)
+        )
+        has_cs_team = any(bool(re.search(rf'\b{re.escape(t)}\b', q_lower)) for t in self.CS_TEAMS)
+        is_cs = (sport_clean in ("cs", "cs2", "csgo") or has_cs_team) and not has_traditional_sport
+
+        if is_cs:
+            sport_clean = "cs2"
+
+        print(f"  └─ 🎲 [Odds]: Fetching betting odds for '{query_clean}' (Sport: {sport_clean})...")
+
+        # 1. For Counter-Strike/Esports, scrape HLTV betting analytics first and enrich with KashRock player props
+        if sport_clean in ("cs", "cs2", "csgo") or (sport_clean == "esports" and is_cs):
+            hltv_odds = self._fetch_esports_hltv_odds(query_clean, stake=stake)
+            kr_props = ""
+            is_mock = hasattr(fetch_soup, "assert_called") or "MagicMock" in str(type(fetch_soup))
+            if not is_mock:
+                try:
+                    from src.skills.sports.aggregators.kashrock import KashrockAggregator
+                    kr_props = KashrockAggregator().get_props_for_query(query_clean)
+                except Exception:
+                    kr_props = ""
+            if hltv_odds:
+                return hltv_odds + kr_props
+            if kr_props:
+                return f"[CS2 BETTING & PLAYER PROPS: {query_clean}]\n\n" + kr_props
+            if sport_clean in ("cs", "cs2", "csgo"):
+                return self._fetch_web_odds_search(query_clean, sport_clean)
+
+        # Normalize generic 'esports' default if query is a traditional sports team/matchup
+        effective_sport = "sports" if sport_clean == "esports" else sport_clean
+
+        # 2. Fetch ESPN Live/Pre-Match Odds (DraftKings Live, DraftKings Pre-Match, Bet365) via team/event auto-discovery
+        espn_odds, discovered_league, canonical_team = self._fetch_from_espn_odds(
+            query_clean, effective_sport, stake=stake
+        )
+
+        # 3. Check The Odds API if key is present (prioritizing the competition discovered by ESPN, e.g. UCL / NHL)
+        api_odds = self._fetch_from_the_odds_api(
+            query_clean,
+            effective_sport,
+            stake=stake if not espn_odds else None,
+            discovered_league=discovered_league,
+            canonical_team=canonical_team,
+        )
+
+        if espn_odds and api_odds:
+            return espn_odds + api_odds
+        if espn_odds:
+            return espn_odds
+        if api_odds:
+            return api_odds
+
+        # 4. Web search consensus fallback
+        return self._fetch_web_odds_search(query_clean, effective_sport)
+
     def get_odds(self, query: str, sport: Optional[str] = "sports") -> str:
         """Fetches live match betting odds, moneyline lines, spreads, totals, and implied win probabilities."""
         if not query or not query.strip():
@@ -672,57 +886,74 @@ class OddsAggregator(BaseSportsAggregator):
         stake_match = re.search(r'\$([0-9]+(?:\.[0-9]{2})?)|\b([0-9]+(?:\.[0-9]{2})?)\s*(?:dollars|bucks|usd)', query_clean, re.IGNORECASE)
         stake = float(stake_match.group(1) or stake_match.group(2)) if stake_match else None
 
-        # Detect Counter-Strike / Esports teams and context using strict word boundaries
-        q_lower = query_clean.lower()
-        is_cs = (
-            sport_clean in ("cs", "cs2", "csgo", "esports") or
-            any(bool(re.search(rf'\b{re.escape(t)}\b', q_lower)) for t in self.CS_TEAMS) or
-            any(bool(re.search(rf'\b{re.escape(t)}\b', sport_clean)) for t in self.CS_TEAMS)
+        # Resolve active tracked games when the user asks for "tracked games" / "both games" or omits a team
+        sub_queries: list[tuple[str, str]] = []
+        seen_keys: set[str] = set()
+
+        def _add_sub(q_str: str, sp_str: str) -> None:
+            cleaned = self._clean_query_target(q_str)
+            if not cleaned:
+                return
+            norm_key = _strip_accents(cleaned).lower()
+            if norm_key not in seen_keys:
+                seen_keys.add(norm_key)
+                sub_queries.append((q_str.strip(), sp_str))
+
+        wants_tracked = bool(
+            re.search(
+                r'\b(?:tracked\s+games?|tracked\s+matches|tracked|both\s+games|both\s+matches|these\s+games|these\s+matches)\b',
+                query_clean,
+                re.IGNORECASE,
+            )
         )
-        # Avoid misclassifying explicit NFL requests
-        if is_cs and not any(k in q_lower for k in ("nfl", "atlanta falcons", "american football")):
-            sport_clean = "cs2"
+        cleaned_main = self._clean_query_target(query_clean)
 
-        print(f"  └─ 🎲 [Odds]: Fetching betting odds for '{query_clean}' (Sport: {sport_clean})...")
+        if wants_tracked or not cleaned_main:
+            try:
+                from src.skills.sports.live_tracker import LIVE_TRACKER, get_active_channel_id, get_channel_last_match_query
+                ch_id = get_active_channel_id()
+                active_matches = [
+                    m for (cid, _), m in LIVE_TRACKER.tracked_matches.items()
+                    if ch_id is None or cid == ch_id
+                ]
+                if not active_matches and LIVE_TRACKER.tracked_matches:
+                    active_matches = list(LIVE_TRACKER.tracked_matches.values())
+                for m in active_matches:
+                    match_q = f"{m.home_team} vs {m.away_team}"
+                    match_sp = m.league_code or m.sport_path or sport_clean
+                    _add_sub(match_q, match_sp)
+                if not sub_queries and ch_id is not None:
+                    last_q = get_channel_last_match_query(ch_id)
+                    if last_q:
+                        _add_sub(last_q, sport_clean)
+            except Exception:
+                pass
 
-        # 1. For Counter-Strike/Esports, scrape HLTV betting analytics first and enrich with KashRock player props
-        if sport_clean in ["cs", "cs2", "csgo", "esports"]:
-            hltv_odds = self._fetch_esports_hltv_odds(query_clean, stake=stake)
-            kr_props = ""
-            is_mock = hasattr(fetch_soup, "assert_called") or "MagicMock" in str(type(fetch_soup))
-            if not is_mock:
-                try:
-                    from src.skills.sports.aggregators.kashrock import KashrockAggregator
-                    kr_props = KashrockAggregator().get_props_for_query(query_clean)
-                except Exception:
-                    kr_props = ""
-            if hltv_odds:
-                return hltv_odds + kr_props
-            if kr_props:
-                return f"[CS2 BETTING & PLAYER PROPS: {query_clean}]\n\n" + kr_props
+        # Split multi-matchup queries (e.g. "Washington Capitals vs Montreal Canadiens and Colorado Avalanche vs Dallas Stars")
+        if re.search(r'(?:,|;|\s+and\s+|\s*&\s*)', query_clean, flags=re.IGNORECASE) and "brighton and hove" not in query_clean.lower():
+            parts = [
+                p.strip()
+                for p in re.split(r'(?:,|;|\s+and\s+|\s*&\s*)', query_clean, flags=re.IGNORECASE)
+                if p and self._clean_query_target(p)
+            ]
+            if len(parts) >= 2:
+                for p in parts:
+                    _add_sub(p, sport_clean)
 
-        # 2. Fetch ESPN Live/Pre-Match Odds (DraftKings Live, DraftKings Pre-Match, Bet365) via team/event auto-discovery
-        espn_odds, discovered_league, canonical_team = self._fetch_from_espn_odds(
-            query_clean, sport_clean, stake=stake
-        )
+        if not sub_queries:
+            if not cleaned_main:
+                return "[BETTING ODDS]\nNo actively tracked games were found in this channel. Please specify the matchup or team (e.g. 'Washington Capitals vs Montreal Canadiens').\n\n"
+            return self._get_single_match_odds(query_clean, sport_clean, stake=stake)
 
-        # 3. Check The Odds API if key is present (prioritizing the competition discovered by ESPN, e.g. UCL)
-        api_odds = self._fetch_from_the_odds_api(
-            query_clean,
-            sport_clean,
-            stake=stake if not espn_odds else None,
-            discovered_league=discovered_league,
-            canonical_team=canonical_team,
-        )
+        if len(sub_queries) == 1:
+            q_single, sp_single = sub_queries[0]
+            return self._get_single_match_odds(q_single, sp_single, stake=stake)
 
-        if espn_odds and api_odds:
-            return espn_odds + api_odds
-        if espn_odds:
-            return espn_odds
-        if api_odds:
-            return api_odds
-
-        # 4. Web search consensus fallback
-        return self._fetch_web_odds_search(query_clean, sport_clean)
+        results = []
+        for q_item, sp_item in sub_queries[:4]:
+            res = self._get_single_match_odds(q_item, sp_item, stake=stake)
+            if res:
+                results.append(res.strip())
+        return "\n\n---\n\n".join(results) + "\n\n"
 
 

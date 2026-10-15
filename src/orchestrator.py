@@ -208,10 +208,12 @@ _INTENT_WORDS_TO_STRIP = {
     "score", "results", "result", "yesterday", "tomorrow", "today", "play",
     "playing", "played", "next", "previous", "past", "recent", "upcoming",
     "whats", "what", "is", "are", "the", "this", "that", "it", "its", "their",
-    "they", "them", "his", "her", "status", "of", "game", "match", "hows",
-    "how", "going", "who", "scored", "last", "goal", "goals", "time", "minute",
+    "they", "them", "his", "her", "status", "of", "game", "games", "match", "matches",
+    "hows", "how", "going", "who", "scored", "last", "goal", "goals", "time", "minute",
     "still", "live", "not", "over", "currently", "on", "right", "now",
-    "track", "tracking", "untrack", "stop", "start", "monitor", "follow",
+    "track", "tracking", "tracked", "untrack", "stop", "start", "monitor", "follow",
+    "odds", "odd", "bet", "betting", "moneyline", "spread", "line", "lines",
+    "check", "get", "both", "these", "those",
     "please", "can", "you", "for", "me", "in", "at",
 }
 
@@ -219,6 +221,7 @@ _FOLLOWUP_MATCH_PATTERN = re.compile(
     r"\b(?:"
     r"their|they|them|his|her|its|that\s+team|same\s+team|"
     r"this\s+game|that\s+game|the\s+game|this\s+match|that\s+match|the\s+match|"
+    r"tracked\s+games?|tracked\s+matches|both\s+games|both\s+matches|these\s+games|these\s+matches|"
     r"track\s+this|track\s+that|track\s+the|track\s+it|untrack|"
     r"hows?\s+the\s+game|how\s+is\s+the\s+game|hows?\s+it\s+going|"
     r"who\s+scored|last\s+goal|still\s+live|not\s+over|what\s+minute|"
@@ -255,7 +258,15 @@ def enrich_sports_tool_args(args: dict, history: list) -> dict:
     combined_args_str = " ".join(str(v) for v in args.values() if v).lower()
 
     # Check if latest user turn is a pronoun or demonstrative match follow-up
-    has_followup_cue = bool(_FOLLOWUP_MATCH_PATTERN.search(latest_user.lower())) or not _extract_subject_entities(latest_user)
+    is_plural_tracked = bool(
+        re.search(
+            r"\b(?:tracked\s+games|tracked\s+matches|both\s+games|both\s+matches|these\s+games|these\s+matches)\b",
+            latest_user.lower(),
+        )
+    )
+    has_followup_cue = (
+        bool(_FOLLOWUP_MATCH_PATTERN.search(latest_user.lower())) or not _extract_subject_entities(latest_user)
+    ) and not is_plural_tracked
     context_snippets = []
 
     if has_followup_cue and len(user_texts) >= 2 and not args.get("team") and not args.get("player"):

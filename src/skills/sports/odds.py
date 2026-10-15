@@ -4,13 +4,13 @@ from src.skills.sports.aggregators.odds import OddsAggregator
 _odds_aggregator = OddsAggregator()
 
 
-def skill_betting_odds(query: str, sport: Optional[str] = "esports") -> str:
+def skill_betting_odds(query: str, sport: Optional[str] = "sports") -> str:
     """
-    Fetch current match betting odds, moneyline lines, and implied win probabilities for sports and esports.
+    Fetch current match betting odds, moneyline lines, spreads, totals, and implied win probabilities for sports and esports.
 
     Args:
-        query: Matchup or event name (e.g. 'Falcons vs Ninjas in Pyjamas', '9z vs Aurora', 'Verstappen US GP').
-        sport: Sport category, default 'esports' (e.g. 'cs2', 'esports', 'f1', 'nfl', 'nba', 'soccer').
+        query: Matchup, team, event name, or 'tracked games' (e.g. 'Washington Capitals vs Montreal Canadiens', 'Colorado Avalanche vs Dallas Stars', 'Real Madrid', 'Falcons vs Ninjas in Pyjamas').
+        sport: Sport category, default 'sports' (e.g. 'nhl', 'nba', 'nfl', 'soccer', 'ucl', 'mlb', 'f1', 'cs2', 'esports').
     """
     print(f"🎲 [Executing Betting Odds Skill] Matchup: '{query}' (Sport: '{sport}')")
     odds_data = _odds_aggregator.get_odds(query, sport=sport)

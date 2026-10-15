@@ -650,8 +650,158 @@ class TestSportsEspnUpgrade(unittest.TestCase):
         # Ensure live match summary is placed BEFORE the schedule block
         self.assertLess(out.index("MATCH SUMMARY"), out.index("TEAM SCHEDULE & RESULTS"))
 
+    @patch("src.skills.sports.aggregators.odds.fetch_json")
+    @patch("src.skills.sports.aggregators.espn_utils.espn_search_auto_discover")
+    def test_nhl_matchup_and_tracked_games_odds(self, mock_disc, mock_fetch_json):
+        from src.skills.sports.odds import skill_betting_odds
+        from src.skills.sports.live_tracker import LIVE_TRACKER, TrackedMatch, MatchSnapshot, set_active_channel_id
+        import os
+
+        def disc_side_effect(query, sport_hint=None):
+            q_l = query.lower()
+            if "washington capitals" in q_l:
+                return {
+                    "entity_type": "team",
+                    "display_name": "Washington Capitals",
+                    "sport": "hockey",
+                    "league": "nhl",
+                    "team_id": "23",
+                }
+            if "colorado avalanche" in q_l:
+                return {
+                    "entity_type": "team",
+                    "display_name": "Colorado Avalanche",
+                    "sport": "hockey",
+                    "league": "nhl",
+                    "team_id": "17",
+                }
+            return None
+
+        mock_disc.side_effect = disc_side_effect
+
+        def fetch_side_effect(url, timeout=8):
+            if "/hockey/nhl/teams/23/schedule" in url:
+                return {
+                    "events": [{
+                        "id": "401892504",
+                        "date": "2026-10-14T23:30Z",
+                        "league": {"name": "NHL", "slug": "nhl"},
+                        "competitions": [{
+                            "status": {"type": {"state": "in", "detail": "2nd Period"}},
+                            "competitors": [
+                                {"homeAway": "home", "team": {"displayName": "Washington Capitals"}, "score": {"displayValue": "3"}},
+                                {"homeAway": "away", "team": {"displayName": "Montreal Canadiens"}, "score": {"displayValue": "2"}},
+                            ],
+                        }],
+                    }]
+                }
+            if "/hockey/nhl/teams/17/schedule" in url:
+                return {
+                    "events": [{
+                        "id": "401892505",
+                        "date": "2026-10-15T00:30Z",
+                        "league": {"name": "NHL", "slug": "nhl"},
+                        "competitions": [{
+                            "status": {"type": {"state": "in", "detail": "1st Period"}},
+                            "competitors": [
+                                {"homeAway": "home", "team": {"displayName": "Colorado Avalanche"}, "score": {"displayValue": "1"}},
+                                {"homeAway": "away", "team": {"displayName": "Dallas Stars"}, "score": {"displayValue": "1"}},
+                            ],
+                        }],
+                    }]
+                }
+            if "/events/401892504/competitions/401892504/odds" in url:
+                return {
+                    "items": [{
+                        "provider": {"name": "Draft Kings"},
+                        "details": "WSH -110",
+                        "overUnder": 6.5,
+                        "spread": -1.5,
+                        "homeTeamOdds": {"moneyLine": -110, "close": {"pointSpread": {"american": "-1.5"}}},
+                        "awayTeamOdds": {"moneyLine": -110, "close": {"pointSpread": {"american": "+1.5"}}},
+                    }]
+                }
+            if "/events/401892505/competitions/401892505/odds" in url:
+                return {
+                    "items": [{
+                        "provider": {"name": "Draft Kings - Live Odds"},
+                        "details": "COL -154",
+                        "overUnder": 5.5,
+                        "spread": -1.5,
+                        "homeTeamOdds": {"moneyLine": -154, "current": {"pointSpread": {"american": "-1.5"}}},
+                        "awayTeamOdds": {"moneyLine": 120, "current": {"pointSpread": {"american": "+1.5"}}},
+                    }]
+                }
+            if "api.the-odds-api.com/v4/sports/icehockey_nhl/odds" in url:
+                return [
+                    {
+                        "sport_title": "NHL",
+                        "commence_time": "2026-10-14T23:45:23Z",
+                        "home_team": "Washington Capitals",
+                        "away_team": "Montréal Canadiens",
+                        "bookmakers": [{
+                            "title": "DraftKings",
+                            "markets": [{"key": "h2h", "outcomes": [
+                                {"name": "Washington Capitals", "price": 1.65},
+                                {"name": "Montréal Canadiens", "price": 2.30},
+                            ]}],
+                        }],
+                    },
+                    {
+                        "sport_title": "NHL",
+                        "commence_time": "2026-10-15T00:38:40Z",
+                        "home_team": "Colorado Avalanche",
+                        "away_team": "Dallas Stars",
+                        "bookmakers": [{
+                            "title": "DraftKings",
+                            "markets": [{"key": "h2h", "outcomes": [
+                                {"name": "Colorado Avalanche", "price": 1.69},
+                                {"name": "Dallas Stars", "price": 2.14},
+                            ]}],
+                        }],
+                    },
+                ]
+            return []
+
+        mock_fetch_json.side_effect = fetch_side_effect
+
+        with patch.dict(os.environ, {"THE_ODDS_API_KEY": "test_key"}):
+            # 1. Calling skill_betting_odds with default sport and "Team A vs Team B" (unaccented Montreal)
+            res_single = skill_betting_odds("Washington Capitals vs Montreal Canadiens")
+            self.assertIn("[LIVE & PRE-MATCH BETTING ODDS: Washington Capitals vs Montreal Canadiens]", res_single)
+            self.assertIn("[SPORTSBOOK CONSENSUS ODDS: Washington Capitals vs Montréal Canadiens]", res_single)
+
+            # 2. Calling skill_betting_odds for "tracked games" when 2 live games are tracked in LIVE_TRACKER
+            LIVE_TRACKER.tracked_matches.clear()
+            set_active_channel_id(777)
+            snap = MatchSnapshot(state="in", status_detail="Live", home_team="H", away_team="A", home_score="1", away_score="1")
+            LIVE_TRACKER.tracked_matches[(777, "401892504")] = TrackedMatch(
+                channel_id=777,
+                sport_path="hockey",
+                league_code="nhl",
+                league_name="NHL",
+                event_id="401892504",
+                home_team="Washington Capitals",
+                away_team="Montreal Canadiens",
+                last_snapshot=snap,
+            )
+            LIVE_TRACKER.tracked_matches[(777, "401892505")] = TrackedMatch(
+                channel_id=777,
+                sport_path="hockey",
+                league_code="nhl",
+                league_name="NHL",
+                event_id="401892505",
+                home_team="Colorado Avalanche",
+                away_team="Dallas Stars",
+                last_snapshot=snap,
+            )
+            try:
+                res_tracked = skill_betting_odds("check the odds of the tracked games")
+                self.assertIn("Washington Capitals vs Montreal Canadiens", res_tracked)
+                self.assertIn("Colorado Avalanche vs Dallas Stars", res_tracked)
+            finally:
+                LIVE_TRACKER.tracked_matches.clear()
+
 
 if __name__ == "__main__":
     unittest.main()
-
-
