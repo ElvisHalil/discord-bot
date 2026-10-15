@@ -16,7 +16,7 @@ MOOD_ALIASES: dict[str, set[str]] = {
         "beautiful", "vocal", "liquid", "ethereal", "soaring", "melody"
     },
     "hard": {
-        "hard", "harder", "heavy", "heavier", "aggressive", "brutal", "industrial",
+        "hard", "heavy", "aggressive", "brutal", "industrial",
         "filthy", "dirty", "intense", "rage", "mosh", "hardcore"
     },
     "dark": {

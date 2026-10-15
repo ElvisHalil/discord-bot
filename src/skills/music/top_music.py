@@ -20,6 +20,7 @@ def _is_manager_mocked() -> bool:
         or hasattr(manager.get_similar_tracks, "assert_called")
         or hasattr(manager.get_mood_tracks, "assert_called")
         or hasattr(manager.get_artist_tracks, "assert_called")
+        or hasattr(manager.get_spectrum_tracks, "assert_called")
         or any(
             hasattr(getattr(agg, "get_similar", None), "assert_called")
             or hasattr(getattr(agg, "get_charts", None), "assert_called")
@@ -28,7 +29,7 @@ def _is_manager_mocked() -> bool:
     )
 
 
-def _pre_resolve_top_candidate(candidates: list[Track]) -> str:
+def _pre_resolve_top_candidate(candidates: list[Track], ui_zone: Optional[str] = None) -> str:
     """
     Pre-resolves a verified, Discord-embeddable YouTube Music link for the top candidate track
     (trying up to 4 candidates if one has Discord embedding disabled by its label).
@@ -59,18 +60,20 @@ def _pre_resolve_top_candidate(candidates: list[Track]) -> str:
                     if best_fallback is None:
                         best_fallback = (cand, r)
                     continue
-                return _format_pre_resolved_entry(cand, r)
+                return _format_pre_resolved_entry(cand, r, ui_zone=ui_zone)
         except Exception as e:
             print(f"  └─ ⚠️ [Top Music Pre-Resolver]: Error resolving '{query}': {e}")
             continue
 
     if best_fallback is not None:
-        return _format_pre_resolved_entry(best_fallback[0], best_fallback[1])
+        return _format_pre_resolved_entry(best_fallback[0], best_fallback[1], ui_zone=ui_zone)
     return ""
 
 
-def _format_pre_resolved_entry(cand: Track, r: dict) -> str:
+def _format_pre_resolved_entry(cand: Track, r: dict, ui_zone: Optional[str] = None) -> str:
     from src.skills.music.utils import record_played_track
+    from src.skills.music.spectrum import record_channel_played_song
+
     record_played_track(cand.title, cand.artist)
     record_played_track(r["title"], r["artist"])
     vid = r.get("id")
@@ -81,6 +84,8 @@ def _format_pre_resolved_entry(cand: Track, r: dict) -> str:
             MUSIC_METADATA_CACHE[vid]["genre"] = genre
         if album and not MUSIC_METADATA_CACHE[vid].get("album"):
             MUSIC_METADATA_CACHE[vid]["album"] = album
+
+    record_channel_played_song(song=r["title"], artist=r["artist"], genre=genre, ui_zone=ui_zone)
 
     lines = [
         "\n=== VERIFIED YOUTUBE MUSIC RESULT (PRE-RESOLVED & READY TO PRESENT) ===",
@@ -101,19 +106,159 @@ def skill_top_music(
     match_mood: Optional[bool] = False,
     artist: Optional[str] = None,
     mood: Optional[str] = None,
+    shift: Optional[str] = None,
 ) -> str:
     """
-    Fetches the current top trending/charting music, finds tracks matching a mood/vibe ('banger', 'melodic', 'hard', 'chill', 'sad', 'love'), finds similar songs, OR searches top tracks by an artist.
-    ALWAYS use this skill FIRST when a user asks for genre recommendations, mood/vibe songs ('play me a banger', 'play something melodic', 'play something hard', 'play a love song'), top hits, songs by a specific artist, or similar songs.
+    Fetches the current top trending/charting music, finds tracks matching a mood/vibe ('banger', 'melodic', 'hard', 'chill', 'sad', 'love'), shifts 1 notch on the Tempo x Intensity spectrum ('harder', 'softer', 'faster', 'slower'), finds similar songs, OR searches top tracks by an artist.
+    ALWAYS use this skill FIRST when a user asks for genre recommendations, mood/vibe songs ('play me a banger', 'play something melodic', 'play something hard', 'play a love song'), tempo/intensity notch shifts ('harder', 'softer', 'faster', 'slower'), top hits, songs by a specific artist, or similar songs.
     NOTE: When a user requests one specific song by title (e.g. 'play Strobe by Deadmau5'), call `skill_youtube_searcher(query='<Song> by <Artist>', is_music=True)` directly instead of passing the song title as a genre.
 
     Args:
         genre: Genre or regional style for top charts, e.g. 'pop', 'techno', 'dnb', 'german rap'. Leave empty for all genres.
-        similar_to: Seed song to find similar tracks for, as 'Song Title by Artist Name'.
+        similar_to: Seed song to find similar tracks for (or current song to shift from), as 'Song Title by Artist Name'.
         match_mood: Set true to match the emotional mood/energy of the similar_to song rather than just its style.
         artist: Artist name to get their top popular tracks, e.g. 'Deadmau5' or 'Daft Punk'.
         mood: Mood or vibe keyword, e.g. 'banger', 'melodic', 'hard', 'dark', 'chill', 'sad', 'love', 'workout'.
+        shift: Relative 1-notch tempo/intensity adjustment from the current song: 'harder', 'softer', 'faster', or 'slower'.
     """
+    from src.skills.music.spectrum import (
+        parse_spectrum_shift,
+        has_non_music_domain_context,
+        step_spectrum_zone,
+        get_channel_last_played_song,
+        record_channel_played_song,
+    )
+    from src.skills.music.utils import parse_song_meta, _norm_track_token
+
+    # Detect if a 1-notch spectrum shift ('harder', 'softer', 'faster', 'slower') was requested
+    # via `shift`, or passed by a small model inside `mood` or `genre` when no specific genre is given.
+    shift_raw = (shift or "").strip()
+    if not shift_raw and not artist:
+        if mood and parse_spectrum_shift(mood) is not None:
+            shift_raw = mood.strip()
+        elif genre and not mood and parse_spectrum_shift(genre) is not None:
+            g_check, m_check = parse_mood_and_genre(genre, None)
+            if not m_check and g_check == genre.lower().strip():
+                shift_raw = genre.strip()
+
+    if shift_raw:
+        if (
+            shift_raw.startswith("NON_MUSIC_CONVERSATION:")
+            or has_non_music_domain_context(shift_raw)
+            or (similar_to and has_non_music_domain_context(similar_to))
+        ):
+            clean_shift_err = shift_raw.replace("NON_MUSIC_CONVERSATION:", "").strip()
+            return (
+                f"⚠️ '{clean_shift_err}' appears to be a non-music comparison or domain question. "
+                "Do NOT use `skill_top_music` for non-music questions; answer the user's question directly or use `search_web` / `skill_sports_info`."
+            )
+
+        parsed_shift = parse_spectrum_shift(shift_raw)
+        if parsed_shift is not None:
+            d_tempo, d_intensity, shift_label = parsed_shift
+            seed_song = ""
+            seed_artist = ""
+            seed_genre = None
+            known_zone = None
+
+            last_played = get_channel_last_played_song()
+            if similar_to:
+                s_meta = parse_song_meta(similar_to)
+                seed_song = s_meta.get("song", "")
+                seed_artist = s_meta.get("artist", "")
+                seed_genre = s_meta.get("genre")
+                if last_played and (
+                    _norm_track_token(last_played.get("song") or "") == _norm_track_token(seed_song)
+                ):
+                    seed_genre = seed_genre or last_played.get("genre")
+                    known_zone = last_played.get("ui_zone")
+            elif last_played:
+                seed_song = last_played.get("song") or ""
+                seed_artist = last_played.get("artist") or ""
+                seed_genre = last_played.get("genre")
+                known_zone = last_played.get("ui_zone")
+
+            resolved_genre, start_zone = manager.resolve_track_genre_and_zone(
+                song=seed_song,
+                artist=seed_artist,
+                known_genre=seed_genre,
+                known_zone=known_zone,
+            )
+            step_info = step_spectrum_zone(start_zone, d_tempo, d_intensity)
+            target_zone = step_info["target_zone"]
+            target_zone_name = step_info["target_zone_name"]
+            at_boundary = step_info["at_boundary"]
+            used_default = step_info["used_default_start"]
+
+            print(
+                f"🎛️ [Executing Music Spectrum Shift] Direction: {shift_label} | "
+                f"Seed: '{seed_song} by {seed_artist}' (Genre: {resolved_genre}, Start Zone: {start_zone or 'mid_mid (default)'}) "
+                f"-> Target Zone: {target_zone_name} (Boundary Deep-Cuts: {at_boundary})"
+            )
+
+            exclude_q = f"{seed_song} by {seed_artist}" if seed_song and seed_artist else None
+            all_tracks = manager.get_spectrum_tracks(
+                target_zone=target_zone,
+                prefer_deep_cuts=at_boundary,
+                exclude_query=exclude_q,
+            )
+            if not all_tracks:
+                return f"No tracks found for spectrum zone '{target_zone_name}'."
+
+            artist_seen = set()
+            featured_diverse = []
+            for t in all_tracks:
+                clean_artist = t.artist.lower().strip()
+                if clean_artist and clean_artist not in artist_seen:
+                    artist_seen.add(clean_artist)
+                    featured_diverse.append(t)
+
+            random.shuffle(featured_diverse)
+            top_sample = (featured_diverse or all_tracks)[:15]
+
+            styles_preview = ", ".join(
+                (target_zone.get("deep_cut_tags", []) if at_boundary else target_zone.get("mainstream_tags", []))[:4]
+            )
+            if seed_song and not used_default:
+                output = (
+                    f"=== 🎛️ MUSIC SPECTRUM SHIFT: {shift_label.upper()} ===\n"
+                    f"• Previous Track: {seed_song} by {seed_artist} "
+                    f"(Genre: {resolved_genre or 'Detected'} | Zone: {step_info['start_zone']})\n"
+                    f"• New Target Zone: {target_zone_name} "
+                    f"(Tempo: {target_zone['tempo'].upper()}, Intensity: {target_zone['intensity'].upper()} | Styles: {styles_preview})\n\n"
+                )
+            else:
+                output = (
+                    f"=== 🎛️ MUSIC SPECTRUM SHIFT: {shift_label.upper()} (DEFAULT CENTER START) ===\n"
+                    f"• Starting Zone: mid_mid (Center Default — no active song or identifiable genre)\n"
+                    f"• New Target Zone: {target_zone_name} "
+                    f"(Tempo: {target_zone['tempo'].upper()}, Intensity: {target_zone['intensity'].upper()} | Styles: {styles_preview})\n\n"
+                )
+
+            pre_resolved = _pre_resolve_top_candidate(top_sample, ui_zone=target_zone_name)
+            if pre_resolved:
+                output += pre_resolved + "\n"
+            elif top_sample:
+                record_channel_played_song(
+                    song=top_sample[0].title,
+                    artist=top_sample[0].artist,
+                    genre=top_sample[0].genre,
+                    ui_zone=target_zone_name,
+                )
+
+            for t in top_sample:
+                output += t.display_line() + "\n"
+
+            output += (
+                "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
+                "Briefly mention how you adjusted the vibe 1 notch "
+                f"({shift_label} -> {target_zone['tempo']} tempo, {target_zone['intensity']} intensity: {styles_preview}).\n"
+                "CRITICAL: If `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, "
+                "you MUST present THAT EXACT Song, Artist, and Link immediately using the template below—do NOT pick a different track from the list and do NOT call `skill_youtube_searcher` again!\n\n"
+                + SONG_TEMPLATE
+            )
+            return output
+
     if artist:
         print(f"🎵 [Executing Top Music Skill] Artist: {artist}")
         try:

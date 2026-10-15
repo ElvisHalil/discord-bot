@@ -358,5 +358,143 @@ class MusicAggregatorManager:
         combined.extend(dz_tracks)
         return self._filter_and_deduplicate(combined)
 
+    def resolve_track_genre_and_zone(
+        self,
+        song: str,
+        artist: str,
+        known_genre: Optional[str] = None,
+        known_zone: Optional[str] = None,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        Resolve the genre and 3x3 spectrum `ui_zone` for a currently playing or referenced track:
+        1. Use known_zone / known_genre if already determined.
+        2. Check MUSIC_METADATA_CACHE for matching (song, artist).
+        3. Query Last.fm track.gettoptags -> artist.gettoptags and classify the returned tags.
+        """
+        from src.skills.music.spectrum import classify_genre_to_zone
+
+        if known_zone:
+            return known_genre, known_zone
+
+        if known_genre:
+            z = classify_genre_to_zone(known_genre)
+            if z:
+                return known_genre, z
+
+        s_norm = _norm_track_token(song)
+        a_norm = _norm_track_token(artist)
+        for cached in MUSIC_METADATA_CACHE.values():
+            c_genre = cached.get("genre")
+            if c_genre:
+                c_song = _norm_track_token(cached.get("song", ""))
+                c_art = _norm_track_token(cached.get("artist", ""))
+                if s_norm and c_song == s_norm and (not a_norm or c_art == a_norm):
+                    z = classify_genre_to_zone(c_genre)
+                    if z:
+                        return c_genre, z
+
+        lastfm = self.aggregators.get("lastfm")
+        if lastfm and hasattr(lastfm, "_call") and artist and artist.lower() not in ("unknown artist", "unknown"):
+            collected_tags: list[str] = []
+            if song and song.lower() not in ("unknown track", "unknown"):
+                try:
+                    t_res = lastfm._call("track.gettoptags", {"track": song, "artist": artist, "autocorrect": 1})
+                    t_tags = t_res.get("toptags", {}).get("tag", [])
+                    if isinstance(t_tags, dict):
+                        t_tags = [t_tags]
+                    for tg in t_tags[:8]:
+                        t_name = (tg.get("name") or "").strip()
+                        if t_name:
+                            collected_tags.append(t_name)
+                except Exception:
+                    pass
+
+            if not collected_tags:
+                try:
+                    a_res = lastfm._call("artist.gettoptags", {"artist": artist, "autocorrect": 1})
+                    a_tags = a_res.get("toptags", {}).get("tag", [])
+                    if isinstance(a_tags, dict):
+                        a_tags = [a_tags]
+                    for tg in a_tags[:8]:
+                        t_name = (tg.get("name") or "").strip()
+                        if t_name:
+                            collected_tags.append(t_name)
+                except Exception:
+                    pass
+
+            for tg in collected_tags:
+                z = classify_genre_to_zone(tg)
+                if z:
+                    return tg.title(), z
+
+        return known_genre, None
+
+    def get_spectrum_tracks(
+        self,
+        target_zone: dict,
+        prefer_deep_cuts: bool = False,
+        exclude_query: Optional[str] = None,
+    ) -> list[Track]:
+        """
+        Fetch diverse tracks for a target 3x3 spectrum zone using its mainstream_tags,
+        deep_cut_tags, and intersection_modifiers across Last.fm and Deezer concurrently.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        mainstream = list(target_zone.get("mainstream_tags", []))
+        deep_cuts = list(target_zone.get("deep_cut_tags", []))
+        modifiers = list(target_zone.get("intersection_modifiers", []))
+
+        if prefer_deep_cuts:
+            chosen_deep = random.sample(deep_cuts, min(3, len(deep_cuts)))
+            chosen_main = random.sample(mainstream, min(1, len(mainstream)))
+            active_tags = chosen_deep + chosen_main
+        else:
+            chosen_main = random.sample(mainstream, min(3, len(mainstream)))
+            chosen_deep = random.sample(deep_cuts, min(1, len(deep_cuts)))
+            active_tags = chosen_main + chosen_deep
+
+        if not active_tags:
+            active_tags = mainstream or deep_cuts or ["pop"]
+
+        print(
+            f"  └─ 🎛️ [Spectrum Shift]: Fetching zone '{target_zone.get('ui_zone')}' "
+            f"(tempo={target_zone.get('tempo')}, intensity={target_zone.get('intensity')}, tags={active_tags})..."
+        )
+
+        lastfm = self.aggregators.get("lastfm")
+        deezer = self.aggregators.get("deezer")
+
+        tasks: list[tuple] = []
+        if lastfm:
+            for tag in active_tags[:3]:
+                tasks.append((lastfm.get_charts, tag, tag.title()))
+        if deezer:
+            for idx, tag in enumerate(active_tags[:3]):
+                # Optionally pair one Deezer playlist query with an intersection modifier when pushing boundaries
+                if prefer_deep_cuts and idx == 0 and modifiers:
+                    mod = random.choice(modifiers)
+                    tasks.append((deezer.get_charts, f"{tag} {mod}", tag.title()))
+                else:
+                    tasks.append((deezer.get_charts, tag, tag.title()))
+
+        all_tracks: list[Track] = []
+        if tasks:
+            with ThreadPoolExecutor(max_workers=min(6, len(tasks))) as pool:
+                fut_map = {pool.submit(fn, genre=q): tag_label for fn, q, tag_label in tasks}
+                for fut, tag_label in fut_map.items():
+                    try:
+                        res = fut.result() or []
+                        for trk in res:
+                            if not trk.genre:
+                                trk.genre = tag_label
+                            all_tracks.append(trk)
+                    except Exception:
+                        pass
+
+        random.shuffle(all_tracks)
+        return self._filter_and_deduplicate(all_tracks, exclude_query=exclude_query)
+
+
 
 

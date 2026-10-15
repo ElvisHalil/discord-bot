@@ -23,7 +23,9 @@ from src.config import MODES
 from src.orchestrator import (
     normalize_tool_args,
     enrich_sports_tool_args,
+    enrich_music_tool_args,
     detect_missed_sports_tool_call,
+    detect_missed_music_shift_tool_call,
     trim_history,
     apply_auto_ping,
     join_orphan_bullets,
@@ -71,7 +73,7 @@ except ValueError:
     print("⚠️ BOT_OWNER_ID is missing or invalid in .env; '!mode' is disabled for everyone.")
 
 
-def clear_tool_caches():
+def clear_tool_caches(channel_id: int = None):
     tools.VISITED_URLS.clear()
     tools.URL_CACHE.clear()
     tools.SEARCH_CACHE.clear()
@@ -81,6 +83,7 @@ def clear_tool_caches():
         from src.skills.music.aggregators.deezer import clear_deezer_cache
         from src.skills.music.aggregators.lastfm import clear_lastfm_cache
         from src.skills.music.aggregators.charts import clear_charts_cache
+        from src.skills.music.spectrum import clear_channel_played_songs
         from src.skills.sports.aggregators.liquipedia import clear_liquipedia_cache
         from src.skills.sports.aggregators.hltv import clear_hltv_cache
         from src.skills.sports.aggregators.kashrock import clear_kashrock_cache
@@ -89,6 +92,7 @@ def clear_tool_caches():
         clear_deezer_cache()
         clear_lastfm_cache()
         clear_charts_cache()
+        clear_channel_played_songs(channel_id)
         clear_liquipedia_cache()
         clear_hltv_cache()
         clear_kashrock_cache()
@@ -256,6 +260,7 @@ async def on_raw_reaction_add(payload):
                     print(f"🎵 [Reaction Target]: Cleaned '{clean_title}' by '{orig_artist}'")
 
                     # 2. Get recommendations (and pre-resolved verified YouTube link) from skill_top_music
+                    set_active_channel_id(channel.id)
                     similar_res = await asyncio.to_thread(tools.skill_top_music, similar_to=search_query)
                     is_unrelated_fallback = "NO DIRECT SIMILAR SONGS FOUND" in similar_res
                     similar_tracks = []
@@ -455,14 +460,17 @@ async def run_agent_turn(channel_id, mode_config):
         tool_calls = getattr(response.message, "tool_calls", None)
         if not tool_calls:
             if iterations == 0 and supports_tools:
-                missed = detect_missed_sports_tool_call(history, active_channel_id=channel_id)
+                missed = (
+                    detect_missed_sports_tool_call(history, active_channel_id=channel_id)
+                    or detect_missed_music_shift_tool_call(history)
+                )
                 if missed and missed[0] in active_tools:
                     forced_tool_name, forced_raw_args = missed
                     func = active_tools[forced_tool_name]
                     forced_args = normalize_tool_args(forced_tool_name, func, forced_raw_args)
                     history.pop()  # Discard stale non-tool reply from iteration 0
                     set_active_channel_id(channel_id)
-                    print(f"⚡ [{current_mode.upper()}] Intercepted missed sports tool on turn 0 -> forcing {forced_tool_name}({forced_args})")
+                    print(f"⚡ [{current_mode.upper()}] Intercepted missed tool on turn 0 -> forcing {forced_tool_name}({forced_args})")
                     try:
                         tool_output = await asyncio.to_thread(func, **forced_args)
                     except Exception as e:
@@ -515,6 +523,8 @@ async def run_agent_turn(channel_id, mode_config):
                 args = normalize_tool_args(tool_name, func, call.function.arguments or {})
                 if tool_name in ("skill_sports_info", "skill_track_live_game", "skill_betting_odds"):
                     args = enrich_sports_tool_args(args, history)
+                elif tool_name == "skill_top_music":
+                    args = enrich_music_tool_args(args, history)
                 set_active_channel_id(channel_id)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
                 try:
@@ -603,7 +613,7 @@ async def on_message(message):
 
     if user_input.lower() == "!reset":
         chat_history.pop(message.channel.id, None)
-        clear_tool_caches()
+        clear_tool_caches(message.channel.id)
         await message.channel.send("🧹 Memory and context wiped for this channel.")
         return
 
@@ -695,6 +705,7 @@ async def on_message(message):
 
                 # Clean and ensure consistent song card template if a music track is returned
                 # (may hit the network for metadata, so run it off the event loop)
+                set_active_channel_id(channel_id)
                 reply = await asyncio.to_thread(standardize_song_reply, reply)
 
                 # Scrub internal tool name leaks, meta-refusals, and hallucinated betting links

@@ -51,6 +51,11 @@ TOOL_ARG_ALIASES = {
         "seed": "similar_to",
         "song": "similar_to",
         "track": "similar_to",
+        "direction": "shift",
+        "notch": "shift",
+        "scale": "shift",
+        "tempo": "shift",
+        "intensity": "shift",
     },
     "skill_csgo_esports": {
         "type": "query_type",
@@ -383,6 +388,94 @@ def detect_missed_sports_tool_call(
         if is_live_match_followup:
             args = enrich_sports_tool_args({"query": latest_user}, history)
             return ("skill_sports_info", args)
+
+    return None
+
+
+_REPLY_SONG_CARD_RE = re.compile(
+    r"\[Replying to song card:\s*'([^']+)'\s*by\s*'([^']+)'\]",
+    re.IGNORECASE,
+)
+
+
+def enrich_music_tool_args(args: dict, history: list) -> dict:
+    """Enrich skill_top_music arguments with song-card reply seeds and validate 3-Tier
+    music spectrum shift context so comparative words in normal conversation are never treated as shifts."""
+    if not isinstance(args, dict) or not history:
+        return args
+
+    user_msgs = [
+        m for m in history
+        if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
+    ]
+    if not user_msgs:
+        return args
+
+    last_msg = user_msgs[-1]
+    raw_content = str(last_msg.get("content", "") if isinstance(last_msg, dict) else getattr(last_msg, "content", "") or "")
+    clean_user = _extract_raw_user_text(last_msg)
+    if not clean_user or clean_user.startswith("Now summarize") or clean_user.startswith("You have used"):
+        return args
+
+    enriched = dict(args)
+
+    # 1. If the user is replying to a song card and didn't specify a seed song or artist, attach it
+    m_reply = _REPLY_SONG_CARD_RE.search(raw_content)
+    if m_reply and not enriched.get("similar_to") and not enriched.get("artist"):
+        enriched["similar_to"] = f"{m_reply.group(1).strip()} by {m_reply.group(2).strip()}"
+
+    # 2. Check 3-Tier Music Spectrum Shift context disambiguation
+    try:
+        from src.skills.music.spectrum import (
+            parse_spectrum_shift,
+            is_valid_music_shift_context,
+            has_non_music_domain_context,
+        )
+        valid_shift_ctx = is_valid_music_shift_context(raw_content, history)
+        user_shift = parse_spectrum_shift(clean_user)
+        arg_shift = (
+            parse_spectrum_shift(str(enriched.get("shift") or ""))
+            or parse_spectrum_shift(str(enriched.get("mood") or ""))
+        )
+
+        if valid_shift_ctx and user_shift is not None:
+            if not enriched.get("shift"):
+                enriched["shift"] = clean_user
+        elif (user_shift is not None or arg_shift is not None) and not valid_shift_ctx:
+            if has_non_music_domain_context(clean_user) or not enriched.get("genre"):
+                enriched["shift"] = f"NON_MUSIC_CONVERSATION: {clean_user}"
+    except Exception:
+        pass
+
+    return enriched
+
+
+def detect_missed_music_shift_tool_call(history: list) -> typing.Optional[typing.Tuple[str, dict]]:
+    """Detect when an 8B model skips calling skill_top_music on a valid 3-Tier music spectrum shift
+    (e.g. replying 'faster' to a song card or typing 'go harder' right after a song card)."""
+    if not history:
+        return None
+
+    user_msgs = [
+        m for m in history
+        if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
+    ]
+    if not user_msgs:
+        return None
+
+    last_msg = user_msgs[-1]
+    raw_content = str(last_msg.get("content", "") if isinstance(last_msg, dict) else getattr(last_msg, "content", "") or "")
+    clean_user = _extract_raw_user_text(last_msg)
+    if not clean_user or clean_user.startswith("!") or clean_user.startswith("Now summarize") or clean_user.startswith("You have used"):
+        return None
+
+    try:
+        from src.skills.music.spectrum import is_valid_music_shift_context
+        if is_valid_music_shift_context(raw_content, history):
+            args = enrich_music_tool_args({"shift": clean_user}, history)
+            return ("skill_top_music", args)
+    except Exception:
+        pass
 
     return None
 
