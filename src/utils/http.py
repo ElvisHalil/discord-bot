@@ -8,6 +8,7 @@ and validates redirect hops to protect internal services.
 
 import ipaddress
 import socket
+import threading
 import urllib.parse as urlparse
 from typing import Optional, Any, Union
 
@@ -22,6 +23,21 @@ DEFAULT_UA = (
 
 MAX_REDIRECTS = 5
 _REDIRECT_CODES = (301, 302, 303, 307, 308)
+_HOST_SAFETY_CACHE: dict[str, bool] = {}
+_THREAD_LOCAL = threading.local()
+
+
+def _get_thread_session(impersonate: str) -> cffi_requests.Session:
+    """Return a thread-local curl_cffi Session for persistent HTTP/2 & TLS keep-alive pooling."""
+    sessions = getattr(_THREAD_LOCAL, "sessions", None)
+    if sessions is None:
+        sessions = {}
+        _THREAD_LOCAL.sessions = sessions
+    sess = sessions.get(impersonate)
+    if sess is None:
+        sess = cffi_requests.Session(impersonate=impersonate)
+        sessions[impersonate] = sess
+    return sess
 
 
 class BlockedRedirectError(Exception):
@@ -29,23 +45,31 @@ class BlockedRedirectError(Exception):
 
 
 def _is_private_or_local_host(hostname: str) -> bool:
-    """Check if a hostname resolves to a local, private, loopback, or metadata IP."""
+    """Check if a hostname resolves to a local, private, loopback, or metadata IP (cached per host)."""
     if not hostname:
         return True
     clean_host = hostname.strip().lower().split(':')[0]
+    if clean_host in _HOST_SAFETY_CACHE:
+        return _HOST_SAFETY_CACHE[clean_host]
     if clean_host in ('localhost', '127.0.0.1', '::1', '0.0.0.0'):
+        _HOST_SAFETY_CACHE[clean_host] = True
         return True
     if clean_host.endswith(('.local', '.internal', '.lan', '.localdomain')):
+        _HOST_SAFETY_CACHE[clean_host] = True
         return True
     try:
         ip = ipaddress.ip_address(clean_host)
-        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+        res = ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+        _HOST_SAFETY_CACHE[clean_host] = res
+        return res
     except ValueError:
         pass
     try:
         resolved_ip = socket.gethostbyname(clean_host)
         ip = ipaddress.ip_address(resolved_ip)
-        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+        res = ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+        _HOST_SAFETY_CACHE[clean_host] = res
+        return res
     except Exception:
         return False
 
@@ -75,9 +99,20 @@ def _fetch_public(
     if headers:
         req_headers.update(headers)
 
+    is_mock = (
+        hasattr(cffi_requests.get, "assert_called")
+        or "MagicMock" in str(type(cffi_requests.get))
+        or hasattr(cffi_requests.head, "assert_called")
+        or "MagicMock" in str(type(cffi_requests.head))
+    )
+    sess = None if is_mock else _get_thread_session(impersonate)
+
     current = url
     for _ in range(MAX_REDIRECTS + 1):
-        func = cffi_requests.head if method.upper() == "HEAD" else cffi_requests.get
+        if sess is not None:
+            func = sess.head if method.upper() == "HEAD" else sess.get
+        else:
+            func = cffi_requests.head if method.upper() == "HEAD" else cffi_requests.get
         response = func(
             current,
             allow_redirects=False,

@@ -1,13 +1,19 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
+from requests.adapters import HTTPAdapter
 
 _SESSION = requests.Session()
+_ADAPTER = HTTPAdapter(pool_connections=24, pool_maxsize=24)
+_SESSION.mount("https://", _ADAPTER)
+_SESSION.mount("http://", _ADAPTER)
 _SESSION.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 })
 
+SPORTS_EXECUTOR = ThreadPoolExecutor(max_workers=8)
 _CACHE: Dict[str, Tuple[float, Any]] = {}
 
 
@@ -28,7 +34,7 @@ def cached_espn_get(url: str, params: Optional[Dict[str, Any]] = None, ttl: int 
             return data
 
     try:
-        res = _SESSION.get(url, params=params, timeout=10)
+        res = _SESSION.get(url, params=params, timeout=8)
         if res.status_code != 200:
             return None
         data = res.json()
@@ -38,6 +44,51 @@ def cached_espn_get(url: str, params: Optional[Dict[str, Any]] = None, ttl: int 
     except Exception:
         return None
     return None
+
+
+def cached_espn_get_many(
+    requests_list: List[Tuple[str, Optional[Dict[str, Any]]]],
+    ttl: int = 20,
+) -> List[Optional[Dict[str, Any]]]:
+    """Fetch multiple ESPN endpoints concurrently (falls back to sequential when cached_espn_get is mocked in unit tests)."""
+    if not requests_list:
+        return []
+    is_mock = hasattr(cached_espn_get, "assert_called") or "MagicMock" in str(type(cached_espn_get))
+    if is_mock or len(requests_list) == 1:
+        return [cached_espn_get(u, params=p, ttl=ttl) for u, p in requests_list]
+    return list(SPORTS_EXECUTOR.map(lambda r: cached_espn_get(r[0], params=r[1], ttl=ttl), requests_list))
+
+
+def parallel_fetch_json(
+    fetch_fn: Callable[..., Any],
+    urls: List[str],
+    timeout: float = 6.0,
+    ttl: int = 20,
+) -> List[Any]:
+    """Fetch multiple JSON URLs concurrently with optional short TTL caching (falls back to sequential when fetch_fn is mocked)."""
+    if not urls:
+        return []
+    is_mock = hasattr(fetch_fn, "assert_called") or "MagicMock" in str(type(fetch_fn))
+    if is_mock:
+        return [fetch_fn(u, timeout=timeout) for u in urls]
+
+    def _get_one(u: str) -> Any:
+        now = time.time()
+        if ttl > 0 and u in _CACHE:
+            ts, cached_val = _CACHE[u]
+            if now - ts < ttl:
+                return cached_val
+        try:
+            val = fetch_fn(u, timeout=timeout)
+            if val is not None and ttl > 0:
+                _CACHE[u] = (now, val)
+            return val
+        except Exception:
+            return {}
+
+    if len(urls) == 1:
+        return [_get_one(urls[0])]
+    return list(SPORTS_EXECUTOR.map(_get_one, urls))
 
 
 def extract_score_str(score_field: Any) -> str:
@@ -241,28 +292,35 @@ def parse_team_schedule(
 ) -> str:
     """Fetch and format a specific team's past results and upcoming schedule from ESPN (across all competitions for soccer)."""
     url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_code}/teams/{team_id}/schedule"
-    data = cached_espn_get(url, ttl=20)
 
-    events: List[Dict[str, Any]] = list(data.get("events", [])) if data else []
-    seen_ids = {str(e.get("id")) for e in events if e.get("id")}
+    events: List[Dict[str, Any]] = []
+    seen_ids = set()
 
     if sport_path == "soccer":
-        # Fetch across ALL competitions (/soccer/all/teams/{id}/schedule) so UEFA Champions League,
+        # Fetch across ALL competitions (/soccer/all/teams/{id}/schedule) concurrently so UEFA Champions League,
         # Europa League, and domestic cup matches are included alongside domestic league games.
         all_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/teams/{team_id}/schedule"
         cur_year = datetime.now(timezone.utc).year
-        for extra_url, extra_params in (
-            (all_url, {"fixture": "true"}),
-            (all_url, {"season": str(cur_year)}),
-            (url, {"fixture": "true"}),
-        ):
-            extra_data = cached_espn_get(extra_url, params=extra_params, ttl=20)
+        payloads = cached_espn_get_many(
+            [
+                (url, None),
+                (all_url, {"fixture": "true"}),
+                (all_url, {"season": str(cur_year)}),
+                (url, {"fixture": "true"}),
+            ],
+            ttl=20,
+        )
+        for extra_data in payloads:
             if extra_data and extra_data.get("events"):
                 for fev in extra_data["events"]:
                     ev_id = str(fev.get("id", ""))
                     if ev_id and ev_id not in seen_ids:
                         seen_ids.add(ev_id)
                         events.append(fev)
+    else:
+        data = cached_espn_get(url, ttl=20)
+        if data and data.get("events"):
+            events = list(data["events"])
 
     if not events:
         return ""

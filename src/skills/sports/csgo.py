@@ -54,25 +54,38 @@ def skill_csgo_esports(query_type: Optional[str] = 'all', event_page: Optional[s
         else:
             q_type = "all"
 
-    # 1. LIVE STREAMS
-    if q_type in ['live_streams', 'all']:
-        output += _esl_aggregator.get_live_matches()
-
-    # 2. TOURNAMENTS (auto-includes active/next event details unless a specific event_page is requested below)
-    if q_type in ['tournaments', 'all']:
+    if q_type == 'all':
+        from src.skills.sports.aggregators.espn_utils import SPORTS_EXECUTOR
+        fut_esl = SPORTS_EXECUTOR.submit(_esl_aggregator.get_live_matches)
         if event_page:
-            output += _liquipedia_aggregator.get_s_tier_tournaments(include_next_event_details=False)
+            fut_tourn = SPORTS_EXECUTOR.submit(_liquipedia_aggregator.get_s_tier_tournaments, False)
         else:
-            output += _liquipedia_aggregator.get_s_tier_tournaments()
+            fut_tourn = SPORTS_EXECUTOR.submit(_liquipedia_aggregator.get_s_tier_tournaments)
+        fut_rank = SPORTS_EXECUTOR.submit(_hltv_aggregator.get_rankings, 7)
+        if event_page:
+            fut_ev = SPORTS_EXECUTOR.submit(_liquipedia_aggregator.get_event_info, event_page)
+            output += fut_esl.result() + fut_tourn.result() + fut_rank.result() + fut_ev.result()
+        else:
+            output += fut_esl.result() + fut_tourn.result() + fut_rank.result()
+    else:
+        # 1. LIVE STREAMS
+        if q_type == 'live_streams':
+            output += _esl_aggregator.get_live_matches()
 
-    # 3. HLTV RANKINGS
-    if q_type in ['rankings', 'all']:
-        limit = 7 if q_type == 'all' else 15
-        output += _hltv_aggregator.get_rankings(limit=limit)
+        # 2. TOURNAMENTS (auto-includes active/next event details unless a specific event_page is requested below)
+        if q_type == 'tournaments':
+            if event_page:
+                output += _liquipedia_aggregator.get_s_tier_tournaments(include_next_event_details=False)
+            else:
+                output += _liquipedia_aggregator.get_s_tier_tournaments()
 
-    # 4. EVENT INFO (triggered when q_type == 'event_info' OR whenever event_page is provided for non-odds/non-stats queries)
-    if q_type == 'event_info' or (event_page and q_type not in ['odds', 'betting', 'player_stats']):
-        output += _liquipedia_aggregator.get_event_info(event_page)
+        # 3. HLTV RANKINGS
+        if q_type == 'rankings':
+            output += _hltv_aggregator.get_rankings(limit=15)
+
+        # 4. EVENT INFO (triggered when q_type == 'event_info' OR whenever event_page is provided for non-odds/non-stats queries)
+        if q_type == 'event_info' or (event_page and q_type not in ['odds', 'betting', 'player_stats']):
+            output += _liquipedia_aggregator.get_event_info(event_page)
 
     # 5. PLAYER / TEAM STATS
     if q_type == 'player_stats':

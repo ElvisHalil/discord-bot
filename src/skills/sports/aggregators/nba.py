@@ -10,6 +10,7 @@ import re
 from typing import Optional, Dict, Any, List
 from src.skills.sports.aggregators.base import BaseSportsAggregator
 from src.skills.sports.aggregators.espn_utils import (
+    parallel_fetch_json,
     resolve_espn_team,
     parse_team_schedule,
     parse_team_roster_and_stats,
@@ -132,11 +133,13 @@ class NbaAggregator(BaseSportsAggregator):
                 f"📅 Current Date: {self.format_human_date(now)}\n"
             ]
 
+            day_urls = [f"{self.SCOREBOARD_URL}?dates={pdate}" for pdate in recent_dates]
+            day_payloads = parallel_fetch_json(fetch_json, day_urls, timeout=6, ttl=30)
+
             total_games = 0
-            for pdate in recent_dates:
+            for pdate, day_data in zip(recent_dates, day_payloads):
                 day_title = self.format_human_date(pdate)
-                day_data = fetch_json(f"{self.SCOREBOARD_URL}?dates={pdate}", timeout=6)
-                events = day_data.get("events", [])
+                events = (day_data or {}).get("events", [])
                 if not events:
                     continue
 
@@ -207,12 +210,14 @@ class NbaAggregator(BaseSportsAggregator):
 
             output_lines = [f"=== NBA {scope_label} ===\n"]
 
-            total_games = 0
-            for udate in upcoming_dates[:5]:
-                day_title = self.format_human_date(udate)
+            target_dates = upcoming_dates[:5]
+            day_urls = [f"{self.SCOREBOARD_URL}?dates={udate}" for udate in target_dates]
+            day_payloads = parallel_fetch_json(fetch_json, day_urls, timeout=6, ttl=30)
 
-                day_data = fetch_json(f"{self.SCOREBOARD_URL}?dates={udate}", timeout=6)
-                events = day_data.get("events", [])
+            total_games = 0
+            for udate, day_data in zip(target_dates, day_payloads):
+                day_title = self.format_human_date(udate)
+                events = (day_data or {}).get("events", [])
                 if not events:
                     continue
 

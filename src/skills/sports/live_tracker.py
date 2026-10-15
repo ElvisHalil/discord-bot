@@ -620,9 +620,10 @@ class LiveSportsTracker:
             print("🛑 [Live Tracker]: No active matches remaining. Background polling task self-stopped.")
 
     async def poll_once(self) -> None:
-        """Poll all currently tracked matches once, fire notifications on changes, and prune finished games."""
+        """Poll all currently tracked matches once in parallel, fire notifications on changes, and prune finished games."""
         now = time.time()
         items = list(self.tracked_matches.items())
+        active_items: List[Tuple[Tuple[int, str], TrackedMatch, str]] = []
 
         for key, match in items:
             # 1. Check 4-hour safety timeout
@@ -630,18 +631,26 @@ class LiveSportsTracker:
                 print(f"⏱️ [Live Tracker]: Match {match.home_team} vs {match.away_team} exceeded 4-hour safety limit; auto-stopping.")
                 self.tracked_matches.pop(key, None)
                 continue
-
-            # 2. Fetch fresh ESPN summary
             summary_url = (
                 f"https://site.api.espn.com/apis/site/v2/sports/{match.sport_path}/"
                 f"{match.league_code}/summary?event={match.event_id}"
             )
-            try:
-                summary_data = await asyncio.to_thread(fetch_json, summary_url, timeout=8)
-                if not summary_data:
-                    continue
-            except Exception as e:
-                print(f"  └─ ⚠️ [Live Tracker Poll Error ({match.home_team} vs {match.away_team})]: {e}")
+            active_items.append((key, match, summary_url))
+
+        if not active_items:
+            return
+
+        # 2. Fetch fresh ESPN summaries concurrently across all tracked matches
+        responses = await asyncio.gather(
+            *(asyncio.to_thread(fetch_json, url, timeout=8) for _, _, url in active_items),
+            return_exceptions=True,
+        )
+
+        for (key, match, _), summary_data in zip(active_items, responses):
+            if isinstance(summary_data, Exception):
+                print(f"  └─ ⚠️ [Live Tracker Poll Error ({match.home_team} vs {match.away_team})]: {summary_data}")
+                continue
+            if not summary_data or not isinstance(summary_data, dict):
                 continue
 
             curr_snapshot = extract_snapshot_from_summary(summary_data)
@@ -778,26 +787,30 @@ class LiveSportsTracker:
         return f"🛑 Stopped live tracking for: {', '.join(removed)}."
 
     def list_tracked(self, channel_id: int) -> str:
-        """List all matches currently tracked in channel_id (refreshing live display snapshots first)."""
+        """List all matches currently tracked in channel_id (refreshing live display snapshots in parallel first)."""
         matches = [m for k, m in self.tracked_matches.items() if k[0] == channel_id]
         if not matches:
             return "ℹ️ No live matches are currently being tracked in this channel."
 
-        from src.skills.sports.aggregators.espn_utils import cached_espn_get
+        from src.skills.sports.aggregators.espn_utils import cached_espn_get_many
+
+        req_list = [
+            (
+                f"https://site.api.espn.com/apis/site/v2/sports/{m.sport_path}/{m.league_code}/summary?event={m.event_id}",
+                None,
+            )
+            for m in matches
+        ]
+        summaries = cached_espn_get_many(req_list, ttl=15)
 
         lines = ["📡 **ACTIVELY TRACKED MATCHES IN THIS CHANNEL:**"]
-        for m in matches:
+        for m, summary_data in zip(matches, summaries):
             s = m.last_snapshot
-            summary_url = (
-                f"https://site.api.espn.com/apis/site/v2/sports/{m.sport_path}/"
-                f"{m.league_code}/summary?event={m.event_id}"
-            )
-            try:
-                summary_data = cached_espn_get(summary_url, ttl=15)
-                if summary_data and summary_data.get("header"):
+            if summary_data and summary_data.get("header"):
+                try:
                     s = extract_snapshot_from_summary(summary_data)
-            except Exception:
-                pass
+                except Exception:
+                    pass
             lines.append(
                 f"• **{m.home_team} {s.home_score} - {s.away_score} {m.away_team}** "
                 f"({m.league_name}) — Status: `{s.status_detail}`"

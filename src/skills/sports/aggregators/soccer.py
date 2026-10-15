@@ -11,6 +11,8 @@ from typing import Optional, Dict, Any, List, Tuple
 from src.skills.sports.aggregators.base import BaseSportsAggregator
 from src.skills.sports.aggregators.espn_utils import (
     cached_espn_get,
+    cached_espn_get_many,
+    parallel_fetch_json,
     resolve_espn_team,
     match_team_in_query,
     parse_team_schedule,
@@ -360,12 +362,15 @@ class SoccerAggregator(BaseSportsAggregator):
             cur_year = datetime.now(timezone.utc).year
             events: List[Dict[str, Any]] = []
             seen_ids = set()
-            for u, p in (
-                (sched_url, None),
-                (all_url, {"season": str(cur_year)}),
-                (all_url, {"fixture": "true"}),
-            ):
-                s_data = cached_espn_get(u, params=p, ttl=20)
+            payloads = cached_espn_get_many(
+                [
+                    (sched_url, None),
+                    (all_url, {"season": str(cur_year)}),
+                    (all_url, {"fixture": "true"}),
+                ],
+                ttl=20,
+            )
+            for s_data in payloads:
                 if s_data and s_data.get("events"):
                     for ev in s_data["events"]:
                         eid = str(ev.get("id", ""))
@@ -438,12 +443,13 @@ class SoccerAggregator(BaseSportsAggregator):
                 f"📅 Current Date: {self.format_human_date(now)}\n"
             ]
 
+            day_urls = [f"{self.SCOREBOARD_BASE}/{league_code}/scoreboard?dates={pdate}" for pdate in recent_dates]
+            day_payloads = parallel_fetch_json(fetch_json, day_urls, timeout=6, ttl=30)
+
             total_matches = 0
-            for pdate in recent_dates:
+            for pdate, day_data in zip(recent_dates, day_payloads):
                 day_title = self.format_human_date(pdate)
-                day_url = f"{self.SCOREBOARD_BASE}/{league_code}/scoreboard?dates={pdate}"
-                day_data = fetch_json(day_url, timeout=6)
-                events = day_data.get("events", [])
+                events = (day_data or {}).get("events", [])
                 if not events:
                     continue
 
@@ -531,13 +537,14 @@ class SoccerAggregator(BaseSportsAggregator):
 
             output_lines = [f"=== {league_name.upper()} {scope_label} ===\n"]
 
-            total_matches = 0
-            for udate in upcoming_dates[:5]:
-                day_title = self.format_human_date(udate)
+            target_dates = upcoming_dates[:5]
+            day_urls = [f"{self.SCOREBOARD_BASE}/{league_code}/scoreboard?dates={udate}" for udate in target_dates]
+            day_payloads = parallel_fetch_json(fetch_json, day_urls, timeout=6, ttl=30)
 
-                day_url = f"{self.SCOREBOARD_BASE}/{league_code}/scoreboard?dates={udate}"
-                day_data = fetch_json(day_url, timeout=6)
-                events = day_data.get("events", [])
+            total_matches = 0
+            for udate, day_data in zip(target_dates, day_payloads):
+                day_title = self.format_human_date(udate)
+                events = (day_data or {}).get("events", [])
                 if not events:
                     continue
 

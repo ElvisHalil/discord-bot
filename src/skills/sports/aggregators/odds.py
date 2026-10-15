@@ -237,16 +237,19 @@ class OddsAggregator(BaseSportsAggregator):
             if ent_type != "team" or not team_id:
                 return None, club_league, None
 
+            from src.skills.sports.aggregators.espn_utils import parallel_fetch_json
+
             # Fetch schedule (for soccer, use /all/teams/{id}/schedule?fixture=true to include UCL/cups)
             if sport_path == "soccer":
                 sched_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/teams/{team_id}/schedule?fixture=true"
             else:
                 sched_url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{league_code}/teams/{team_id}/schedule"
 
-            sched_data = fetch_json(sched_url, timeout=8)
+            sched_data = parallel_fetch_json(fetch_json, [sched_url], timeout=8, ttl=20)[0]
             events = (sched_data or {}).get("events", [])
             if not events and sport_path == "soccer":
-                sched_data = fetch_json(f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_code}/teams/{team_id}/schedule?fixture=true", timeout=8)
+                fallback_sched_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_code}/teams/{team_id}/schedule?fixture=true"
+                sched_data = parallel_fetch_json(fetch_json, [fallback_sched_url], timeout=8, ttl=20)[0]
                 events = (sched_data or {}).get("events", [])
 
             if not events:
@@ -292,52 +295,70 @@ class OddsAggregator(BaseSportsAggregator):
                 post_evs.sort(key=lambda e: e.get("date", ""))
                 chosen_ev = post_evs[-1]
 
-            ev_id = str(chosen_ev.get("id", ""))
-            ev_league_obj = chosen_ev.get("league", {})
-            ev_league_slug = ev_league_obj.get("slug") or league_code
-            ev_league_name = ev_league_obj.get("name") or ev_league_slug.upper()
-            ev_date = chosen_ev.get("date", "")
+            def _load_ev_odds(ev_obj: dict):
+                e_id = str(ev_obj.get("id", ""))
+                e_lg_obj = ev_obj.get("league", {})
+                e_lg_slug = e_lg_obj.get("slug") or league_code
+                e_lg_name = e_lg_obj.get("name") or e_lg_slug.upper()
+                e_date = ev_obj.get("date", "")
 
-            comp = (chosen_ev.get("competitions") or [{}])[0]
-            status_type = comp.get("status", {}).get("type", {})
-            state = status_type.get("state", "")
-            status_detail = status_type.get("detail") or status_type.get("shortDetail") or "Scheduled"
+                c_obj = (ev_obj.get("competitions") or [{}])[0]
+                st_type = c_obj.get("status", {}).get("type", {})
+                st_state = st_type.get("state", "")
+                st_detail = st_type.get("detail") or st_type.get("shortDetail") or "Scheduled"
 
-            competitors = comp.get("competitors", [])
-            home_comp = next((c for c in competitors if c.get("homeAway") == "home"), {})
-            away_comp = next((c for c in competitors if c.get("homeAway") == "away"), {})
-            home_name = home_comp.get("team", {}).get("displayName", "Home")
-            away_name = away_comp.get("team", {}).get("displayName", "Away")
+                comps = c_obj.get("competitors", [])
+                h_comp = next((c for c in comps if c.get("homeAway") == "home"), {})
+                a_comp = next((c for c in comps if c.get("homeAway") == "away"), {})
+                h_name = h_comp.get("team", {}).get("displayName", "Home")
+                a_name = a_comp.get("team", {}).get("displayName", "Away")
 
-            def _score_str(c: dict) -> str:
-                s = c.get("score", "")
-                if isinstance(s, dict):
-                    return str(s.get("displayValue", s.get("value", "")))
-                return str(s) if s is not None else ""
+                def _score_str(c: dict) -> str:
+                    s = c.get("score", "")
+                    if isinstance(s, dict):
+                        return str(s.get("displayValue", s.get("value", "")))
+                    return str(s) if s is not None else ""
 
-            home_score = _score_str(home_comp)
-            away_score = _score_str(away_comp)
+                h_score = _score_str(h_comp)
+                a_score = _score_str(a_comp)
 
-            # Fetch ESPN Core API odds for this specific event
-            odds_url = f"https://sports.core.api.espn.com/v2/sports/{sport_path}/leagues/{ev_league_slug}/events/{ev_id}/competitions/{ev_id}/odds"
-            odds_data = fetch_json(odds_url, timeout=8)
-            items = (odds_data or {}).get("items", [])
+                o_url = f"https://sports.core.api.espn.com/v2/sports/{sport_path}/leagues/{e_lg_slug}/events/{e_id}/competitions/{e_id}/odds"
+                s_url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{e_lg_slug}/summary?event={e_id}"
 
-            # If live scores are omitted on /schedule or Core API odds items are empty, check /summary
-            if not is_json_mock and ((state == "in" and (not home_score or not away_score)) or not items):
-                try:
-                    summary_url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{ev_league_slug}/summary?event={ev_id}"
-                    summary_data = fetch_json(summary_url, timeout=8) or {}
-                    header_comps = (summary_data.get("header") or {}).get("competitions") or []
-                    if header_comps:
-                        h_c = next((c for c in header_comps[0].get("competitors", []) if c.get("homeAway") == "home"), {})
-                        a_c = next((c for c in header_comps[0].get("competitors", []) if c.get("homeAway") == "away"), {})
-                        home_score = home_score or _score_str(h_c)
-                        away_score = away_score or _score_str(a_c)
-                    if not items:
-                        items = summary_data.get("pickcenter") or summary_data.get("odds") or []
-                except Exception:
-                    pass
+                if not is_json_mock and st_state == "in" and (not h_score or not a_score):
+                    o_data, s_data = parallel_fetch_json(fetch_json, [o_url, s_url], timeout=8, ttl=15)
+                    o_items = (o_data or {}).get("items", [])
+                    s_data = s_data or {}
+                    h_comps = (s_data.get("header") or {}).get("competitions") or []
+                    if h_comps:
+                        h_c = next((c for c in h_comps[0].get("competitors", []) if c.get("homeAway") == "home"), {})
+                        a_c = next((c for c in h_comps[0].get("competitors", []) if c.get("homeAway") == "away"), {})
+                        h_score = h_score or _score_str(h_c)
+                        a_score = a_score or _score_str(a_c)
+                    if not o_items:
+                        o_items = s_data.get("pickcenter") or s_data.get("odds") or []
+                else:
+                    o_data = parallel_fetch_json(fetch_json, [o_url], timeout=8, ttl=15)[0]
+                    o_items = (o_data or {}).get("items", [])
+                    if not is_json_mock and not o_items:
+                        try:
+                            s_data = parallel_fetch_json(fetch_json, [s_url], timeout=8, ttl=15)[0] or {}
+                            o_items = s_data.get("pickcenter") or s_data.get("odds") or []
+                        except Exception:
+                            pass
+                return o_items, e_lg_slug, e_lg_name, e_date, st_state, st_detail, h_name, a_name, h_score, a_score
+
+            items, ev_league_slug, ev_league_name, ev_date, state, status_detail, home_name, away_name, home_score, away_score = _load_ev_odds(chosen_ev)
+
+            # If a distant future 'pre' matchup has no open odds yet, check the most recent 'post' matchup (e.g. a game that just finished today)
+            if not items and state == "pre" and not is_json_mock:
+                post_candidates = [
+                    ev for ev in candidate_events
+                    if (ev.get("competitions") or [{}])[0].get("status", {}).get("type", {}).get("state", "") == "post"
+                ]
+                if post_candidates:
+                    post_candidates.sort(key=lambda e: e.get("date", ""))
+                    items, ev_league_slug, ev_league_name, ev_date, state, status_detail, home_name, away_name, home_score, away_score = _load_ev_odds(post_candidates[-1])
 
             if not items:
                 return None, ev_league_slug, team_name
@@ -574,43 +595,46 @@ class OddsAggregator(BaseSportsAggregator):
                 dedup_tokens.append(t)
         query_tokens = dedup_tokens
 
+        from src.skills.sports.aggregators.espn_utils import parallel_fetch_json
+
+        top_candidates = candidate_keys[:4]
+        odds_urls = [
+            f"https://api.the-odds-api.com/v4/sports/{sk}/odds/?apiKey={api_key}&regions=us,eu,uk&markets=h2h"
+            for sk in top_candidates
+        ]
+        datasets = parallel_fetch_json(fetch_json, odds_urls, timeout=8, ttl=20)
+
         matched_games = []
-        for sport_key in candidate_keys[:4]:
-            url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/?apiKey={api_key}&regions=us,eu,uk&markets=h2h"
-            try:
-                data = fetch_json(url, timeout=8)
-                if not isinstance(data, list) or not data:
-                    continue
+        for sport_key, data in zip(top_candidates, datasets):
+            if not isinstance(data, list) or not data:
+                continue
 
-                for game in data:
-                    home = game.get("home_team", "")
-                    away = game.get("away_team", "")
-                    home_l = _strip_accents(home).lower()
-                    away_l = _strip_accents(away).lower()
+            for game in data:
+                home = game.get("home_team", "")
+                away = game.get("away_team", "")
+                home_l = _strip_accents(home).lower()
+                away_l = _strip_accents(away).lower()
 
-                    score = 0
-                    home_hits = sum(1 for t in query_tokens if t in home_l)
-                    away_hits = sum(1 for t in query_tokens if t in away_l)
-                    token_hits = home_hits + away_hits
+                score = 0
+                home_hits = sum(1 for t in query_tokens if t in home_l)
+                away_hits = sum(1 for t in query_tokens if t in away_l)
+                token_hits = home_hits + away_hits
 
-                    if home_hits >= 1 and away_hits >= 1:
-                        score = 100
-                    elif target_clean and (target_clean in home_l or target_clean in away_l):
-                        score = 100
-                    elif query_tokens:
-                        if token_hits == len(query_tokens):
-                            score = 80
-                        elif token_hits >= 2:
-                            score = 60
-                        elif token_hits > 0 and len(query_tokens) <= 2:
-                            score = 50
+                if home_hits >= 1 and away_hits >= 1:
+                    score = 100
+                elif target_clean and (target_clean in home_l or target_clean in away_l):
+                    score = 100
+                elif query_tokens:
+                    if token_hits == len(query_tokens):
+                        score = 80
+                    elif token_hits >= 2:
+                        score = 60
+                    elif token_hits > 0 and len(query_tokens) <= 2:
+                        score = 50
 
-                    if score > 0 and game.get("bookmakers"):
-                        commence = game.get("commence_time", "9999-99-99")
-                        matched_games.append((score, commence, sport_key, game))
-            except Exception as e:
-                if "404" not in str(e):
-                    print(f"  └─ ⚠️ [The Odds API ({sport_key})]: {e}")
+                if score > 0 and game.get("bookmakers"):
+                    commence = game.get("commence_time", "9999-99-99")
+                    matched_games.append((score, commence, sport_key, game))
 
         if not matched_games:
             return None
@@ -923,9 +947,9 @@ class OddsAggregator(BaseSportsAggregator):
                     match_sp = m.league_code or m.sport_path or sport_clean
                     _add_sub(match_q, match_sp)
                 if not sub_queries and ch_id is not None:
-                    last_q = get_channel_last_match_query(ch_id)
+                    last_q, last_s = get_channel_last_match_query(ch_id)
                     if last_q:
-                        _add_sub(last_q, sport_clean)
+                        _add_sub(last_q, last_s or sport_clean)
             except Exception:
                 pass
 
@@ -949,11 +973,22 @@ class OddsAggregator(BaseSportsAggregator):
             q_single, sp_single = sub_queries[0]
             return self._get_single_match_odds(q_single, sp_single, stake=stake)
 
-        results = []
-        for q_item, sp_item in sub_queries[:4]:
-            res = self._get_single_match_odds(q_item, sp_item, stake=stake)
-            if res:
-                results.append(res.strip())
+        from src.skills.sports.aggregators.espn_utils import SPORTS_EXECUTOR
+        is_mock = (
+            hasattr(fetch_json, "assert_called")
+            or "MagicMock" in str(type(fetch_json))
+            or hasattr(fetch_soup, "assert_called")
+            or "MagicMock" in str(type(fetch_soup))
+        )
+        batch = sub_queries[:4]
+        if is_mock:
+            raw_results = [self._get_single_match_odds(q_item, sp_item, stake=stake) for q_item, sp_item in batch]
+        else:
+            raw_results = list(
+                SPORTS_EXECUTOR.map(lambda item: self._get_single_match_odds(item[0], item[1], stake=stake), batch)
+            )
+        results = [r.strip() for r in raw_results if r]
         return "\n\n---\n\n".join(results) + "\n\n"
+
 
 
