@@ -267,6 +267,22 @@ class NbaAggregator(BaseSportsAggregator):
             data = fetch_json(url, timeout=8)
             events = data.get("events", [])
 
+            if not date_param:
+                all_completed = events and all(
+                    ev.get("competitions", [{}])[0].get("status", {}).get("type", {}).get("completed", False)
+                    for ev in events
+                )
+                if not events or all_completed:
+                    today_str = now.strftime("%Y%m%d")
+                    today_data = fetch_json(f"{self.SCOREBOARD_URL}?dates={today_str}", timeout=5)
+                    today_events = today_data.get("events", [])
+                    if today_events:
+                        existing_ids = {str(e.get("id")) for e in events}
+                        new_today = [e for e in today_events if str(e.get("id")) not in existing_ids]
+                        if new_today:
+                            events = new_today if all_completed else (events + new_today)
+                            date_param = today_str
+
             if not events and not date_param:
                 yesterday = (now - timedelta(days=1)).strftime("%Y%m%d")
                 alt_data = fetch_json(f"{self.SCOREBOARD_URL}?dates={yesterday}", timeout=5)
@@ -286,6 +302,8 @@ class NbaAggregator(BaseSportsAggregator):
 
             day_display = self.format_human_date(date_param) if date_param else self.format_human_date(now)
             output_lines = [f"=== NBA SCOREBOARD — {day_display.upper()} ===\n"]
+
+            from src.skills.sports.aggregators.odds import format_inline_scoreboard_odds
 
             for ev in events:
                 comps = ev.get("competitions", [])
@@ -316,6 +334,11 @@ class NbaAggregator(BaseSportsAggregator):
 
                 output_lines.append(f"🏀 {away_team}{away_rec} {away_score} @ {home_team}{home_rec} {home_score}{live_badge}")
                 output_lines.append(f"   Status: {status_desc}")
+
+                if not is_completed:
+                    inline_odds = format_inline_scoreboard_odds(comp, home_team, away_team)
+                    if inline_odds:
+                        output_lines.append(inline_odds)
 
                 away_quarters = [str(int(l.get("value", 0))) for l in away.get("linescores", [])]
                 home_quarters = [str(int(l.get("value", 0))) for l in home.get("linescores", [])]

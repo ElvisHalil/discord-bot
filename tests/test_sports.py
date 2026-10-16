@@ -627,6 +627,69 @@ class TestSkillSportsInfo(unittest.TestCase):
         self.assertIn("not recognized as a sport", res)
         self.assertIn("search_web", res)
 
+    @patch("src.skills.sports.aggregators.hockey.fetch_json")
+    @patch("src.skills.sports.aggregators.soccer.fetch_json")
+    def test_multi_sport_soccer_and_hockey_routing(self, mock_soccer_fetch, mock_hockey_fetch):
+        mock_soccer_fetch.return_value = {
+            "events": [{
+                "competitions": [{
+                    "status": {"type": {"detail": "Sat 10:00 AM", "state": "pre", "completed": False}},
+                    "competitors": [
+                        {"homeAway": "home", "score": "0", "team": {"displayName": "Arsenal"}},
+                        {"homeAway": "away", "score": "0", "team": {"displayName": "Chelsea"}},
+                    ],
+                }]
+            }]
+        }
+        mock_hockey_fetch.return_value = {
+            "events": [{
+                "id": "401",
+                "competitions": [{
+                    "status": {"type": {"detail": "Tonight 7:00 PM", "state": "pre", "completed": False}},
+                    "competitors": [
+                        {"homeAway": "home", "score": "0", "team": {"displayName": "Toronto Maple Leafs"}},
+                        {"homeAway": "away", "score": "0", "team": {"displayName": "Boston Bruins"}},
+                    ],
+                }]
+            }]
+        }
+        res = skill_sports_info(query="what are the soccer and hockey games today?")
+        self.assertIn("Arsenal", res)
+        self.assertIn("NHL SCOREBOARD", res)
+        self.assertIn("Toronto Maple Leafs", res)
+
+    @patch("src.skills.sports.aggregators.odds.fetch_json")
+    @patch("src.skills.sports.aggregators.hockey.fetch_json")
+    def test_games_and_odds_combined_routing(self, mock_hockey_fetch, mock_odds_fetch):
+        scoreboard_payload = {
+            "events": [{
+                "id": "401999",
+                "competitions": [{
+                    "status": {"type": {"detail": "Tonight 7:00 PM EDT", "state": "pre", "completed": False}},
+                    "competitors": [
+                        {"homeAway": "home", "score": "0", "team": {"displayName": "Edmonton Oilers"}},
+                        {"homeAway": "away", "score": "0", "team": {"displayName": "Calgary Flames"}},
+                    ],
+                    "odds": [{
+                        "provider": {"name": "DraftKings"},
+                        "moneyline": {
+                            "home": {"close": {"odds": "-160"}},
+                            "away": {"close": {"odds": "+135"}},
+                        },
+                    }],
+                }]
+            }]
+        }
+        mock_hockey_fetch.return_value = scoreboard_payload
+        mock_odds_fetch.return_value = scoreboard_payload
+
+        res = skill_sports_info(query="hockey games today and their odds")
+        self.assertIn("NHL SCOREBOARD", res)
+        self.assertIn("Calgary Flames", res)
+        self.assertIn("Edmonton Oilers", res)
+        self.assertIn("[MATCH BETTING ODDS: Edmonton Oilers vs Calgary Flames]", res)
+        self.assertIn("Best Odds Available:", res)
+        self.assertIn("- **Edmonton Oilers**: 1.62 | Win probability: ~61.7%", res)
 
 
 if __name__ == "__main__":

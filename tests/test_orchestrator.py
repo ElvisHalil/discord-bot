@@ -154,6 +154,33 @@ class TestReplyPostProcessing(unittest.TestCase):
         self.assertEqual(standardize_song_reply(reply), reply)
         mock_meta.assert_not_called()
 
+    @patch("src.skills.youtube.client.verify_embeddable", return_value=True)
+    @patch("src.skills.music.utils.get_music_metadata")
+    def test_compound_prompt_and_song_reply_preserved(self, mock_meta, mock_embed):
+        mock_meta.return_value = {
+            "song": "Strobe",
+            "artist": "deadmau5",
+            "album": "For Lack of a Better Name",
+            "genre": "Electronic",
+        }
+        # Case 1: Answer before song card (with markdown web links and multiple paragraphs) + text after song card
+        reply = (
+            "Here are today's NHL games:\n"
+            "- **Boston Bruins @ Toronto Maple Leafs** (7:00 PM EDT) - [Preview](<https://www.nhl.com/game/1>)\n\n"
+            "And here is a track for you:\n"
+            "**Song:** Strobe\n"
+            "**Artist:** deadmau5\n"
+            "https://music.youtube.com/watch?v=tKi9Z-f6qX4\n\n"
+            "Enjoy the games tonight!"
+        )
+        out = standardize_song_reply(reply)
+        self.assertIn("Here are today's NHL games:", out)
+        self.assertIn("[Preview](<https://www.nhl.com/game/1>)", out)
+        self.assertIn("Enjoy the games tonight!", out)
+        self.assertIn("**Song:** Strobe", out)
+        self.assertIn("**Artist:** deadmau5", out)
+        self.assertTrue(out.endswith("https://music.youtube.com/watch?v=tKi9Z-f6qX4"))
+
     def test_wikipedia_parentheses_preserved(self):
         out = suppress_discord_embeds("See https://en.wikipedia.org/wiki/Python_(programming_language).")
         self.assertIn("<https://en.wikipedia.org/wiki/Python_(programming_language)>", out)

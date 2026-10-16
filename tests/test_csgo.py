@@ -273,8 +273,8 @@ class TestOdds(unittest.TestCase):
 
             self.assertIn("MATCH BETTING ODDS: Falcons vs Ninjas in Pyjamas", res)
             self.assertIn("Favorite: **Falcons**", res)
-            self.assertIn("1.26 (American: -385)", res)
-            self.assertIn("4.20 (American: +320)", res)
+            self.assertIn("- **Falcons**: 1.26 | Win probability: ~79.4%", res)
+            self.assertIn("- **Ninjas in Pyjamas**: 4.20 | Win probability: ~23.8%", res)
 
     def test_tool_arg_aliases_for_odds(self):
         from src.skills.sports.odds import skill_betting_odds

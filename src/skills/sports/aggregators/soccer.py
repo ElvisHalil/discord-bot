@@ -691,6 +691,8 @@ class SoccerAggregator(BaseSportsAggregator):
             day_display = self.format_human_date(date_param) if date_param else self.format_human_date(now)
             output_lines = [f"=== {league_name.upper()} MATCHES — {day_display.upper()} ===\n"]
 
+            from src.skills.sports.aggregators.odds import format_inline_scoreboard_odds
+
             for ev in events:
                 comps = ev.get("competitions", [])
                 if not comps:
@@ -717,6 +719,11 @@ class SoccerAggregator(BaseSportsAggregator):
                 live_marker = " 🔴 [LIVE]" if is_live else (" ✅ [FT]" if is_completed else "")
                 output_lines.append(f"⚽ {home_name} {home_score} - {away_score} {away_name}{live_marker}")
                 output_lines.append(f"   Status: {status_desc}")
+
+                if not is_completed:
+                    inline_odds = format_inline_scoreboard_odds(comp, home_name, away_name)
+                    if inline_odds:
+                        output_lines.append(inline_odds)
 
                 venue_name = comp.get("venue", {}).get("fullName")
                 match_date = ev.get("date", "")

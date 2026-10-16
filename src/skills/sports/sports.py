@@ -113,145 +113,194 @@ def skill_sports_info(
                 if not sport_raw and last_s:
                     sport_raw = last_s
 
+    has_odds_kw = bool(re.search(r'\b(?:odds?|bet|bets|betting|moneyline)\b', combined)) or sport_raw.lower() in ("odds", "betting")
+    wants_games_and_odds = has_odds_kw and bool(
+        re.search(
+            r'\b(?:games?|matches|schedule|fixtures?|scores?|playing)\b.*\b(?:and|with|plus|also|&)\b.*\b(?:odds?|betting|lines?)\b|'
+            r'\b(?:odds?|betting|lines?)\b.*\b(?:and|with|for\s+all)\b.*\b(?:games?|matches|schedule|fixtures?)\b',
+            combined,
+        )
+    )
+
     # 1. Counter-Strike / Esports Check (guard against NFL "Atlanta Falcons" and substring false positives like 'esl' in 'bundesliga' or 'cs' in 'celtics')
     is_nfl_falcons = "atlanta" in combined or sport_raw.lower() in ("nfl", "football", "american football")
     is_cs = not is_nfl_falcons and (
         sport_raw.lower() in ("cs", "cs2", "csgo", "counter-strike", "counter strike", "esports") or
         any(bool(re.search(rf'\b{re.escape(k)}\b', combined)) for k in CS_KEYWORDS)
     )
-    if is_cs:
-        sport_raw = "cs"
-        target_q = " ".join(p for p in (team_raw, player_raw, query_raw) if p).strip() or combined
-        named_event = target_q if any(t in combined for t in ("thunderpick", "pgl", "blast", "iem", "esl", "major", "bucharest", "chengdu", "atlanta")) else None
-        if re.search(r'\b(?:odds?|bet|bets|betting|prop|props|moneyline)\b', combined):
+
+    def _run_cs(q_str: str) -> str:
+        target_q = " ".join(p for p in (team_raw, player_raw, query_raw) if p).strip() or q_str
+        named_event = target_q if any(t in q_str for t in ("thunderpick", "pgl", "blast", "iem", "esl", "major", "bucharest", "chengdu", "atlanta")) else None
+        if has_odds_kw and not wants_games_and_odds:
             return _odds_aggregator.get_odds(target_q, sport="cs2")
-        elif re.search(r'\b(?:stats|statistics|rating|kdr|kd)\b', combined):
+        elif re.search(r'\b(?:stats|statistics|rating|kdr|kd)\b', q_str):
             return skill_csgo_esports(query_type="player_stats", player_url=player_raw or team_raw or target_q)
-        elif any(k in combined for k in ("roster", "player", "lineup", "group", "bracket", "teams")):
+        elif any(k in q_str for k in ("roster", "player", "lineup", "group", "bracket", "teams")):
             return skill_csgo_esports(query_type="event_info", event_page=named_event or (target_q if target_q not in ("schedule", "") else None))
-        elif any(k in combined for k in ("tourn", "schedule", "next", "upcoming", "event", "match", "matches", "time", "today", "tomorrow", "when", "play")):
+        elif any(k in q_str for k in ("tourn", "schedule", "next", "upcoming", "event", "match", "matches", "time", "today", "tomorrow", "when", "play")):
             return skill_csgo_esports(query_type="tournaments", event_page=named_event)
-        elif any(k in combined for k in ("rank", "top", "leader", "standings")):
+        elif any(k in q_str for k in ("rank", "top", "leader", "standings")):
             return skill_csgo_esports(query_type="rankings")
-        elif any(k in combined for k in ("live", "stream", "broadcast")):
+        elif any(k in q_str for k in ("live", "stream", "broadcast")):
             return skill_csgo_esports(query_type="live_streams")
         else:
-            is_team_matchup = " vs " in combined or sum(1 for t in _odds_aggregator.CS_TEAMS if bool(re.search(rf'\b{re.escape(t)}\b', combined))) >= 2
+            is_team_matchup = " vs " in q_str or sum(1 for t in _odds_aggregator.CS_TEAMS if bool(re.search(rf'\b{re.escape(t)}\b', q_str))) >= 2
             return skill_csgo_esports(
                 query_type="all",
                 event_page=named_event,
                 matchup=target_q if is_team_matchup else None,
             )
 
-    # 2. Betting odds check for traditional sports (use word boundaries so 'betis' or 'better' do not match 'bet')
-    if re.search(r'\b(?:odds?|bet|bets|betting|moneyline)\b', combined) or sport_raw.lower() in ("odds", "betting"):
+    # 2. Pure Betting Odds Check (when user asks for odds without asking for a full games/schedule list)
+    if has_odds_kw and not wants_games_and_odds:
+        if is_cs:
+            target_q = " ".join(p for p in (team_raw, player_raw, query_raw) if p).strip() or combined
+            return _odds_aggregator.get_odds(target_q, sport="cs2")
         return _odds_aggregator.get_odds(combined, sport=sport_raw.lower())
 
-    # 3. Formula 1 Check
+    # 3. Detect all requested sports (supports both single-sport and multi-sport queries like 'soccer and hockey games')
     is_f1 = (
         sport_raw.lower() in ("f1", "formula 1", "formula1", "grand prix", "racing") or
         bool(re.search(r'\b(?:f1|formula\s*1|formula1|grand\s*prix|constructors?|drivers?\s*championship|constructors?\s*championship|verstappen|hamilton|leclerc|norris|piastri|antonelli)\b', combined)) or
         any(k in combined for k in ("f1 race", "f1 standings", "f1 calendar"))
     )
-    if is_f1:
-        sport_raw = "f1"
-        data = _f1_aggregator.get_info(combined)
-        guidance = "Review the Formula 1 schedule/standings and inform the user. Remind them session times are in UTC."
 
-    # 4. NBA Basketball Check (excluding WNBA / NCAAB which route to UniversalEspnAggregator)
-    elif (
+    is_nba = (
         not any(w in combined for w in ("wnba", "ncaab", "college basketball", "march madness")) and (
             sport_raw.lower() in ("nba", "basketball", "hoops") or
             bool(re.search(r'\b(?:nba|basketball|hoops|lakers|celtics|warriors|knicks|sixers|76ers|bucks|cavaliers|cavs|nuggets|mavericks|mavs|suns|clippers|timberwolves|pelicans|rockets|grizzlies|blazers|pacers|pistons|raptors|wizards|hornets|hawks|bulls)\b', combined))
         )
-    ):
-        sport_raw = "nba"
-        data = _nba_aggregator.get_info(combined)
-        guidance = "Present the NBA games, leaders, injuries, rosters, or standings clearly. Include scores, status, and quarter linescores if available."
+    )
 
-    # 5. NHL Hockey Check
-    elif (
+    is_nhl = (
         sport_raw.lower() in ("nhl", "hockey", "ice hockey") or
         bool(re.search(r'\b(?:nhl|hockey|ice\s*hockey|stanley\s*cup|bruins|maple\s*leafs|leafs|canadiens|habs|red\s*wings|lightning|sabres|senators|islanders|devils|penguins|flyers|capitals|hurricanes|blue\s*jackets|oilers|flames|canucks|golden\s*knights|kraken|avalanche|predators|blackhawks|sharks|ducks)\b', combined))
-    ):
-        sport_raw = "nhl"
-        data = _hockey_aggregator.get_info(combined)
-        guidance = "Present the NHL games, leaders, injuries, rosters, or standings clearly. Include scores, status, and period linescores if available."
+    )
 
-    # 6. Explicit Universal ESPN Sports (NFL, NCAAF, MLB, WNBA, NCAAB, UFC/MMA, Tennis, Golf)
-    elif (
+    is_other_us_sport = not is_cs and (
         sport_raw.lower() in ("nfl", "ncaaf", "cfb", "mlb", "baseball", "wnba", "ncaab", "ufc", "mma", "tennis", "atp", "wta", "pga", "golf") or
         any(
             alias in combined
             for reg in _universal_aggregator.SPORT_LEAGUE_REGISTRY.values()
             for alias in reg["aliases"]
         )
-    ):
-        sport_raw = sport_raw or "espn"
-        data = _universal_aggregator.get_info(combined)
-        guidance = "Present the sports scores, schedules, rosters, player stats, injuries, or standings clearly."
+    )
 
-    # 7. Soccer & Universal Auto-Discovery Fallback
+    soccer_keywords = (
+        "soccer", "epl", "premier", "ucl", "champions",
+        "laliga", "la liga", "seriea", "serie a", "bundesliga", "mls",
+        "ligue1", "ligue 1", "pitch", "relegation", "golden boot", "starting xi"
+    )
+    general_match_keywords = (
+        "match", "matches", "fixture", "fixtures", "game", "games",
+        "score", "scores", "schedule", "standings", "table", "results",
+        "outcome", "outcomes", "today", "tomorrow", "yesterday", "this week", "next week",
+        "injuries", "injured", "injury", "roster", "squad", "lineup", "formation",
+        "cards", "yellow card", "red card", "scorers", "assists", "possession", "boxscore", "player stats"
+    )
+    has_football_as_soccer = (
+        "football" in combined
+        and not any(w in combined for w in ("nfl", "american football", "college football", "ncaaf"))
+    )
+    is_explicit_soccer = (
+        sport_raw.lower() in ("soccer", "football", "epl", "ucl", "laliga", "seriea", "bundesliga", "mls", "ligue1") or
+        has_football_as_soccer or
+        any(k in combined for k in soccer_keywords) or
+        any(club in combined for club in _soccer_aggregator.CLUB_LEAGUE_HINTS)
+    )
+
+    matched_tasks: list[tuple[str, object, str]] = []
+    if is_cs:
+        matched_tasks.append(("cs", _run_cs, "Present the Counter-Strike tournament/match details clearly."))
+    if is_f1:
+        matched_tasks.append(("f1", _f1_aggregator.get_info, "Review the Formula 1 schedule/standings and inform the user. Remind them session times are in UTC."))
+    if is_nba:
+        matched_tasks.append(("nba", _nba_aggregator.get_info, "Present the NBA games, leaders, injuries, rosters, or standings clearly. Include scores, status, and quarter linescores if available."))
+    if is_nhl:
+        matched_tasks.append(("nhl", _hockey_aggregator.get_info, "Present the NHL games, leaders, injuries, rosters, or standings clearly. Include scores, status, and period linescores if available."))
+    if is_other_us_sport:
+        matched_tasks.append((sport_raw or "espn", _universal_aggregator.get_info, "Present the sports scores, schedules, rosters, player stats, injuries, or standings clearly."))
+    if is_explicit_soccer:
+        matched_tasks.append(("soccer", _soccer_aggregator.get_info, "Present the soccer matches, scores, goal scorers, cards, possession/shots stats, lineups, rosters, injuries, or standings clearly."))
+
+    def _scope_query_for_sport(q_text: str, target_sport: str) -> str:
+        """Strip other sport names and 'and their odds' filler when splitting a multi-sport or games+odds query."""
+        cleaned = q_text
+        if wants_games_and_odds:
+            cleaned = re.sub(r'\b(?:and\s+(?:their\s+)?|with\s+(?:their\s+)?)?(?:betting\s+)?(?:odds?|lines?|moneylines?)\b', ' ', cleaned, flags=re.IGNORECASE)
+        other_sport_words = {
+            "soccer": ("nhl", "hockey", "ice hockey", "nba", "basketball", "f1", "formula 1"),
+            "nhl": ("soccer", "epl", "premier league", "ucl", "champions league", "laliga", "la liga", "serie a", "bundesliga", "nba", "basketball", "f1", "formula 1"),
+            "nba": ("soccer", "epl", "premier league", "ucl", "nhl", "hockey", "ice hockey", "f1", "formula 1"),
+            "f1": ("soccer", "nhl", "hockey", "nba", "basketball"),
+        }.get(target_sport, ())
+        for w in other_sport_words:
+            cleaned = re.sub(rf'\b{re.escape(w)}\b', ' ', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip(" ,;&")
+        return cleaned or target_sport
+
+    if len(matched_tasks) == 1:
+        only_sport, only_fn, guidance = matched_tasks[0]
+        if only_sport == "cs" and not wants_games_and_odds:
+            return only_fn(combined)
+        sport_raw = only_sport
+        q_arg = _scope_query_for_sport(combined, only_sport) if wants_games_and_odds else combined
+        data = only_fn(q_arg)
+    elif len(matched_tasks) >= 2:
+        from src.skills.sports.aggregators.espn_utils import SPORTS_EXECUTOR
+        sport_raw = ", ".join(t[0] for t in matched_tasks)
+        guidance = "Present all requested sports sections clearly under separate headings so every sport the user asked for is covered."
+
+        def _exec_task(item):
+            sp_key, fn, _ = item
+            return fn(_scope_query_for_sport(combined, sp_key))
+
+        # Run multiple sport aggregators in parallel
+        section_outputs = list(SPORTS_EXECUTOR.map(_exec_task, matched_tasks))
+        data = "\n\n" + ("\n\n" + ("=" * 45) + "\n\n").join(s.strip() for s in section_outputs if s and s.strip())
     else:
-        soccer_keywords = (
-            "soccer", "football", "epl", "premier", "ucl", "champions",
-            "laliga", "la liga", "seriea", "serie a", "bundesliga", "mls",
-            "ligue1", "ligue 1", "pitch", "relegation", "golden boot", "starting xi"
-        )
-        general_match_keywords = (
-            "match", "matches", "fixture", "fixtures", "game", "games",
-            "score", "scores", "schedule", "standings", "table", "results",
-            "outcome", "outcomes", "today", "tomorrow", "yesterday", "this week", "next week",
-            "injuries", "injured", "injury", "roster", "squad", "lineup", "formation",
-            "cards", "yellow card", "red card", "scorers", "assists", "possession", "boxscore", "player stats"
-        )
-
-        is_explicit_soccer = (
-            sport_raw.lower() in ("soccer", "football", "epl", "ucl", "laliga", "seriea", "bundesliga", "mls", "ligue1") or
-            any(k in combined for k in soccer_keywords) or
-            any(club in combined for club in _soccer_aggregator.CLUB_LEAGUE_HINTS)
-        )
-
-        if is_explicit_soccer:
+        # Universal Auto-Discovery Fallback
+        disc = espn_search_auto_discover(combined)
+        if disc:
+            d_sport = disc.get("sport", "")
+            d_league = disc.get("league", "")
+            if d_sport == "soccer":
+                sport_raw = "soccer"
+                data = _soccer_aggregator.get_info(combined)
+                guidance = "Present the soccer matches, scores, goal scorers, cards, possession/shots stats, lineups, rosters, injuries, or standings clearly."
+            elif d_sport == "basketball" and d_league == "nba":
+                sport_raw = "nba"
+                data = _nba_aggregator.get_info(combined)
+                guidance = "Present the NBA games, leaders, injuries, rosters, or standings clearly."
+            elif d_sport == "hockey" and d_league == "nhl":
+                sport_raw = "nhl"
+                data = _hockey_aggregator.get_info(combined)
+                guidance = "Present the NHL games, leaders, injuries, rosters, or standings clearly."
+            else:
+                sport_raw = f"{d_sport}/{d_league}"
+                data = _universal_aggregator.get_info(combined)
+                guidance = "Present the sports scores, schedules, rosters, player stats, injuries, or standings clearly."
+        elif (
+            sport_raw.lower() in ("sports", "sport", "general", "all") or
+            (sport_raw.lower() == "" and any(k in combined for k in general_match_keywords)) or
+            bool(re.search(r'\b(?:sports?)\b', combined))
+        ):
             sport_raw = "soccer"
             data = _soccer_aggregator.get_info(combined)
             guidance = "Present the soccer matches, scores, goal scorers, cards, possession/shots stats, lineups, rosters, injuries, or standings clearly."
         else:
-            # Try ESPN Universal Search v2 Auto-Discovery for any team, player, or league worldwide
-            disc = espn_search_auto_discover(combined)
-            if disc:
-                d_sport = disc.get("sport", "")
-                d_league = disc.get("league", "")
-                if d_sport == "soccer":
-                    sport_raw = "soccer"
-                    data = _soccer_aggregator.get_info(combined)
-                    guidance = "Present the soccer matches, scores, goal scorers, cards, possession/shots stats, lineups, rosters, injuries, or standings clearly."
-                elif d_sport == "basketball" and d_league == "nba":
-                    sport_raw = "nba"
-                    data = _nba_aggregator.get_info(combined)
-                    guidance = "Present the NBA games, leaders, injuries, rosters, or standings clearly."
-                elif d_sport == "hockey" and d_league == "nhl":
-                    sport_raw = "nhl"
-                    data = _hockey_aggregator.get_info(combined)
-                    guidance = "Present the NHL games, leaders, injuries, rosters, or standings clearly."
-                else:
-                    sport_raw = f"{d_sport}/{d_league}"
-                    data = _universal_aggregator.get_info(combined)
-                    guidance = "Present the sports scores, schedules, rosters, player stats, injuries, or standings clearly."
-            elif (
-                sport_raw.lower() in ("sports", "sport", "general", "all") or
-                (sport_raw.lower() == "" and any(k in combined for k in general_match_keywords)) or
-                bool(re.search(r'\b(?:sports?)\b', combined))
-            ):
-                sport_raw = "soccer"
-                data = _soccer_aggregator.get_info(combined)
-                guidance = "Present the soccer matches, scores, goal scorers, cards, possession/shots stats, lineups, rosters, injuries, or standings clearly."
-            else:
-                return (
-                    f"⚠️ Query '{combined}' is not recognized as a sport, team, or athlete.\n"
-                    f"`skill_sports_info` ONLY supports sports and esports.\n"
-                    f"For AI models, technology, coding, general news, or other topics: please use `search_web` instead."
-                )
+            return (
+                f"⚠️ Query '{combined}' is not recognized as a sport, team, or athlete.\n"
+                f"`skill_sports_info` ONLY supports sports and esports.\n"
+                f"For AI models, technology, coding, general news, or other topics: please use `search_web` instead."
+            )
+
+    if wants_games_and_odds:
+        odds_section = _odds_aggregator.get_odds(combined, sport=sport_raw if "," not in sport_raw else "sports")
+        if odds_section:
+            data = f"{data.strip()}\n\n=== 🎲 BETTING ODDS (DECIMAL FORMAT) ===\n{odds_section.strip()}\n"
+            guidance += " Also present the Decimal betting odds (`Best Odds Available`) and win probabilities for each matchup."
 
     print(f"🏟️ [Executing Sports Info Skill] Sport: {sport_raw}, Query: {combined}")
 

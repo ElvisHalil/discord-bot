@@ -596,11 +596,11 @@ class TestSportsEspnUpgrade(unittest.TestCase):
         with patch.dict(os.environ, {"THE_ODDS_API_KEY": "test_key"}):
             res = agg.get_odds("if I bet $100 on madrid game right now", sport="")
 
-        self.assertIn("[LIVE & PRE-MATCH BETTING ODDS: AS Roma vs Real Madrid]", res)
-        self.assertIn("DraftKings - Live Odds", res)
+        self.assertIn("[MATCH BETTING ODDS: AS Roma vs Real Madrid]", res)
+        self.assertIn("Best Odds Available:", res)
+        self.assertIn("Favorite: **Real Madrid**", res)
         self.assertIn("Bet Payout Simulation ($100.00 Stake)", res)
-        self.assertIn("[SPORTSBOOK CONSENSUS ODDS: AS Roma vs Real Madrid]", res)
-        self.assertIn("FanDuel", res)
+        self.assertIn("DraftKings - Live Odds", res)
 
     @patch("src.skills.sports.aggregators.espn_utils.cached_espn_get")
     def test_status_does_not_trigger_roster_and_bundesliga_does_not_trigger_cs(self, mock_get):
@@ -768,8 +768,9 @@ class TestSportsEspnUpgrade(unittest.TestCase):
         with patch.dict(os.environ, {"THE_ODDS_API_KEY": "test_key"}):
             # 1. Calling skill_betting_odds with default sport and "Team A vs Team B" (unaccented Montreal)
             res_single = skill_betting_odds("Washington Capitals vs Montreal Canadiens")
-            self.assertIn("[LIVE & PRE-MATCH BETTING ODDS: Washington Capitals vs Montreal Canadiens]", res_single)
-            self.assertIn("[SPORTSBOOK CONSENSUS ODDS: Washington Capitals vs Montréal Canadiens]", res_single)
+            self.assertIn("[MATCH BETTING ODDS: Washington Capitals vs Montreal Canadiens]", res_single)
+            self.assertIn("Best Odds Available:", res_single)
+            self.assertIn("1.91 | Win probability: ~52.4%", res_single)
 
             # 2. Calling skill_betting_odds for "tracked games" when 2 live games are tracked in LIVE_TRACKER
             LIVE_TRACKER.tracked_matches.clear()
@@ -801,6 +802,102 @@ class TestSportsEspnUpgrade(unittest.TestCase):
                 self.assertIn("Colorado Avalanche vs Dallas Stars", res_tracked)
             finally:
                 LIVE_TRACKER.tracked_matches.clear()
+
+    @patch("src.skills.sports.aggregators.odds.fetch_json")
+    @patch("src.tools.web.search_web")
+    def test_league_wide_soccer_hockey_and_f1_decimal_odds(self, mock_search, mock_fetch):
+        from src.skills.sports.aggregators.odds import OddsAggregator
+
+        def fetch_side_effect(url, timeout=6):
+            if "hockey/nhl/scoreboard" in url:
+                return {
+                    "events": [{
+                        "id": "401899001",
+                        "competitions": [{
+                            "status": {"type": {"state": "pre", "detail": "Tonight 7:00 PM EDT", "completed": False}},
+                            "competitors": [
+                                {"homeAway": "home", "team": {"displayName": "Toronto Maple Leafs"}, "score": "0"},
+                                {"homeAway": "away", "team": {"displayName": "Boston Bruins"}, "score": "0"},
+                            ],
+                            "odds": [{
+                                "provider": {"name": "DraftKings"},
+                                "moneyline": {
+                                    "home": {"close": {"odds": "-150"}},
+                                    "away": {"close": {"odds": "+130"}},
+                                },
+                                "pointSpread": {
+                                    "home": {"close": {"line": "-1.5"}},
+                                    "away": {"close": {"line": "+1.5"}},
+                                },
+                                "overUnder": 6.5,
+                            }],
+                        }],
+                    }]
+                }
+            if "soccer/eng.1/scoreboard" in url:
+                return {
+                    "events": [{
+                        "id": "401899002",
+                        "competitions": [{
+                            "status": {"type": {"state": "pre", "detail": "Sat 10:00 AM EDT", "completed": False}},
+                            "competitors": [
+                                {"homeAway": "home", "team": {"displayName": "Arsenal"}, "score": "0"},
+                                {"homeAway": "away", "team": {"displayName": "Chelsea"}, "score": "0"},
+                            ],
+                            "odds": [{
+                                "provider": {"name": "DraftKings"},
+                                "moneyline": {
+                                    "home": {"close": {"odds": "-125"}},
+                                    "away": {"close": {"odds": "+320"}},
+                                },
+                                "drawOdds": {"moneyLine": 260},
+                            }],
+                        }],
+                    }]
+                }
+            if "racing/f1/scoreboard" in url:
+                return {
+                    "season": {"year": 2026},
+                    "leagues": [{
+                        "calendar": [{
+                            "label": "United States Grand Prix",
+                            "startDate": "2026-10-23T17:30Z",
+                            "endDate": "2026-10-25T20:00Z",
+                        }]
+                    }],
+                }
+            return {"events": []}
+
+        mock_fetch.side_effect = fetch_side_effect
+        mock_search.return_value = (
+            "1. **F1 United States Grand Prix Odds**\n"
+            "   Lando Norris +150\n"
+            "   Max Verstappen +200\n"
+            "   Charles Leclerc +400\n"
+        )
+
+        agg = OddsAggregator()
+
+        # 1. League-wide NHL odds ("hockey odds")
+        nhl_res = agg.get_odds("hockey odds", sport="nhl")
+        self.assertIn("[MATCH BETTING ODDS: Toronto Maple Leafs vs Boston Bruins]", nhl_res)
+        self.assertIn("Best Odds Available:", nhl_res)
+        self.assertIn("- **Toronto Maple Leafs**: 1.67 | Win probability: ~59.9%", nhl_res)
+        self.assertIn("- **Boston Bruins**: 2.30 | Win probability: ~43.5%", nhl_res)
+
+        # 2. League-wide Soccer odds ("epl odds")
+        soc_res = agg.get_odds("epl odds", sport="soccer")
+        self.assertIn("[MATCH BETTING ODDS: Arsenal vs Chelsea]", soc_res)
+        self.assertIn("- **Arsenal**: 1.80 | Win probability: ~55.6%", soc_res)
+        self.assertIn("- **Chelsea**: 4.20 | Win probability: ~23.8%", soc_res)
+        self.assertIn("- **Draw**: 3.60 | Win probability: ~27.8%", soc_res)
+
+        # 3. Formula 1 odds ("f1 odds")
+        f1_res = agg.get_odds("f1 odds", sport="f1")
+        self.assertIn("[MATCH BETTING ODDS: Formula 1 — United States Grand Prix (2026)]", f1_res)
+        self.assertIn("Favorite: **Lando Norris**", f1_res)
+        self.assertIn("- **Lando Norris**: 2.50 | Win probability: ~40.0%", f1_res)
+        self.assertIn("- **Max Verstappen**: 3.00 | Win probability: ~33.3%", f1_res)
 
     @patch("src.skills.sports.aggregators.soccer.fetch_json")
     @patch("src.skills.sports.aggregators.espn_utils.espn_search_auto_discover")

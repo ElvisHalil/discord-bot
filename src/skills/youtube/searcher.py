@@ -36,9 +36,10 @@ def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music:
 
         # Music mode: delegate directly to specialized YouTube Music playback resolver
         if is_music:
-            # Guard against generic genre / non-song queries (e.g. "phonk", "phonk song", "techno music", "dnb track")
-            clean_q_low = re.sub(r'^(?:play\s+)?(?:a\s+|some\s+)?', '', query.strip(), flags=re.IGNORECASE).strip()
+            # Guard against generic genre / non-song queries (e.g. "phonk", "phonk song", "techno music", "play a song")
+            clean_q_low = re.sub(r'^(?:play\s+)?(?:me\s+)?(?:a\s+|some\s+)?', '', query.strip(), flags=re.IGNORECASE).strip()
             generic_m = re.match(r'^([a-z0-9\s&]+?)\s+(?:song|track|music|beat|video|banger)s?$', clean_q_low, re.IGNORECASE)
+            BARE_RANDOM_SONG = {"song", "songs", "track", "tracks", "music", "random", "random song", "random track", "good", "good song", "something", "anything", ""}
             KNOWN_BARE_GENRES = {
                 "phonk", "drift phonk", "synthwave", "retrowave", "darksynth", "hardstyle",
                 "dnb", "drum and bass", "drum & bass", "drumnbass", "jungle", "neurofunk",
@@ -48,10 +49,15 @@ def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music:
                 "rock", "metal", "heavy metal", "indie", "pop", "r&b", "rnb", "jazz", "classical",
                 "banger", "chill", "melodic", "hard", "dark", "sad", "love", "workout",
             }
-            if (" by " not in query.lower() and " - " not in query.lower()) and (generic_m or clean_q_low.lower() in KNOWN_BARE_GENRES):
+            if (" by " not in query.lower() and " - " not in query.lower()) and (
+                clean_q_low.lower() in BARE_RANDOM_SONG or generic_m or clean_q_low.lower() in KNOWN_BARE_GENRES
+            ):
+                from src.skills.music.top_music import skill_top_music
+                if clean_q_low.lower() in BARE_RANDOM_SONG or (generic_m and generic_m.group(1).strip().lower() in BARE_RANDOM_SONG):
+                    print(f"🔄 [YouTube Search Skill]: Redirecting generic song request '{query}' -> skill_top_music().")
+                    return skill_top_music()
                 genre_term = generic_m.group(1).strip() if generic_m else clean_q_low
                 print(f"🔄 [YouTube Search Skill]: Redirecting genre/vibe query '{query}' -> skill_top_music(genre='{genre_term}').")
-                from src.skills.music.top_music import skill_top_music
                 return skill_top_music(genre=genre_term)
 
             previously_served = get_served_song_vids(query)

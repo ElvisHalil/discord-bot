@@ -273,27 +273,34 @@ def standardize_song_reply(reply: str) -> str:
     """
     Scans a message reply for YouTube Music or song links.
     Guarantees that the response adheres strictly to the consistent, emoji-free song template,
-    preserving any conversational context or similarity descriptions while stripping
-    hallucinated markdown links or broken empty templates.
+    preserving any conversational context, multi-task prompt answers, or similarity descriptions
+    while stripping hallucinated YouTube markdown links or broken empty templates.
     """
     has_song_line = bool(_SONG_LINE.search(reply))
     has_artist_field = bool(re.search(r'(?:\*\*|\b)Artist:', reply, re.IGNORECASE))
     has_youtube_link = bool(re.search(r'(?:youtube\.com/watch|youtu\.be/)', reply, re.IGNORECASE))
     has_song_header = has_song_line and (has_artist_field or has_youtube_link)
 
-    # Helper: Extract conversational intro lines preceding any song headers or raw urls
+    # Helper: Extract all non-card conversational / multi-task lines (both before and after the song card)
     intro_lines = []
     for line in reply.split('\n'):
         line_stripped = line.strip()
         if not line_stripped:
+            if intro_lines and intro_lines[-1] != "":
+                intro_lines.append("")
             continue
-        if re.search(r'(?:\*\*|\b)(?:Song|Track|Artist|Album|Genre):\s*', line_stripped, re.IGNORECASE):
-            break
-        if "youtube.com" in line_stripped.lower() or "<raw" in line_stripped.lower() or line_stripped.startswith("<http"):
-            break
-        clean_l = re.sub(r'\[.*?\]\(.*?\)', '', line_stripped).strip()
+        if re.match(r'^[^\S\n]*(?:[-*•][^\S\n]*)?(?:\*\*)?(?:Song|Track|Artist|Album|Genre):(?:\*\*)?\s*', line_stripped, re.IGNORECASE):
+            continue
+        low_l = line_stripped.lower()
+        if "youtube.com" in low_l or "youtu.be" in low_l or "<raw" in low_l or line_stripped.startswith("<http"):
+            continue
+        # Strip only hallucinated YouTube/music-player markdown links, preserving legitimate research/news links
+        clean_l = re.sub(r'\[[^\]]*\]\([^\)]*(?:youtube\.com|youtu\.be)[^\)]*\)', '', line_stripped, flags=re.IGNORECASE)
+        clean_l = re.sub(r'\[(?:YouTube|Channel|Topic|Play|Watch|Video|Track)[^\]]*\]\([^\)]*\)', '', clean_l, flags=re.IGNORECASE).strip()
         if clean_l and not (clean_l.startswith("<") and not clean_l.startswith("<@")):
             intro_lines.append(clean_l)
+    while intro_lines and intro_lines[-1] == "":
+        intro_lines.pop()
     intro_text = "\n".join(intro_lines).strip()
 
     yt_match = re.search(r'(https:\/\/(?:music\.|www\.)?youtube\.com\/watch\?v=([0-9A-Za-z_-]{11}))', reply)
@@ -315,7 +322,10 @@ def standardize_song_reply(reply: str) -> str:
             if clean_s and not is_placeholder_text(clean_s):
                 extracted_song = clean_s
 
-        m_art = re.search(r'(?:\*\*|\b)Artist:\*{0,2}\s*(.+)', reply, re.IGNORECASE)
+        m_art = (
+            re.search(r'(?im)^[^\S\n]*(?:[-*•][^\S\n]*)?(?:\*\*)?Artist:\*{0,2}\s*(.+)', reply)
+            or re.search(r'(?:\*\*|\b)Artist:\*{0,2}\s*(.+)', reply, re.IGNORECASE)
+        )
         if m_art:
             clean_a = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_art.group(1)).strip()
             # If URL is inline (e.g. "Artist: Y https://...")
@@ -324,14 +334,14 @@ def standardize_song_reply(reply: str) -> str:
             if clean_a and not is_placeholder_text(clean_a):
                 extracted_artist = clean_a
 
-        m_alb = re.search(r'(?:\*\*|\b)Album:\*{0,2}\s*(.+)', reply, re.IGNORECASE)
+        m_alb = re.search(r'(?im)^[^\S\n]*(?:[-*•][^\S\n]*)?(?:\*\*)?Album:\*{0,2}\s*(.+)', reply)
         if m_alb:
             clean_al = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_alb.group(1)).strip()
             clean_al = re.sub(r'^(?:\*\*|\b)Album:\*{0,2}\s*', '', clean_al, flags=re.IGNORECASE).strip(" *-_#:`\"'")
             if clean_al and not is_placeholder_text(clean_al):
                 extracted_album = clean_al
 
-        m_gen = re.search(r'(?:\*\*|\b)Genre:\*{0,2}\s*(.+)', reply, re.IGNORECASE)
+        m_gen = re.search(r'(?im)^[^\S\n]*(?:[-*•][^\S\n]*)?(?:\*\*)?Genre:\*{0,2}\s*(.+)', reply)
         if m_gen:
             clean_g = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_gen.group(1)).strip()
             clean_g = re.sub(r'^(?:\*\*|\b)Genre:\*{0,2}\s*', '', clean_g, flags=re.IGNORECASE).strip(" *-_#:`\"'")

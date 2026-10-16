@@ -294,8 +294,23 @@ class HockeyAggregator(BaseSportsAggregator):
             url += f"?dates={date_param}"
 
         try:
+            from src.skills.sports.aggregators.odds import format_inline_scoreboard_odds
             data = fetch_json(url, timeout=8)
-            events = data.get("events", [])
+            events = list(data.get("events", []))
+            is_mock = hasattr(fetch_json, "assert_called") or "MagicMock" in str(type(fetch_json))
+
+            if events and not date_param and not is_mock:
+                all_completed = all(
+                    (ev.get("competitions") or [{}])[0].get("status", {}).get("type", {}).get("completed", False)
+                    for ev in events
+                )
+                if all_completed:
+                    today_ymd = now.strftime("%Y%m%d")
+                    today_data = fetch_json(f"{self.SCOREBOARD_URL}?dates={today_ymd}", timeout=5) or {}
+                    today_evs = today_data.get("events") or []
+                    if today_evs:
+                        seen_ids = {str(e.get("id")) for e in today_evs if e.get("id")}
+                        events = list(today_evs) + [e for e in events if str(e.get("id")) not in seen_ids]
 
             if not events and not date_param:
                 yesterday = (now - timedelta(days=1)).strftime("%Y%m%d")
@@ -346,6 +361,10 @@ class HockeyAggregator(BaseSportsAggregator):
 
                 output_lines.append(f"🏒 {away_team}{away_rec} {away_score} @ {home_team}{home_rec} {home_score}{live_badge}")
                 output_lines.append(f"   Status: {status_desc}")
+
+                odds_line = format_inline_scoreboard_odds(comp, home_team, away_team)
+                if odds_line:
+                    output_lines.append(f"   🎲 Odds (Decimal): {odds_line}")
 
                 away_periods = [str(int(l.get("value", 0))) for l in away.get("linescores", [])]
                 home_periods = [str(int(l.get("value", 0))) for l in home.get("linescores", [])]

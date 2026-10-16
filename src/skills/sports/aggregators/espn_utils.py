@@ -891,6 +891,9 @@ _SEARCH_STOPWORDS = {
     "about", "of", "context", "previous", "last", "current", "currently", "team",
     "soccer", "football", "basketball", "hockey", "baseball", "sports", "sport",
     "all", "show", "get", "me", "please", "tell", "give",
+    "and", "or", "with", "without", "to", "from", "by", "as", "also", "plus", "both",
+    "odds", "bet", "betting", "lines", "line", "moneyline", "spread", "over", "under",
+    "nhl", "nba", "nfl", "mlb", "f1", "epl", "ucl", "tonight",
 }
 
 
