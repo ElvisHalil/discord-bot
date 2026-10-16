@@ -4,7 +4,7 @@ from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.telegram_bridge import (
+from src.utils.telegram import (
     _SENT_SONG_CARDS,
     clean_for_telegram,
     from_tg_channel_id,
@@ -116,7 +116,7 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
             os.environ,
             {"TELEGRAM_OWNER_ID": "123456789", "TELEGRAM_ALLOWED_IDS": ""},
             clear=False,
-        ), patch("src.telegram_bridge.send_telegram_message", new_callable=AsyncMock) as mock_send:
+        ), patch("src.utils.telegram.send_telegram_message", new_callable=AsyncMock) as mock_send:
             await handle_telegram_update(
                 update,
                 main_mod=main_mod,
@@ -148,8 +148,8 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
             os.environ,
             {"TELEGRAM_OWNER_ID": "123456789", "TELEGRAM_ALLOWED_IDS": ""},
             clear=False,
-        ), patch("src.telegram_bridge._tg_api_post") as mock_post, patch(
-            "src.telegram_bridge.standardize_song_reply",
+        ), patch("src.utils.telegram._tg_api_post") as mock_post, patch(
+            "src.utils.telegram.standardize_song_reply",
             side_effect=lambda text, **kw: text,
         ):
             mock_post.return_value = {"ok": True, "result": {"message_id": 42}}
@@ -206,7 +206,7 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
                 },
             }
             with patch(
-                "src.telegram_bridge.tools.skill_top_music",
+                "src.utils.telegram.tools.skill_top_music",
                 return_value=(
                     "=== VERIFIED YOUTUBE MUSIC RESULT ===\n"
                     "Song: One More Time\n"
@@ -291,7 +291,7 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
             os.environ,
             {"TELEGRAM_OWNER_ID": "123456789", "TELEGRAM_ALLOWED_IDS": ""},
             clear=False,
-        ), patch("src.telegram_bridge._tg_api_post") as mock_post:
+        ), patch("src.utils.telegram._tg_api_post") as mock_post:
             mock_post.return_value = {"ok": True, "result": {"message_id": 51}}
             await handle_telegram_update(
                 mode_update,
@@ -310,7 +310,7 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
         main_mod = SimpleNamespace()
         # Disabled -> returns immediately without calling Telegram API
         with patch.dict(os.environ, {"ENABLE_TELEGRAM": "false"}, clear=False), patch(
-            "src.telegram_bridge._tg_api_post"
+            "src.utils.telegram._tg_api_post"
         ) as mock_post:
             await start_telegram_bridge(main_mod)
             mock_post.assert_not_called()
@@ -320,7 +320,7 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
             os.environ,
             {"ENABLE_TELEGRAM": "true", "TELEGRAM_BOT_TOKEN": ""},
             clear=False,
-        ), patch("src.telegram_bridge._tg_api_post") as mock_post:
+        ), patch("src.utils.telegram._tg_api_post") as mock_post:
             await start_telegram_bridge(main_mod)
             mock_post.assert_not_called()
 

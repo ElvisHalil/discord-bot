@@ -1,6 +1,6 @@
 import src.registry as tools
 import os
-from src.orchestrator import get_local_now
+from src.utils.timezones import get_local_now
 
 def _build_research_prompt(facts: str) -> str:
     local_now = get_local_now()

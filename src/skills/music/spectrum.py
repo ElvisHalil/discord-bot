@@ -522,3 +522,94 @@ def step_spectrum_zone(
         "used_default_start": used_default_start,
         "at_boundary": at_boundary,
     }
+
+
+_REPLY_SONG_CARD_RE = re.compile(
+    r"\[Replying to song card:\s*'([^']+)'\s*by\s*'([^']+)'\]",
+    re.IGNORECASE,
+)
+
+
+def _extract_raw_user_text(msg) -> str:
+    """Strip Discord/Telegram wrapper prefixes ('User X says: ...') from a user message in history."""
+    content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
+    if not content:
+        return ""
+    text = str(content).strip()
+    m = re.match(
+        r"^(?:User\s+.+?\s+says(?:\s*\[.*?\])*|.+\(User ID:\s*\d+\)(?:\s*\[.*?\])*)\s*:\s*(.+)$",
+        text,
+        flags=re.DOTALL,
+    )
+    return m.group(1).strip() if m else text
+
+
+def enrich_music_tool_args(args: dict, history: list) -> dict:
+    """Enrich skill_top_music arguments with song-card reply seeds and validate 3-Tier
+    music spectrum shift context so comparative words in normal conversation are never treated as shifts."""
+    if not isinstance(args, dict) or not history:
+        return args
+
+    user_msgs = [
+        m for m in history
+        if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
+    ]
+    if not user_msgs:
+        return args
+
+    last_msg = user_msgs[-1]
+    raw_content = str(last_msg.get("content", "") if isinstance(last_msg, dict) else getattr(last_msg, "content", "") or "")
+    clean_user = _extract_raw_user_text(last_msg)
+    if not clean_user or clean_user.startswith("Now summarize") or clean_user.startswith("You have used"):
+        return args
+
+    enriched = dict(args)
+
+    # 1. If the user is replying to a song card and didn't specify a seed song or artist, attach it
+    m_reply = _REPLY_SONG_CARD_RE.search(raw_content)
+    if m_reply and not enriched.get("similar_to") and not enriched.get("artist"):
+        enriched["similar_to"] = f"{m_reply.group(1).strip()} by {m_reply.group(2).strip()}"
+
+    # 2. Check 3-Tier Music Spectrum Shift context disambiguation
+    valid_shift_ctx = is_valid_music_shift_context(raw_content, history)
+    user_shift = parse_spectrum_shift(clean_user)
+    arg_shift = (
+        parse_spectrum_shift(str(enriched.get("shift") or ""))
+        or parse_spectrum_shift(str(enriched.get("mood") or ""))
+    )
+
+    if valid_shift_ctx and user_shift is not None:
+        if not enriched.get("shift"):
+            enriched["shift"] = clean_user
+    elif (user_shift is not None or arg_shift is not None) and not valid_shift_ctx:
+        if has_non_music_domain_context(clean_user) or not enriched.get("genre"):
+            enriched["shift"] = f"NON_MUSIC_CONVERSATION: {clean_user}"
+
+    return enriched
+
+
+def detect_missed_music_shift_tool_call(history: list) -> Optional[Tuple[str, dict]]:
+    """Detect when an 8B model skips calling skill_top_music on a valid 3-Tier music spectrum shift
+    (e.g. replying 'faster' to a song card or typing 'go harder' right after a song card)."""
+    if not history:
+        return None
+
+    user_msgs = [
+        m for m in history
+        if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
+    ]
+    if not user_msgs:
+        return None
+
+    last_msg = user_msgs[-1]
+    raw_content = str(last_msg.get("content", "") if isinstance(last_msg, dict) else getattr(last_msg, "content", "") or "")
+    clean_user = _extract_raw_user_text(last_msg)
+    if not clean_user or clean_user.startswith("!") or clean_user.startswith("Now summarize") or clean_user.startswith("You have used"):
+        return None
+
+    if is_valid_music_shift_context(raw_content, history):
+        args = enrich_music_tool_args({"shift": clean_user}, history)
+        return ("skill_top_music", args)
+
+    return None
+

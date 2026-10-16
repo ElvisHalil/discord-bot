@@ -33,7 +33,7 @@ from src.orchestrator import (
     sanitize_agent_reply,
     extract_reply_context,
 )
-from src.telegram_bridge import (
+from src.utils.telegram import (
     broadcast_mode_switch,
     is_telegram_channel,
     send_telegram_message,
