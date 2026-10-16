@@ -317,6 +317,81 @@ class TestSportsFollowupAndMissedToolEnforcement(unittest.TestCase):
         self.assertNotIn("55'", old_tool["content"])
 
 
+class TestCentralizedTimeAndTimezones(unittest.TestCase):
+    def test_bot_timezone_env_override_and_fallback(self):
+        from datetime import datetime, timezone
+        from src.orchestrator import get_local_now
+
+        # Fixed UTC moment: 2026-10-16 01:30 UTC
+        ref_utc = datetime(2026, 10, 16, 1, 30, tzinfo=timezone.utc)
+
+        # 1. Explicit IANA override: America/Edmonton (MDT, UTC-6 in October) -> Thu Oct 15, 19:30 MDT
+        with patch.dict("os.environ", {"BOT_TIMEZONE": "America/Edmonton"}, clear=False):
+            dt_mdt = get_local_now(now=ref_utc)
+            self.assertEqual((dt_mdt.year, dt_mdt.month, dt_mdt.day, dt_mdt.hour, dt_mdt.minute), (2026, 10, 15, 19, 30))
+            self.assertEqual(dt_mdt.tzname(), "MDT")
+
+        # 2. Explicit European IANA override: Europe/Berlin (CEST, UTC+2 in mid-October) -> Fri Oct 16, 03:30 CEST
+        with patch.dict("os.environ", {"BOT_TIMEZONE": "Europe/Berlin"}, clear=False):
+            dt_eu = get_local_now(now=ref_utc)
+            self.assertEqual((dt_eu.year, dt_eu.month, dt_eu.day, dt_eu.hour, dt_eu.minute), (2026, 10, 16, 3, 30))
+            self.assertEqual(dt_eu.tzname(), "CEST")
+
+        # 3. Blank or invalid BOT_TIMEZONE falls back cleanly to system local time without raising
+        with patch.dict("os.environ", {"BOT_TIMEZONE": ""}, clear=False):
+            dt_sys = get_local_now(now=ref_utc)
+            self.assertIsNotNone(dt_sys.tzinfo)
+        with patch.dict("os.environ", {"BOT_TIMEZONE": "Invalid/Not_A_Zone"}, clear=False):
+            dt_fallback = get_local_now(now=ref_utc)
+            self.assertIsNotNone(dt_fallback.tzinfo)
+
+    def test_build_reference_clock_includes_local_us_europe_and_utc(self):
+        from datetime import datetime, timezone
+        from src.orchestrator import build_reference_clock
+
+        ref_utc = datetime(2026, 10, 16, 1, 45, tzinfo=timezone.utc)
+        clock = build_reference_clock(now=ref_utc, tz_override="MDT")
+        self.assertIn("Thu, Oct 15, 2026 at 7:45 PM MDT (Local)", clock)
+        self.assertIn("9:45 PM EDT", clock)
+        self.assertIn("6:45 PM PDT", clock)
+        self.assertIn("Fri, Oct 16, 2026 at 03:45 CEST (Europe)", clock)
+        self.assertIn("Fri, Oct 16, 2026 at 01:45 UTC", clock)
+
+    def test_enrich_tool_output_leaves_non_time_outputs_untouched(self):
+        from src.orchestrator import enrich_tool_output_with_time_context
+
+        music_card = (
+            "=== VERIFIED YOUTUBE MUSIC RESULT ===\n"
+            "**Song:** Live Forever\n"
+            "**Artist:** Oasis\n"
+            "https://www.youtube.com/watch?v=123456"
+        )
+        self.assertEqual(enrich_tool_output_with_time_context(music_card), music_card)
+        self.assertEqual(enrich_tool_output_with_time_context("200"), "200")
+
+    def test_enrich_tool_output_annotates_mixed_timezones_and_utc_midnight_rollover(self):
+        from datetime import datetime, timezone
+        from src.orchestrator import enrich_tool_output_with_time_context
+
+        # Current time: Thu Oct 15, 2026 at 7:30 PM MDT (= Fri Oct 16, 01:30 UTC = Fri Oct 16, 03:30 CEST)
+        ref_utc = datetime(2026, 10, 16, 1, 30, tzinfo=timezone.utc)
+        raw_schedule = (
+            "=== NBA SCHEDULE ===\n"
+            "  • Lakers 0 @ Warriors 0 [Thu, Oct 15 - 10:00 PM EDT]\n"
+            "  • Celtics 0 @ Knicks 0 [Fri, Oct 16, 2026 at 01:00 UTC]\n"
+            "📅 --- SATURDAY, OCTOBER 17, 2026 (1 Match) ---\n"
+            "  • Arsenal at Chelsea (Kickoff: 16:30 UTC) [Scheduled]"
+        )
+        enriched = enrich_tool_output_with_time_context(raw_schedule, now=ref_utc, tz_override="MDT")
+        self.assertTrue(enriched.startswith("[🕒 Current Time:"))
+        # 10:00 PM EDT on Oct 15 = Today 8:00 PM MDT / Fri 04:00 CEST (in 30m)
+        self.assertIn("Thu, Oct 15 - 10:00 PM EDT (Today 8:00 PM MDT / Fri 04:00 CEST, in 30m)", enriched)
+        # Fri, Oct 16 at 01:00 UTC = Today 7:00 PM MDT / Fri 03:00 CEST (30m ago) -> no false "tomorrow" confusion!
+        self.assertIn("Fri, Oct 16, 2026 at 01:00 UTC (Today 7:00 PM MDT / Fri 03:00 CEST, 30m ago)", enriched)
+        # Kickoff: 16:30 UTC under Saturday Oct 17 header -> Sat Oct 17 10:30 AM MDT / 18:30 CEST (in 1d 15h)
+        self.assertIn("16:30 UTC (Sat Oct 17 10:30 AM MDT / 18:30 CEST, in 1d 15h)", enriched)
+
+
 if __name__ == "__main__":
     unittest.main()
 

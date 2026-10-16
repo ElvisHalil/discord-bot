@@ -24,6 +24,7 @@ from src.orchestrator import (
     normalize_tool_args,
     enrich_sports_tool_args,
     enrich_music_tool_args,
+    enrich_tool_output_with_time_context,
     detect_missed_sports_tool_call,
     detect_missed_music_shift_tool_call,
     trim_history,
@@ -506,7 +507,7 @@ async def run_agent_turn(channel_id, mode_config):
                     history.append({
                         "role": "tool",
                         "name": forced_tool_name,
-                        "content": str(tool_output),
+                        "content": enrich_tool_output_with_time_context(str(tool_output)),
                     })
                     iterations += 1
                     continue
@@ -559,7 +560,7 @@ async def run_agent_turn(channel_id, mode_config):
             return {
                 "role": "tool",
                 "name": tool_name,
-                "content": str(tool_output)
+                "content": enrich_tool_output_with_time_context(str(tool_output)),
             }
 
         tool_results = await asyncio.gather(*(run_tool(call) for call in tool_calls))

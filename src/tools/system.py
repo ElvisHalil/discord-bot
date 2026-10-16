@@ -3,6 +3,8 @@ import json
 import numexpr as ne
 from datetime import datetime
 
+from src.orchestrator import build_reference_clock
+
 ACTIVE_MEMORY_FILE = "data/memory.json"
 
 def set_memory_file(path: str) -> None:
@@ -13,9 +15,8 @@ def set_memory_file(path: str) -> None:
     ACTIVE_MEMORY_FILE = path
 
 def get_current_datetime() -> str:
-    """Get the exact current date, day of the week, and local time from the host machine."""
-    now = datetime.now()
-    result = now.strftime("Current Date: %A, %B %d, %Y | Local Time (UTC-6): %I:%M:%S %p")
+    """Get the exact current date, day of the week, and time across Local, US, Europe, and UTC timezones."""
+    result = build_reference_clock()
     print(f"🕒 [Checking Clock]: {result}")
     return result
 
