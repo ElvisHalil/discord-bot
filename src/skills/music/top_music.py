@@ -301,6 +301,11 @@ def skill_top_music(
                 tracks, mood_info = manager.get_mood_matched_tracks(similar_to)
                 if mood_info.get("mood"):
                     mood_tag = mood_info["mood"].title()
+            elif parsed_genre:
+                sim_tracks = manager.get_similar_tracks(similar_to)
+                genre_tracks = manager.get_top_charts(genre=parsed_genre)
+                tracks = (genre_tracks or []) + (sim_tracks or [])
+                mood_tag = parsed_genre.title()
             else:
                 tracks = manager.get_similar_tracks(similar_to)
 

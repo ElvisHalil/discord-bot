@@ -260,7 +260,7 @@ def _format_relative_delta(event_utc: datetime, now_utc: datetime) -> str:
 
 _SECTION_DATE_HEADER_RE = re.compile(
     r'(?i)(?:📅|---|\bDates?:)\s*.*?\b(?:'
-    r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})(?:,?\s*(\d{4}))?'
+    r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?'
     r'|(\d{4})-(\d{2})-(\d{2})'
     r')\b'
 )
@@ -268,7 +268,7 @@ _SECTION_DATE_HEADER_RE = re.compile(
 _TIMESTAMP_TOKEN_RE = re.compile(
     r'(?P<iso>\b(?P<iso_y>\d{4})-(?P<iso_m>\d{2})-(?P<iso_d>\d{2})[T\s](?P<iso_t>\d{2}:\d{2})(?::\d{2})?(?:Z|\s*UTC)\b)'
     r'|(?P<md>(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+)?'
-    r'(?P<md_mon>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(?P<md_day>\d{1,2})(?:,?\s*(?P<md_year>\d{4}))?'
+    r'(?P<md_mon>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(?P<md_day>\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(?P<md_year>\d{4}))?'
     r'\s*(?:at\b|-|–|,)?\s*(?P<md_time>\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*(?P<md_tz>UTC|GMT|BST|CEST|CET|EEST|EET|EDT|EST|CDT|CST|MDT|MST|PDT|PST|ET|CT|MT|PT)\b)'
     r'|(?P<sl>\b(?P<sl_m>\d{1,2})/(?P<sl_d>\d{1,2})(?:/(?P<sl_y>\d{2,4}))?\s*(?:at\b|-|–|,)?\s*(?P<sl_time>\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*(?P<sl_tz>UTC|GMT|BST|CEST|CET|EEST|EET|EDT|EST|CDT|CST|MDT|MST|PDT|PST|ET|CT|MT|PT)\b)'
     r'|(?P<to>\b(?P<to_time>\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*(?P<to_tz>UTC|GMT|BST|CEST|CET|EEST|EET|EDT|EST|CDT|CST|MDT|MST|PDT|PST|ET|CT|MT|PT)\b)',
@@ -292,6 +292,21 @@ def _parse_clock_str(clock_raw: str) -> tuple[int, int] | None:
     if not (0 <= hh <= 23 and 0 <= mm <= 59):
         return None
     return hh, mm
+
+
+def _infer_nearest_year(mon: int, day: int, ref_date: date) -> int:
+    """Infer year for a yearless month/day so Dec->Jan and Jan->Dec schedules don't jump 11 months."""
+    yr = ref_date.year
+    try:
+        cand = date(yr, mon, day)
+        diff = (cand - ref_date).days
+        if diff < -180:
+            return yr + 1
+        if diff > 180:
+            return yr - 1
+    except ValueError:
+        pass
+    return yr
 
 
 def enrich_tool_output_with_time_context(
@@ -318,9 +333,7 @@ def enrich_tool_output_with_time_context(
 
     local_now = get_local_now(now=now, tz_override=tz_override)
     utc_now = local_now.astimezone(timezone.utc)
-    local_tz = local_now.tzinfo or timezone.utc
     local_abbr = _short_tz_abbr(local_now)
-    eu_tz = _resolve_tz_token("Europe/Berlin", ref_utc=utc_now) or timezone(timedelta(hours=2), "CEST")
 
     annotated_count = 0
     current_section_date: date | None = None
@@ -334,14 +347,18 @@ def enrich_tool_output_with_time_context(
                 if m_hdr.group(1):
                     mon = _MONTH_NUMS[m_hdr.group(1)[:3].lower()]
                     day = int(m_hdr.group(2))
-                    yr = int(m_hdr.group(3)) if m_hdr.group(3) else local_now.year
+                    yr = int(m_hdr.group(3)) if m_hdr.group(3) else _infer_nearest_year(mon, day, local_now.date())
                     current_section_date = date(yr, mon, day)
                 elif m_hdr.group(4):
                     current_section_date = date(int(m_hdr.group(4)), int(m_hdr.group(5)), int(m_hdr.group(6)))
             except Exception:
                 pass
 
-        # Skip lines that were already annotated
+        # Skip lines that were already annotated or contain pre-formatted Discord epoch tags (<t:...:t>)
+        if re.search(r'<t:\d+:[a-zA-Z]>', line):
+            annotated_count += 1
+            out_lines.append(line)
+            continue
         if f"{local_abbr} /" in line or "🕒 Current Time:" in line:
             out_lines.append(line)
             continue
@@ -350,6 +367,7 @@ def enrich_tool_output_with_time_context(
             nonlocal annotated_count
             full_match = m.group(0)
             try:
+                tz_tok: str | None = None
                 if m.group("iso"):
                     yr = int(m.group("iso_y"))
                     mon = int(m.group("iso_m"))
@@ -361,32 +379,43 @@ def enrich_tool_output_with_time_context(
                 elif m.group("md"):
                     mon = _MONTH_NUMS[m.group("md_mon")[:3].lower()]
                     day = int(m.group("md_day"))
-                    yr = int(m.group("md_year")) if m.group("md_year") else local_now.year
+                    yr = int(m.group("md_year")) if m.group("md_year") else _infer_nearest_year(mon, day, local_now.date())
                     hm = _parse_clock_str(m.group("md_time"))
                     if not hm:
                         return full_match
-                    src_tz = _resolve_tz_token(m.group("md_tz"), ref_utc=utc_now) or timezone.utc
+                    tz_tok = m.group("md_tz")
                 elif m.group("sl"):
                     mon = int(m.group("sl_m"))
                     day = int(m.group("sl_d"))
                     raw_y = m.group("sl_y")
-                    yr = (2000 + int(raw_y) if len(raw_y) == 2 else int(raw_y)) if raw_y else local_now.year
+                    yr = (2000 + int(raw_y) if len(raw_y) == 2 else int(raw_y)) if raw_y else _infer_nearest_year(mon, day, local_now.date())
                     hm = _parse_clock_str(m.group("sl_time"))
                     if not hm:
                         return full_match
-                    src_tz = _resolve_tz_token(m.group("sl_tz"), ref_utc=utc_now) or timezone.utc
+                    tz_tok = m.group("sl_tz")
                 else:
                     hm = _parse_clock_str(m.group("to_time"))
                     if not hm:
                         return full_match
-                    src_tz = _resolve_tz_token(m.group("to_tz"), ref_utc=utc_now) or timezone.utc
-                    base_d = current_section_date or utc_now.astimezone(src_tz).date()
+                    tz_tok = m.group("to_tz")
+                    prelim_tz = _resolve_tz_token(tz_tok, ref_utc=utc_now) or timezone.utc
+                    base_d = current_section_date or utc_now.astimezone(prelim_tz).date()
                     yr, mon, day = base_d.year, base_d.month, base_d.day
+
+                if tz_tok is not None:
+                    est_utc = datetime(yr, mon, day, hm[0], hm[1], tzinfo=timezone.utc)
+                    src_tz = _resolve_tz_token(tz_tok, ref_utc=est_utc) or timezone.utc
+                    prelim_utc = datetime(yr, mon, day, hm[0], hm[1], tzinfo=src_tz).astimezone(timezone.utc)
+                    src_tz = _resolve_tz_token(tz_tok, ref_utc=prelim_utc) or src_tz
 
                 src_dt = datetime(yr, mon, day, hm[0], hm[1], tzinfo=src_tz)
                 ev_utc = src_dt.astimezone(timezone.utc)
-                ev_local = ev_utc.astimezone(local_tz)
-                ev_eu = ev_utc.astimezone(eu_tz)
+                ev_local_tz = resolve_configured_timezone(tz_override=tz_override, ref_utc=ev_utc)
+                ev_eu_tz = _resolve_tz_token("Europe/Berlin", ref_utc=ev_utc) or timezone(timedelta(hours=2), "CEST")
+
+                ev_local = ev_utc.astimezone(ev_local_tz)
+                ev_local_abbr = _short_tz_abbr(ev_local)
+                ev_eu = ev_utc.astimezone(ev_eu_tz)
                 eu_abbr = _short_tz_abbr(ev_eu)
 
                 # Format Local time + relative day label
@@ -401,10 +430,10 @@ def enrich_tool_output_with_time_context(
                     day_lbl = ev_local.strftime("%a %b %d")
 
                 local_clock = ev_local.strftime("%I:%M %p").lstrip("0")
-                local_piece = f"{day_lbl} {local_clock} {local_abbr}"
+                local_piece = f"{day_lbl} {local_clock} {ev_local_abbr}"
 
                 # Format European time (unless Local is already CET/CEST)
-                if local_abbr in ("CET", "CEST"):
+                if ev_local_abbr in ("CET", "CEST"):
                     zone_str = local_piece
                 else:
                     eu_day_prefix = f"{ev_eu.strftime('%a')} " if ev_eu.date() != ev_local.date() else ""

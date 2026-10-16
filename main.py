@@ -2,7 +2,8 @@ import discord
 import os
 import sys
 
-sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
 import re
 import asyncio
 import random
@@ -534,25 +535,28 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
 
         async def run_tool(call):
             tool_name = call.function.name
+            raw_args = call.function.arguments or {}
+            func = active_tools.get(tool_name)
+            norm_args = normalize_tool_args(tool_name, func, raw_args) if func else (raw_args if isinstance(raw_args, dict) else {})
 
-            # Guardrail: Prevent running youtube searcher in parallel with top music
-            if tool_name == "skill_youtube_searcher" and has_top_music:
-                print(f"  └─ ⚠️ [Orchestrator]: Blocked parallel {tool_name} call while skill_top_music is executing.")
+            # Guardrail: Prevent running youtube searcher (in music mode) in parallel with top music
+            if tool_name == "skill_youtube_searcher" and has_top_music and bool(norm_args.get("is_music")):
+                print(f"  └─ ⚠️ [Orchestrator]: Blocked parallel {tool_name}(is_music=True) call while skill_top_music is executing.")
                 return {
                     "role": "tool",
                     "name": tool_name,
                     "content": (
-                        "PARALLEL_EXECUTION_BLOCKED: You cannot call `skill_youtube_searcher` at the same time as `skill_top_music`. "
+                        "PARALLEL_EXECUTION_BLOCKED: You cannot call `skill_youtube_searcher(is_music=True)` at the same time as `skill_top_music`. "
                         "You must first review the songs returned by `skill_top_music` in this step, select ONE specific song, "
                         "and then call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` in your NEXT step to get its link."
                     )
                 }
 
             if tool_name in active_tools:
-                func = active_tools[tool_name]
-                args = normalize_tool_args(tool_name, func, call.function.arguments or {})
+                args = norm_args
                 if tool_name in ("skill_sports_info", "skill_track_live_game", "skill_betting_odds"):
-                    args = enrich_sports_tool_args(args, history)
+                    sibling_tools = [c.function.name for c in tool_calls if c is not call]
+                    args = enrich_sports_tool_args(args, history, sibling_tools=sibling_tools)
                 elif tool_name == "skill_top_music":
                     args = enrich_music_tool_args(args, history)
                 set_active_channel_id(channel_id)

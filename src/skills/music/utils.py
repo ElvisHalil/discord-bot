@@ -281,6 +281,15 @@ def standardize_song_reply(reply: str) -> str:
     has_youtube_link = bool(re.search(r'(?:youtube\.com/watch|youtu\.be/)', reply, re.IGNORECASE))
     has_song_header = has_song_line and (has_artist_field or has_youtube_link)
 
+    song_header_m = _SONG_LINE.search(reply) if has_song_header else None
+    card_region = reply[song_header_m.start():] if song_header_m else reply
+    yt_match = (
+        re.search(r'(https:\/\/(?:music\.|www\.)?youtube\.com\/watch\?v=([0-9A-Za-z_-]{11}))', card_region)
+        or re.search(r'(https:\/\/music\.youtube\.com\/watch\?v=([0-9A-Za-z_-]{11}))', reply)
+        or re.search(r'(https:\/\/(?:music\.|www\.)?youtube\.com\/watch\?v=([0-9A-Za-z_-]{11}))', reply)
+    )
+    card_vid = yt_match.group(2) if (has_song_header and yt_match) else None
+
     # Helper: Extract all non-card conversational / multi-task lines (both before and after the song card)
     intro_lines = []
     for line in reply.split('\n'):
@@ -292,18 +301,22 @@ def standardize_song_reply(reply: str) -> str:
         if re.match(r'^[^\S\n]*(?:[-*•][^\S\n]*)?(?:\*\*)?(?:Song|Track|Artist|Album|Genre):(?:\*\*)?\s*', line_stripped, re.IGNORECASE):
             continue
         low_l = line_stripped.lower()
-        if "youtube.com" in low_l or "youtu.be" in low_l or "<raw" in low_l or line_stripped.startswith("<http"):
+        if "<raw" in low_l:
+            continue
+        if "youtube.com" in low_l or "youtu.be" in low_l:
+            # Preserve non-music YouTube video links from a compound tool call when their video ID differs from the song card
+            m_other_yt = re.search(r'https:\/\/www\.youtube\.com\/watch\?v=([0-9A-Za-z_-]{11})', line_stripped)
+            if has_song_header and m_other_yt and card_vid and m_other_yt.group(1) != card_vid and "music.youtube.com" not in low_l:
+                intro_lines.append(line_stripped)
             continue
         # Strip only hallucinated YouTube/music-player markdown links, preserving legitimate research/news links
         clean_l = re.sub(r'\[[^\]]*\]\([^\)]*(?:youtube\.com|youtu\.be)[^\)]*\)', '', line_stripped, flags=re.IGNORECASE)
         clean_l = re.sub(r'\[(?:YouTube|Channel|Topic|Play|Watch|Video|Track)[^\]]*\]\([^\)]*\)', '', clean_l, flags=re.IGNORECASE).strip()
-        if clean_l and not (clean_l.startswith("<") and not clean_l.startswith("<@")):
+        if clean_l and not (clean_l.startswith("<") and not clean_l.startswith(("<@", "<http://", "<https://", "<t:"))):
             intro_lines.append(clean_l)
     while intro_lines and intro_lines[-1] == "":
         intro_lines.pop()
     intro_text = "\n".join(intro_lines).strip()
-
-    yt_match = re.search(r'(https:\/\/(?:music\.|www\.)?youtube\.com\/watch\?v=([0-9A-Za-z_-]{11}))', reply)
 
     # If message was formatted with a song template:
     if has_song_header:

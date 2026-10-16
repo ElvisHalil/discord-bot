@@ -171,9 +171,9 @@ def skill_top_headlines(region: Optional[str] = None, topic: Optional[str] = Non
             "link": (it.findtext("link") or "").strip(),
         })
 
-    # Resolve publisher URLs in parallel so read_website can open them later.
-    with ThreadPoolExecutor(max_workers=MAX_HEADLINES) as pool:
-        decoded = list(pool.map(lambda s: decode_google_news_url(s["link"]), stories))
+    # Resolve publisher URLs in parallel via shared worker pool so read_website can open them later.
+    from src.utils.workers import map_in_workers
+    decoded = map_in_workers(lambda s: decode_google_news_url(s["link"]), stories)
 
     output = f"=== TOP HEADLINES: {label} (Google News) ===\n"
     for i, (story, real_url) in enumerate(zip(stories, decoded), 1):

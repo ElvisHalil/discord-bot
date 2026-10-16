@@ -356,6 +356,7 @@ _NON_MUSIC_DOMAIN_RE = re.compile(
 _COMPARATIVE_QUESTION_RE = re.compile(
     r"(?:"
     r"\b(?:faster|slower|harder|softer|heavier|lighter)\s+(?:than|to|for|at|on|in\s+the)\b|"
+    r"\b(?:faster|slower|harder|softer|heavier|lighter|tougher|rougher)\s+(?:day|week|month|year|time|shift|workday|morning|night|life)\b|"
     r"\b(?:why|how\s+come|which\s+one|who)\s+(?:is|are|was|were|runs?|goes?)\b.*\b(?:faster|slower|harder|softer)\b|"
     r"^\s*(?:is|are|was|were|do|does|did|can|could|would|should)\s+(?:it|this|that|they|he|she)\b.*\b(?:faster|slower|harder|softer)\b|"
     r"\b(?:work|study|try|push|hit|train|play\s+the\s+game)\s+harder\b|"
@@ -440,6 +441,15 @@ def parse_spectrum_shift(text: str) -> Optional[Tuple[int, int, str]]:
     return (d_tempo, d_intensity, " & ".join(labels))
 
 
+def _has_shift_keyword(text: str) -> bool:
+    return bool(
+        _FASTER_RE.search(text)
+        or _SLOWER_RE.search(text)
+        or _HARDER_RE.search(text)
+        or _SOFTER_RE.search(text)
+    )
+
+
 def is_valid_music_shift_context(user_text: str, history: Optional[list] = None) -> bool:
     """
     3-Tier Context Disambiguation Check ensuring comparative words ('harder', 'softer',
@@ -465,7 +475,15 @@ def is_valid_music_shift_context(user_text: str, history: Optional[list] = None)
 
     # Tier 1B: Explicit music noun/verb in the prompt ("play something harder", "faster song", "go up a notch")
     if _EXPLICIT_MUSIC_CUE_RE.search(cleaned):
-        return True
+        clauses = [
+            c.strip()
+            for c in re.split(r"(?:[.!?;]+|\b(?:also|and\s+also|by\s+the\s+way|btw)\b)", cleaned, flags=re.IGNORECASE)
+            if c and c.strip()
+        ]
+        if len(clauses) <= 1:
+            return True
+        if any(_EXPLICIT_MUSIC_CUE_RE.search(c) and _has_shift_keyword(c) for c in clauses):
+            return True
 
     # Tier 2: Short directive immediately following a music turn in chat_history
     word_count = len(re.findall(r"\w+", cleaned))
@@ -565,12 +583,7 @@ def enrich_music_tool_args(args: dict, history: list) -> dict:
 
     enriched = dict(args)
 
-    # 1. If the user is replying to a song card and didn't specify a seed song or artist, attach it
-    m_reply = _REPLY_SONG_CARD_RE.search(raw_content)
-    if m_reply and not enriched.get("similar_to") and not enriched.get("artist"):
-        enriched["similar_to"] = f"{m_reply.group(1).strip()} by {m_reply.group(2).strip()}"
-
-    # 2. Check 3-Tier Music Spectrum Shift context disambiguation
+    # Check 3-Tier Music Spectrum Shift context disambiguation
     valid_shift_ctx = is_valid_music_shift_context(raw_content, history)
     user_shift = parse_spectrum_shift(clean_user)
     arg_shift = (
@@ -578,11 +591,34 @@ def enrich_music_tool_args(args: dict, history: list) -> dict:
         or parse_spectrum_shift(str(enriched.get("mood") or ""))
     )
 
+    # 1. If the user is replying to a song card and didn't specify a seed song or artist, attach it
+    # (unless they are explicitly switching to a specific genre without asking for similarity/shift)
+    m_reply = _REPLY_SONG_CARD_RE.search(raw_content)
+    if m_reply and not enriched.get("similar_to") and not enriched.get("artist"):
+        wants_card_similarity = bool(
+            not enriched.get("genre")
+            or enriched.get("shift")
+            or user_shift is not None
+            or re.search(r"\b(?:similar|like\s+this|like\s+that|same\s+vibe|another\s+one)\b", clean_user, re.IGNORECASE)
+        )
+        if wants_card_similarity:
+            enriched["similar_to"] = f"{m_reply.group(1).strip()} by {m_reply.group(2).strip()}"
+
+    # 2. Apply or sanitize spectrum shift parameter
     if valid_shift_ctx and user_shift is not None:
-        if not enriched.get("shift"):
+        if not enriched.get("shift") and not enriched.get("genre") and not enriched.get("artist"):
             enriched["shift"] = clean_user
     elif (user_shift is not None or arg_shift is not None) and not valid_shift_ctx:
-        if has_non_music_domain_context(clean_user) or not enriched.get("genre"):
+        has_explicit_music_request = bool(
+            enriched.get("genre")
+            or enriched.get("artist")
+            or enriched.get("similar_to")
+            or (enriched.get("mood") and not parse_spectrum_shift(str(enriched.get("mood") or "")))
+            or _EXPLICIT_MUSIC_CUE_RE.search(clean_user)
+        )
+        if has_explicit_music_request:
+            enriched.pop("shift", None)
+        elif has_non_music_domain_context(clean_user) or not enriched.get("genre"):
             enriched["shift"] = f"NON_MUSIC_CONVERSATION: {clean_user}"
 
     return enriched

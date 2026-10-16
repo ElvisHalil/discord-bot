@@ -691,9 +691,104 @@ class TestSkillSportsInfo(unittest.TestCase):
         self.assertIn("Best Odds Available:", res)
         self.assertIn("- **Edmonton Oilers**: 1.62 | Win probability: ~61.7%", res)
 
+    @patch("src.skills.sports.aggregators.espn_utils.cached_espn_get", return_value=None)
+    @patch("src.skills.sports.sports.skill_csgo_esports")
+    @patch("src.skills.sports.aggregators.soccer.fetch_json")
+    def test_multi_sport_cs_and_soccer_routing(self, mock_soccer_fetch, mock_csgo, _mock_espn_get):
+        mock_csgo.return_value = "=== COUNTER-STRIKE ESPORTS DATA ===\n• Spirit vs Vitality [18:00 UTC]"
+        mock_soccer_fetch.return_value = {
+            "events": [{
+                "competitions": [{
+                    "status": {"type": {"detail": "Sat 10:00 AM", "state": "pre", "completed": False}},
+                    "competitors": [
+                        {"homeAway": "home", "score": "0", "team": {"displayName": "Arsenal"}},
+                        {"homeAway": "away", "score": "0", "team": {"displayName": "Chelsea"}},
+                    ],
+                }]
+            }]
+        }
+        res = skill_sports_info(query="what are the CS2 matches and Premier League games today?")
+        self.assertIn("COUNTER-STRIKE ESPORTS DATA", res)
+        self.assertIn("Spirit vs Vitality", res)
+        self.assertIn("ENGLISH PREMIER LEAGUE", res)
+        self.assertIn("Arsenal", res)
+
+    @patch("src.skills.sports.aggregators.espn_utils.cached_espn_get", return_value=None)
+    @patch("src.skills.sports.sports.skill_csgo_esports")
+    @patch("src.skills.sports.aggregators.nba.fetch_json")
+    def test_multi_sport_cs_rankings_and_nba_schedule_scoping(self, mock_nba_fetch, mock_csgo, _mock_espn_get):
+        mock_csgo.return_value = "=== HLTV WORLD RANKINGS ===\n1. Team Spirit"
+        mock_nba_fetch.return_value = {
+            "events": [{
+                "competitions": [{
+                    "status": {"type": {"detail": "Tonight 10:00 PM EDT", "state": "pre", "completed": False}},
+                    "competitors": [
+                        {"homeAway": "home", "score": "0", "team": {"displayName": "Los Angeles Lakers"}},
+                        {"homeAway": "away", "score": "0", "team": {"displayName": "Golden State Warriors"}},
+                    ],
+                }]
+            }]
+        }
+        res = skill_sports_info(query="cs rankings and when do the lakers play")
+        mock_csgo.assert_called_once_with(query_type="rankings")
+        self.assertIn("HLTV WORLD RANKINGS", res)
+        self.assertIn("Los Angeles Lakers", res)
+
+    @patch("src.skills.sports.aggregators.f1.fetch_json")
+    def test_f1_all_races_and_ongoing_weekend_utc_boundary(self, mock_fetch):
+        from datetime import timezone
+        now_utc = datetime.now(timezone.utc)
+        start_iso = (now_utc - timedelta(days=1)).strftime("%Y-%m-%dT14:00Z")
+        end_iso = (now_utc + timedelta(hours=3)).strftime("%Y-%m-%dT21:00Z")
+        mock_fetch.return_value = {
+            "season": {"year": now_utc.year},
+            "leagues": [{"calendar": [{"label": "United States Grand Prix", "startDate": start_iso, "endDate": end_iso}]}],
+            "events": [{
+                "name": "United States Grand Prix",
+                "date": start_iso,
+                "endDate": end_iso,
+                "status": {"type": {"detail": "Sunday Race"}},
+                "circuit": {"fullName": "Circuit of the Americas"},
+                "competitions": [],
+            }],
+        }
+        # Asking "what are all the F1 races" must route to schedule (not standings) and keep ongoing Sunday race in UPCOMING
+        res = skill_sports_info("f1", "what are all the F1 races this season")
+        self.assertIn("UPCOMING GRAND PRIX RACES", res)
+        self.assertIn("United States Grand Prix", res)
+
+    def test_espn_team_schedule_uses_bot_local_date_for_is_playing_today(self):
+        from datetime import timezone
+        from src.skills.sports.aggregators.espn_utils import parse_team_schedule
+        from src.utils.timezones import get_local_now
+        # Current time: Thu Oct 15, 2026 at 7:30 PM MDT (= Fri Oct 16, 01:30 UTC)
+        # Game at Fri Oct 16, 02:00 UTC is Thu Oct 15, 8:00 PM MDT -> TODAY in America/Edmonton!
+        ref_utc = datetime(2026, 10, 16, 1, 30, tzinfo=timezone.utc)
+        sched_data = {
+            "events": [{
+                "date": "2026-10-16T02:00Z",
+                "competitions": [{
+                    "date": "2026-10-16T02:00Z",
+                    "status": {"type": {"state": "pre", "completed": False, "shortDetail": "Thu, Oct 15 at 10:00 PM EDT"}},
+                    "competitors": [
+                        {"homeAway": "home", "team": {"displayName": "Edmonton Oilers"}},
+                        {"homeAway": "away", "team": {"displayName": "Calgary Flames"}},
+                    ],
+                }],
+            }]
+        }
+        with patch.dict("os.environ", {"BOT_TIMEZONE": "America/Edmonton"}, clear=False):
+            mdt_now = get_local_now(now=ref_utc)
+            with patch("src.utils.timezones.get_local_now", return_value=mdt_now), \
+                 patch("src.skills.sports.aggregators.espn_utils.cached_espn_get", return_value=sched_data):
+                out = parse_team_schedule("hockey", "nhl", "22", "Edmonton Oilers")
+        self.assertIn("🔥 **TODAY —", out)
+        self.assertIn("Edmonton Oilers", out)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

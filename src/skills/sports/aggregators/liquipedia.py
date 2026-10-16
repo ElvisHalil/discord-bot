@@ -231,11 +231,13 @@ class LiquipediaAggregator(BaseSportsAggregator):
         if not epoch_str or not str(epoch_str).isdigit():
             return clean_raw or "Time TBD"
         try:
+            from src.utils.timezones import get_local_now, _short_tz_abbr
             ts = int(epoch_str)
             utc_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-            local_dt = utc_dt.astimezone()
+            local_dt = get_local_now(now=utc_dt)
+            local_abbr = _short_tz_abbr(local_dt)
             utc_str = utc_dt.strftime("%b %d, %H:%M UTC")
-            local_str = local_dt.strftime("%I:%M %p %Z").lstrip("0")
+            local_str = f"{local_dt.strftime('%I:%M %p').lstrip('0')} {local_abbr}"
             if clean_raw:
                 return f"{clean_raw} ({utc_str} | {local_str} | <t:{ts}:t>)"
             return f"{utc_str} ({local_str} | <t:{ts}:t>)"

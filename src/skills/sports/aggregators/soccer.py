@@ -634,7 +634,7 @@ class SoccerAggregator(BaseSportsAggregator):
 
                     venue = comp.get("venue", {}).get("fullName")
                     m_date = ev.get("date", "")
-                    time_str = m_date[11:16] + " UTC" if len(m_date) >= 16 else ""
+                    time_str = m_date[:16].replace("T", " ") + " UTC" if len(m_date) >= 16 else ""
 
                     details_list = []
                     if time_str:
@@ -882,7 +882,7 @@ class SoccerAggregator(BaseSportsAggregator):
                     status_desc = status_obj.get("type", {}).get("detail") or "Scheduled"
 
                     m_date = ev.get("date", "")
-                    time_str = m_date[11:16] + " UTC" if len(m_date) >= 16 else ""
+                    time_str = m_date[:16].replace("T", " ") + " UTC" if len(m_date) >= 16 else ""
                     venue = comp.get("venue", {}).get("fullName")
 
                     if state == "in" or is_completed:
@@ -1068,8 +1068,10 @@ class SoccerAggregator(BaseSportsAggregator):
                     if not is_completed:
                         any_live_or_upcoming_today = True
 
+                    m_date = ev.get("date", "")
+                    kickoff_str = f" | Kickoff: {m_date[:16].replace('T', ' ')} UTC" if (len(m_date) >= 16 and not is_live and not is_completed) else ""
                     live_marker = " 🔴 [LIVE]" if is_live else (" ✅ [FT]" if is_completed else "")
-                    league_lines.append(f"  ⚽ {home_name} {home_score} - {away_score} {away_name}{live_marker} ({status_desc})")
+                    league_lines.append(f"  ⚽ {home_name} {home_score} - {away_score} {away_name}{live_marker} ({status_desc}{kickoff_str})")
 
                     goals, _, red_cards, stats_line = self._extract_match_details(comp, home, away, home_name, away_name)
                     if goals:

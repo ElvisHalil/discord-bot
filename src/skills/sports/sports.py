@@ -76,18 +76,36 @@ def skill_sports_info(
         combined = "soccer schedule"
 
     # Explicit guardrail: Reject AI models, tech, coding, and non-sports queries mistakenly routed here
-    if re.search(r'\b(?:gemini|opus|claude|chatgpt|gpt-[0-9a-z]+|deepseek|qwen|llama|llms?|benchmarks?|antigravity|coding|python|javascript|nvidia|rtx|intel|amd)\b', combined):
-        return (
-            f"⚠️ Query '{combined}' is not a sports query.\n"
-            f"`skill_sports_info` ONLY supports sports and esports.\n"
-            f"For AI models, benchmarks, technology, programming, news, or general knowledge: please use `search_web` instead."
+    _TECH_RE = re.compile(
+        r'\b(?:gemini|opus|claude|chatgpt|gpt-[0-9a-z]+|deepseek|qwen|llama|llms?|benchmarks?|antigravity|coding|python|javascript|nvidia|rtx|intel|amd)\b',
+        re.IGNORECASE,
+    )
+    if _TECH_RE.search(combined):
+        has_valid_sport_signal = (
+            sport_raw.lower() in ("soccer", "epl", "ucl", "laliga", "seriea", "bundesliga", "ligue1", "mls", "nba", "nhl", "nfl", "mlb", "ufc", "f1", "cs", "cs2", "odds")
+            or any(club in combined for club in _soccer_aggregator.CLUB_LEAGUE_HINTS)
+            or any(bool(re.search(rf'\b{re.escape(k)}\b', combined)) for k in CS_KEYWORDS)
+            or bool(re.search(r'\b(?:soccer|epl|ucl|laliga|bundesliga|serie\s*a|nba|nhl|hockey|nfl|mlb|ufc|f1|formula\s*1|lakers|celtics|warriors|oilers|flames|bruins|leafs)\b', combined))
         )
+        if not has_valid_sport_signal:
+            return (
+                f"⚠️ Query '{combined}' is not a sports query.\n"
+                f"`skill_sports_info` ONLY supports sports and esports.\n"
+                f"For AI models, benchmarks, technology, programming, news, or general knowledge: please use `search_web` instead."
+            )
+        combined = _TECH_RE.sub(" ", combined)
+        combined = re.sub(r"\s{2,}", " ", combined).strip()
 
     # 0. Live Match Tracking Check (if LLM calls skill_sports_info instead of skill_track_live_game)
+    from src.skills.sports.context import _NON_SPORTS_TRACK_RE
     if re.search(r'\b(?:untrack|stop\s+tracking)\b', combined):
         from src.skills.sports.live_tracker import skill_track_live_game
         return skill_track_live_game(action="stop", query=team_raw or query_raw or combined, sport=sport_raw)
-    if re.search(r'\b(?:track|tracking)\b', combined) and not re.search(r'\b(?:track\s+and\s+field|race\s+track|soundtrack)\b', combined):
+    if (
+        re.search(r'\b(?:track|tracking)\b', combined)
+        and not re.search(r'\b(?:track\s+and\s+field|race\s+track|soundtrack)\b', combined)
+        and not _NON_SPORTS_TRACK_RE.search(combined)
+    ):
         from src.skills.sports.live_tracker import skill_track_live_game
         return skill_track_live_game(action="start", query=team_raw or query_raw or combined, sport=sport_raw)
 
@@ -122,6 +140,50 @@ def skill_sports_info(
         )
     )
 
+    def _scope_query_for_sport(q_text: str, target_sport: str) -> str:
+        """Strip other sport names/clauses and 'and their odds' filler when splitting a multi-sport or games+odds query."""
+        cleaned = q_text
+        if wants_games_and_odds:
+            cleaned = re.sub(r'\b(?:and\s+(?:their\s+)?|with\s+(?:their\s+)?)?(?:betting\s+)?(?:odds?|lines?|moneylines?)\b', ' ', cleaned, flags=re.IGNORECASE)
+        _cs_words = ("cs", "cs2", "csgo", "counter-strike", "counter strike", "esports", "e-sports", "hltv", "spirit", "vitality", "navi", "faze", "mouz", "g2")
+        _soccer_words = ("soccer", "epl", "premier league", "ucl", "champions league", "laliga", "la liga", "serie a", "bundesliga", "real madrid", "arsenal", "barcelona", "bayern", "chelsea", "liverpool")
+        _nhl_words = ("nhl", "hockey", "ice hockey", "oilers", "flames", "bruins", "leafs", "maple leafs")
+        _nba_words = ("nba", "basketball", "lakers", "celtics", "warriors", "knicks")
+        _f1_words = ("f1", "formula 1", "grand prix")
+        sport_vocab = {
+            "soccer": _soccer_words,
+            "nhl": _nhl_words,
+            "nba": _nba_words,
+            "f1": _f1_words,
+            "cs": _cs_words,
+        }
+        other_sport_words = {
+            "soccer": _nhl_words + _nba_words + _f1_words + _cs_words,
+            "nhl": _soccer_words + _nba_words + _f1_words + _cs_words,
+            "nba": _soccer_words + _nhl_words + _f1_words + _cs_words,
+            "f1": _soccer_words + _nhl_words + _nba_words + _cs_words,
+            "cs": _soccer_words + _nhl_words + _nba_words + _f1_words,
+        }.get(target_sport, ())
+
+        # If the prompt has multiple clauses ('cs rankings and when do the lakers play'),
+        # drop clauses that only mention another sport so intent words like 'rankings' or 'play' don't bleed across sports.
+        own_words = sport_vocab.get(target_sport, ())
+        clauses = [c.strip() for c in re.split(r'\b(?:and\s+also|and|also|plus)\b|[,;]', cleaned, flags=re.IGNORECASE) if c and c.strip()]
+        if len(clauses) >= 2 and other_sport_words:
+            kept_clauses = []
+            for c in clauses:
+                has_own = any(bool(re.search(rf'\b{re.escape(w)}\b', c, re.IGNORECASE)) for w in own_words)
+                has_other = any(bool(re.search(rf'\b{re.escape(w)}\b', c, re.IGNORECASE)) for w in other_sport_words)
+                if has_own or not has_other:
+                    kept_clauses.append(c)
+            if kept_clauses:
+                cleaned = " ".join(kept_clauses)
+
+        for w in other_sport_words:
+            cleaned = re.sub(rf'\b{re.escape(w)}\b', ' ', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip(" ,;&")
+        return cleaned or target_sport
+
     # 1. Counter-Strike / Esports Check (guard against NFL "Atlanta Falcons" and substring false positives like 'esl' in 'bundesliga' or 'cs' in 'celtics')
     is_nfl_falcons = "atlanta" in combined or sport_raw.lower() in ("nfl", "football", "american football")
     is_cs = not is_nfl_falcons and (
@@ -130,7 +192,8 @@ def skill_sports_info(
     )
 
     def _run_cs(q_str: str) -> str:
-        target_q = " ".join(p for p in (team_raw, player_raw, query_raw) if p).strip() or q_str
+        eff_q = _scope_query_for_sport(query_raw, "cs") if (q_str != combined and query_raw) else query_raw
+        target_q = " ".join(p for p in (team_raw, player_raw, eff_q) if p).strip() or q_str
         named_event = target_q if any(t in q_str for t in ("thunderpick", "pgl", "blast", "iem", "esl", "major", "bucharest", "chengdu", "atlanta")) else None
         if has_odds_kw and not wants_games_and_odds:
             return _odds_aggregator.get_odds(target_q, sport="cs2")
@@ -138,7 +201,9 @@ def skill_sports_info(
             return skill_csgo_esports(query_type="player_stats", player_url=player_raw or team_raw or target_q)
         elif any(k in q_str for k in ("roster", "player", "lineup", "group", "bracket", "teams")):
             return skill_csgo_esports(query_type="event_info", event_page=named_event or (target_q if target_q not in ("schedule", "") else None))
-        elif any(k in q_str for k in ("tourn", "schedule", "next", "upcoming", "event", "match", "matches", "time", "today", "tomorrow", "when", "play")):
+        elif any(k in q_str for k in ("rank", "top", "leader", "standings")) and not any(k in q_str for k in ("tourn", "schedule", "match", "matches")):
+            return skill_csgo_esports(query_type="rankings")
+        elif re.search(r'\b(?:tourn\w*|schedule|next|upcoming|events?|match|matches|time|today|tomorrow|when|playing|plays)\b|\bplay\b(?!\s+(?:a|an|some|me|music|song|track))', q_str):
             return skill_csgo_esports(query_type="tournaments", event_page=named_event)
         elif any(k in q_str for k in ("rank", "top", "leader", "standings")):
             return skill_csgo_esports(query_type="rankings")
@@ -224,22 +289,6 @@ def skill_sports_info(
     if is_explicit_soccer:
         matched_tasks.append(("soccer", _soccer_aggregator.get_info, "Present the soccer matches, scores, goal scorers, cards, possession/shots stats, lineups, rosters, injuries, or standings clearly."))
 
-    def _scope_query_for_sport(q_text: str, target_sport: str) -> str:
-        """Strip other sport names and 'and their odds' filler when splitting a multi-sport or games+odds query."""
-        cleaned = q_text
-        if wants_games_and_odds:
-            cleaned = re.sub(r'\b(?:and\s+(?:their\s+)?|with\s+(?:their\s+)?)?(?:betting\s+)?(?:odds?|lines?|moneylines?)\b', ' ', cleaned, flags=re.IGNORECASE)
-        other_sport_words = {
-            "soccer": ("nhl", "hockey", "ice hockey", "nba", "basketball", "f1", "formula 1"),
-            "nhl": ("soccer", "epl", "premier league", "ucl", "champions league", "laliga", "la liga", "serie a", "bundesliga", "nba", "basketball", "f1", "formula 1"),
-            "nba": ("soccer", "epl", "premier league", "ucl", "nhl", "hockey", "ice hockey", "f1", "formula 1"),
-            "f1": ("soccer", "nhl", "hockey", "nba", "basketball"),
-        }.get(target_sport, ())
-        for w in other_sport_words:
-            cleaned = re.sub(rf'\b{re.escape(w)}\b', ' ', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip(" ,;&")
-        return cleaned or target_sport
-
     if len(matched_tasks) == 1:
         only_sport, only_fn, guidance = matched_tasks[0]
         if only_sport == "cs" and not wants_games_and_odds:
@@ -297,14 +346,25 @@ def skill_sports_info(
             )
 
     if wants_games_and_odds:
-        odds_section = _odds_aggregator.get_odds(combined, sport=sport_raw if "," not in sport_raw else "sports")
+        if len(matched_tasks) >= 2:
+            odds_parts = []
+            for sp_key, _, _ in matched_tasks:
+                odds_sp = "cs2" if sp_key == "cs" else sp_key
+                sec = _odds_aggregator.get_odds(_scope_query_for_sport(combined, sp_key), sport=odds_sp)
+                if sec and sec.strip():
+                    odds_parts.append(sec.strip())
+            odds_section = "\n\n".join(odds_parts)
+        else:
+            odds_sp = "cs2" if sport_raw == "cs" else sport_raw
+            odds_section = _odds_aggregator.get_odds(combined, sport=odds_sp)
         if odds_section:
             data = f"{data.strip()}\n\n=== 🎲 BETTING ODDS (DECIMAL FORMAT) ===\n{odds_section.strip()}\n"
             guidance += " Also present the Decimal betting odds (`Best Odds Available`) and win probabilities for each matchup."
 
     print(f"🏟️ [Executing Sports Info Skill] Sport: {sport_raw}, Query: {combined}")
 
-    now = datetime.now()
+    from src.utils.timezones import get_local_now
+    now = get_local_now()
     today_str = now.strftime("%A, %B %d, %Y")
 
     output = f"📅 CURRENT REFERENCE DATE: {today_str}\n\n" + data

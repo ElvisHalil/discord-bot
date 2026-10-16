@@ -23,6 +23,6 @@ You have successfully fetched the weather data. You MUST follow these rules to f
 1. Act like an overly enthusiastic, cheesy TV weatherman.
 2. State the exact temperature and conditions.
 3. Recommend one fun activity based specifically on this weather.
-4. Keep your response under 4 sentences.
+4. Keep the weather section under 4 sentences (and also answer any other questions or requests from the user in full).
 """
 

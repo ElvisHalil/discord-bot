@@ -68,7 +68,64 @@ def _extract_subject_entities(text: str) -> str:
     ).strip()
 
 
-def enrich_sports_tool_args(args: dict, history: list) -> dict:
+_NON_SPORTS_CLAUSE_PATTERNS = [
+    # Music requests ("and play a rock song", "also put on some jazz", "play me a track by...")
+    re.compile(
+        r"(?:[,;.]?\s*\b(?:and|also|plus|then|while\s+you're\s+at\s+it)\s+)?(?:can\s+you\s+|could\s+you\s+|please\s+)?"
+        r"\b(?:play|put\s+on|recommend|queue|spin)\s+(?:me\s+)?(?:a|an|some|the|something)?\s*[^,.;]*"
+        r"\b(?:song|songs|track|tracks|music|tune|tunes|beat|beats|vibe|vibes|rock|pop|jazz|metal|techno|house|dnb|drum\s+and\s+bass|hip\s*hop|rap|synthwave|ambient|indie|country|classical|lofi|lo-fi|chill)\b[^.;]*",
+        re.IGNORECASE,
+    ),
+    # Weather / News / Math / Tech / Greeting clauses in compound prompts
+    re.compile(
+        r"(?:[,;.]?\s*\b(?:and|also|plus|then)\s+)?(?:"
+        r"what(?:'s|\s+is)\s+the\s+weather\b[^,;.]*|"
+        r"check\s+the\s+weather\b[^,;.]*|"
+        r"(?:get|check|show|what\s+are)\s+(?:the\s+)?(?:top\s+|latest\s+)?(?:news|headlines)\b[^,;.]*|"
+        r"(?:why|how)\s+(?:is|are|does|do)\s+(?:python|c\+\+|rust|javascript|rtx|nvidia|amd|claude|gpt|gemini|llama|qwen)\b[^,;.]*"
+        r")",
+        re.IGNORECASE,
+    ),
+]
+
+_CS_WORD_RE = re.compile(
+    r"\b(?:cs2?|csgo|counter-strike|counter\s+strike|esports|spirit|vitality|navi|natus\s+vincere|faze|mouz|g2|astralis|mongolz|furia|eternal\s+fire|blast|iem|pgl|esl|hltv)\b",
+    re.IGNORECASE,
+)
+
+_ODDS_CLAUSE_RE = re.compile(
+    r"\b(?:and\s+(?:their\s+|the\s+|what\s+are\s+the\s+)?|with\s+(?:their\s+|the\s+)?)?(?:betting\s+)?(?:odds?|moneylines?)\b(?:\s+for\s+[^,;.]*)?",
+    re.IGNORECASE,
+)
+
+
+def _strip_non_sports_clauses(text: str, sibling_tools: typing.Optional[list] = None) -> str:
+    """Remove non-sports clauses (music, weather, headlines, tech comparisons, or sibling-handled CS/odds clauses)
+    from a compound user message before enriching sports tool arguments."""
+    if not text:
+        return ""
+    cleaned = text
+    for pat in _NON_SPORTS_CLAUSE_PATTERNS:
+        cleaned = pat.sub(" ", cleaned)
+    siblings = set(sibling_tools or ())
+    if "skill_csgo_esports" in siblings:
+        clauses = [c.strip() for c in re.split(r"\b(?:and\s+also|and|also|plus)\b|[,;.]", cleaned, flags=re.IGNORECASE) if c and c.strip()]
+        non_cs_clauses = [c for c in clauses if not _CS_WORD_RE.search(c)]
+        if non_cs_clauses:
+            cleaned = " ".join(non_cs_clauses)
+        else:
+            cleaned = _CS_WORD_RE.sub(" ", cleaned)
+    if "skill_betting_odds" in siblings:
+        cleaned = _ODDS_CLAUSE_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,;.&!?-")
+    return cleaned
+
+
+def enrich_sports_tool_args(
+    args: dict,
+    history: list,
+    sibling_tools: typing.Optional[list] = None,
+) -> dict:
     """Ensure sports tools never lose team/player/league context from the user's prompt
     or from earlier user turns on pronoun/match follow-ups (e.g. 'track this game', 'hows the game going')."""
     if not isinstance(args, dict) or not history:
@@ -84,31 +141,33 @@ def enrich_sports_tool_args(args: dict, history: list) -> dict:
         return args
 
     latest_user = user_texts[-1]
+    scoped_latest = _strip_non_sports_clauses(latest_user, sibling_tools=sibling_tools) or latest_user
     combined_args_str = " ".join(str(v) for v in args.values() if v).lower()
 
     # Check if latest user turn is a pronoun or demonstrative match follow-up
     is_plural_tracked = bool(
         re.search(
             r"\b(?:tracked\s+games|tracked\s+matches|both\s+games|both\s+matches|these\s+games|these\s+matches)\b",
-            latest_user.lower(),
+            scoped_latest.lower(),
         )
     )
     has_followup_cue = (
-        bool(_FOLLOWUP_MATCH_PATTERN.search(latest_user.lower())) or not _extract_subject_entities(latest_user)
+        bool(_FOLLOWUP_MATCH_PATTERN.search(scoped_latest.lower())) or not _extract_subject_entities(scoped_latest)
     ) and not is_plural_tracked
     context_snippets = []
 
     if has_followup_cue and len(user_texts) >= 2 and not args.get("team") and not args.get("player"):
         # Scan backwards through prior user messages to find the most recent message with a concrete subject/team entity
         for prev_user in reversed(user_texts[:-1]):
-            prev_entities = _extract_subject_entities(prev_user)
+            prev_scoped = _strip_non_sports_clauses(prev_user) or prev_user
+            prev_entities = _extract_subject_entities(prev_scoped)
             if prev_entities:
                 if prev_entities.lower() not in combined_args_str:
                     context_snippets.append(prev_entities)
                 break
 
-    if latest_user.lower() not in combined_args_str:
-        context_snippets.append(latest_user)
+    if scoped_latest.lower() not in combined_args_str:
+        context_snippets.append(scoped_latest)
 
     if context_snippets:
         enriched = dict(args)
@@ -160,6 +219,21 @@ def detect_explicit_tracker_intent(user_text: str) -> typing.Optional[typing.Tup
     return None
 
 
+_LIVE_MATCH_FOLLOWUP_RE = re.compile(
+    r"\b(?:"
+    r"score|scores|scored|scorer|goal|goals|game|match|minute|halftime|"
+    r"winning|losing|leading|lineup|lineups|possession|shots|yellow\s+card|red\s+card|"
+    r"hows?\s+(?:the|this|that)\s+(?:game|match)|"
+    r"whats?\s+the\s+status|status\s+of\s+(?:the|this|that)|"
+    r"still\s+live|(?:game|match)\s+live|"
+    r"(?:is\s+it|game|match)\s+(?:over|finished)|"
+    r"(?:first|second|1st|2nd)\s+half|"
+    r"who(?:'s|\s+is)\s+playing|still\s+playing"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
 def detect_missed_sports_tool_call(
     history: list,
     active_channel_id: int = 0,
@@ -209,15 +283,7 @@ def detect_missed_sports_tool_call(
         pass
 
     if has_prior_sports_turn or last_match_q:
-        is_live_match_followup = bool(
-            re.search(
-                r"\b(?:status|score|scores|scored|scorer|goal|goals|game|match|going|"
-                r"live|playing|minute|half|halftime|over|finished|winning|losing|leading|"
-                r"lineup|lineups|stats|possession|shots|cards?)\b",
-                q_low,
-            )
-        )
-        if is_live_match_followup:
+        if _LIVE_MATCH_FOLLOWUP_RE.search(q_low):
             args = enrich_sports_tool_args({"query": latest_user}, history)
             return ("skill_sports_info", args)
 

@@ -330,6 +330,10 @@ def parse_team_schedule(
     # Always sort chronologically (oldest -> newest) so [-max_past:] are the latest results and [:max_future] are next up
     events.sort(key=lambda e: e.get("date", ""))
 
+    from src.utils.timezones import get_local_now
+    local_now = get_local_now()
+    local_tz = local_now.tzinfo or timezone.utc
+    local_today_date = local_now.date()
     now_utc_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     past_lines: List[str] = []
     live_lines: List[str] = []
@@ -369,6 +373,12 @@ def parse_team_schedule(
                 pass
         else:
             is_today = raw_date.startswith(now_utc_date)
+            if not is_today and raw_date:
+                try:
+                    ev_dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).astimezone(local_tz)
+                    is_today = (ev_dt.date() == local_today_date)
+                except Exception:
+                    pass
             today_prefix = "🔥 **TODAY — " if is_today else "**"
             future_lines.append(f"• {today_prefix}{date_str}**: **{a_name}** @ **{h_name}**{comp_tag}")
 
@@ -895,7 +905,9 @@ _SEARCH_STOPWORDS = {
     "all", "show", "get", "me", "please", "tell", "give",
     "and", "or", "with", "without", "to", "from", "by", "as", "also", "plus", "both",
     "odds", "bet", "betting", "lines", "line", "moneyline", "spread", "over", "under",
-    "nhl", "nba", "nfl", "mlb", "f1", "epl", "ucl", "tonight",
+    "nhl", "nba", "nfl", "mlb", "f1", "epl", "ucl", "uel", "tonight",
+    "premier", "league", "champions", "europa", "laliga", "bundesliga", "serie", "seriea", "ligue", "ligue1", "mls",
+    "cs", "cs2", "csgo", "esports",
 }
 
 

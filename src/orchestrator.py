@@ -97,6 +97,25 @@ TOOL_ARG_ALIASES = {
         "command": "action", "mode": "action", "type": "action",
         "league": "sport", "category": "sport",
     },
+    "skill_weather_reporter": {
+        "location": "city", "place": "city", "town": "city", "region": "city", "q": "city", "query": "city",
+    },
+    "skill_youtube_searcher": {
+        "q": "query", "search_query": "query", "search": "query", "video": "query",
+        "song": "query", "track": "query", "title": "query",
+        "limit": "max_results", "count": "max_results", "music": "is_music",
+    },
+    "skill_audio_intelligence": {
+        "song": "track", "query": "track", "q": "track", "title": "track", "seed": "track",
+        "mode": "action", "type": "action", "bpm": "target_bpm", "tempo": "target_bpm",
+    },
+    "evaluate_math": {
+        "math": "expression", "expr": "expression", "equation": "expression",
+        "formula": "expression", "query": "expression", "q": "expression",
+    },
+    "save_memory": {
+        "memory": "fact", "note": "fact", "info": "fact", "text": "fact", "content": "fact",
+    },
 }
 
 
@@ -219,13 +238,17 @@ def trim_history(history: list, limit: int, old_tool_chars: int = OLD_TOOL_OUTPU
 # Reply post-processing & sanitization
 # ---------------------------------------------------------------------------
 
-_PROTECTED_SPANS = re.compile(r'(<[^>\s]+>|https?://\S+|`[^`]*`)')
+_PROTECTED_SPANS = re.compile(
+    r'(<[^>\s]+>|https?://\S+|`[^`]*`|(?m:^[^\S\n]*(?:[-*•][^\S\n]*)?(?:\*\*)?(?:Song|Track|Artist|Album|Genre):\*{0,2}\s*.+$))',
+    re.IGNORECASE,
+)
 MIN_PING_NAME_LENGTH = 3
 
 
 def apply_auto_ping(reply: str, known_users: dict) -> str:
     """Replace known user names in the reply with Discord mentions.
-    Skips names shorter than MIN_PING_NAME_LENGTH to avoid pinging on common short words."""
+    Skips names shorter than MIN_PING_NAME_LENGTH to avoid pinging on common short words,
+    and protects URLs, code spans, mentions, and song-card metadata lines."""
     if not reply or not known_users:
         return reply
 

@@ -4,7 +4,7 @@ Fetches real-time Grand Prix schedules, session timings, race results,
 and driver/constructor standings from ESPN's official public API.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor
 from src.skills.sports.aggregators.base import BaseSportsAggregator
@@ -20,7 +20,11 @@ class F1Aggregator(BaseSportsAggregator):
     def get_info(self, query: str = "schedule") -> str:
         """Routes F1 queries between schedule, race results, and championship standings."""
         q = (query or "").lower().strip()
-        if any(w in q for w in ("standing", "driver", "constructor", "point", "table", "rank", "all", "full", "grid", "champion")):
+        if any(w in q for w in ("standing", "driver", "constructor", "point", "table", "rank", "grid", "champion")):
+            return self.get_standings()
+        if any(w in q for w in ("all", "full")) and not any(
+            w in q for w in ("race", "races", "schedule", "calendar", "grand prix", "gp", "weekend", "session")
+        ):
             return self.get_standings()
         return self.get_schedule(filter_query=q)
 
@@ -37,7 +41,8 @@ class F1Aggregator(BaseSportsAggregator):
             season_year = data.get("season", {}).get("year", datetime.now().year)
 
             # 1. Parse Calendar & Find Next/Recent Races
-            now = datetime.now()
+            now_utc = datetime.now(timezone.utc)
+            now = now_utc.replace(tzinfo=None)
             upcoming_races: List[Dict[str, Any]] = []
             past_races: List[Dict[str, Any]] = []
 
@@ -46,11 +51,18 @@ class F1Aggregator(BaseSportsAggregator):
                 start_str = item.get("startDate", "")
                 end_str = item.get("endDate", "")
                 race_date = None
+                end_date = None
                 try:
                     # Parse ISO format e.g. 2026-10-23T16:30Z
                     clean_date = start_str.replace("Z", "+00:00")
-                    race_dt = datetime.fromisoformat(clean_date).replace(tzinfo=None)
+                    race_dt = datetime.fromisoformat(clean_date).astimezone(timezone.utc).replace(tzinfo=None)
                     race_date = race_dt
+                except Exception:
+                    pass
+                try:
+                    if end_str:
+                        clean_end = end_str.replace("Z", "+00:00")
+                        end_date = datetime.fromisoformat(clean_end).astimezone(timezone.utc).replace(tzinfo=None)
                 except Exception:
                     pass
 
@@ -63,7 +75,8 @@ class F1Aggregator(BaseSportsAggregator):
                     "date_param": start_str[:10].replace("-", "") if start_str else "",
                 }
 
-                if race_date and race_date >= now:
+                cutoff_dt = end_date or race_date
+                if cutoff_dt and cutoff_dt.date() >= now.date():
                     upcoming_races.append(entry)
                 else:
                     past_races.append(entry)

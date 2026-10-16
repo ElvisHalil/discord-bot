@@ -544,8 +544,418 @@ class TestWorkerConcurrencyAndLockFreeTurns(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Oilers vs Flames", final_hist[6]["content"])
 
 
+class TestTimeConverterAccuracy(unittest.TestCase):
+    def test_ordinal_dates_and_section_headers_parsed(self):
+        from datetime import datetime, timezone
+        from src.orchestrator import enrich_tool_output_with_time_context
+
+        ref_utc = datetime(2026, 10, 22, 18, 0, tzinfo=timezone.utc)
+        raw = (
+            "📅 --- SATURDAY, OCTOBER 24TH, 2026 ---\n"
+            "  • Arsenal vs Chelsea (Kickoff: 16:30 UTC)\n"
+            "  • Formula 1 Qualifying [Sat, Oct 24th - 4:00 PM EDT]"
+        )
+        enriched = enrich_tool_output_with_time_context(raw, now=ref_utc, tz_override="MDT")
+        self.assertIn("16:30 UTC (Sat Oct 24 10:30 AM MDT / 18:30 CEST", enriched)
+        self.assertIn("Sat, Oct 24th - 4:00 PM EDT (Sat Oct 24 2:00 PM MDT / 22:00 CEST", enriched)
+
+    def test_cross_year_december_to_january_rollover(self):
+        from datetime import datetime, timezone
+        from src.orchestrator import enrich_tool_output_with_time_context
+
+        # Current time: Dec 28, 2026 at 20:00 UTC -> Jan 3 without a year must resolve to Jan 3, 2027 (in ~6d), NOT 359d ago!
+        ref_utc = datetime(2026, 12, 28, 20, 0, tzinfo=timezone.utc)
+        raw = "  • Winter Classic: Bruins @ Blackhawks [Sun, Jan 3 - 2:00 PM EST]"
+        enriched = enrich_tool_output_with_time_context(raw, now=ref_utc, tz_override="MST")
+        self.assertIn("Sun, Jan 3 - 2:00 PM EST (Sun Jan 03 12:00 PM MST / 20:00 CET, in 5d 23h)", enriched)
+
+    def test_liquipedia_discord_epoch_line_not_double_annotated_and_uses_bot_tz(self):
+        from datetime import datetime, timezone
+        from src.orchestrator import enrich_tool_output_with_time_context
+        from src.skills.sports.aggregators.liquipedia import LiquipediaAggregator
+
+        ref_utc = datetime(2026, 10, 16, 14, 0, tzinfo=timezone.utc)
+        agg = LiquipediaAggregator()
+        with patch.dict("os.environ", {"BOT_TIMEZONE": "America/Edmonton"}, clear=False):
+            ts_str = agg._format_match_timestamp("October 16, 2026 - 14:00 UTC", str(int(ref_utc.timestamp())))
+        self.assertIn("8:00 AM MDT", ts_str)
+        self.assertIn("Oct 16, 14:00 UTC", ts_str)
+        self.assertIn("<t:1792159200:t>", ts_str)
+
+        line = f"  • Team Spirit vs Vitality — {ts_str}"
+        enriched = enrich_tool_output_with_time_context(line, now=ref_utc, tz_override="MDT")
+        # Must not inject nested parentheses inside an already-formatted Discord <t:...:t> line
+        self.assertTrue(enriched.endswith(line))
+
+    def test_dst_transition_mismatch_october_eu_cet_vs_us_mdt(self):
+        from datetime import datetime, timezone
+        from src.orchestrator import enrich_tool_output_with_time_context
+
+        # Oct 23, 2026: Europe is still on CEST (UTC+2), US is on MDT (UTC-6).
+        # Event is on Oct 28, 2026: Europe has switched to CET (UTC+1 on Oct 25), while US is still on MDT (UTC-6 until Nov 1)!
+        ref_utc = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
+        raw = "  • Champions League: Bayern vs PSG [Wed, Oct 28, 2026 at 20:00 UTC]"
+        enriched = enrich_tool_output_with_time_context(raw, now=ref_utc, tz_override="MDT")
+        # 20:00 UTC on Oct 28 = 2:00 PM MDT (UTC-6) and 21:00 CET (UTC+1)
+        self.assertIn("Wed, Oct 28, 2026 at 20:00 UTC (Wed Oct 28 2:00 PM MDT / 21:00 CET", enriched)
+
+    def test_soccer_kickoff_full_utc_date_prevents_midnight_drift(self):
+        from datetime import datetime, timezone
+        from src.orchestrator import enrich_tool_output_with_time_context
+
+        # Section header says Thursday Oct 15 (US local date), but match kicks off at 2026-10-16 01:30 UTC (= Thu Oct 15 7:30 PM MDT)
+        ref_utc = datetime(2026, 10, 16, 1, 0, tzinfo=timezone.utc)
+        raw = (
+            "📅 --- THURSDAY, OCTOBER 15, 2026 (1 Match) ---\n"
+            "  • LAFC at Inter Miami (Kickoff: 2026-10-16 01:30 UTC) [Scheduled]"
+        )
+        enriched = enrich_tool_output_with_time_context(raw, now=ref_utc, tz_override="MDT")
+        self.assertIn("2026-10-16 01:30 UTC (Today 7:30 PM MDT / Fri 03:30 CEST, in 30m)", enriched)
+
+    def test_12h_noon_midnight_and_24h_boundaries(self):
+        from datetime import datetime, timezone
+        from src.orchestrator import enrich_tool_output_with_time_context
+
+        ref_utc = datetime(2026, 10, 16, 12, 0, tzinfo=timezone.utc)
+        raw = (
+            "  • Noon Event [Fri, Oct 16 - 12:00 PM UTC]\n"
+            "  • Midnight Event [Fri, Oct 16 - 12:00 AM UTC]"
+        )
+        enriched = enrich_tool_output_with_time_context(raw, now=ref_utc, tz_override="MDT")
+        self.assertIn("12:00 PM UTC (Today 6:00 AM MDT / 14:00 CEST, now)", enriched)
+        self.assertIn("12:00 AM UTC (Yesterday 6:00 PM MDT / Fri 02:00 CEST, 12h ago)", enriched)
+
+
+class TestConversationWithAllToolsAndSkills(unittest.IsolatedAsyncioTestCase):
+    """Verifies that a casual conversation / greeting / comparative remark paired with
+    each of the registered tools and skills normalizes, enriches, executes, and post-processes cleanly."""
+
+    def test_conversation_plus_music_genre_mood_artist_and_shift_variants(self):
+        from src.orchestrator import enrich_music_tool_args
+
+        # 1. Conversation with comparative words ("slower", "harder day") + explicit genre request -> must NOT trigger NON_MUSIC_CONVERSATION
+        hist_genre = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Halil says: Yo how's it going! I had a harder day today and traffic was slower than usual, can you play a drum and bass song?"},
+        ]
+        args_genre = enrich_music_tool_args({"genre": "drum and bass", "shift": "slower"}, hist_genre)
+        self.assertEqual(args_genre.get("genre"), "drum and bass")
+        self.assertNotIn("shift", args_genre)
+
+        # 2. Conversation + Artist request
+        hist_artist = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Halil says: Hey bot! Why is Python slower than C++? Also play a song by Daft Punk"},
+        ]
+        args_artist = enrich_music_tool_args({"artist": "Daft Punk"}, hist_artist)
+        self.assertEqual(args_artist.get("artist"), "Daft Punk")
+        self.assertNotIn("shift", args_artist)
+
+        # 3. Conversation + Mood request
+        hist_mood = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Halil says: Good morning! Play something chill while I work"},
+        ]
+        args_mood = enrich_music_tool_args({"mood": "chill"}, hist_mood)
+        self.assertEqual(args_mood.get("mood"), "chill")
+        self.assertNotIn("shift", args_mood)
+
+        # 4. Conversation + Relative Spectrum Shift
+        hist_shift = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Halil says: That last song was nice, now play something faster and harder"},
+        ]
+        args_shift = enrich_music_tool_args({}, hist_shift)
+        self.assertEqual(args_shift.get("shift"), "That last song was nice, now play something faster and harder")
+
+    def test_conversation_plus_all_registered_tools_argument_enrichment_and_execution(self):
+        from src.orchestrator import enrich_sports_tool_args, normalize_tool_args
+        from src.skills.weather.reporter import skill_weather_reporter
+
+        # Weather skill prompt instruction must allow answering other questions in full
+        with patch("src.skills.weather.reporter._weather_aggregator.get_weather", return_value="Sunny, +22°C"):
+            w_out = skill_weather_reporter("Tokyo")
+        self.assertIn("Keep the weather section under 4 sentences", w_out)
+        self.assertIn("answer any other questions or requests from the user in full", w_out)
+
+        # Sports enrichment with conversational + music clause strips the music clause cleanly
+        hist_sports_conv = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Halil says: hey how's it going? what are the NHL games today and play a rock track"},
+        ]
+        s_args = enrich_sports_tool_args({"sport": "nhl", "query": "games today"}, hist_sports_conv)
+        self.assertNotIn("rock track", s_args["query"].lower())
+
+        # Verify all registered tools in research-gemma mode normalize arguments cleanly
+        tools_map = MODES["research-gemma"]["tools"]
+        expected_tools = {
+            "search_web",
+            "read_website",
+            "read_youtube_video",
+            "skill_weather_reporter",
+            "skill_top_headlines",
+            "get_top_headlines",
+            "skill_youtube_searcher",
+            "skill_top_music",
+            "skill_audio_intelligence",
+            "skill_csgo_esports",
+            "skill_betting_odds",
+            "skill_sports_info",
+            "skill_track_live_game",
+            "evaluate_math",
+            "get_current_datetime",
+            "save_memory",
+            "recall_memories",
+        }
+        self.assertEqual(set(tools_map.keys()), expected_tools)
+
+        sample_calls = [
+            ("search_web", {"q": "quantum computing"}, {"query": "quantum computing"}),
+            ("read_website", {"link": "https://example.com"}, {"url": "https://example.com"}),
+            ("read_youtube_video", {"link": "https://www.youtube.com/watch?v=12345678901"}, {"url": "https://www.youtube.com/watch?v=12345678901"}),
+            ("skill_weather_reporter", {"location": "Paris"}, {"city": "Paris"}),
+            ("skill_top_headlines", {"country": "Canada"}, {"region": "Canada"}),
+            ("get_top_headlines", {"category": "Technology"}, {"topic": "Technology"}),
+            ("skill_youtube_searcher", {"q": "elden ring trailer", "is_music": "false"}, {"query": "elden ring trailer", "is_music": False}),
+            ("skill_top_music", {"vibe": "chill", "style": "synthwave"}, {"mood": "chill", "genre": "synthwave"}),
+            ("skill_audio_intelligence", {"song": "Strobe by deadmau5"}, {"track": "Strobe by deadmau5"}),
+            ("skill_csgo_esports", {"type": "rankings"}, {"query_type": "rankings"}),
+            ("skill_betting_odds", {"match": "Falcons vs Vitality", "league": "cs2"}, {"query": "Falcons vs Vitality", "sport": "cs2"}),
+            ("skill_sports_info", {"league": "nba", "q": "lakers schedule"}, {"sport": "nba", "query": "lakers schedule"}),
+            ("skill_track_live_game", {"team": "Real Madrid"}, {"query": "Real Madrid"}),
+            ("evaluate_math", {"math": "25 * 14"}, {"expression": "25 * 14"}),
+            ("get_current_datetime", {}, {}),
+            ("save_memory", {"memory": "Likes synthwave"}, {"fact": "Likes synthwave"}),
+            ("recall_memories", {}, {}),
+        ]
+        for t_name, raw_in, expected_out in sample_calls:
+            with self.subTest(tool=t_name):
+                norm = normalize_tool_args(t_name, tools_map[t_name], raw_in)
+                self.assertEqual(norm, expected_out)
+
+
+class TestAllToolAndSkillCombinations(unittest.IsolatedAsyncioTestCase):
+    """Tests cross-domain multi-tool combinations (Music + Sports, CS + Soccer, Video + Song Card,
+    Sports + CS sibling scoping, and 4-tool mega-turns) through orchestration and post-processing."""
+
+    @patch("src.skills.youtube.client.verify_embeddable", return_value=True)
+    @patch("src.skills.music.utils.get_music_metadata")
+    def test_video_link_and_music_song_card_both_preserved_in_standardize_song_reply(self, mock_meta, _mock_embed):
+        mock_meta.return_value = {
+            "song": "Nightcall",
+            "artist": "Kavinsky",
+            "album": "OutRun",
+            "genre": "Synthwave",
+        }
+        compound_reply = (
+            "Here is the GTA 6 trailer you asked for:\n"
+            "https://www.youtube.com/watch?v=QdBZY2fkU-0\n\n"
+            "And here is a synthwave track to vibe to:\n"
+            "**Song:** Nightcall\n"
+            "**Artist:** Kavinsky\n"
+            "https://music.youtube.com/watch?v=MV_3Dpw-BRY"
+        )
+        out = standardize_song_reply(compound_reply)
+        # Both the regular YouTube trailer link AND the YouTube Music song card link must be preserved!
+        self.assertIn("https://www.youtube.com/watch?v=QdBZY2fkU-0", out)
+        self.assertIn("**Song:** Nightcall", out)
+        self.assertIn("**Artist:** Kavinsky", out)
+        self.assertTrue(out.endswith("https://music.youtube.com/watch?v=MV_3Dpw-BRY"))
+
+    def test_sibling_tools_scoping_prevents_duplicate_cs_and_odds_in_sports_info(self):
+        from src.orchestrator import enrich_sports_tool_args
+
+        # When model calls both skill_sports_info(sport='nhl') and skill_csgo_esports in parallel
+        hist = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Halil says: when does Team Spirit play in CS2 and what are the NHL games today?"},
+        ]
+        enriched = enrich_sports_tool_args(
+            {"sport": "nhl", "query": "NHL games today"},
+            hist,
+            sibling_tools=["skill_csgo_esports"],
+        )
+        self.assertNotIn("spirit", enriched["query"].lower())
+        self.assertNotIn("cs2", enriched["query"].lower())
+
+        # When model calls both skill_sports_info(sport='nba') and skill_betting_odds in parallel
+        hist_odds = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Halil says: what are the NBA games today and their betting odds"},
+        ]
+        enriched_odds = enrich_sports_tool_args(
+            {"sport": "nba", "query": "NBA games today"},
+            hist_odds,
+            sibling_tools=["skill_betting_odds"],
+        )
+        self.assertNotIn("odds", enriched_odds["query"].lower())
+
+    async def test_parallel_tool_execution_allows_non_music_video_with_top_music_and_blocks_music_video(self):
+        from types import SimpleNamespace
+        with patch("main.ensure_ollama_running"):
+            import main as main_mod
+
+        called_tools = []
+
+        def fake_top_music(genre: Optional[str] = None, mood: Optional[str] = None):
+            called_tools.append(("skill_top_music", genre))
+            return "=== TODAY'S TOP CHARTING MUSIC ===\n**Song:** Strobe\n**Artist:** deadmau5\nhttps://music.youtube.com/watch?v=tKi9Z-f6qX4"
+
+        def fake_yt_searcher(query: str, max_results: Optional[int] = 1, is_music: Optional[bool] = False):
+            called_tools.append(("skill_youtube_searcher", query, is_music))
+            return "https://www.youtube.com/watch?v=QdBZY2fkU-0"
+
+        def fake_weather(city: str):
+            called_tools.append(("skill_weather_reporter", city))
+            return "Sunny +20C"
+
+        def fake_sports(sport: Optional[str] = None, query: Optional[str] = None):
+            called_tools.append(("skill_sports_info", sport, query))
+            return "=== NHL SCOREBOARD ===\nOilers vs Flames"
+
+        fake_mode_cfg = {
+            "model": "test-model",
+            "max_iterations": 3,
+            "is_research": True,
+            "supports_tools": True,
+            "history_limit": 40,
+            "ollama_options": {},
+            "tools": {
+                "skill_top_music": fake_top_music,
+                "skill_youtube_searcher": fake_yt_searcher,
+                "skill_weather_reporter": fake_weather,
+                "skill_sports_info": fake_sports,
+            },
+        }
+
+        # Case 1: 4 tools in parallel including skill_youtube_searcher(is_music=False) + skill_top_music -> ALL 4 execute!
+        step1_msg = SimpleNamespace(
+            content="",
+            tool_calls=[
+                SimpleNamespace(function=SimpleNamespace(name="skill_top_music", arguments={"genre": "synthwave"})),
+                SimpleNamespace(function=SimpleNamespace(name="skill_youtube_searcher", arguments={"query": "GTA 6 trailer", "is_music": False})),
+                SimpleNamespace(function=SimpleNamespace(name="skill_weather_reporter", arguments={"city": "Calgary"})),
+                SimpleNamespace(function=SimpleNamespace(name="skill_sports_info", arguments={"sport": "nhl", "query": "games today"})),
+            ],
+        )
+        step2_msg = SimpleNamespace(content="Here is everything you asked for!", tool_calls=None)
+
+        mock_chat = unittest.mock.AsyncMock(side_effect=[
+            SimpleNamespace(message=step1_msg),
+            SimpleNamespace(message=step2_msg),
+        ])
+        turn_hist = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Halil says: check Calgary weather, NHL games today, find the GTA 6 trailer video, and play a synthwave song"},
+        ]
+        with patch.object(main_mod.ollama_client, "chat", mock_chat):
+            reply = await main_mod.run_agent_turn(777, fake_mode_cfg, turn_history=turn_hist)
+
+        self.assertEqual(reply, "Here is everything you asked for!")
+        self.assertEqual(len(called_tools), 4)
+        tool_msgs = [m for m in turn_hist if isinstance(m, dict) and m.get("role") == "tool"]
+        self.assertEqual(len(tool_msgs), 4)
+        self.assertTrue(all("PARALLEL_EXECUTION_BLOCKED" not in m["content"] for m in tool_msgs))
+
+        # Case 2: skill_youtube_searcher(is_music=True) called in parallel with skill_top_music -> blocked!
+        called_tools.clear()
+        step1_blocked = SimpleNamespace(
+            content="",
+            tool_calls=[
+                SimpleNamespace(function=SimpleNamespace(name="skill_top_music", arguments={"genre": "rock"})),
+                SimpleNamespace(function=SimpleNamespace(name="skill_youtube_searcher", arguments={"query": "rock song", "is_music": True})),
+            ],
+        )
+        mock_chat_blocked = unittest.mock.AsyncMock(side_effect=[
+            SimpleNamespace(message=step1_blocked),
+            SimpleNamespace(message=step2_msg),
+        ])
+        turn_hist_blocked = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Halil says: play a rock song"},
+        ]
+        with patch.object(main_mod.ollama_client, "chat", mock_chat_blocked):
+            await main_mod.run_agent_turn(778, fake_mode_cfg, turn_history=turn_hist_blocked)
+
+        blocked_msgs = [m for m in turn_hist_blocked if isinstance(m, dict) and m.get("role") == "tool" and m.get("name") == "skill_youtube_searcher"]
+        self.assertEqual(len(blocked_msgs), 1)
+        self.assertIn("PARALLEL_EXECUTION_BLOCKED", blocked_msgs[0]["content"])
+
+
+class TestMultiTurnAndStatefulFlows(unittest.TestCase):
+    def test_casual_greetings_after_sports_turn_do_not_trigger_missed_sports_tool(self):
+        from src.orchestrator import detect_missed_sports_tool_call
+
+        prior_sports = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Halil says: whats the score of the real madrid game"},
+            {"role": "tool", "name": "skill_sports_info", "content": "Real Madrid 2 - 1 Barcelona (60')"},
+            {"role": "assistant", "content": "Real Madrid leads 2-1 in the 60th minute."},
+        ]
+        casual_turns = [
+            "User Halil says: hey how's it going?",
+            "User Halil says: where do you live?",
+            "User Halil says: glad the workday is over!",
+            "User Halil says: I ate half a pizza earlier",
+            "User Halil says: how's it going? also play a synthwave song",
+        ]
+        for msg in casual_turns:
+            with self.subTest(msg=msg):
+                self.assertIsNone(detect_missed_sports_tool_call(prior_sports + [{"role": "user", "content": msg}], active_channel_id=101))
+
+        # Genuine match follow-ups after a sports turn MUST still trigger skill_sports_info
+        genuine_followups = [
+            "User Halil says: hows the game going?",
+            "User Halil says: is it still live?",
+            "User Halil says: is the game over?",
+            "User Halil says: who scored last goal?",
+        ]
+        for msg in genuine_followups:
+            with self.subTest(msg=msg):
+                missed = detect_missed_sports_tool_call(prior_sports + [{"role": "user", "content": msg}], active_channel_id=101)
+                self.assertIsNotNone(missed)
+                self.assertEqual(missed[0], "skill_sports_info")
+
+    def test_reply_to_song_card_with_genre_override_vs_similarity(self):
+        from src.orchestrator import enrich_music_tool_args
+
+        # Replying to a song card with a brand-new genre request ("nice song! now play some jazz")
+        # should NOT force similar_to='Nightcall by Kavinsky'
+        hist_override = [
+            {"role": "user", "content": "User Halil says [Replying to song card: 'Nightcall' by 'Kavinsky']: nice song! now play some jazz"},
+        ]
+        enriched_override = enrich_music_tool_args({"genre": "jazz"}, hist_override)
+        self.assertEqual(enriched_override.get("genre"), "jazz")
+        self.assertNotIn("similar_to", enriched_override)
+
+        # Replying to a song card asking for "something similar in synthwave" SHOULD keep similar_to
+        hist_sim = [
+            {"role": "user", "content": "User Halil says [Replying to song card: 'Nightcall' by 'Kavinsky']: play something similar to this in synthwave"},
+        ]
+        enriched_sim = enrich_music_tool_args({"genre": "synthwave"}, hist_sim)
+        self.assertEqual(enriched_sim.get("genre"), "synthwave")
+        self.assertEqual(enriched_sim.get("similar_to"), "Nightcall by Kavinsky")
+
+    def test_auto_ping_protects_song_card_metadata_lines(self):
+        reply = (
+            "Yo future, here is that track you wanted:\n\n"
+            "**Song:** Mask Off\n"
+            "**Artist:** Future\n"
+            "**Album:** FUTURE\n"
+            "**Genre:** Hip-Hop\n\n"
+            "https://music.youtube.com/watch?v=xvZqHgFz51I"
+        )
+        out = apply_auto_ping(reply, {"future": 987654321})
+        # Conversational intro pings the user "future", while the song card lines remain untouched!
+        self.assertIn("Yo <@987654321>, here is that track you wanted:", out)
+        self.assertIn("**Song:** Mask Off", out)
+        self.assertIn("**Artist:** Future", out)
+        self.assertIn("**Album:** FUTURE", out)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
