@@ -27,7 +27,7 @@ from src.skills.sports.live_tracker import (
      set_active_channel_id,
     skill_track_live_game,
 )
-from src.utils import chunk_message
+from src.utils import chunk_message, run_in_worker
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
@@ -326,7 +326,7 @@ async def _handle_telegram_reaction(
     user_tag = f"@{user['username']}" if user.get("username") else user_display
     internal_cid = to_tg_channel_id(int(chat_id))
 
-    await asyncio.to_thread(_tg_api_post, bot_token, "sendChatAction", {"chat_id": chat_id, "action": "typing"}, 10)
+    await run_in_worker(_tg_api_post, bot_token, "sendChatAction", {"chat_id": chat_id, "action": "typing"}, 10)
 
     clean_title = re.sub(r"[\(\[\{].*?(?:official|video|audio|lyrics|visualizer|download|remastered|hd|4k|hq|mix).*?[\)\]\}]", "", orig_title, flags=re.IGNORECASE)
     clean_title = re.sub(r"[\(\[\{](?:feat\.|ft\.).*?[\)\]\}]", "", clean_title, flags=re.IGNORECASE)
@@ -339,7 +339,7 @@ async def _handle_telegram_reaction(
     search_query = f"{clean_title} by {orig_artist}".strip() if orig_artist else clean_title
 
     set_active_channel_id(internal_cid)
-    similar_res = await asyncio.to_thread(tools.skill_top_music, similar_to=search_query)
+    similar_res = await run_in_worker(tools.skill_top_music, similar_to=search_query)
     verified_url = None
     chosen_track = None
     if "=== VERIFIED YOUTUBE MUSIC RESULT" in similar_res:
@@ -359,7 +359,7 @@ async def _handle_telegram_reaction(
         ]
         random.shuffle(similar_tracks)
         for candidate in similar_tracks[:4]:
-            yt_output = await asyncio.to_thread(tools.skill_youtube_searcher, candidate, max_results=1, is_music=True)
+            yt_output = await run_in_worker(tools.skill_youtube_searcher, candidate, max_results=1, is_music=True)
             m_url = re.search(r"(https:\/\/(?:music|www)\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})", yt_output)
             if m_url:
                 verified_url = m_url.group(1).replace("www.youtube.com", "music.youtube.com")
@@ -371,7 +371,7 @@ async def _handle_telegram_reaction(
 
     m_vid = re.search(r"watch\?v=([0-9A-Za-z_-]{11})", verified_url)
     vid = m_vid.group(1) if m_vid else None
-    meta = await asyncio.to_thread(get_music_metadata, vid, fallback_text=chosen_track)
+    meta = await run_in_worker(get_music_metadata, vid, fallback_text=chosen_track)
     intro_text = f"{user_tag} Here is a song similar to **{orig_title}** by **{orig_artist}**:"
     final_reply = format_song_card(
         song=meta["song"],
@@ -509,7 +509,7 @@ async def handle_telegram_update(
     if low_input.startswith("!track "):
         target_q = normalized_input[7:].strip()
         set_active_channel_id(internal_cid)
-        res = await asyncio.to_thread(skill_track_live_game, action="start", query=target_q)
+        res = await run_in_worker(skill_track_live_game, action="start", query=target_q)
         LIVE_TRACKER.ensure_loop_running()
         await send_telegram_message(internal_cid, res, token=bot_token)
         return
@@ -517,13 +517,13 @@ async def handle_telegram_update(
     if low_input.startswith("!untrack"):
         target_q = normalized_input[8:].strip()
         set_active_channel_id(internal_cid)
-        res = await asyncio.to_thread(skill_track_live_game, action="stop", query=target_q)
+        res = await run_in_worker(skill_track_live_game, action="stop", query=target_q)
         await send_telegram_message(internal_cid, res, token=bot_token)
         return
 
     if low_input in ("!tracked", "!track"):
         set_active_channel_id(internal_cid)
-        res = await asyncio.to_thread(skill_track_live_game, action="list")
+        res = await run_in_worker(skill_track_live_game, action="list")
         await send_telegram_message(internal_cid, res, token=bot_token)
         return
 
@@ -534,67 +534,84 @@ async def handle_telegram_update(
     if not normalized_input:
         return
 
-    # 4. Run standard conversation turn reusing main.run_agent_turn
-    async with main_mod.channel_locks[internal_cid]:
-        mode_config = MODES[main_mod.current_mode]
-        is_research = mode_config.get("is_research", False)
-        tools.set_memory_file(mode_config["memory_file"])
+    # 4. Run standard conversation turn reusing main.run_agent_turn (3-phase lock-free execution)
+    mode_config = MODES[main_mod.current_mode]
+    is_research = mode_config.get("is_research", False)
+    tools.set_memory_file(mode_config["memory_file"])
+    set_active_channel_id(internal_cid)
 
+    ref_context = ""
+    ref_text = reply_to.get("text") or reply_to.get("caption")
+    if ref_text:
+        ref_context = extract_reply_context(ref_text)
+
+    if main_mod.current_mode == "chat":
+        user_msg = f"{user_display} (User ID: {user_id}){ref_context}: {normalized_input}"
+    else:
+        user_msg = f"User {user_display} says{ref_context}: {normalized_input}"
+
+    # Phase 1: Snapshot history (<1ms under channel lock)
+    async with main_mod.channel_locks[internal_cid]:
         system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
         if internal_cid not in main_mod.chat_history:
             main_mod.chat_history[internal_cid] = [system_msg]
         else:
             main_mod.chat_history[internal_cid][0] = system_msg
+        turn_history = list(main_mod.chat_history[internal_cid])
 
-        ref_context = ""
-        ref_text = reply_to.get("text") or reply_to.get("caption")
-        if ref_text:
-            ref_context = extract_reply_context(ref_text)
+    turn_start_idx = len(turn_history)
+    turn_history.append({"role": "user", "content": user_msg})
 
-        if main_mod.current_mode == "chat":
-            user_msg = f"{user_display} (User ID: {user_id}){ref_context}: {normalized_input}"
-        else:
-            user_msg = f"User {user_display} says{ref_context}: {normalized_input}"
+    # Phase 2: Lock-free execution & post-processing
+    await run_in_worker(
+        _tg_api_post,
+        bot_token,
+        "sendChatAction",
+        {"chat_id": chat_id, "action": "typing"},
+        10,
+    )
 
-        main_mod.chat_history[internal_cid].append({"role": "user", "content": user_msg})
-
-        await asyncio.to_thread(
-            _tg_api_post,
-            bot_token,
-            "sendChatAction",
-            {"chat_id": chat_id, "action": "typing"},
-            10,
-        )
-
+    try:
         try:
+            reply = await main_mod.run_agent_turn(internal_cid, mode_config, turn_history=turn_history)
+        except TypeError:
             reply = await main_mod.run_agent_turn(internal_cid, mode_config)
-            if not reply.strip():
-                reply = (
-                    "Don't leave me hanging—what's on your mind?"
-                    if main_mod.current_mode == "chat"
-                    else "⚠️ Generated an empty response."
-                )
+        if not reply.strip():
+            reply = (
+                "Don't leave me hanging—what's on your mind?"
+                if main_mod.current_mode == "chat"
+                else "⚠️ Generated an empty response."
+            )
 
+        if is_research:
+            reply = join_orphan_bullets(reply)
+
+        set_active_channel_id(internal_cid)
+        reply = await run_in_worker(standardize_song_reply, reply)
+        reply = sanitize_agent_reply(reply)
+
+        # Phase 3: Atomic commit (<1ms under channel lock)
+        turn_delta = turn_history[turn_start_idx:]
+        if len(turn_delta) == 1:
+            turn_delta.append({"role": "assistant", "content": reply})
+
+        async with main_mod.channel_locks[internal_cid]:
+            if internal_cid not in main_mod.chat_history:
+                main_mod.chat_history[internal_cid] = [system_msg]
+            main_mod.chat_history[internal_cid].extend(turn_delta)
             main_mod.chat_history[internal_cid] = trim_history(
                 main_mod.chat_history[internal_cid],
                 mode_config.get("history_limit", 40),
             )
 
-            if is_research:
-                reply = join_orphan_bullets(reply)
-
-            set_active_channel_id(internal_cid)
-            reply = await asyncio.to_thread(standardize_song_reply, reply)
-            reply = sanitize_agent_reply(reply)
-
-            await send_telegram_message(internal_cid, reply, token=bot_token)
-        except Exception as e:
-            print(f"❌ [Telegram Error]: {type(e).__name__}: {e}")
-            await send_telegram_message(
-                internal_cid,
-                "⚠️ Something went wrong while handling that. Please try again!",
-                token=bot_token,
-            )
+        await send_telegram_message(internal_cid, reply, token=bot_token)
+    except Exception as e:
+        print(f"❌ [Telegram Error]: {type(e).__name__}: {e}")
+        await send_telegram_message(
+            internal_cid,
+            "⚠️ Something went wrong while handling that. Please try again!",
+            token=bot_token,
+        )
 
 
 _POLLING_ACTIVE = False

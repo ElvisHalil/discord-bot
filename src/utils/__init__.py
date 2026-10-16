@@ -18,6 +18,14 @@ from src.utils.timezones import (
     get_local_now,
     resolve_configured_timezone,
 )
+from src.utils.workers import (
+    SUB_WORKER_POOL,
+    WORKER_POOL,
+    map_in_workers,
+    run_in_worker,
+    shutdown_worker_pool,
+    submit_to_worker,
+)
 
 __all__ = [
     "ensure_ollama_running",
@@ -34,5 +42,11 @@ __all__ = [
     "enrich_tool_output_with_time_context",
     "get_local_now",
     "resolve_configured_timezone",
+    "WORKER_POOL",
+    "SUB_WORKER_POOL",
+    "run_in_worker",
+    "submit_to_worker",
+    "map_in_workers",
+    "shutdown_worker_pool",
 ]
 

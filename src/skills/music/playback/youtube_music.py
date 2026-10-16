@@ -407,9 +407,9 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
         else:
             standard_embeddable.append(entry)
 
-    from concurrent.futures import ThreadPoolExecutor
     import urllib.parse
     from src.skills.youtube.client import _http_get
+    from src.utils.workers import map_in_workers
 
     def _verify_batch(batch_candidates: list[tuple[str, str, str]]) -> None:
         if not batch_candidates:
@@ -423,15 +423,9 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
 
         remaining = batch_candidates[1:]
         if remaining:
-            if len(remaining) == 1:
-                rem_entry = _verify_single_candidate(remaining[0])
+            for rem_entry in map_in_workers(_verify_single_candidate, remaining):
                 if rem_entry:
                     _record_verified_entry(rem_entry)
-            else:
-                with ThreadPoolExecutor(max_workers=min(4, len(remaining))) as pool:
-                    for rem_entry in pool.map(_verify_single_candidate, remaining):
-                        if rem_entry:
-                            _record_verified_entry(rem_entry)
 
     # =========================================================================
     # PHASE 1A: Direct YouTube Search over Persistent Keep-Alive Session (~0.5s)

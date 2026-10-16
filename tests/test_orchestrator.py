@@ -419,7 +419,133 @@ class TestCentralizedTimeAndTimezones(unittest.TestCase):
         self.assertIn("16:30 UTC (Sat Oct 17 10:30 AM MDT / 18:30 CEST, in 1d 15h)", enriched)
 
 
+class TestWorkerConcurrencyAndLockFreeTurns(unittest.IsolatedAsyncioTestCase):
+    async def test_contextvar_propagation_across_nested_workers(self):
+        import asyncio
+        import time
+        from src.skills.sports.live_tracker import get_active_channel_id, set_active_channel_id
+        from src.tools.system import _get_active_memory_file, set_memory_file
+        from src.utils.workers import map_in_workers, run_in_worker, submit_to_worker
+
+        async def simulate_channel_task(cid: int, mem_path: str, delay: float):
+            set_active_channel_id(cid)
+            set_memory_file(mem_path)
+
+            def blocking_skill():
+                time.sleep(delay)
+                outer_cid = get_active_channel_id()
+                outer_mem = _get_active_memory_file()
+                # Fan out sub-workers from inside the worker thread
+                sub_cids = map_in_workers(lambda _: get_active_channel_id(), [1, 2, 3])
+                fut_mem = submit_to_worker(_get_active_memory_file)
+                return outer_cid, outer_mem, sub_cids, fut_mem.result()
+
+            return await run_in_worker(blocking_skill)
+
+        res_a, res_b = await asyncio.gather(
+            simulate_channel_task(1001, "data/mem_a.json", 0.06),
+            simulate_channel_task(2002, "data/mem_b.json", 0.02),
+        )
+        self.assertEqual(res_a, (1001, "data/mem_a.json", [1001, 1001, 1001], "data/mem_a.json"))
+        self.assertEqual(res_b, (2002, "data/mem_b.json", [2002, 2002, 2002], "data/mem_b.json"))
+
+    async def test_concurrent_turns_fast_turn_finishes_while_slow_worker_fetches(self):
+        import asyncio
+        import time
+        from collections import defaultdict
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from src.utils.telegram import handle_telegram_update, to_tg_channel_id
+        from src.utils.workers import run_in_worker
+
+        completion_order = []
+        cid = to_tg_channel_id(555000)
+
+        def slow_sports_scrape():
+            time.sleep(0.18)
+            return "=== NHL SCHEDULE ===\n• Oilers vs Flames"
+
+        async def fake_run_agent_turn(channel_id, mode_config, turn_history=None):
+            history = turn_history if turn_history is not None else main_mod.chat_history[channel_id]
+            last_user = history[-1]["content"]
+            if "hockey games" in last_user:
+                # Simulate LLM step 1 -> slow background worker tool -> LLM step 2
+                history.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"function": {"name": "skill_sports_info", "arguments": {"sport": "nhl"}}}],
+                })
+                tool_out = await run_in_worker(slow_sports_scrape)
+                history.append({
+                    "role": "tool",
+                    "name": "skill_sports_info",
+                    "content": tool_out,
+                })
+                reply = "Here are today's NHL games: Oilers vs Flames."
+                history.append({"role": "assistant", "content": reply})
+                completion_order.append("turn_1_slow")
+                return reply
+            else:
+                # Fast prompt that does not need to wait for Turn 1's worker
+                await asyncio.sleep(0.01)
+                reply = "25 * 14 is 350."
+                history.append({"role": "assistant", "content": reply})
+                completion_order.append("turn_2_fast")
+                return reply
+
+        main_mod = SimpleNamespace(
+            current_mode="research-gemma",
+            chat_history={},
+            channel_locks=defaultdict(asyncio.Lock),
+            run_agent_turn=fake_run_agent_turn,
+        )
+
+        update_slow = {
+            "update_id": 100,
+            "message": {
+                "message_id": 1,
+                "from": {"id": 123456789, "is_bot": False, "first_name": "Halil"},
+                "chat": {"id": 555000, "type": "private"},
+                "text": "what are the hockey games today?",
+            },
+        }
+        update_fast = {
+            "update_id": 101,
+            "message": {
+                "message_id": 2,
+                "from": {"id": 123456789, "is_bot": False, "first_name": "Halil"},
+                "chat": {"id": 555000, "type": "private"},
+                "text": "what is 25 * 14?",
+            },
+        }
+
+        with patch.dict(
+            "os.environ",
+            {"TELEGRAM_OWNER_ID": "123456789", "TELEGRAM_ALLOWED_IDS": "555000"},
+            clear=False,
+        ), patch("src.utils.telegram._tg_api_post", return_value={"ok": True, "result": {"message_id": 99}}):
+            t1 = asyncio.create_task(handle_telegram_update(update_slow, main_mod, bot_token="tok"))
+            await asyncio.sleep(0.02)  # Let Turn 1 enter its background worker
+            t2 = asyncio.create_task(handle_telegram_update(update_fast, main_mod, bot_token="tok"))
+            await asyncio.gather(t1, t2)
+
+        # 1. Fast Turn 2 finished before Slow Turn 1!
+        self.assertEqual(completion_order, ["turn_2_fast", "turn_1_slow"])
+
+        # 2. Both turns' complete message blocks are committed atomically without interleaving
+        final_hist = main_mod.chat_history[cid]
+        roles = [m["role"] for m in final_hist]
+        # Expected: [system, user_2, assistant_2, user_1, assistant(tool_call_1), tool(output_1), assistant_1]
+        self.assertEqual(roles, ["system", "user", "assistant", "user", "assistant", "tool", "assistant"])
+        self.assertIn("25 * 14", final_hist[1]["content"])
+        self.assertEqual(final_hist[2]["content"], "25 * 14 is 350.")
+        self.assertIn("hockey games", final_hist[3]["content"])
+        self.assertEqual(final_hist[5]["name"], "skill_sports_info")
+        self.assertIn("Oilers vs Flames", final_hist[6]["content"])
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 

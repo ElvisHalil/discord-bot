@@ -20,6 +20,7 @@ from src.tools.web import (
     WEB_TOOLS,
     BROWSER_HEADERS,
     VISITED_URLS,
+    reset_turn_visited_urls,
     URL_CACHE,
     SEARCH_CACHE,
     YOUTUBE_CACHE,

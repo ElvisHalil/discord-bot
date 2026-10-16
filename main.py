@@ -11,7 +11,13 @@ from collections import defaultdict
 from dotenv import load_dotenv
 from ollama import AsyncClient
 import src.registry as tools
-from src.utils import ensure_ollama_running, chunk_message, suppress_discord_embeds
+from src.utils import (
+    ensure_ollama_running,
+    chunk_message,
+    suppress_discord_embeds,
+    run_in_worker,
+    shutdown_worker_pool,
+)
 from src.skills.music.utils import format_song_card, get_music_metadata, standardize_song_reply
 from src.skills.sports.live_tracker import (
     LIVE_TRACKER,
@@ -170,27 +176,27 @@ async def handle_live_match_update(match, snapshot, triggers):
         "num_predict": 220,
     }
 
+    try:
+        resp = await ollama_client.chat(
+            model=mode_config["model"],
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": internal_user_prompt},
+            ],
+            options=update_options,
+        )
+        llm_text = sanitize_agent_reply((resp.message.content or "").strip())
+    except Exception as e:
+        print(f"⚠️ [Live Tracker LLM Error]: {e}")
+        llm_text = ""
+
+    final_msg = f"📡 **LIVE UPDATE ({match.league_name})**\n{llm_text}" if llm_text else fallback_msg
+    if is_tg:
+        await send_telegram_message(match.channel_id, final_msg)
+    else:
+        await channel.send(final_msg)
+
     async with channel_locks[match.channel_id]:
-        try:
-            resp = await ollama_client.chat(
-                model=mode_config["model"],
-                messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": internal_user_prompt},
-                ],
-                options=update_options,
-            )
-            llm_text = sanitize_agent_reply((resp.message.content or "").strip())
-        except Exception as e:
-            print(f"⚠️ [Live Tracker LLM Error]: {e}")
-            llm_text = ""
-
-        final_msg = f"📡 **LIVE UPDATE ({match.league_name})**\n{llm_text}" if llm_text else fallback_msg
-        if is_tg:
-            await send_telegram_message(match.channel_id, final_msg)
-        else:
-            await channel.send(final_msg)
-
         if match.channel_id not in chat_history:
             system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
             chat_history[match.channel_id] = [system_msg]
@@ -282,7 +288,7 @@ async def on_raw_reaction_add(payload):
 
                     # 2. Get recommendations (and pre-resolved verified YouTube link) from skill_top_music
                     set_active_channel_id(channel.id)
-                    similar_res = await asyncio.to_thread(tools.skill_top_music, similar_to=search_query)
+                    similar_res = await run_in_worker(tools.skill_top_music, similar_to=search_query)
                     is_unrelated_fallback = "NO DIRECT SIMILAR SONGS FOUND" in similar_res
                     similar_tracks = []
                     for line in similar_res.split("\n"):
@@ -296,7 +302,7 @@ async def on_raw_reaction_add(payload):
                     if not similar_tracks:
                         is_unrelated_fallback = True
                         print("⚠️ [Reaction Fallback]: No similar tracks found, pulling general charts...")
-                        bp_res = await asyncio.to_thread(tools.skill_top_music, genre=None)
+                        bp_res = await run_in_worker(tools.skill_top_music, genre=None)
                         similar_res = bp_res
                         for line in bp_res.split("\n"):
                             line = line.strip()
@@ -322,7 +328,7 @@ async def on_raw_reaction_add(payload):
                     if not verified_url or not chosen_track:
                         random.shuffle(similar_tracks)
                         for candidate in similar_tracks[:6]:
-                            yt_output = await asyncio.to_thread(tools.skill_youtube_searcher, candidate, max_results=1, is_music=True)
+                            yt_output = await run_in_worker(tools.skill_youtube_searcher, candidate, max_results=1, is_music=True)
                             m_url = re.search(r'(https:\/\/music\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})', yt_output)
                             if not m_url:
                                 m_url = re.search(r'(https:\/\/www\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})', yt_output)
@@ -395,7 +401,7 @@ async def on_raw_reaction_add(payload):
 
                     intro_text, meta = await asyncio.gather(
                         _generate_intro(),
-                        asyncio.to_thread(get_music_metadata, vid, fallback_text=chosen_track)
+                        run_in_worker(get_music_metadata, vid, fallback_text=chosen_track)
                     )
 
                     if not intro_text:
@@ -438,17 +444,20 @@ async def on_raw_reaction_add(payload):
                     await channel.send(f"{user_tag} ⚠️ Something went wrong while finding a similar song. Please try again!")
 
 
-async def run_agent_turn(channel_id, mode_config):
+async def run_agent_turn(channel_id, mode_config, turn_history=None):
     """Run the model/tool loop for one user turn and return the final reply text."""
     is_research = mode_config.get("is_research", False)
     supports_tools = mode_config.get("supports_tools", True)
     max_iterations = mode_config["max_iterations"]
     active_tools = mode_config.get("tools", {})
     tool_functions = list(active_tools.values())
-    history = chat_history[channel_id]
+    history = turn_history if turn_history is not None else chat_history[channel_id]
+    set_active_channel_id(channel_id)
 
     if is_research:
-        tools.VISITED_URLS.clear()
+        tools.reset_turn_visited_urls()
+        if turn_history is None:
+            tools.VISITED_URLS.clear()
 
     base_kwargs = {
         "model": mode_config["model"],
@@ -493,7 +502,7 @@ async def run_agent_turn(channel_id, mode_config):
                     set_active_channel_id(channel_id)
                     print(f"⚡ [{current_mode.upper()}] Intercepted missed tool on turn 0 -> forcing {forced_tool_name}({forced_args})")
                     try:
-                        tool_output = await asyncio.to_thread(func, **forced_args)
+                        tool_output = await run_in_worker(func, **forced_args)
                     except Exception as e:
                         print(f"  └─ ❌ Forced tool {forced_tool_name} crashed: {e}")
                         tool_output = f"Tool execution failed: {e}"
@@ -549,7 +558,7 @@ async def run_agent_turn(channel_id, mode_config):
                 set_active_channel_id(channel_id)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
                 try:
-                    tool_output = await asyncio.to_thread(func, **args)
+                    tool_output = await run_in_worker(func, **args)
                 except Exception as e:
                     print(f"  └─ ❌ Tool {tool_name} crashed: {e}")
                     tool_output = f"Tool execution failed: {e}"
@@ -651,7 +660,7 @@ async def on_message(message):
         active_channels.add(message.channel.id)
         target_q = user_input[7:].strip()
         set_active_channel_id(message.channel.id)
-        res = await asyncio.to_thread(skill_track_live_game, action="start", query=target_q)
+        res = await run_in_worker(skill_track_live_game, action="start", query=target_q)
         LIVE_TRACKER.ensure_loop_running()
         await message.channel.send(res)
         return
@@ -660,14 +669,14 @@ async def on_message(message):
         active_channels.add(message.channel.id)
         target_q = user_input[8:].strip()
         set_active_channel_id(message.channel.id)
-        res = await asyncio.to_thread(skill_track_live_game, action="stop", query=target_q)
+        res = await run_in_worker(skill_track_live_game, action="stop", query=target_q)
         await message.channel.send(res)
         return
 
     if user_input.lower() in ("!tracked", "!track"):
         active_channels.add(message.channel.id)
         set_active_channel_id(message.channel.id)
-        res = await asyncio.to_thread(skill_track_live_game, action="list")
+        res = await run_in_worker(skill_track_live_game, action="list")
         await message.channel.send(res)
         return
 
@@ -680,78 +689,90 @@ async def on_message(message):
     channel_id = message.channel.id
     active_channels.add(channel_id)
 
-    # Serialize turns per channel: two overlapping mentions would otherwise
-    # interleave their tool calls/results in the same history list.
-    async with channel_locks[channel_id]:
-        # Set up mode config
-        mode_config = MODES[current_mode]
-        is_research = mode_config.get("is_research", False)
-        tools.set_memory_file(mode_config["memory_file"])
+    mode_config = MODES[current_mode]
+    is_research = mode_config.get("is_research", False)
+    tools.set_memory_file(mode_config["memory_file"])
+    set_active_channel_id(channel_id)
 
-        # Rebuild the system prompt every turn so the date and saved facts stay current.
+    other_mentions = [f"{m.display_name} (ID: {m.id})" for m in message.mentions if m != client.user]
+    mention_context = f" [Tagged in chat: {', '.join(other_mentions)}]" if other_mentions else ""
+
+    ref_context = ""
+    if message.reference and message.reference.message_id:
+        try:
+            ref_msg = message.reference.resolved
+            if not isinstance(ref_msg, discord.Message):
+                ref_msg = await message.channel.fetch_message(message.reference.message_id)
+            if ref_msg:
+                ref_context = extract_reply_context(ref_msg.content)
+        except Exception as e:
+            print(f"⚠️ [Reference Resolution Error]: {e}")
+
+    if current_mode == "chat":
+        user_msg = f"{message.author.display_name} (User ID: {message.author.id}){mention_context}{ref_context}: {user_input}"
+    else:
+        user_msg = f"User {message.author.display_name} says{mention_context}{ref_context}: {user_input}"
+
+    # Phase 1: Take a fast (<1ms) isolated snapshot of chat_history and release the channel lock
+    # so slow worker tool fetches never block other prompts, 👍 reactions, or live tracker alerts.
+    async with channel_locks[channel_id]:
         system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
         if channel_id not in chat_history:
             chat_history[channel_id] = [system_msg]
         else:
             chat_history[channel_id][0] = system_msg
+        turn_history = list(chat_history[channel_id])
 
-        other_mentions = [f"{m.display_name} (ID: {m.id})" for m in message.mentions if m != client.user]
-        mention_context = f" [Tagged in chat: {', '.join(other_mentions)}]" if other_mentions else ""
+    turn_start_idx = len(turn_history)
+    turn_history.append({"role": "user", "content": user_msg})
 
-        ref_context = ""
-        if message.reference and message.reference.message_id:
-            try:
-                ref_msg = message.reference.resolved
-                if not isinstance(ref_msg, discord.Message):
-                    ref_msg = await message.channel.fetch_message(message.reference.message_id)
-                if ref_msg:
-                    ref_context = extract_reply_context(ref_msg.content)
-            except Exception as e:
-                print(f"⚠️ [Reference Resolution Error]: {e}")
+    # Phase 2: Lock-free turn execution and reply post-processing
+    async with message.channel.typing():
+        try:
+            reply = await run_agent_turn(channel_id, mode_config, turn_history=turn_history)
 
-        if current_mode == "chat":
-            user_msg = f"{message.author.display_name} (User ID: {message.author.id}){mention_context}{ref_context}: {user_input}"
-        else:
-            user_msg = f"User {message.author.display_name} says{mention_context}{ref_context}: {user_input}"
+            if not reply.strip():
+                reply = "Don't leave me hanging—what's on your mind?" if current_mode == "chat" else "⚠️ Generated an empty response."
 
-        chat_history[channel_id].append({"role": "user", "content": user_msg})
+            # Auto-ping fix for chat mode
+            if current_mode == "chat":
+                reply = apply_auto_ping(reply, known_users)
 
-        async with message.channel.typing():
-            try:
-                reply = await run_agent_turn(channel_id, mode_config)
+            if is_research:
+                reply = join_orphan_bullets(reply)
 
-                if not reply.strip():
-                    reply = "Don't leave me hanging—what's on your mind?" if current_mode == "chat" else "⚠️ Generated an empty response."
+            # Suppress Discord embed cards for article/web links while preserving YouTube video embeds
+            reply = suppress_discord_embeds(reply)
 
-                # Rolling context trimming (also shortens old tool dumps)
-                chat_history[channel_id] = trim_history(chat_history[channel_id], mode_config.get("history_limit", 40))
+            # Clean and ensure consistent song card template if a music track is returned
+            # (may hit the network for metadata, so run it off the event loop)
+            set_active_channel_id(channel_id)
+            reply = await run_in_worker(standardize_song_reply, reply)
 
-                # Auto-ping fix for chat mode
-                if current_mode == "chat":
-                    reply = apply_auto_ping(reply, known_users)
+            # Scrub internal tool name leaks, meta-refusals, and hallucinated betting links
+            reply = sanitize_agent_reply(reply)
 
-                if is_research:
-                    reply = join_orphan_bullets(reply)
+            # Phase 3: Atomically commit this turn's completed message block (<1ms)
+            turn_delta = turn_history[turn_start_idx:]
+            if len(turn_delta) == 1:
+                turn_delta.append({"role": "assistant", "content": reply})
 
-                # Suppress Discord embed cards for article/web links while preserving YouTube video embeds
-                reply = suppress_discord_embeds(reply)
+            async with channel_locks[channel_id]:
+                if channel_id not in chat_history:
+                    chat_history[channel_id] = [system_msg]
+                chat_history[channel_id].extend(turn_delta)
+                chat_history[channel_id] = trim_history(
+                    chat_history[channel_id], mode_config.get("history_limit", 40)
+                )
 
-                # Clean and ensure consistent song card template if a music track is returned
-                # (may hit the network for metadata, so run it off the event loop)
-                set_active_channel_id(channel_id)
-                reply = await asyncio.to_thread(standardize_song_reply, reply)
+            chunks = chunk_message(reply)
+            for chunk in chunks:
+                if chunk:
+                    await message.channel.send(chunk)
 
-                # Scrub internal tool name leaks, meta-refusals, and hallucinated betting links
-                reply = sanitize_agent_reply(reply)
-
-                chunks = chunk_message(reply)
-                for chunk in chunks:
-                    if chunk:
-                        await message.channel.send(chunk)
-
-            except Exception as e:
-                print(f"❌ Error handling message: {type(e).__name__}: {e}")
-                await message.channel.send("⚠️ Something went wrong while handling that. Please try again!")
+        except Exception as e:
+            print(f"❌ Error handling message: {type(e).__name__}: {e}")
+            await message.channel.send("⚠️ Something went wrong while handling that. Please try again!")
 
 if __name__ == "__main__":
     try:
@@ -763,13 +784,4 @@ if __name__ == "__main__":
             LIVE_TRACKER.shutdown()
         except Exception:
             pass
-        try:
-            from src.skills.sports.aggregators.espn_utils import SPORTS_EXECUTOR
-            SPORTS_EXECUTOR.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            pass
-        try:
-            import concurrent.futures.thread as _cft
-            _cft._threads_queues.clear()
-        except Exception:
-            pass
+        shutdown_worker_pool()

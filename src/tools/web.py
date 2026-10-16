@@ -5,7 +5,8 @@ import socket
 import sys
 import requests
 import urllib.parse as urlparse
-from typing import Optional
+from contextvars import ContextVar
+from typing import Optional, Set
 from bs4 import BeautifulSoup
 from curl_cffi import requests as cffi_requests
 from curl_cffi.requests.errors import RequestsError
@@ -31,9 +32,24 @@ BROWSER_HEADERS = {
 }
 
 VISITED_URLS = set()
+_TURN_VISITED_URLS: ContextVar[Optional[Set[str]]] = ContextVar("TURN_VISITED_URLS", default=None)
 URL_CACHE = {}
 SEARCH_CACHE = {}
 YOUTUBE_CACHE = {}
+
+
+def reset_turn_visited_urls() -> Set[str]:
+    """Initialize a fresh turn-scoped visited URL set without wiping concurrent turns."""
+    turn_set: Set[str] = set()
+    _TURN_VISITED_URLS.set(turn_set)
+    return turn_set
+
+
+def _record_visited_url(url: str) -> None:
+    VISITED_URLS.add(url)
+    turn_set = _TURN_VISITED_URLS.get()
+    if turn_set is not None:
+        turn_set.add(url)
 
 # Generic words that add nothing to a keyword-matched news search.
 _NEWS_FILLER = re.compile(
@@ -371,7 +387,7 @@ def read_website(url: str) -> str:
                 output += "• Summarize the key information clearly using bold headings and concise bullet points for Discord.\n"
                 output += "• If you need deeper facts, use `read_website` on any relevant [Link](url) found in the text above."
                 
-                VISITED_URLS.add(url)
+                _record_visited_url(url)
                 URL_CACHE[url] = output
                 return output
             else:
@@ -491,7 +507,7 @@ def read_website(url: str) -> str:
         output += "• If you need deeper facts, use `read_website` on any relevant link above."
             
         final_result = output[:20000]
-        VISITED_URLS.add(url)
+        _record_visited_url(url)
         URL_CACHE[url] = final_result
         return final_result
 

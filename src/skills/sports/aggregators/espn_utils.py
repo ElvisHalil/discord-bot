@@ -13,7 +13,9 @@ _SESSION.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 })
 
-SPORTS_EXECUTOR = ThreadPoolExecutor(max_workers=8)
+from src.utils.workers import SUB_WORKER_POOL, map_in_workers
+
+SPORTS_EXECUTOR = SUB_WORKER_POOL
 _CACHE: Dict[str, Tuple[float, Any]] = {}
 
 
@@ -56,7 +58,7 @@ def cached_espn_get_many(
     is_mock = hasattr(cached_espn_get, "assert_called") or "MagicMock" in str(type(cached_espn_get))
     if is_mock or len(requests_list) == 1:
         return [cached_espn_get(u, params=p, ttl=ttl) for u, p in requests_list]
-    return list(SPORTS_EXECUTOR.map(lambda r: cached_espn_get(r[0], params=r[1], ttl=ttl), requests_list))
+    return map_in_workers(lambda r: cached_espn_get(r[0], params=r[1], ttl=ttl), requests_list)
 
 
 def parallel_fetch_json(
@@ -88,7 +90,7 @@ def parallel_fetch_json(
 
     if len(urls) == 1:
         return [_get_one(urls[0])]
-    return list(SPORTS_EXECUTOR.map(_get_one, urls))
+    return map_in_workers(_get_one, urls)
 
 
 def extract_score_str(score_field: Any) -> str:

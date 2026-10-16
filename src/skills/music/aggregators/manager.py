@@ -230,7 +230,7 @@ class MusicAggregatorManager:
             }
             print(f"  └─ 🎭 [Mood Discovery]: Resolving standalone multi-genre vibe '{canon_mood}'...")
 
-        from concurrent.futures import ThreadPoolExecutor
+        from src.utils.workers import submit_to_worker
         all_tracks = []
         deezer = self.aggregators.get("deezer")
         lastfm = self.aggregators.get("lastfm")
@@ -257,20 +257,19 @@ class MusicAggregatorManager:
             tasks.append((beatport.get_charts, bp_query))
 
         if tasks:
-            with ThreadPoolExecutor(max_workers=min(7, len(tasks))) as pool:
-                futures = [pool.submit(fn, genre=arg) for fn, arg in tasks]
-                for fut in futures:
-                    try:
-                        all_tracks.extend(fut.result() or [])
-                    except Exception:
-                        pass
+            futures = [submit_to_worker(fn, genre=arg) for fn, arg in tasks]
+            for fut in futures:
+                try:
+                    all_tracks.extend(fut.result() or [])
+                except Exception:
+                    pass
 
         random.shuffle(all_tracks)
         return self._filter_and_deduplicate(all_tracks, exclude_query=similar_to)
 
     def get_top_charts(self, genre: str = None, mood: str = None) -> list[Track]:
         """Fetches trending and charting music across Last.fm, Beatport, and global charts concurrently, or delegates to mood discovery."""
-        from concurrent.futures import ThreadPoolExecutor
+        from src.utils.workers import submit_to_worker
         parsed_genre, parsed_mood = parse_mood_and_genre(genre, mood)
         if parsed_mood:
             return self.get_mood_tracks(mood=parsed_mood, genre=parsed_genre)
@@ -280,13 +279,12 @@ class MusicAggregatorManager:
         active_providers = [self.aggregators[name] for name in provider_names if self.aggregators.get(name)]
 
         if active_providers:
-            with ThreadPoolExecutor(max_workers=len(active_providers)) as pool:
-                futures = [pool.submit(prov.get_charts, genre=parsed_genre) for prov in active_providers]
-                for fut in futures:
-                    try:
-                        all_tracks.extend(fut.result() or [])
-                    except Exception:
-                        pass
+            futures = [submit_to_worker(prov.get_charts, genre=parsed_genre) for prov in active_providers]
+            for fut in futures:
+                try:
+                    all_tracks.extend(fut.result() or [])
+                except Exception:
+                    pass
 
         # Safety net if Last.fm API key is missing and no other provider returned tracks
         if not all_tracks and self.aggregators.get("deezer"):
@@ -303,7 +301,7 @@ class MusicAggregatorManager:
         - Last.fm provides scrobble-ranked fan favorites and autocorrected artist resolution.
         - Deezer provides trending catalog tracks and enriches matching Last.fm tracks with Album metadata.
         """
-        from concurrent.futures import ThreadPoolExecutor
+        from src.utils.workers import submit_to_worker
 
         lastfm = self.aggregators.get("lastfm")
         deezer = self.aggregators.get("deezer")
@@ -328,17 +326,16 @@ class MusicAggregatorManager:
             except Exception:
                 pass
         elif len(tasks) >= 2:
-            with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-                futs = {name: pool.submit(fn, artist) for name, fn in tasks}
-                for name, fut in futs.items():
-                    try:
-                        res = fut.result() or []
-                        if name == "lastfm":
-                            lfm_tracks = res
-                        else:
-                            dz_tracks = res
-                    except Exception:
-                        pass
+            futs = {name: submit_to_worker(fn, artist) for name, fn in tasks}
+            for name, fut in futs.items():
+                try:
+                    res = fut.result() or []
+                    if name == "lastfm":
+                        lfm_tracks = res
+                    else:
+                        dz_tracks = res
+                except Exception:
+                    pass
 
         # Map Deezer album titles by normalized track title so Last.fm tracks get Album metadata when available
         album_by_title = {}
@@ -439,7 +436,7 @@ class MusicAggregatorManager:
         Fetch diverse tracks for a target 3x3 spectrum zone using its mainstream_tags,
         deep_cut_tags, and intersection_modifiers across Last.fm and Deezer concurrently.
         """
-        from concurrent.futures import ThreadPoolExecutor
+        from src.utils.workers import submit_to_worker
 
         mainstream = list(target_zone.get("mainstream_tags", []))
         deep_cuts = list(target_zone.get("deep_cut_tags", []))
@@ -480,17 +477,16 @@ class MusicAggregatorManager:
 
         all_tracks: list[Track] = []
         if tasks:
-            with ThreadPoolExecutor(max_workers=min(6, len(tasks))) as pool:
-                fut_map = {pool.submit(fn, genre=q): tag_label for fn, q, tag_label in tasks}
-                for fut, tag_label in fut_map.items():
-                    try:
-                        res = fut.result() or []
-                        for trk in res:
-                            if not trk.genre:
-                                trk.genre = tag_label
-                            all_tracks.append(trk)
-                    except Exception:
-                        pass
+            fut_map = {submit_to_worker(fn, genre=q): tag_label for fn, q, tag_label in tasks}
+            for fut, tag_label in fut_map.items():
+                try:
+                    res = fut.result() or []
+                    for trk in res:
+                        if not trk.genre:
+                            trk.genre = tag_label
+                        all_tracks.append(trk)
+                except Exception:
+                    pass
 
         random.shuffle(all_tracks)
         return self._filter_and_deduplicate(all_tracks, exclude_query=exclude_query)
