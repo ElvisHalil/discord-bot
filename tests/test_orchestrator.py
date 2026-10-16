@@ -254,6 +254,27 @@ class TestSanitizeAgentReply(unittest.TestCase):
         self.assertNotIn("standings you see are not real-world", cleaned)
         self.assertIn("- Kimi Antonelli - 340 pts", cleaned)
 
+    def test_strips_standalone_asterisk_and_underscore_horizontal_rules(self):
+        from src.orchestrator import sanitize_agent_reply
+        text = (
+            "Here are the schedules!\n\n"
+            "***\n\n"
+            "### NHL Schedule\n"
+            "**Friday, October 16th**\n"
+            "*   Pittsburgh Penguins at Colorado Avalanche\n"
+            "*   ***Key Matchup*** with __underlined note__\n\n"
+            "___\n\n"
+            "### CS Esports Schedule\n"
+            "**Upcoming Matches**"
+        )
+        cleaned = sanitize_agent_reply(text)
+        self.assertNotIn("\n***\n", f"\n{cleaned}\n")
+        self.assertNotIn("\n___\n", f"\n{cleaned}\n")
+        self.assertIn("**Friday, October 16th**", cleaned)
+        self.assertIn("*   Pittsburgh Penguins at Colorado Avalanche", cleaned)
+        self.assertIn("***Key Matchup*** with __underlined note__", cleaned)
+        self.assertIn("### CS Esports Schedule", cleaned)
+
 
 class TestExtractReplyContext(unittest.TestCase):
     def test_extract_song_card_reply(self):

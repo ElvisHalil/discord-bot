@@ -351,5 +351,7 @@ def sanitize_agent_reply(reply: str) -> str:
     text = re.sub(r'\[([^\]]+)\]\(<?t:\d+(?::[a-zA-Z])?>?\)', r'\1', text)
     # Clean up orphaned bullet colons left when a stage label was stripped: "*   : Matchup" -> "*   Matchup"
     text = re.sub(r'(?m)^([ \t]*[-*•][ \t]+):\s+', r'\1', text)
+    # Strip standalone Markdown horizontal rules (*** / ___) which Discord parses as unclosed bold/underline tags
+    text = re.sub(r'(?m)^[ \t]*(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})[ \t]*$\n?', '', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
