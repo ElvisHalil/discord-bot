@@ -354,8 +354,8 @@ def enrich_tool_output_with_time_context(
             except Exception:
                 pass
 
-        # Skip lines that were already annotated or contain pre-formatted Discord epoch tags (<t:...:t>)
-        if re.search(r'<t:\d+:[a-zA-Z]>', line):
+        # Skip lines that were already annotated or contain pre-formatted (UTC | Local) or Discord epoch tags
+        if re.search(r'<t:\d+:[a-zA-Z]>', line) or re.search(rf'\bUTC\s*\|\s*[^)\n]*\b{re.escape(local_abbr)}\b', line):
             annotated_count += 1
             out_lines.append(line)
             continue

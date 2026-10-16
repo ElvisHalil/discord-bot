@@ -56,7 +56,7 @@ class NbaAggregator(BaseSportsAggregator):
         )) or (any(w in q for w in ("played", "result", "results", "back")) and not any(w in q for w in ("upcoming", "next", "future", "schedule", "tomorrow")))
 
         is_month = "month" in q and not is_past
-        is_week = any(w in q for w in ("week", "upcoming", "schedule", "fixtures", "next games")) and not is_past
+        is_week = any(w in q for w in ("week", "upcoming", "next", "schedule", "fixtures", "next games", "few days", "coming up", "soon", "weekend", "saturday", "sunday")) and not is_past
 
         team_sched_block = ""
         if matched_team:

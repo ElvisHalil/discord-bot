@@ -187,7 +187,7 @@ class SoccerAggregator(BaseSportsAggregator):
         )) or (any(w in q for w in ("played", "result", "results", "back")) and not any(w in q for w in ("upcoming", "next", "future", "schedule", "tomorrow")))
 
         is_month = "month" in q and not is_past
-        is_week = any(w in q for w in ("week", "upcoming", "next", "fixtures", "schedule", "soon", "weekend", "saturday", "sunday")) and not is_past
+        is_week = any(w in q for w in ("week", "upcoming", "next", "fixtures", "schedule", "soon", "weekend", "saturday", "sunday", "few days", "coming up")) and not is_past
 
         if matched_team:
             team_sched_block = parse_team_schedule("soccer", league_code, matched_team["id"], matched_team["displayName"])

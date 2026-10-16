@@ -571,7 +571,8 @@ class TestTimeConverterAccuracy(unittest.TestCase):
 
     def test_liquipedia_discord_epoch_line_not_double_annotated_and_uses_bot_tz(self):
         from datetime import datetime, timezone
-        from src.orchestrator import enrich_tool_output_with_time_context
+        from src.orchestrator import enrich_tool_output_with_time_context, sanitize_agent_reply
+        from src.skills.music.utils import standardize_song_reply
         from src.skills.sports.aggregators.liquipedia import LiquipediaAggregator
 
         ref_utc = datetime(2026, 10, 16, 14, 0, tzinfo=timezone.utc)
@@ -580,12 +581,25 @@ class TestTimeConverterAccuracy(unittest.TestCase):
             ts_str = agg._format_match_timestamp("October 16, 2026 - 14:00 UTC", str(int(ref_utc.timestamp())))
         self.assertIn("8:00 AM MDT", ts_str)
         self.assertIn("Oct 16, 14:00 UTC", ts_str)
-        self.assertIn("<t:1792159200:t>", ts_str)
+        self.assertNotIn("<t:", ts_str)
 
         line = f"  • Team Spirit vs Vitality — {ts_str}"
         enriched = enrich_tool_output_with_time_context(line, now=ref_utc, tz_override="MDT")
-        # Must not inject nested parentheses inside an already-formatted Discord <t:...:t> line
+        # Must not inject nested parentheses inside an already-formatted (UTC | Local) line
         self.assertTrue(enriched.endswith(line))
+
+        # Regression: Gemma NHL+CS output with [Time](<t:...>) and [Playoffs](<t:...>) must not leave unresolved <t:...> or orphaned '*   :'
+        raw_gemma_reply = (
+            "*   Pittsburgh Penguins at Colorado Avalanche [9:00 PM EDT](<t:1705347600:t>)\n"
+            "*   [Playoffs](<t:1792245600:t>): Aurora Gaming vs FURIA (Bo3)\n"
+            "*   : Team Falcons vs BetBoom Team (Bo3)"
+        )
+        cleaned = sanitize_agent_reply(standardize_song_reply(raw_gemma_reply))
+        self.assertIn("Pittsburgh Penguins at Colorado Avalanche 9:00 PM EDT", cleaned)
+        self.assertIn("Playoffs: Aurora Gaming vs FURIA (Bo3)", cleaned)
+        self.assertIn("*   Team Falcons vs BetBoom Team (Bo3)", cleaned)
+        self.assertNotIn("<t:", cleaned)
+        self.assertNotIn("*   :", cleaned)
 
     def test_dst_transition_mismatch_october_eu_cet_vs_us_mdt(self):
         from datetime import datetime, timezone

@@ -309,9 +309,14 @@ def standardize_song_reply(reply: str) -> str:
             if has_song_header and m_other_yt and card_vid and m_other_yt.group(1) != card_vid and "music.youtube.com" not in low_l:
                 intro_lines.append(line_stripped)
             continue
-        # Strip only hallucinated YouTube/music-player markdown links, preserving legitimate research/news links
+        # Strip only hallucinated YouTube/music-player markdown links, preserving legitimate research/news/sports links
         clean_l = re.sub(r'\[[^\]]*\]\([^\)]*(?:youtube\.com|youtu\.be)[^\)]*\)', '', line_stripped, flags=re.IGNORECASE)
-        clean_l = re.sub(r'\[(?:YouTube|Channel|Topic|Play|Watch|Video|Track)[^\]]*\]\([^\)]*\)', '', clean_l, flags=re.IGNORECASE).strip()
+        clean_l = re.sub(
+            r'\[(?:YouTube|Channel|Topic|Play|Watch|Video|Track)\b[^\]]*\]\((?:[^\)]*(?:youtube\.com|youtu\.be|<raw)[^\)]*|\s*)\)',
+            '',
+            clean_l,
+            flags=re.IGNORECASE,
+        ).strip()
         if clean_l and not (clean_l.startswith("<") and not clean_l.startswith(("<@", "<http://", "<https://", "<t:"))):
             intro_lines.append(clean_l)
     while intro_lines and intro_lines[-1] == "":
@@ -468,8 +473,13 @@ def standardize_song_reply(reply: str) -> str:
         if video_url != full_url:
             reply = reply.replace(full_url, video_url)
 
-    # Strip hallucinated markdown links and accidental raw placeholders
-    reply = re.sub(r'\[(?:YouTube|Channel|Topic|Play|Watch|Video|Track)[^\]]*\]\([^\)]*\)', '', reply, flags=re.IGNORECASE)
+    # Strip hallucinated YouTube markdown links and accidental raw placeholders
+    reply = re.sub(
+        r'\[(?:YouTube|Channel|Topic|Play|Watch|Video|Track)\b[^\]]*\]\((?:[^\)]*(?:youtube\.com|youtu\.be|<raw)[^\)]*|\s*)\)',
+        '',
+        reply,
+        flags=re.IGNORECASE,
+    )
     reply = re.sub(r'<Raw YouTube[^\n>]*>', '', reply, flags=re.IGNORECASE)
     return reply.strip()
 

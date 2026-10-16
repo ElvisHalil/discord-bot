@@ -109,7 +109,8 @@ class LiquipediaAggregator(BaseSportsAggregator):
             return self._known_events[0].get("slug")
 
         # Match against known tournament names or slugs
-        q_tokens = [w for w in re.findall(r'[a-z0-9]+', q_low) if len(w) >= 3 and w not in ("the", "cs2", "schedule", "matches", "today", "time", "tournament", "event")]
+        raw_tokens = [w for w in re.findall(r'[a-z0-9]+', q_low) if len(w) >= 3 and w not in ("the", "cs2", "schedule", "matches", "today", "time", "tournament", "event", "table", "standings", "teams", "roster", "rosters")]
+        q_tokens = [w[:-1] if (len(w) > 4 and w.endswith("s")) else w for w in raw_tokens]
         for ev in self._known_events:
             ev_text = f"{ev.get('name', '')} {ev.get('slug', '')} {ev.get('location', '')}".lower()
             if q_low in ev_text or (q_tokens and all(tok in ev_text for tok in q_tokens)):
@@ -226,7 +227,7 @@ class LiquipediaAggregator(BaseSportsAggregator):
 
     @staticmethod
     def _format_match_timestamp(raw_time_str: str, epoch_str: str) -> str:
-        """Formats Liquipedia's match time alongside UTC, local time, and Discord native timestamp."""
+        """Formats Liquipedia's match time alongside UTC and local time."""
         clean_raw = re.sub(r'\s+', ' ', (raw_time_str or "").strip())
         if not epoch_str or not str(epoch_str).isdigit():
             return clean_raw or "Time TBD"
@@ -239,8 +240,8 @@ class LiquipediaAggregator(BaseSportsAggregator):
             utc_str = utc_dt.strftime("%b %d, %H:%M UTC")
             local_str = f"{local_dt.strftime('%I:%M %p').lstrip('0')} {local_abbr}"
             if clean_raw:
-                return f"{clean_raw} ({utc_str} | {local_str} | <t:{ts}:t>)"
-            return f"{utc_str} ({local_str} | <t:{ts}:t>)"
+                return f"{clean_raw} ({utc_str} | {local_str})"
+            return f"{utc_str} ({local_str})"
         except Exception:
             return clean_raw or "Time TBD"
 
@@ -322,22 +323,31 @@ class LiquipediaAggregator(BaseSportsAggregator):
         return [m[1] for m in matches]
 
     def _parse_groups_from_soup(self, soup: BeautifulSoup) -> list[str]:
-        """Extracts Group Stage tables (e.g. Group A, Group B) from Liquipedia."""
+        """Extracts Group Stage tables and standings records (e.g. Group A, Group B) from Liquipedia."""
         group_lines = []
         for g_tbl in soup.select("table.grouptable"):
             header_el = g_tbl.select_one("th")
             if not header_el:
                 continue
-            raw_header = header_el.get_text(" | ", strip=True).split("|")[0].strip()
+            raw_header = re.sub(r'\bWeek\s+\d+\b', '', header_el.get_text(" | ", strip=True).split("|")[0]).strip()
             if not raw_header:
                 continue
             teams = []
+            seen_names = set()
             for tr in g_tbl.select("tr"):
                 team_el = tr.select_one(".block-team a[title], .team-template-text a[title]")
                 if team_el and team_el.get("title"):
                     t_name = re.sub(r'\s*\(page does not exist\)\s*$', '', team_el["title"].strip(), flags=re.IGNORECASE)
-                    if t_name and t_name not in teams:
-                        teams.append(t_name)
+                    if t_name and t_name not in seen_names:
+                        seen_names.add(t_name)
+                        tds = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
+                        if len(tds) >= 2 and re.match(r'^\d+-\d+$', tds[1]):
+                            wl = tds[1]
+                            rds = f", Rds: {tds[2]}" if len(tds) >= 3 and tds[2] else ""
+                            diff = f" ({tds[3]})" if len(tds) >= 4 and tds[3] else ""
+                            teams.append(f"{t_name} [{wl}{rds}{diff}]")
+                        else:
+                            teams.append(t_name)
             if teams:
                 group_lines.append(f"- **{raw_header}**: {', '.join(teams)}")
         return group_lines

@@ -347,5 +347,9 @@ def sanitize_agent_reply(reply: str) -> str:
 
     text = _TOOL_CALL_MENTION_RE.sub(_clean_tool_name, text)
     text = _HALLUCINATED_BETTING_URL_RE.sub('[Bet365](<https://www.bet365.com>)', text)
+    # Unwrap malformed Markdown links targeting Discord timestamp tags: [9:00 PM EDT](<t:1705347600:t>) -> 9:00 PM EDT
+    text = re.sub(r'\[([^\]]+)\]\(<?t:\d+(?::[a-zA-Z])?>?\)', r'\1', text)
+    # Clean up orphaned bullet colons left when a stage label was stripped: "*   : Matchup" -> "*   Matchup"
+    text = re.sub(r'(?m)^([ \t]*[-*•][ \t]+):\s+', r'\1', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()

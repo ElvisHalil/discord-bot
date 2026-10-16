@@ -19,7 +19,7 @@ def skill_csgo_esports(query_type: Optional[str] = 'all', event_page: Optional[s
       - 'event_info': Gets detailed info about a specific event, including CURRENT MATCHES and full TEAM ROSTERS (requires event_page).
       - 'rankings': Gets the current world team rankings from HLTV, including team rosters.
       - 'player_stats': Gets stats for a specific player (requires player_url).
-      - 'live_streams': Checks if ESL is currently streaming a live match on YouTube.
+      - 'live_streams': Checks if ESLCS, BLASTPremier, or thunderpickesports is currently streaming a live match on YouTube.
       - 'odds': Gets live betting odds, moneylines, and win probabilities for a matchup (pass matchup or event_page).
       - 'all': Fetches 'tournaments', 'rankings', and 'live_streams'.
 
@@ -38,14 +38,14 @@ def skill_csgo_esports(query_type: Optional[str] = 'all', event_page: Optional[s
         q_type = "odds"
     elif any(w in q_type for w in ("stat", "rating", "kdr", "kd")) or q_type == "player_stats" or player_url:
         q_type = "player_stats"
-    elif any(w in q_type for w in ("event", "roster", "lineup", "group", "bracket")) or ("player" in q_type and not player_url):
+    elif any(w in q_type for w in ("event", "roster", "lineup", "group", "bracket", "table")) or ("player" in q_type and not player_url):
         q_type = "event_info"
+    elif any(w in q_type for w in ("live", "stream", "broadcast")):
+        q_type = "live_streams"
     elif any(w in q_type for w in ("tourn", "schedule", "calendar", "match", "matches", "time", "today", "tomorrow", "upcoming", "next")):
         q_type = "tournaments"
     elif any(w in q_type for w in ("rank", "top", "leader", "standings")):
         q_type = "rankings"
-    elif any(w in q_type for w in ("live", "stream", "broadcast")):
-        q_type = "live_streams"
     elif q_type not in ['tournaments', 'event_info', 'rankings', 'player_stats', 'live_streams', 'odds', 'all']:
         if any(team in q_type for team in _odds_aggregator.CS_TEAMS):
             q_type = "odds"
@@ -104,12 +104,12 @@ Use this exact live data to answer the user's questions about CS esports.
    - Highlight what is happening NEXT: the immediate upcoming or active tournament starting soonest (from UPCOMING S-TIER TOURNAMENTS) with dates, prize pool, location, its clickable Markdown link `[Tournament Name](<https://liquipedia.net/...>)`, and key opening matchups/times if available in `MATCH SCHEDULE & RESULTS`.
    - Highlight recent action: mention the most recent tournament champion and runner-up (from RECENT TOURNAMENT CHAMPIONS).
    - Mention top world ranking leaders concisely (e.g. #1 Spirit, #2 Vitality) without dumping long lists of all players unless the user asked for rosters.
-   - If there is an active ESL YouTube live stream, highlight the matchup and stream link. If ESL is NOT broadcasting live, simply omit the live section or mention in passing that no games are live right now—DO NOT create a prominent empty section.
+   - If there is an active YouTube live stream (ESLCS, BLASTPremier, or thunderpickesports), highlight the channel, matchup, and stream link. If no channels are broadcasting live, simply omit the live section or mention in passing that no games are live right now—DO NOT create a prominent empty section.
    - NEVER output pseudo-links like `[Event Page](<event_page: ...>)` or `<event_page: ...>`. Only use real HTTPS links with angle brackets: `[Tournament](<https://liquipedia.net/...>)`.
    - Do NOT end your message with generic canned questions (e.g. "Need details about a specific team, tournament...?"). Converse naturally like an esports enthusiast.
 2. When asked about match schedules, match times, or "what time are matches today / tomorrow":
    - Use the exact matchups, stages (e.g. Group A Opening Matches, Playoffs), series format (`Bo3`, `Bo5`), and start times from `=== MATCH SCHEDULE & RESULTS (Exact Times) ===`.
-   - Present the exact start times provided in the data (including local/UTC times and Discord `<t:...:t>` timestamps).
+   - Present the exact human-readable start times provided in the data (including local, CEST, or UTC times). NEVER output or invent raw Unix epoch tags like `<t:...:t>` or `[Time](<t:...:t>)`.
    - NEVER claim that exact match times aren't specified or tell the user to check Liquipedia manually when the match schedule is present in the tool output!
 3. When asked "what teams are participating", groups, or rosters:
    - Present participating teams cleanly (grouped by `=== GROUP STAGE SEEDING ===` Group A / Group B when available, or with bold bullet points).

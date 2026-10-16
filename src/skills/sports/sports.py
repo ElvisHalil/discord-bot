@@ -24,7 +24,7 @@ CS_KEYWORDS = {
     "falcons", "nip", "ninjas in pyjamas", "vitality", "spirit", "team spirit",
     "navi", "natus vincere", "furia", "mouz", "faze", "g2", "virtus.pro",
     "astralis", "complexity", "the mongolz", "mongolz", "heroic", "eternal fire",
-    "thunderpick", "blast", "pgl", "iem", "esl"
+    "thunderpick", "thunderpicks", "blast", "pgl", "iem", "esl"
 }
 
 
@@ -199,16 +199,16 @@ def skill_sports_info(
             return _odds_aggregator.get_odds(target_q, sport="cs2")
         elif re.search(r'\b(?:stats|statistics|rating|kdr|kd)\b', q_str):
             return skill_csgo_esports(query_type="player_stats", player_url=player_raw or team_raw or target_q)
-        elif any(k in q_str for k in ("roster", "player", "lineup", "group", "bracket", "teams")):
+        elif any(k in q_str for k in ("roster", "player", "lineup", "group", "bracket", "teams", "table", "tables")) or (named_event and "standings" in q_str):
             return skill_csgo_esports(query_type="event_info", event_page=named_event or (target_q if target_q not in ("schedule", "") else None))
         elif any(k in q_str for k in ("rank", "top", "leader", "standings")) and not any(k in q_str for k in ("tourn", "schedule", "match", "matches")):
             return skill_csgo_esports(query_type="rankings")
+        elif any(k in q_str for k in ("live", "stream", "broadcast")):
+            return skill_csgo_esports(query_type="live_streams")
         elif re.search(r'\b(?:tourn\w*|schedule|next|upcoming|events?|match|matches|time|today|tomorrow|when|playing|plays)\b|\bplay\b(?!\s+(?:a|an|some|me|music|song|track))', q_str):
             return skill_csgo_esports(query_type="tournaments", event_page=named_event)
         elif any(k in q_str for k in ("rank", "top", "leader", "standings")):
             return skill_csgo_esports(query_type="rankings")
-        elif any(k in q_str for k in ("live", "stream", "broadcast")):
-            return skill_csgo_esports(query_type="live_streams")
         else:
             is_team_matchup = " vs " in q_str or sum(1 for t in _odds_aggregator.CS_TEAMS if bool(re.search(rf'\b{re.escape(t)}\b', q_str))) >= 2
             return skill_csgo_esports(

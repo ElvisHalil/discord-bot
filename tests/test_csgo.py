@@ -126,8 +126,8 @@ class TestLiquipediaAggregator(unittest.TestCase):
         self.assertIn("MATCH SCHEDULE & RESULTS (Exact Times)", res)
         self.assertIn("[Group A - Opening Matches]", res)
         self.assertIn("**Team Falcons** vs **Ninjas in Pyjamas** (Bo3)", res)
-        self.assertIn("08:30 UTC", res)
-        self.assertIn("<t:1791966600:t>", res)
+        self.assertIn("Oct 14, 08:30 UTC", res)
+        self.assertNotIn("<t:1791966600:t>", res)
 
 
 class TestCsgoSkill(unittest.TestCase):
@@ -240,6 +240,86 @@ class TestCsgoSkill(unittest.TestCase):
         self.assertEqual(norm.get("query_type"), "tournaments")
         self.assertEqual(norm.get("event_page"), "ESL/Pro_League")
         self.assertEqual(norm.get("matchup"), "Falcons vs NIP")
+
+    @patch.dict("os.environ", {"YOUTUBE_API_KEY": "test_yt_key"}, clear=False)
+    @patch("src.skills.sports.aggregators.kashrock.KashrockAggregator.get_live_scoreboards", return_value="")
+    @patch("src.skills.sports.aggregators.esl_live.requests.get")
+    def test_esl_live_aggregator_checks_esl_blast_and_thunderpick(self, mock_get, _mock_kr):
+        from src.skills.sports.aggregators.esl_live import EslLiveAggregator
+
+        def fake_get(_url, params=None, timeout=5):
+            cid = (params or {}).get("channelId")
+            resp = MagicMock()
+            if cid == "UCDs5D1luLRP2oo3lk71MaCA":  # thunderpickesports
+                resp.json.return_value = {
+                    "items": [{
+                        "id": {"videoId": "7Ql1O23W-hk"},
+                        "snippet": {"title": "Thunderpick World Championship 2026 Finals - Day 3"},
+                    }]
+                }
+            else:
+                resp.json.return_value = {"items": []}
+            return resp
+
+        mock_get.side_effect = fake_get
+        agg = EslLiveAggregator()
+        out = agg.get_live_matches()
+
+        self.assertEqual(mock_get.call_count, 3)
+        checked_ids = [call.kwargs["params"]["channelId"] for call in mock_get.call_args_list]
+        self.assertEqual(
+            checked_ids,
+            [
+                "UCPq2ETz4aAGo2Z-8JisDPIA",  # ESLCS
+                "UC9k--dE_UE0Faxzgb_DDkYQ",  # BLASTPremier
+                "UCDs5D1luLRP2oo3lk71MaCA",  # thunderpickesports
+            ],
+        )
+        self.assertIn("[LIVE CS2 STREAMS]", out)
+        self.assertIn("Thunderpick Esports (@thunderpickesports)", out)
+        self.assertIn("Thunderpick World Championship 2026 Finals - Day 3", out)
+        self.assertIn("https://www.youtube.com/watch?v=7Ql1O23W-hk", out)
+
+    @patch("src.skills.sports.sports.skill_csgo_esports")
+    def test_sports_info_routes_cs_live_stream_queries_to_live_streams(self, mock_csgo):
+        from src.skills.sports.sports import skill_sports_info
+        mock_csgo.return_value = "[LIVE CS2 STREAMS]"
+
+        res = skill_sports_info(sport="cs", query="are any live match streams happening on thunderpick or blast?")
+        mock_csgo.assert_called_once_with(query_type="live_streams")
+        self.assertEqual(res, "[LIVE CS2 STREAMS]")
+
+    @patch("src.skills.sports.sports.skill_csgo_esports")
+    def test_thunderpicks_and_blast_tournament_routing_and_group_records(self, mock_csgo):
+        from bs4 import BeautifulSoup
+        from src.skills.sports.sports import skill_sports_info
+
+        mock_csgo.return_value = "CS EVENT INFO"
+        skill_sports_info(query="thunderpicks table")
+        mock_csgo.assert_called_with(query_type="event_info", event_page="thunderpicks table")
+
+        mock_csgo.reset_mock()
+        skill_sports_info(query="blast standings")
+        mock_csgo.assert_called_with(query_type="event_info", event_page="blast standings")
+
+        agg = LiquipediaAggregator()
+        agg._known_events = [
+            {"name": "PGL Masters Bucharest 2026", "slug": "PGL/2026/Masters", "location": "Bucharest"},
+            {"name": "Thunderpick World Championship 2026", "slug": "Thunderpick/World_Championship/2026", "location": "Attard"},
+            {"name": "BLAST Rivals Fall 2026", "slug": "BLAST/Rivals/2026/Fall", "location": "Chek Lap Kok"},
+        ]
+        self.assertEqual(agg.resolve_event_slug("thunderpicks table"), "Thunderpick/World_Championship/2026")
+        self.assertEqual(agg.resolve_event_slug("blast standings"), "BLAST/Rivals/2026/Fall")
+
+        group_html = """
+        <table class="grouptable">
+          <tr><th>Group A Week 1</th></tr>
+          <tr><th>1.</th><td><span class="block-team"><a title="Team Falcons">Falcons</a></span></td><td>2-0</td><td>63-50</td><td>+13</td></tr>
+          <tr><th>2.</th><td><span class="block-team"><a title="Aurora Gaming">Aurora</a></span></td><td>2-1</td><td>64-57</td><td>+7</td></tr>
+        </table>
+        """
+        groups = agg._parse_groups_from_soup(BeautifulSoup(group_html, "html.parser"))
+        self.assertEqual(groups, ["- **Group A**: Team Falcons [2-0, Rds: 63-50 (+13)], Aurora Gaming [2-1, Rds: 64-57 (+7)]"])
 
 
 class TestOdds(unittest.TestCase):
