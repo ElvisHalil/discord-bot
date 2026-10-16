@@ -760,6 +760,8 @@ async def on_message(message):
             turn_delta = turn_history[turn_start_idx:]
             if len(turn_delta) == 1:
                 turn_delta.append({"role": "assistant", "content": reply})
+            else:
+                turn_delta[-1] = {"role": "assistant", "content": reply}
 
             async with channel_locks[channel_id]:
                 if channel_id not in chat_history:

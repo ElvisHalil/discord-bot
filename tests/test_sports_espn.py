@@ -367,7 +367,7 @@ class TestSportsEspnUpgrade(unittest.TestCase):
         from src.orchestrator import normalize_tool_args, enrich_sports_tool_args
 
         # Turn 1: User asks "When does Bayern Munich play next?", LLM passes only sport='soccer', query='schedule'
-        history_t1 = [{"role": "user", "content": "User Jubkill says: When does Bayern Munich play next?"}]
+        history_t1 = [{"role": "user", "content": "User Alex says: When does Bayern Munich play next?"}]
         raw_t1 = normalize_tool_args("skill_sports_info", skill_sports_info, {"sport": "soccer", "query": "schedule"})
         enriched_t1 = enrich_sports_tool_args(raw_t1, history_t1)
         self.assertIn("bayern munich", enriched_t1["query"].lower())
@@ -375,7 +375,7 @@ class TestSportsEspnUpgrade(unittest.TestCase):
         # Turn 2: User asks "what their roster?", LLM passes only sport='soccer', query='roster'
         history_t2 = history_t1 + [
             {"role": "assistant", "content": "Bayern Munich plays RB Leipzig next."},
-            {"role": "user", "content": "User Jubkill says: what their roster?"},
+            {"role": "user", "content": "User Alex says: what their roster?"},
         ]
         raw_t2 = normalize_tool_args("skill_sports_info", skill_sports_info, {"sport": "soccer", "query": "roster"})
         enriched_t2 = enrich_sports_tool_args(raw_t2, history_t2)

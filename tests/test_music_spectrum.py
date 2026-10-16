@@ -123,12 +123,12 @@ class TestMusicSpectrumGridAndClassifier(unittest.TestCase):
 class TestMusicSpectrumContextDisambiguation(unittest.TestCase):
     def test_non_music_domain_conversations_rejected(self):
         non_music_prompts = [
-            "User Jubkill says: Is the RTX 5090 faster than the 4090?",
-            "User Jubkill says: Why is Python slower than C++?",
-            "User Jubkill says: Leclerc needs to pit for softer tires in the next lap",
-            "User Jubkill says: Real Madrid has a harder schedule next month in La Liga",
-            "User Jubkill says: This math exam was way harder than last week's",
-            "User Jubkill says: The new update runs much faster on Windows",
+            "User Alex says: Is the RTX 5090 faster than the 4090?",
+            "User Alex says: Why is Python slower than C++?",
+            "User Alex says: Leclerc needs to pit for softer tires in the next lap",
+            "User Alex says: Real Madrid has a harder schedule next month in La Liga",
+            "User Alex says: This math exam was way harder than last week's",
+            "User Alex says: The new update runs much faster on Windows",
         ]
         song_card_history = [
             {"role": "assistant", "content": "**Song:** Nightcall\n**Artist:** Kavinsky\nhttps://music.youtube.com/watch?v=MV_3Dpw-BRY"},
@@ -148,13 +148,13 @@ class TestMusicSpectrumContextDisambiguation(unittest.TestCase):
     def test_casual_followup_after_non_music_reply_rejected(self):
         history = [
             {"role": "assistant", "content": "Quantum entanglement occurs when two particles remain correlated across distance."},
-            {"role": "user", "content": "User Jubkill says: can you explain that slower?"},
+            {"role": "user", "content": "User Alex says: can you explain that slower?"},
         ]
         self.assertFalse(is_valid_music_shift_context(history[-1]["content"], history))
         self.assertIsNone(detect_missed_music_shift_tool_call(history))
 
     def test_tier_1a_reply_to_song_card_accepted(self):
-        user_msg = "User Jubkill says [Replying to song card: 'Nightcall' by 'Kavinsky']: harder"
+        user_msg = "User Alex says [Replying to song card: 'Nightcall' by 'Kavinsky']: harder"
         history = [{"role": "user", "content": user_msg}]
         self.assertTrue(is_valid_music_shift_context(user_msg, history))
 
@@ -166,7 +166,7 @@ class TestMusicSpectrumContextDisambiguation(unittest.TestCase):
         self.assertEqual(missed, ("skill_top_music", {"shift": "harder", "similar_to": "Nightcall by Kavinsky"}))
 
     def test_tier_1b_explicit_music_shift_accepted(self):
-        user_msg = "User Jubkill says: play something faster and harder"
+        user_msg = "User Alex says: play something faster and harder"
         history = [{"role": "user", "content": user_msg}]
         self.assertTrue(is_valid_music_shift_context(user_msg, history))
 
@@ -185,7 +185,7 @@ class TestMusicSpectrumContextDisambiguation(unittest.TestCase):
                     "https://music.youtube.com/watch?v=TWcyIpul8OE"
                 ),
             },
-            {"role": "user", "content": "User Jubkill says: faster"},
+            {"role": "user", "content": "User Alex says: faster"},
         ]
         self.assertTrue(is_valid_music_shift_context(history[-1]["content"], history))
         missed = detect_missed_music_shift_tool_call(history)

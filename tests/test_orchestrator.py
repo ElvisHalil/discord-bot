@@ -122,16 +122,16 @@ class TestTrimHistory(unittest.TestCase):
 
 class TestAutoPing(unittest.TestCase):
     def test_pings_names(self):
-        self.assertEqual(apply_auto_ping("yo jubkill, nice", {"jubkill": 42}), "yo <@42>, nice")
-        self.assertEqual(apply_auto_ping("@Jubkill lol", {"jubkill": 42}), "<@42> lol")
+        self.assertEqual(apply_auto_ping("yo alex, nice", {"alex": 42}), "yo <@42>, nice")
+        self.assertEqual(apply_auto_ping("@Alex lol", {"alex": 42}), "<@42> lol")
 
     def test_ignores_short_names_and_substrings(self):
         self.assertEqual(apply_auto_ping("it is what it is", {"it": 1}), "it is what it is")
         self.assertEqual(apply_auto_ping("samsung phone", {"sam": 1}), "samsung phone")
 
     def test_does_not_touch_urls_mentions_or_code(self):
-        reply = "see https://jubkill.com/page and <@99> and `jubkill`"
-        self.assertEqual(apply_auto_ping(reply, {"jubkill": 42}), reply)
+        reply = "see https://alex.example.com/page and <@99> and `alex`"
+        self.assertEqual(apply_auto_ping(reply, {"alex": 42}), reply)
 
 
 class TestOrphanBullets(unittest.TestCase):
@@ -259,7 +259,7 @@ class TestExtractReplyContext(unittest.TestCase):
     def test_extract_song_card_reply(self):
         from src.orchestrator import extract_reply_context
         song_card = (
-            "<@123456> User Jubkill reacted with 👍 to 'Strobe by deadmau5'. Check out this similar song:\n\n"
+            "<@123456> User Alex reacted with 👍 to 'Strobe by deadmau5'. Check out this similar song:\n\n"
             "**Song:** Apex\n"
             "**Artist:** Bicep\n"
             "**Genre:** Techno\n\n"
@@ -286,13 +286,13 @@ class TestSportsFollowupAndMissedToolEnforcement(unittest.TestCase):
 
         history = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "User Jubkill says: whats status of real madrid game"},
+            {"role": "user", "content": "User Alex says: whats status of real madrid game"},
             {"role": "assistant", "content": "AS Roma 2 - 1 Real Madrid (55')"},
-            {"role": "user", "content": "User Jubkill says: track this game"},
+            {"role": "user", "content": "User Alex says: track this game"},
             {"role": "assistant", "content": "Tracking active"},
-            {"role": "user", "content": "User Jubkill says: who scored last goal what time?"},
+            {"role": "user", "content": "User Alex says: who scored last goal what time?"},
             {"role": "assistant", "content": "Malen at 51'"},
-            {"role": "user", "content": "User Jubkill says: hows the game going"},
+            {"role": "user", "content": "User Alex says: hows the game going"},
         ]
         enriched = enrich_sports_tool_args({"query": "status"}, history)
         self.assertIn("real madrid", enriched["query"].lower())
@@ -302,10 +302,10 @@ class TestSportsFollowupAndMissedToolEnforcement(unittest.TestCase):
 
         history_track = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "User Jubkill says: whats status of real madrid game"},
+            {"role": "user", "content": "User Alex says: whats status of real madrid game"},
             {"role": "tool", "name": "skill_sports_info", "content": "AS Roma 2 - 1 Real Madrid (55')"},
             {"role": "assistant", "content": "AS Roma 2 - 1 Real Madrid (55')"},
-            {"role": "user", "content": "User Jubkill says: track this game"},
+            {"role": "user", "content": "User Alex says: track this game"},
         ]
         missed_track = detect_missed_sports_tool_call(history_track, active_channel_id=101)
         self.assertIsNotNone(missed_track)
@@ -315,7 +315,7 @@ class TestSportsFollowupAndMissedToolEnforcement(unittest.TestCase):
 
         history_status = history_track + [
             {"role": "assistant", "content": "Tracking active"},
-            {"role": "user", "content": "User Jubkill says: hows the game going"},
+            {"role": "user", "content": "User Alex says: hows the game going"},
         ]
         missed_status = detect_missed_sports_tool_call(history_status, active_channel_id=101)
         self.assertIsNotNone(missed_status)
@@ -325,7 +325,7 @@ class TestSportsFollowupAndMissedToolEnforcement(unittest.TestCase):
         # Music reaction / track queries must never trigger sports tracker
         history_music = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "Jubkill reacted with 👍 to 'Song' requesting a similar track."},
+            {"role": "user", "content": "Alex reacted with 👍 to 'Song' requesting a similar track."},
         ]
         self.assertIsNone(detect_missed_sports_tool_call(history_music, active_channel_id=101))
 
@@ -504,7 +504,7 @@ class TestWorkerConcurrencyAndLockFreeTurns(unittest.IsolatedAsyncioTestCase):
             "update_id": 100,
             "message": {
                 "message_id": 1,
-                "from": {"id": 123456789, "is_bot": False, "first_name": "Halil"},
+                "from": {"id": 123456789, "is_bot": False, "first_name": "Alex"},
                 "chat": {"id": 555000, "type": "private"},
                 "text": "what are the hockey games today?",
             },
@@ -513,7 +513,7 @@ class TestWorkerConcurrencyAndLockFreeTurns(unittest.IsolatedAsyncioTestCase):
             "update_id": 101,
             "message": {
                 "message_id": 2,
-                "from": {"id": 123456789, "is_bot": False, "first_name": "Halil"},
+                "from": {"id": 123456789, "is_bot": False, "first_name": "Alex"},
                 "chat": {"id": 555000, "type": "private"},
                 "text": "what is 25 * 14?",
             },
@@ -636,7 +636,7 @@ class TestConversationWithAllToolsAndSkills(unittest.IsolatedAsyncioTestCase):
         # 1. Conversation with comparative words ("slower", "harder day") + explicit genre request -> must NOT trigger NON_MUSIC_CONVERSATION
         hist_genre = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "User Halil says: Yo how's it going! I had a harder day today and traffic was slower than usual, can you play a drum and bass song?"},
+            {"role": "user", "content": "User Alex says: Yo how's it going! I had a harder day today and traffic was slower than usual, can you play a drum and bass song?"},
         ]
         args_genre = enrich_music_tool_args({"genre": "drum and bass", "shift": "slower"}, hist_genre)
         self.assertEqual(args_genre.get("genre"), "drum and bass")
@@ -645,7 +645,7 @@ class TestConversationWithAllToolsAndSkills(unittest.IsolatedAsyncioTestCase):
         # 2. Conversation + Artist request
         hist_artist = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "User Halil says: Hey bot! Why is Python slower than C++? Also play a song by Daft Punk"},
+            {"role": "user", "content": "User Alex says: Hey bot! Why is Python slower than C++? Also play a song by Daft Punk"},
         ]
         args_artist = enrich_music_tool_args({"artist": "Daft Punk"}, hist_artist)
         self.assertEqual(args_artist.get("artist"), "Daft Punk")
@@ -654,7 +654,7 @@ class TestConversationWithAllToolsAndSkills(unittest.IsolatedAsyncioTestCase):
         # 3. Conversation + Mood request
         hist_mood = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "User Halil says: Good morning! Play something chill while I work"},
+            {"role": "user", "content": "User Alex says: Good morning! Play something chill while I work"},
         ]
         args_mood = enrich_music_tool_args({"mood": "chill"}, hist_mood)
         self.assertEqual(args_mood.get("mood"), "chill")
@@ -663,7 +663,7 @@ class TestConversationWithAllToolsAndSkills(unittest.IsolatedAsyncioTestCase):
         # 4. Conversation + Relative Spectrum Shift
         hist_shift = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "User Halil says: That last song was nice, now play something faster and harder"},
+            {"role": "user", "content": "User Alex says: That last song was nice, now play something faster and harder"},
         ]
         args_shift = enrich_music_tool_args({}, hist_shift)
         self.assertEqual(args_shift.get("shift"), "That last song was nice, now play something faster and harder")
@@ -681,7 +681,7 @@ class TestConversationWithAllToolsAndSkills(unittest.IsolatedAsyncioTestCase):
         # Sports enrichment with conversational + music clause strips the music clause cleanly
         hist_sports_conv = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "User Halil says: hey how's it going? what are the NHL games today and play a rock track"},
+            {"role": "user", "content": "User Alex says: hey how's it going? what are the NHL games today and play a rock track"},
         ]
         s_args = enrich_sports_tool_args({"sport": "nhl", "query": "games today"}, hist_sports_conv)
         self.assertNotIn("rock track", s_args["query"].lower())
@@ -768,7 +768,7 @@ class TestAllToolAndSkillCombinations(unittest.IsolatedAsyncioTestCase):
         # When model calls both skill_sports_info(sport='nhl') and skill_csgo_esports in parallel
         hist = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "User Halil says: when does Team Spirit play in CS2 and what are the NHL games today?"},
+            {"role": "user", "content": "User Alex says: when does Team Spirit play in CS2 and what are the NHL games today?"},
         ]
         enriched = enrich_sports_tool_args(
             {"sport": "nhl", "query": "NHL games today"},
@@ -781,7 +781,7 @@ class TestAllToolAndSkillCombinations(unittest.IsolatedAsyncioTestCase):
         # When model calls both skill_sports_info(sport='nba') and skill_betting_odds in parallel
         hist_odds = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "User Halil says: what are the NBA games today and their betting odds"},
+            {"role": "user", "content": "User Alex says: what are the NBA games today and their betting odds"},
         ]
         enriched_odds = enrich_sports_tool_args(
             {"sport": "nba", "query": "NBA games today"},
@@ -846,7 +846,7 @@ class TestAllToolAndSkillCombinations(unittest.IsolatedAsyncioTestCase):
         ])
         turn_hist = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "User Halil says: check Calgary weather, NHL games today, find the GTA 6 trailer video, and play a synthwave song"},
+            {"role": "user", "content": "User Alex says: check Calgary weather, NHL games today, find the GTA 6 trailer video, and play a synthwave song"},
         ]
         with patch.object(main_mod.ollama_client, "chat", mock_chat):
             reply = await main_mod.run_agent_turn(777, fake_mode_cfg, turn_history=turn_hist)
@@ -872,7 +872,7 @@ class TestAllToolAndSkillCombinations(unittest.IsolatedAsyncioTestCase):
         ])
         turn_hist_blocked = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "User Halil says: play a rock song"},
+            {"role": "user", "content": "User Alex says: play a rock song"},
         ]
         with patch.object(main_mod.ollama_client, "chat", mock_chat_blocked):
             await main_mod.run_agent_turn(778, fake_mode_cfg, turn_history=turn_hist_blocked)
@@ -888,16 +888,16 @@ class TestMultiTurnAndStatefulFlows(unittest.TestCase):
 
         prior_sports = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "User Halil says: whats the score of the real madrid game"},
+            {"role": "user", "content": "User Alex says: whats the score of the real madrid game"},
             {"role": "tool", "name": "skill_sports_info", "content": "Real Madrid 2 - 1 Barcelona (60')"},
             {"role": "assistant", "content": "Real Madrid leads 2-1 in the 60th minute."},
         ]
         casual_turns = [
-            "User Halil says: hey how's it going?",
-            "User Halil says: where do you live?",
-            "User Halil says: glad the workday is over!",
-            "User Halil says: I ate half a pizza earlier",
-            "User Halil says: how's it going? also play a synthwave song",
+            "User Alex says: hey how's it going?",
+            "User Alex says: where do you live?",
+            "User Alex says: glad the workday is over!",
+            "User Alex says: I ate half a pizza earlier",
+            "User Alex says: how's it going? also play a synthwave song",
         ]
         for msg in casual_turns:
             with self.subTest(msg=msg):
@@ -905,10 +905,10 @@ class TestMultiTurnAndStatefulFlows(unittest.TestCase):
 
         # Genuine match follow-ups after a sports turn MUST still trigger skill_sports_info
         genuine_followups = [
-            "User Halil says: hows the game going?",
-            "User Halil says: is it still live?",
-            "User Halil says: is the game over?",
-            "User Halil says: who scored last goal?",
+            "User Alex says: hows the game going?",
+            "User Alex says: is it still live?",
+            "User Alex says: is the game over?",
+            "User Alex says: who scored last goal?",
         ]
         for msg in genuine_followups:
             with self.subTest(msg=msg):
@@ -922,7 +922,7 @@ class TestMultiTurnAndStatefulFlows(unittest.TestCase):
         # Replying to a song card with a brand-new genre request ("nice song! now play some jazz")
         # should NOT force similar_to='Nightcall by Kavinsky'
         hist_override = [
-            {"role": "user", "content": "User Halil says [Replying to song card: 'Nightcall' by 'Kavinsky']: nice song! now play some jazz"},
+            {"role": "user", "content": "User Alex says [Replying to song card: 'Nightcall' by 'Kavinsky']: nice song! now play some jazz"},
         ]
         enriched_override = enrich_music_tool_args({"genre": "jazz"}, hist_override)
         self.assertEqual(enriched_override.get("genre"), "jazz")
@@ -930,7 +930,7 @@ class TestMultiTurnAndStatefulFlows(unittest.TestCase):
 
         # Replying to a song card asking for "something similar in synthwave" SHOULD keep similar_to
         hist_sim = [
-            {"role": "user", "content": "User Halil says [Replying to song card: 'Nightcall' by 'Kavinsky']: play something similar to this in synthwave"},
+            {"role": "user", "content": "User Alex says [Replying to song card: 'Nightcall' by 'Kavinsky']: play something similar to this in synthwave"},
         ]
         enriched_sim = enrich_music_tool_args({"genre": "synthwave"}, hist_sim)
         self.assertEqual(enriched_sim.get("genre"), "synthwave")
@@ -953,8 +953,335 @@ class TestMultiTurnAndStatefulFlows(unittest.TestCase):
         self.assertIn("**Album:** FUTURE", out)
 
 
+class TestMultiUserDiscordChannelConcurrency(unittest.IsolatedAsyncioTestCase):
+    """Emulates 2 and 3 users interacting concurrently in a shared Discord channel
+    through main.on_message, main.on_raw_reaction_add, and main.handle_live_match_update."""
+
+    async def test_three_users_concurrent_on_message_in_shared_discord_channel(self):
+        import asyncio
+        import time
+        from contextlib import asynccontextmanager
+        from types import SimpleNamespace
+        from src.utils.workers import run_in_worker
+
+        with patch("main.ensure_ollama_running"):
+            import main as main_mod
+
+        channel_id = 9001
+        bot_user = SimpleNamespace(id=999, name="Bot", display_name="Bot")
+        sent_messages = []
+
+        @asynccontextmanager
+        async def fake_typing():
+            yield
+
+        async def fake_send(text):
+            sent_messages.append(text)
+
+        fake_channel = SimpleNamespace(
+            id=channel_id,
+            typing=fake_typing,
+            send=fake_send,
+        )
+
+        user_alex = SimpleNamespace(id=101, name="alex", display_name="Alex", mention="<@101>")
+        user_sam = SimpleNamespace(id=102, name="sam", display_name="Sam", mention="<@102>")
+        user_jordan = SimpleNamespace(id=103, name="jordan", display_name="Jordan", mention="<@103>")
+
+        msg_alex = SimpleNamespace(
+            author=user_alex,
+            channel=fake_channel,
+            content="<@999> what are the NHL games today?",
+            mentions=[bot_user],
+            reference=None,
+        )
+        msg_sam = SimpleNamespace(
+            author=user_sam,
+            channel=fake_channel,
+            content="<@999> play a synthwave song",
+            mentions=[bot_user],
+            reference=None,
+        )
+        msg_jordan = SimpleNamespace(
+            author=user_jordan,
+            channel=fake_channel,
+            content="<@999> what is 12 * 12?",
+            mentions=[bot_user],
+            reference=None,
+        )
+
+        async def fake_run_agent_turn(cid, mode_config, turn_history=None):
+            history = turn_history
+            user_prompt = history[-1]["content"]
+            if "NHL games" in user_prompt:
+                history.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"function": {"name": "skill_sports_info", "arguments": {"sport": "nhl"}}}],
+                })
+                tool_out = await run_in_worker(lambda: (time.sleep(0.14), "=== NHL ===\nOilers vs Flames")[1])
+                history.append({"role": "tool", "name": "skill_sports_info", "content": tool_out})
+                raw_reply = "Hey Alex, today's NHL game is Oilers vs Flames."
+                history.append({"role": "assistant", "content": raw_reply})
+                return raw_reply
+            elif "synthwave song" in user_prompt:
+                history.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"function": {"name": "skill_top_music", "arguments": {"genre": "synthwave"}}}],
+                })
+                tool_out = await run_in_worker(lambda: (time.sleep(0.06), "Song: Nightcall\nArtist: Kavinsky")[1])
+                history.append({"role": "tool", "name": "skill_top_music", "content": tool_out})
+                raw_reply = (
+                    "Here you go Sam:\n"
+                    "**Song:** Nightcall\n"
+                    "**Artist:** Kavinsky\n"
+                    "https://music.youtube.com/watch?v=MV_3Dpw-BRY"
+                )
+                history.append({"role": "assistant", "content": raw_reply})
+                return raw_reply
+            else:
+                await asyncio.sleep(0.01)
+                raw_reply = "Yo Jordan, 12 * 12 is 144."
+                history.append({"role": "assistant", "content": raw_reply})
+                return raw_reply
+
+        main_mod.chat_history.pop(channel_id, None)
+        main_mod.known_users.clear()
+        prev_mode = main_mod.current_mode
+        main_mod.current_mode = "chat"
+
+        try:
+            with patch.object(main_mod, "client", SimpleNamespace(user=bot_user)), patch.object(
+                main_mod, "run_agent_turn", side_effect=fake_run_agent_turn
+            ), patch(
+                "src.skills.youtube.client.verify_embeddable", return_value=True
+            ), patch(
+                "src.skills.music.utils.get_music_metadata",
+                return_value={"song": "Nightcall", "artist": "Kavinsky", "album": "OutRun", "genre": "Synthwave"},
+            ):
+                t_alex = asyncio.create_task(main_mod.on_message(msg_alex))
+                await asyncio.sleep(0.005)
+                t_sam = asyncio.create_task(main_mod.on_message(msg_sam))
+                await asyncio.sleep(0.005)
+                t_jordan = asyncio.create_task(main_mod.on_message(msg_jordan))
+                await asyncio.gather(t_alex, t_sam, t_jordan)
+
+            # 1. Replies sent in completion order: Jordan (fastest) -> Sam (medium) -> Alex (slowest)
+            self.assertEqual(len(sent_messages), 3)
+            self.assertIn("<@103>", sent_messages[0])
+            self.assertIn("144", sent_messages[0])
+            self.assertIn("<@102>", sent_messages[1])
+            self.assertIn("**Genre:** Synthwave", sent_messages[1])
+            self.assertIn("<@101>", sent_messages[2])
+            self.assertIn("Oilers vs Flames", sent_messages[2])
+
+            # 2. All 3 users registered in known_users
+            self.assertEqual(main_mod.known_users.get("alex"), 101)
+            self.assertEqual(main_mod.known_users.get("sam"), 102)
+            self.assertEqual(main_mod.known_users.get("jordan"), 103)
+
+            # 3. chat_history[9001] has 3 atomic, non-interleaved turn blocks AND stores the post-processed reply
+            hist = main_mod.chat_history[channel_id]
+            roles = [m["role"] for m in hist]
+            # [system, jordan_u, jordan_a, sam_u, sam_tc, sam_tool, sam_a, alex_u, alex_tc, alex_tool, alex_a]
+            self.assertEqual(
+                roles,
+                ["system", "user", "assistant", "user", "assistant", "tool", "assistant", "user", "assistant", "tool", "assistant"],
+            )
+            # Sam's committed assistant message in chat_history includes the standardized Genre line and auto-ping
+            self.assertIn("**Genre:** Synthwave", hist[6]["content"])
+            self.assertIn("<@102>", hist[6]["content"])
+        finally:
+            main_mod.current_mode = prev_mode
+            main_mod.chat_history.pop(channel_id, None)
+
+    async def test_dual_user_message_turn_concurrent_with_second_user_thumbs_up_and_live_tracker_alert(self):
+        import asyncio
+        import time
+        from contextlib import asynccontextmanager
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from src.utils.workers import run_in_worker
+
+        with patch("main.ensure_ollama_running"):
+            import main as main_mod
+
+        channel_id = 9002
+        bot_user = SimpleNamespace(id=999, name="Bot", display_name="Bot")
+        sent_messages = []
+
+        @asynccontextmanager
+        async def fake_typing():
+            yield
+
+        async def fake_send(text):
+            sent_messages.append(text)
+
+        reacted_card_msg = SimpleNamespace(
+            id=5001,
+            author=bot_user,
+            content=(
+                "**Song:** Nightcall\n"
+                "**Artist:** Kavinsky\n"
+                "**Genre:** Synthwave\n\n"
+                "https://music.youtube.com/watch?v=MV_3Dpw-BRY"
+            ),
+        )
+
+        async def fake_fetch_message(mid):
+            return reacted_card_msg
+
+        fake_channel = SimpleNamespace(
+            id=channel_id,
+            typing=fake_typing,
+            send=fake_send,
+            fetch_message=fake_fetch_message,
+        )
+
+        user_alex = SimpleNamespace(id=101, name="alex", display_name="Alex", mention="<@101>")
+        user_sam = SimpleNamespace(id=102, name="sam", display_name="Sam", mention="<@102>")
+
+        fake_client = SimpleNamespace(
+            user=bot_user,
+            get_channel=lambda cid: fake_channel,
+            fetch_channel=AsyncMock(return_value=fake_channel),
+            get_user=lambda uid: user_sam if uid == 102 else user_alex,
+            fetch_user=AsyncMock(return_value=user_sam),
+        )
+
+        msg_alex = SimpleNamespace(
+            author=user_alex,
+            channel=fake_channel,
+            content="<@999> check the weather in Tokyo",
+            mentions=[bot_user],
+            reference=None,
+        )
+        reaction_payload = SimpleNamespace(
+            user_id=102,
+            channel_id=channel_id,
+            message_id=5001,
+            emoji="👍",
+        )
+        live_match = SimpleNamespace(channel_id=channel_id, league_name="Premier League")
+        live_snapshot = SimpleNamespace(
+            home_team="Arsenal",
+            away_team="Chelsea",
+            home_score=2,
+            away_score=1,
+            status_detail="78'",
+            stats_summary="Possession: ARS 58% - 42% CHE",
+        )
+
+        async def fake_run_agent_turn(cid, mode_config, turn_history=None):
+            turn_history.append({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "skill_weather_reporter", "arguments": {"city": "Tokyo"}}}],
+            })
+            out = await run_in_worker(lambda: (time.sleep(0.12), "Sunny +22C")[1])
+            turn_history.append({"role": "tool", "name": "skill_weather_reporter", "content": out})
+            reply = "Tokyo is currently Sunny and +22C."
+            turn_history.append({"role": "assistant", "content": reply})
+            return reply
+
+        main_mod.chat_history.pop(channel_id, None)
+        main_mod.handled_reactions.clear()
+
+        try:
+            with patch.object(main_mod, "client", fake_client), patch.object(
+                main_mod, "run_agent_turn", side_effect=fake_run_agent_turn
+            ), patch.object(
+                main_mod.ollama_client,
+                "chat",
+                AsyncMock(return_value=SimpleNamespace(message=SimpleNamespace(content="Here is a similar synthwave track!"))),
+            ), patch(
+                "main.tools.skill_top_music",
+                return_value=(
+                    "=== VERIFIED YOUTUBE MUSIC RESULT ===\n"
+                    "Song: Midnight City\n"
+                    "Artist: M83\n"
+                    "Genre: Synthpop\n"
+                    "Link: https://music.youtube.com/watch?v=dX3k_QDnzHE\n"
+                ),
+            ), patch(
+                "main.get_music_metadata",
+                return_value={"song": "Midnight City", "artist": "M83", "album": "Hurry Up, We're Dreaming", "genre": "Synthpop"},
+            ):
+                t_alex = asyncio.create_task(main_mod.on_message(msg_alex))
+                await asyncio.sleep(0.01)
+                t_sam_react = asyncio.create_task(main_mod.on_raw_reaction_add(reaction_payload))
+                t_tracker = asyncio.create_task(
+                    main_mod.handle_live_match_update(live_match, live_snapshot, ["⚽ GOAL! Saka 78' (Arsenal)"])
+                )
+                await asyncio.gather(t_alex, t_sam_react, t_tracker)
+
+            # All 3 events sent their messages to the channel
+            self.assertEqual(len(sent_messages), 3)
+            self.assertTrue(any("📡 **LIVE UPDATE (Premier League)**" in m for m in sent_messages))
+            self.assertTrue(any("<@102>" in m and "**Song:** Midnight City" in m for m in sent_messages))
+            self.assertTrue(any("Tokyo is currently Sunny" in m for m in sent_messages))
+
+            # Verify Alex's [assistant(tool_call), tool(output), assistant(reply)] block in chat_history was NOT split
+            hist = main_mod.chat_history[channel_id]
+            tool_idx = next(i for i, m in enumerate(hist) if m.get("role") == "tool" and m.get("name") == "skill_weather_reporter")
+            self.assertEqual(hist[tool_idx - 1].get("role"), "assistant")
+            self.assertTrue(hist[tool_idx - 1].get("tool_calls"))
+            self.assertEqual(hist[tool_idx + 1].get("role"), "assistant")
+            self.assertIn("Tokyo is currently Sunny", hist[tool_idx + 1].get("content", ""))
+        finally:
+            main_mod.chat_history.pop(channel_id, None)
+            main_mod.handled_reactions.clear()
+
+    async def test_three_users_concurrent_save_memory_and_recall_thread_safety(self):
+        import asyncio
+        import json
+        import os
+        import tempfile
+        from src.tools.system import recall_memories, save_memory, set_memory_file
+        from src.utils.workers import run_in_worker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem_path = os.path.join(tmpdir, "shared_memory.json")
+            set_memory_file(mem_path)
+            try:
+                facts = [
+                    "Alex supports Arsenal in the Premier League",
+                    "Sam loves drum and bass music",
+                    "Jordan watches Formula 1 and NHL",
+                    "Alex prefers dark roast coffee",
+                    "Sam plays Counter-Strike 2 on weekends",
+                    "Jordan lives in Mountain Time",
+                ]
+                await asyncio.gather(
+                    *(run_in_worker(save_memory, f) for f in facts),
+                    run_in_worker(recall_memories),
+                )
+                with open(mem_path, "r", encoding="utf-8") as f:
+                    saved = json.load(f)
+                self.assertEqual(sorted(saved), sorted(facts))
+                recalled = recall_memories()
+                for f in facts:
+                    self.assertIn(f, recalled)
+            finally:
+                set_memory_file("data/memory.json")
+
+    async def test_daemon_worker_pool_and_shutdown_suppresses_keyboard_interrupt(self):
+        import threading
+        from src.utils.workers import SUB_WORKER_POOL, WORKER_POOL, run_in_worker, submit_to_worker
+
+        res1 = await run_in_worker(lambda: threading.current_thread().daemon)
+        res2 = submit_to_worker(lambda: threading.current_thread().daemon).result(timeout=5)
+        self.assertTrue(res1)
+        self.assertTrue(res2)
+        self.assertTrue(all(t.daemon for t in WORKER_POOL._threads))
+        self.assertTrue(all(t.daemon for t in SUB_WORKER_POOL._threads))
+        self.assertTrue(getattr(threading._shutdown, "_bot_wrapped", False))
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

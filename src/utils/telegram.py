@@ -594,6 +594,8 @@ async def handle_telegram_update(
         turn_delta = turn_history[turn_start_idx:]
         if len(turn_delta) == 1:
             turn_delta.append({"role": "assistant", "content": reply})
+        else:
+            turn_delta[-1] = {"role": "assistant", "content": reply}
 
         async with main_mod.channel_locks[internal_cid]:
             if internal_cid not in main_mod.chat_history:

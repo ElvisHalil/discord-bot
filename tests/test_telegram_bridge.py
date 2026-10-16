@@ -159,7 +159,7 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
                 "update_id": 2,
                 "message": {
                     "message_id": 11,
-                    "from": {"id": 123456789, "is_bot": False, "first_name": "Halil"},
+                    "from": {"id": 123456789, "is_bot": False, "first_name": "Alex"},
                     "chat": {"id": 123456789, "type": "private"},
                     "text": "/reset",
                 },
@@ -178,7 +178,7 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
                 "update_id": 3,
                 "message": {
                     "message_id": 12,
-                    "from": {"id": 123456789, "is_bot": False, "first_name": "Halil"},
+                    "from": {"id": 123456789, "is_bot": False, "first_name": "Alex"},
                     "chat": {"id": 123456789, "type": "private"},
                     "text": "play some daft punk",
                 },
@@ -201,7 +201,7 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
                 "message_reaction": {
                     "chat": {"id": 123456789, "type": "private"},
                     "message_id": 42,
-                    "user": {"id": 123456789, "is_bot": False, "first_name": "Halil"},
+                    "user": {"id": 123456789, "is_bot": False, "first_name": "Alex"},
                     "new_reaction": [{"type": "emoji", "emoji": "👍"}],
                 },
             }
@@ -282,7 +282,7 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
             "update_id": 10,
             "message": {
                 "message_id": 50,
-                "from": {"id": 123456789, "is_bot": False, "first_name": "Halil"},
+                "from": {"id": 123456789, "is_bot": False, "first_name": "Alex"},
                 "chat": {"id": 123456789, "type": "private"},
                 "text": "/mode chat",
             },

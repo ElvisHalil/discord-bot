@@ -8,17 +8,69 @@ across worker and sub-worker threads.
 import asyncio
 import concurrent.futures.thread as _cft
 import contextvars
+import threading
+import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, Iterable, List, Optional, TypeVar
 
 T = TypeVar("T")
 
+
+class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
+    """ThreadPoolExecutor that spawns daemon=True worker threads so CPython 3.14's
+    C-level _thread_shutdown() never hangs on in-flight background scrapes at Ctrl+C exit."""
+
+    def _adjust_thread_count(self) -> None:
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+
+        def weakref_cb(_, q=self._work_queue):
+            q.put(None)
+
+        num_threads = len(self._threads)
+        if num_threads < self._max_workers:
+            thread_name = f"{self._thread_name_prefix or self}_{num_threads}"
+            if hasattr(self, "_create_worker_context"):
+                worker_args = (
+                    weakref.ref(self, weakref_cb),
+                    self._create_worker_context(),
+                    self._work_queue,
+                )
+            else:
+                worker_args = (
+                    weakref.ref(self, weakref_cb),
+                    self._work_queue,
+                    self._initializer,
+                    self._initargs,
+                )
+            t = threading.Thread(
+                name=thread_name,
+                target=_cft._worker,
+                args=worker_args,
+                daemon=True,
+            )
+            t.start()
+            self._threads.add(t)
+
+
+_orig_threading_shutdown = getattr(threading, "_shutdown", None)
+if callable(_orig_threading_shutdown) and not getattr(_orig_threading_shutdown, "_bot_wrapped", False):
+    def _quiet_threading_shutdown() -> None:
+        try:
+            _orig_threading_shutdown()
+        except KeyboardInterrupt:
+            pass
+
+    _quiet_threading_shutdown._bot_wrapped = True  # type: ignore[attr-defined]
+    threading._shutdown = _quiet_threading_shutdown  # type: ignore[attr-defined]
+
+
 # Top-level executor for agent tool turns (`run_in_worker`)
-WORKER_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="BotTurnWorker")
+WORKER_POOL = _DaemonThreadPoolExecutor(max_workers=16, thread_name_prefix="BotTurnWorker")
 
 # Sub-worker executor for synchronous fan-out inside skills (`submit_to_worker`, `map_in_workers`)
 # Separated from WORKER_POOL so parent tool threads waiting on child futures can never starve or deadlock.
-SUB_WORKER_POOL = ThreadPoolExecutor(max_workers=24, thread_name_prefix="BotSubWorker")
+SUB_WORKER_POOL = _DaemonThreadPoolExecutor(max_workers=24, thread_name_prefix="BotSubWorker")
 
 
 async def run_in_worker(func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
@@ -59,13 +111,18 @@ def map_in_workers(
 
 
 def shutdown_worker_pool() -> None:
-    """Cleanly shut down the shared worker pools on process exit without blocking Ctrl+C."""
+    """Cleanly shut down the shared worker pools and signal any stdlib executor queues on exit."""
     for pool in (WORKER_POOL, SUB_WORKER_POOL):
         try:
             pool.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
     try:
+        for q in list(_cft._threads_queues.values()):
+            try:
+                q.put(None)
+            except Exception:
+                pass
         _cft._threads_queues.clear()
     except Exception:
         pass
