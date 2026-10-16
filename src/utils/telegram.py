@@ -631,6 +631,23 @@ async def start_telegram_bridge(main_mod: Any) -> None:
     bot_id = bot_info.get("id")
     print(f"✅ Telegram Bridge online as: @{bot_username} (Allowed IDs: {sorted(allowed) if allowed else 'NONE - Fail-Closed'})")
 
+    async def _poll_updates_daemon(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Run long-polling getUpdates in a daemon thread so Ctrl+C never hangs in ThreadPoolExecutor._python_exit."""
+        import threading
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+
+        def _worker():
+            res = _tg_api_post(bot_token, "getUpdates", payload, 35)
+            if not loop.is_closed() and not fut.done():
+                try:
+                    loop.call_soon_threadsafe(fut.set_result, res)
+                except RuntimeError:
+                    pass
+
+        threading.Thread(target=_worker, daemon=True, name="TelegramLongPoll").start()
+        return await fut
+
     _POLLING_ACTIVE = True
     offset = 0
     try:
@@ -641,7 +658,7 @@ async def start_telegram_bridge(main_mod: Any) -> None:
                     "timeout": 25,
                     "allowed_updates": ["message", "message_reaction"],
                 }
-                data = await asyncio.to_thread(_tg_api_post, bot_token, "getUpdates", poll_payload, 35)
+                data = await _poll_updates_daemon(poll_payload)
                 if not data or not data.get("ok"):
                     await asyncio.sleep(5)
                     continue
@@ -666,4 +683,5 @@ async def start_telegram_bridge(main_mod: Any) -> None:
                 await asyncio.sleep(5)
     finally:
         _POLLING_ACTIVE = False
+
 

@@ -754,4 +754,22 @@ async def on_message(message):
                 await message.channel.send("⚠️ Something went wrong while handling that. Please try again!")
 
 if __name__ == "__main__":
-    client.run(DISCORD_TOKEN)
+    try:
+        client.run(DISCORD_TOKEN)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            LIVE_TRACKER.shutdown()
+        except Exception:
+            pass
+        try:
+            from src.skills.sports.aggregators.espn_utils import SPORTS_EXECUTOR
+            SPORTS_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        try:
+            import concurrent.futures.thread as _cft
+            _cft._threads_queues.clear()
+        except Exception:
+            pass

@@ -625,6 +625,13 @@ class LiveSportsTracker:
             self._tracker_task = None
             print("🛑 [Live Tracker]: No active matches remaining. Background polling task self-stopped.")
 
+    def shutdown(self) -> None:
+        """Cleanly cancel the background polling task and clear tracked state on process exit."""
+        self.tracked_matches.clear()
+        if self._tracker_task is not None and not self._tracker_task.done():
+            self._tracker_task.cancel()
+            self._tracker_task = None
+
     async def poll_once(self) -> None:
         """Poll all currently tracked matches once in parallel, fire notifications on changes, and prune finished games."""
         now = time.time()
