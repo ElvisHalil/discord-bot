@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import json
+import re
 import time
 from typing import Any, Optional
 
@@ -396,12 +397,44 @@ class GoogleFlightsPriceAggregator:
         )
         booking_url = q_obj.url()
 
+        # Google Flights SSR (script.ds:1) only pre-renders multi-carrier round-trip combinations
+        # for stays <= 16 days. When both dates are within the 6-month schedule horizon and stay > 16 days
+        # (e.g. a 3-week round trip), query SSR with the same-weekday return date in [10..16] days while
+        # keeping booking_url anchored to the user's exact requested return_date.
+        ssr_q_obj = q_obj
+        if return_date:
+            try:
+                dep_dt = datetime.strptime(date, "%Y-%m-%d").date()
+                ret_dt = datetime.strptime(return_date, "%Y-%m-%d").date()
+                today_dt = get_local_now().date()
+                stay_days = (ret_dt - dep_dt).days
+                if stay_days > 16 and (ret_dt - today_dt).days <= 185:
+                    wd_diff = (ret_dt.weekday() - dep_dt.weekday()) % 7
+                    ssr_stay = 14 + wd_diff if wd_diff <= 2 else 7 + wd_diff
+                    ssr_ret_date = (dep_dt + timedelta(days=ssr_stay)).strftime("%Y-%m-%d")
+                    ssr_queries = [
+                        FlightQuery(date=date, from_airport=origin_code, to_airport=dest_code, max_stops=max_stops),
+                        FlightQuery(date=ssr_ret_date, from_airport=dest_code, to_airport=origin_code, max_stops=max_stops),
+                    ]
+                    ssr_q_obj = create_query(
+                        flights=ssr_queries,
+                        seat=seat_norm,  # type: ignore[arg-type]
+                        trip=trip_type,  # type: ignore[arg-type]
+                        passengers=Passengers(adults=1),
+                        currency=currency,
+                        language="en",
+                        max_stops=max_stops,
+                        hide_separate_and_self_transfer=True,
+                    )
+            except Exception:
+                ssr_q_obj = q_obj
+
         print(f"  └─ ✈️ [Google Flights]: Searching {origin_code} -> {dest_code} ({date}{f' to {return_date}' if return_date else ''}, {seat_norm}, {currency})...")
 
         flights_list: list[Flights] = []
         insights: dict[str, Any] = {}
         try:
-            html = fetch_flights_html(q_obj)
+            html = fetch_flights_html(ssr_q_obj)
             if html:
                 flights_list, insights = self._parse_google_flights_html(html)
         except Exception:
@@ -409,7 +442,7 @@ class GoogleFlightsPriceAggregator:
 
         if not flights_list:
             try:
-                res = get_flights(q_obj)
+                res = get_flights(ssr_q_obj)
                 flights_list = list(res or [])
             except Exception:
                 flights_list = []
@@ -776,6 +809,27 @@ class GoogleFlightsPriceAggregator:
             if not ns2_options:
                 continue
 
+            def _parse_clock_mins(t_str: str) -> int:
+                m_clk = re.search(r"(\d{1,2}):(\d{2})\s*(AM|PM)", t_str or "", re.IGNORECASE)
+                if not m_clk:
+                    return 720
+                hh, mm, ap = int(m_clk.group(1)), int(m_clk.group(2)), m_clk.group(3).upper()
+                if ap == "PM" and hh != 12:
+                    hh += 12
+                elif ap == "AM" and hh == 12:
+                    hh = 0
+                return hh * 60 + mm
+
+            arr1_mins = _parse_clock_mins(ns1.get("arrival_time", ""))
+            ns2_options.sort(
+                key=lambda o: (
+                    0 if _parse_clock_mins(o.get("departure_time", "")) >= arr1_mins + 45 else 1,
+                    _parse_clock_mins(o.get("departure_time", "")) - arr1_mins
+                    if _parse_clock_mins(o.get("departure_time", "")) >= arr1_mins + 45
+                    else _parse_clock_mins(o.get("departure_time", "")),
+                )
+            )
+
             out_lines.append(
                 f"\n=== ✈️ CONFIRMED 1-STOP GATEWAY SCHEDULE VIA {hub_city.upper()} ({hub_code}): {orig_code} -> {hub_code} -> {dest_code} ==="
             )
@@ -784,11 +838,37 @@ class GoogleFlightsPriceAggregator:
                 f"multi-segment/interline 1-stop fares on **{orig_code} <-> {dest_code}** up to **~6 months (182 days)** before travel. "
                 f"However, **both individual nonstop legs via {hub_city} ({hub_code}) ARE already published and operating** in your requested window!"
             )
-            rt_fare_note = (
-                f", Round-Trip {orig_code}<->{hub_code} nonstop base fare **${rt_ns1['price']} {currency}** | standalone one-way **${ns1['price']} {currency}**"
-                if rt_ns1
-                else f", standalone leg price **${ns1['price']} {currency}**"
+
+            # List concrete operating date pairs in the requested window so the LLM always returns specific travel dates
+            sample_pairs: list[str] = []
+            for d_off in (0, 2, 7):
+                cand_dep = dep_dt + timedelta(days=d_off)
+                cand_dep_s = cand_dep.strftime("%a, %Y-%m-%d")
+                if ret_date_s:
+                    try:
+                        r_dt_base = datetime.strptime(ret_date_s, "%Y-%m-%d").date()
+                        cand_ret = r_dt_base + timedelta(days=d_off)
+                        sample_pairs.append(f"**{cand_dep_s} ↔ Return {cand_ret.strftime('%a, %Y-%m-%d')}**")
+                    except Exception:
+                        sample_pairs.append(f"**{cand_dep_s} ↔ Return {ret_date_s}**")
+                else:
+                    sample_pairs.append(f"**{cand_dep_s}**")
+            out_lines.append(
+                f"• **📅 Concrete Recommended 1-Stop Travel Dates in Your Window**: {', '.join(sample_pairs)}"
             )
+
+            if ret_date_s:
+                rt_fare_note = (
+                    f", Round-Trip {orig_code}<->{hub_code} nonstop base fare **${rt_ns1['price']} {currency}**"
+                    if rt_ns1
+                    else ""
+                )
+            else:
+                rt_fare_note = (
+                    f", Round-Trip {orig_code}<->{hub_code} nonstop base fare **${rt_ns1['price']} {currency}** | standalone one-way **${ns1['price']} {currency}**"
+                    if rt_ns1
+                    else f", standalone leg price **${ns1['price']} {currency}**"
+                )
             out_lines.append(
                 f"• **🛫 Outbound Leg 1 (Nonstop {orig_city} {orig_code} -> {hub_city} {hub_code} on {dep_date_s})**: "
                 f"**{ns1['airlines']}** Nonstop ({ns1['departure_time']} -> {ns1['arrival_time']}, **{ns1['duration_str']}**{rt_fare_note})"
@@ -797,9 +877,9 @@ class GoogleFlightsPriceAggregator:
                 f"• **🛫 Outbound Leg 2 (Nonstop {hub_city} {hub_code} -> {dest_city} {dest_code} on {leg2_date_s})**:"
             )
             for idx, ns2 in enumerate(ns2_options[:3], start=1):
+                leg2_price_suffix = "" if ret_date_s else f", standalone short-haul leg **${ns2['price']} {currency}**"
                 out_lines.append(
-                    f"  {idx}. **{ns2['airlines']}** Nonstop ({ns2['departure_time']} -> {ns2['arrival_time']}, **{ns2['duration_str']}**, "
-                    f"standalone short-haul leg **${ns2['price']} {currency}**)"
+                    f"  {idx}. **{ns2['airlines']}** Nonstop ({ns2['departure_time']} -> {ns2['arrival_time']}, **{ns2['duration_str']}**{leg2_price_suffix})"
                 )
 
             if ret_date_s:
@@ -816,16 +896,18 @@ class GoogleFlightsPriceAggregator:
                     f"• **🛬 Return 1-Stop Schedule ({dest_city} {dest_code} -> {hub_city} {hub_code} -> {orig_city} {orig_code} around {ret_date_s})**:"
                 )
                 if ret_ns1_opts:
-                    r1 = ret_ns1_opts[0]
+                    # Prefer a morning/midday short-haul leg (AM or early PM) so it connects before the transatlantic departure
+                    am_opts = [o for o in ret_ns1_opts if "AM" in o.get("arrival_time", "") or o.get("arrival_time", "").startswith(("12:", "1:"))]
+                    r1 = am_opts[0] if am_opts else ret_ns1_opts[0]
                     out_lines.append(
                         f"  - **Return Segment 1 (Nonstop {dest_city} {dest_code} -> {hub_city} {hub_code} on {ret_date_s})**: "
-                        f"**{r1['airlines']}** Nonstop ({r1['departure_time']} -> {r1['arrival_time']}, **{r1['duration_str']}**, **${r1['price']} {currency}**)"
+                        f"**{r1['airlines']}** Nonstop ({r1['departure_time']} -> {r1['arrival_time']}, **{r1['duration_str']}**)"
                     )
                 else:
                     carrier_names = " / ".join(sorted({o["airlines"] for o in ns2_options[:2]}))
                     out_lines.append(
                         f"  - **Return Segment 1 (Nonstop {dest_city} {dest_code} -> {hub_city} {hub_code}, ~2h 05m)**: "
-                        f"Operated daily by **{carrier_names}** (~$190–$350 {currency}; European short-haul schedules for {ret_date_s[:7]} release ~6–8 months before departure)."
+                        f"Operated daily by **{carrier_names}** (European short-haul schedules for {ret_date_s[:7]} release ~6–8 months before departure)."
                     )
                 if ret_ns2:
                     out_lines.append(
@@ -834,9 +916,14 @@ class GoogleFlightsPriceAggregator:
                         f"**Confirmed published & operating in {ret_date_s[:7]}!**"
                     )
 
+            partner_pair = (
+                f"{ns1['airlines']} & {ns2_options[0]['airlines']}"
+                if ns1["airlines"] != ns2_options[0]["airlines"]
+                else f"{ns1['airlines']} & partner airlines"
+            )
             out_lines.append(
                 f"• 💡 **Booking Tip**: Do **not** buy the two legs as separate one-way tickets (transatlantic one-way fares are heavily surcharged). "
-                f"Once your return date enters the **6-month window**, **{ns1['airlines']} & {ns2_options[0]['airlines']}** automatically merge "
+                f"Once your return date enters the **6-month window**, **{partner_pair}** automatically merge "
                 f"**{orig_code} <-> {hub_code} <-> {dest_code}** into a single 1-stop ticket (see the **6-Month Published Benchmark Fare** below)."
             )
         return out_lines
@@ -860,37 +947,38 @@ class GoogleFlightsPriceAggregator:
         dep_date = data["date"]
         ret_date = data.get("return_date")
         trip_tag = f"Round-Trip ({dep_date} to {ret_date})" if ret_date else f"{dep_date}"
+        price_suffix = f"{eff_currency} Round-Trip" if ret_date else eff_currency
 
         if best:
             lines.append(
-                f"• 🏆 **Best Recommended Flight (Optimal Price + Duration)**: **${best['price']} {eff_currency}** via **{best['airlines']}** "
-                f"({best['stops_label']}, **{best['duration_str']}**, {best['departure_time']} -> {best['arrival_time']})"
+                f"• 🏆 **Best Recommended Flight (Optimal Price + Duration)**: **${best['price']} {price_suffix}** via **{best['airlines']}** "
+                f"({best['stops_label']}, **{best['duration_str']}**, {best['departure_time']} -> {best['arrival_time']} on **{trip_tag}**)"
             )
         if low and low != best:
             lines.append(
-                f"• 💰 **Cheapest Reasonable Fare**: **${low['price']} {eff_currency}** via **{low['airlines']}** "
-                f"({low['stops_label']}, **{low['duration_str']}**, {low['departure_time']} -> {low['arrival_time']})"
+                f"• 💰 **Cheapest Reasonable Fare**: **${low['price']} {price_suffix}** via **{low['airlines']}** "
+                f"({low['stops_label']}, **{low['duration_str']}**, {low['departure_time']} -> {low['arrival_time']} on **{trip_tag}**)"
             )
         elif low:
             lines.append(
-                f"• 💰 **Cheapest Overall Fare**: **${low['price']} {eff_currency}** via **{low['airlines']}** "
-                f"({low['stops_label']}, **{low['duration_str']}**, {low['departure_time']} -> {low['arrival_time']})"
+                f"• 💰 **Cheapest Overall Fare**: **${low['price']} {price_suffix}** via **{low['airlines']}** "
+                f"({low['stops_label']}, **{low['duration_str']}**, {low['departure_time']} -> {low['arrival_time']} on **{trip_tag}**)"
             )
 
         if low_ns:
             if low_ns == best or low_ns == low:
                 lines.append(
-                    f"• ⚡ **Direct / Nonstop Highlight**: Top recommended fare (**${low_ns['price']} {eff_currency}** via **{low_ns['airlines']}**, **{low_ns['duration_str']}**) is a **Nonstop** flight!"
+                    f"• ⚡ **Direct / Nonstop Highlight**: Top recommended fare (**${low_ns['price']} {price_suffix}** via **{low_ns['airlines']}**, **{low_ns['duration_str']}**) is a **Nonstop** flight!"
                 )
             else:
                 lines.append(
-                    f"• ⚡ **Cheapest Direct / Nonstop Flight**: **${low_ns['price']} {eff_currency}** via **{low_ns['airlines']}** "
-                    f"(Nonstop, **{low_ns['duration_str']}**, {low_ns['departure_time']} -> {low_ns['arrival_time']})"
+                    f"• ⚡ **Cheapest Direct / Nonstop Flight**: **${low_ns['price']} {price_suffix}** via **{low_ns['airlines']}** "
+                    f"(Nonstop, **{low_ns['duration_str']}**, {low_ns['departure_time']} -> {low_ns['arrival_time']} on **{trip_tag}**)"
                 )
         elif fastest and fastest != best and fastest != low:
             lines.append(
-                f"• ⚡ **Shortest / Fastest Flight**: **${fastest['price']} {eff_currency}** via **{fastest['airlines']}** "
-                f"({fastest['stops_label']}, **{fastest['duration_str']}**, {fastest['departure_time']} -> {fastest['arrival_time']})"
+                f"• ⚡ **Shortest / Fastest Flight**: **${fastest['price']} {price_suffix}** via **{fastest['airlines']}** "
+                f"({fastest['stops_label']}, **{fastest['duration_str']}**, {fastest['departure_time']} -> {fastest['arrival_time']} on **{trip_tag}**)"
             )
 
         if not low_ns and nearby_direct:
@@ -943,8 +1031,8 @@ class GoogleFlightsPriceAggregator:
             badge_str = f" ({', '.join(badges)})" if badges else ""
 
             lines.append(
-                f"{idx}. **${opt['price']} {eff_currency}** — **{opt['airlines']}** [{opt['stops_label']}]{badge_str}\n"
-                f"   🕒 {opt['departure_time']} ({opt['from_code']}) -> {opt['arrival_time']} ({opt['to_code']}) | "
+                f"{idx}. **${opt['price']} {price_suffix}** — **{opt['airlines']}** [{opt['stops_label']}]{badge_str}\n"
+                f"   📅 {trip_tag} | 🕒 {opt['departure_time']} ({opt['from_code']}) -> {opt['arrival_time']} ({opt['to_code']}) | "
                 f"⏱️ {opt['duration_str']}{ac_suffix}"
             )
         return lines
@@ -1030,13 +1118,31 @@ class GoogleFlightsPriceAggregator:
             except Exception:
                 pass
 
+        def _fmt_day_label(dt_s: str, wd: str, res_obj: Optional[dict[str, Any]] = None, short_wd: bool = False) -> str:
+            base_lbl = f"{wd[:3]} {dt_s}" if short_wd else f"{wd}, {dt_s}"
+            r_dt_s = (res_obj or {}).get("return_date")
+            if not r_dt_s and trip_days:
+                try:
+                    r_dt_s = (datetime.strptime(dt_s, "%Y-%m-%d").date() + timedelta(days=trip_days)).strftime("%Y-%m-%d")
+                except Exception:
+                    r_dt_s = None
+            if r_dt_s:
+                try:
+                    r_wd = datetime.strptime(r_dt_s, "%Y-%m-%d").strftime("%a")
+                    return f"{base_lbl} ↔ Return {r_wd} {r_dt_s}"
+                except Exception:
+                    return f"{base_lbl} ↔ Return {r_dt_s}"
+            return base_lbl
+
+        is_rt_scan = bool(return_date or trip_days)
+        curr_lbl = f"{currency} Round-Trip" if is_rt_scan else currency
         stops_filter_tag = f" | **Filter**: Max {max_stops} Stop(s)" if max_stops is not None else ""
         trip_mode_str = (
             f"Round-Trip (Outbound: {window_label.split('–')[0].strip()} [sample {rep_dep_date}] | Return: {return_window_label or return_date} [sample {return_date}])"
             if return_date
             else f"Flexible Window ({window_label})"
         )
-        route_arrow = "<->" if return_date else "->"
+        route_arrow = "<->" if is_rt_scan else "->"
         lines = [
             f"=== 📅 FLEXIBLE DATE & DIRECT FLIGHT SCHEDULE SCANNER: {orig_city.upper()} ({orig_code}) {route_arrow} {dest_city.upper()} ({dest_code}) ===",
             f"• **Route**: {orig_name} ({orig_code}) {route_arrow} {dest_name} ({dest_code})",
@@ -1090,7 +1196,14 @@ class GoogleFlightsPriceAggregator:
                         f"**${rt_best['price']} {currency} Round-Trip** via **{rt_best['airlines']}** "
                         f"({rt_best['stops_label']}, **{rt_best['duration_str']}**, {rt_best['departure_time']} -> {rt_best['arrival_time']})"
                     )
-                lines.extend(self._format_fare_block(active_benchmark, currency, max_items=4, include_booking_link=False))
+                    rt_low = rt_benchmark_data.get("lowest_reasonable") or rt_benchmark_data["lowest_overall"]
+                    if rt_low and rt_low != rt_best:
+                        lines.append(
+                            f"• 💰 **Lowest 1-Stop Round-Trip Benchmark**: **${rt_low['price']} {currency} Round-Trip** via **{rt_low['airlines']}** "
+                            f"({rt_low['stops_label']}, **{rt_low['duration_str']}**, {rt_low['departure_time']} -> {rt_low['arrival_time']})"
+                        )
+                if not gateway_lines:
+                    lines.extend(self._format_fare_block(active_benchmark, currency, max_items=4, include_booking_link=False))
 
         if not daily_results:
             _append_future_horizon_and_gateway_sections()
@@ -1143,13 +1256,13 @@ class GoogleFlightsPriceAggregator:
             direct_sorted = sorted(direct_days, key=lambda x: (x[2]["price"], x[0]))
             best_dir_dt, best_dir_wd, best_dir_opt, best_dir_url = direct_sorted[0]
             lines.append(
-                f"• ⭐ **Cheapest Direct Flight Date**: **{best_dir_wd}, {best_dir_dt}** at **${best_dir_opt['price']} {currency}** "
+                f"• ⭐ **Cheapest Direct Flight Date**: **{_fmt_day_label(best_dir_dt, best_dir_wd)}** at **${best_dir_opt['price']} {curr_lbl}** "
                 f"via **{best_dir_opt['airlines']}** ({best_dir_opt['duration_str']}) — [Book Direct](<{best_dir_url}>)"
             )
             lines.append("• **Top Direct Flight Dates in Window**:")
             for idx, (dt_s, wd, ns, b_url) in enumerate(direct_sorted[:5], start=1):
                 lines.append(
-                    f"  {idx}. **{wd[:3]} {dt_s}** — **${ns['price']} {currency}** | **{ns['airlines']}** [Nonstop, {ns['duration_str']}, "
+                    f"  {idx}. **{_fmt_day_label(dt_s, wd, short_wd=True)}** — **${ns['price']} {curr_lbl}** | **{ns['airlines']}** [Nonstop, {ns['duration_str']}, "
                     f"{ns['departure_time']} -> {ns['arrival_time']}] ([Google Flights](<{b_url}>))"
                 )
         else:
@@ -1175,8 +1288,8 @@ class GoogleFlightsPriceAggregator:
                 f_dt, f_wd, f_res = fastest_day
                 f_opt = f_res.get("fastest_overall") or f_res["lowest_overall"]
                 lines.append(
-                    f"• ⚡ **Shortest / Fastest Connecting Flight in Scanned Window**: **{f_wd}, {f_dt}** — **{f_opt['duration_str']}** "
-                    f"({f_opt['stops_label']}) at **${f_opt['price']} {currency}** via **{f_opt['airlines']}** ([Google Flights](<{f_res['booking_url']}>))"
+                    f"• ⚡ **Shortest / Fastest Connecting Flight in Scanned Window**: **{_fmt_day_label(f_dt, f_wd, f_res)}** — **{f_opt['duration_str']}** "
+                    f"({f_opt['stops_label']}) at **${f_opt['price']} {curr_lbl}** via **{f_opt['airlines']}** ([Google Flights](<{f_res['booking_url']}>))"
                 )
 
         # If user requested 1-stop flights (or no direct flights exist), highlight 1-stop availability
@@ -1191,15 +1304,15 @@ class GoogleFlightsPriceAggregator:
                         x[2].get("duration_mins") or 999999,
                     ),
                 )
-                b1_dt, b1_wd, b1_opt, b1_url, _ = one_stop_sorted[0]
+                b1_dt, b1_wd, b1_opt, b1_url, b1_res = one_stop_sorted[0]
                 lines.append(
-                    f"• ⭐ **Best 1-Stop Flight in Window**: **{b1_wd}, {b1_dt}** at **${b1_opt['price']} {currency}** "
+                    f"• ⭐ **Best 1-Stop Flight in Window**: **{_fmt_day_label(b1_dt, b1_wd, b1_res)}** at **${b1_opt['price']} {curr_lbl}** "
                     f"via **{b1_opt['airlines']}** ({b1_opt['stops_label']}, **{b1_opt['duration_str']}**, "
                     f"{b1_opt['departure_time']} -> {b1_opt['arrival_time']}) — [Book 1-Stop](<{b1_url}>)"
                 )
-                for idx, (dt_s, wd, o1, b_url, _r) in enumerate(one_stop_sorted[:5], start=1):
+                for idx, (dt_s, wd, o1, b_url, r_obj) in enumerate(one_stop_sorted[:5], start=1):
                     lines.append(
-                        f"  {idx}. **{wd[:3]} {dt_s}** — **${o1['price']} {currency}** | **{o1['airlines']}** "
+                        f"  {idx}. **{_fmt_day_label(dt_s, wd, r_obj, short_wd=True)}** — **${o1['price']} {curr_lbl}** | **{o1['airlines']}** "
                         f"[{o1['stops_label']}, **{o1['duration_str']}**, {o1['departure_time']} -> {o1['arrival_time']}] ([Google Flights](<{b_url}>))"
                     )
             else:
@@ -1265,7 +1378,7 @@ class GoogleFlightsPriceAggregator:
                 opt = res.get(pick_key) or res["lowest_overall"]
                 verdict_tag = f" | {res['verdict']}" if res.get("verdict") else ""
                 lines.append(
-                    f"{idx}. **{wd}, {dt_s}** — **${opt['price']} {currency}** via **{opt['airlines']}** "
+                    f"{idx}. **{_fmt_day_label(dt_s, wd, res)}** — **${opt['price']} {curr_lbl}** via **{opt['airlines']}** "
                     f"[{opt['stops_label']}, **{opt['duration_str']}**, {opt['departure_time']} -> {opt['arrival_time']}]{verdict_tag} "
                     f"([Google Flights](<{res['booking_url']}>))"
                 )
@@ -1276,15 +1389,15 @@ class GoogleFlightsPriceAggregator:
                 best_opt = res.get("best_overall") or res["lowest_overall"]
                 low_opt = res.get("lowest_reasonable") or res["lowest_overall"]
                 ns_opt = res.get("lowest_nonstop")
-                ns_col = f"⚡ Direct: **${ns_opt['price']} {currency}** ({ns_opt['airlines']}, {ns_opt['duration_str']})" if ns_opt else "Direct: —"
+                ns_col = f"⚡ Direct: **${ns_opt['price']} {curr_lbl}** ({ns_opt['airlines']}, {ns_opt['duration_str']})" if ns_opt else "Direct: —"
                 if low_opt and low_opt["price"] < best_opt["price"]:
                     best_col = (
-                        f"🏆 Best: **${best_opt['price']}** ({best_opt['duration_str']}, {best_opt['stops_label']}) | "
-                        f"💰 Low: **${low_opt['price']}** ({low_opt['duration_str']})"
+                        f"🏆 Best: **${best_opt['price']} {curr_lbl}** ({best_opt['duration_str']}, {best_opt['stops_label']}) | "
+                        f"💰 Low: **${low_opt['price']} {curr_lbl}** ({low_opt['duration_str']})"
                     )
                 else:
-                    best_col = f"🏆 Best: **${best_opt['price']} {currency}** ({best_opt['airlines']}, {best_opt['stops_label']}, {best_opt['duration_str']})"
-                lines.append(f"• **{wd[:3]} {dt_s}**: {best_col} | {ns_col}")
+                    best_col = f"🏆 Best: **${best_opt['price']} {curr_lbl}** ({best_opt['airlines']}, {best_opt['stops_label']}, {best_opt['duration_str']})"
+                lines.append(f"• **{_fmt_day_label(dt_s, wd, res, short_wd=True)}**: {best_col} | {ns_col}")
 
         # --- SECTION 4: SPARSE FUTURE WINDOW / MISSING 1-STOP HORIZON & GATEWAY HUB DISCOVERY ---
         is_sparse_window = len(candidate_days) <= max(2, len(date_list) // 5)

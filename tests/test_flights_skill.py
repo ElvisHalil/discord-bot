@@ -1154,15 +1154,104 @@ class TestFlightsSkill(unittest.TestCase):
             self.assertIn("Outbound Leg 1 (Nonstop Edmonton YEG -> Amsterdam AMS", out)
             self.assertIn("Round-Trip YEG<->AMS nonstop base fare **$1368 CAD**", out)
             self.assertIn("Croatia Airlines** Nonstop", out)
+            self.assertIn("Concrete Recommended 1-Stop Travel Dates in Your Window", out)
             self.assertIn("Return 1-Stop Schedule (Zagreb ZAG -> Amsterdam AMS -> Edmonton YEG around 2027-08-10)", out)
             self.assertIn("Return Segment 2 (Nonstop Amsterdam AMS -> Edmonton YEG on 2027-08-10)**: **KLM** Nonstop", out)
             self.assertIn("Published 1-Stop Round-Trip Benchmark (YEG <-> ZAG)**: **$1695 CAD Round-Trip** via **KLM, Croatia**", out)
 
+    def test_december_three_weeks_round_trip_and_paired_dates(self):
+        from src.skills.flights.airports import extract_flight_numbers, parse_natural_date
+
+        set_active_channel_id(903)
+        # 1. Duration phrases ("for 3 weeks", "max 1 stop") must never be extracted as flight numbers
+        self.assertEqual(
+            extract_flight_numbers("ok give me best flight from Edmonton to Zagreb in december for 3 weeks"),
+            [],
+        )
+        # 2. Invalid calendar dates like 2027-12-40 must be rejected
+        self.assertIsNone(parse_natural_date("2027-12-40"))
+
+        # 3. Prior turns set May-August 2027 + max_stops=1
+        parse_route_from_query("planning trip from Edmonton to Zagreb from May to August next year")
+        parse_route_from_query("1 stop only")
+
+        # 4. Turn 4: "in december for 3 weeks" must resolve to December 2026 (21-day Round-Trip)
+        #    even if the LLM hallucinated date="2027-12-01" in tool args, while preserving max_stops=1
+        r4 = parse_route_from_query(
+            "ok give me best flight from Edmonton to Zagreb in december for 3 weeks",
+            origin="Edmonton",
+            destination="Zagreb",
+            date="2027-12-01",
+        )
+        self.assertEqual(r4["origin"][0], "YEG")
+        self.assertEqual(r4["destination"][0], "ZAG")
+        self.assertEqual(r4["dep_month_window"], ("2026-12-01", "2026-12-21", "December 2026"))
+        self.assertEqual(r4["trip_days"], 21)
+        self.assertEqual(r4["trip_type"], "round-trip")
+        self.assertEqual(r4["date"], "2026-12-08")
+        self.assertEqual(r4["return_date"], "2026-12-29")
+        self.assertEqual(r4["max_stops"], 1)
+        self.assertTrue(r4["wants_flexible_scan"])
+
+        agg = GoogleFlightsPriceAggregator()
+        dec_1stop = {
+            "price": 1671,
+            "currency": "CAD",
+            "airlines": "KLM, Croatia",
+            "stops": 1,
+            "stops_label": "1 stop (AMS)",
+            "from_code": "YEG",
+            "to_code": "ZAG",
+            "departure_time": "6:05 PM",
+            "arrival_time": "1:15 PM (+1d)",
+            "duration_mins": 730,
+            "duration_str": "12h 10m",
+            "flight_mins": 640,
+            "aircraft": "Airbus A330-200",
+        }
+
+        def fake_dec_fetch(origin_code, dest_code, date, return_date=None, cabin="economy", currency="CAD", max_stops=None, *args, **kwargs):
+            if date == "2026-12-01":
+                return {
+                    "origin": origin_code,
+                    "destination": dest_code,
+                    "date": date,
+                    "return_date": return_date,
+                    "trip_type": "round-trip",
+                    "cabin": cabin,
+                    "currency": currency,
+                    "booking_url": f"https://www.google.com/travel/flights?d={date}&r={return_date}",
+                    "lowest_overall": dec_1stop,
+                    "lowest_reasonable": dec_1stop,
+                    "best_overall": dec_1stop,
+                    "fastest_overall": dec_1stop,
+                    "lowest_nonstop": None,
+                    "options": [dec_1stop],
+                }
+            return {
+                "origin": origin_code,
+                "destination": dest_code,
+                "date": date,
+                "return_date": return_date,
+                "trip_type": "round-trip",
+                "cabin": cabin,
+                "currency": currency,
+                "booking_url": "https://www.google.com/travel/flights",
+                "lowest_overall": None,
+                "lowest_reasonable": None,
+                "best_overall": None,
+                "fastest_overall": None,
+                "lowest_nonstop": None,
+                "options": [],
+            }
+
+        with patch.object(agg, "fetch_structured_fares", side_effect=fake_dec_fetch):
+            out = agg.search_prices("ok give me best flight from Edmonton to Zagreb in december for 3 weeks")
+            self.assertIn("December 2026 (~21-Day Round-Trip)", out)
+            self.assertIn("Tuesday, 2026-12-01 ↔ Return Tue 2026-12-22", out)
+            self.assertIn("$1671 CAD Round-Trip", out)
+
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
-
 

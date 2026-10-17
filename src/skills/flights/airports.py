@@ -580,18 +580,37 @@ def resolve_airport(location: Optional[str]) -> Optional[Tuple[str, str, str, st
 def extract_flight_numbers(text: str) -> list[str]:
     """
     Extracts commercial flight numbers (e.g. 'AC850', 'WS 102', 'UA123', 'ACA850')
-    from natural language text without matching prices or dates.
+    from natural language text without matching prices, durations ('for 3 weeks'), or dates.
     """
     if not text:
         return []
     found: list[str] = []
+    non_flight_words = (
+        set(_MONTH_MAP.keys())
+        | _NON_LOCATION_WORDS
+        | {
+            "in", "to", "on", "at", "by", "of", "or", "bo", "cs", "f1", "pm", "am",
+            "for", "max", "min", "top", "day", "way", "out", "via", "any", "all",
+            "one", "two", "six", "per", "leg", "hub", "get", "see", "can", "you",
+            "the", "and", "not", "are", "was", "has", "had", "but", "now", "new",
+            "old", "low", "avg", "est", "cad", "usd", "eur", "gbp",
+        }
+    )
     for m in re.finditer(r"\b([A-Za-z]{2,3}|[A-Za-z]\d|\d[A-Za-z])[\s\-]?(\d{1,4})\b", text):
-        prefix = m.group(1).upper()
+        raw_prefix = m.group(1)
+        prefix = raw_prefix.upper()
         digits = m.group(2)
-        if prefix.lower() in _MONTH_MAP or prefix in ("IN", "TO", "ON", "AT", "BY", "OF", "OR", "BO", "CS", "F1", "PM", "AM"):
+        if prefix.lower() in non_flight_words:
+            continue
+        trailing = text[m.end() :]
+        if re.match(
+            r"^\s*(?:weeks?|days?|months?|years?|stops?|layovers?|hours?|hrs?|mins?|minutes?|people|adults?|passengers?|tickets?|bags?|legs?)\b",
+            trailing,
+            re.IGNORECASE,
+        ):
             continue
         has_flight_word = bool(re.search(r"\b(?:flight|track|status|radar|callsign|plane)\b", text, re.IGNORECASE))
-        if prefix in AIRLINE_CODES or (has_flight_word and len(prefix) in (2, 3)):
+        if prefix in AIRLINE_CODES or (has_flight_word and raw_prefix.isupper() and len(prefix) in (2, 3) and len(digits) >= 2):
             code = f"{prefix}{digits}"
             if code not in found:
                 found.append(code)
@@ -608,11 +627,14 @@ def parse_natural_date(date_text: Optional[str], reference_dt: Optional[datetime
     now = reference_dt or get_local_now()
     txt = date_text.strip().lower()
 
-    # 1. Explicit ISO YYYY-MM-DD
+    # 1. Explicit ISO YYYY-MM-DD (validated against calendar)
     m_iso = re.search(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b", txt)
     if m_iso:
         y, mo, d = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
-        return f"{y:04d}-{mo:02d}-{d:02d}"
+        try:
+            return datetime(y, mo, d).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
 
     # 2. Relative keywords
     if "day after tomorrow" in txt:
@@ -684,10 +706,13 @@ def _extract_all_dates_from_text(text: str, now: datetime) -> list[str]:
     found: list[Tuple[int, str]] = []
     month_pattern = "|".join(_MONTH_MAP.keys())
 
-    # 1. Explicit ISO dates
+    # 1. Explicit ISO dates (validated against calendar)
     for m in re.finditer(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b", text):
         y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        found.append((m.start(), f"{y:04d}-{mo:02d}-{d:02d}"))
+        try:
+            found.append((m.start(), datetime(y, mo, d).strftime("%Y-%m-%d")))
+        except ValueError:
+            pass
 
     # 2. Month + Day (+ optional Year) or Month range ("Nov 15 to 22")
     m_same_month_range = re.search(
@@ -851,7 +876,6 @@ def parse_route_from_query(
 
     orig_resolved = (resolve_airport(origin) if origin else None) or orig_from_query
     dest_resolved = (resolve_airport(destination) if destination else None) or dest_from_query
-    query_had_both_airports = bool(orig_from_query and dest_from_query)
 
     # Inherit from channel's last route on follow-up prompts
     if not (orig_resolved and dest_resolved):
@@ -870,7 +894,7 @@ def parse_route_from_query(
         and (orig_resolved[0] != prev_state.origin[0] or dest_resolved[0] != prev_state.destination[0])
     )
 
-    # Parse dates and month windows
+    # Parse dates, month windows, and stay duration ('for 3 weeks', 'for 10 days', 'for a month')
     is_explicit_one_way = bool(
         re.search(r"\b(?:one[\s\-]?way)\b", q_low)
         or (trip_type_arg and "one" in trip_type_arg.lower())
@@ -914,13 +938,26 @@ def parse_route_from_query(
         and not query_has_month_name
     )
 
+    # Extract optional trip duration in days ("for 3 weeks", "for 10 days", "for a month")
+    trip_days: Optional[int] = None
+    m_stay = re.search(r"\bfor\s+(\d+)\s*(day|days|week|weeks|month|months)\b", q_low)
+    if m_stay:
+        n_val = int(m_stay.group(1))
+        unit_s = m_stay.group(2)
+        trip_days = n_val * 30 if "month" in unit_s else (n_val * 7 if "week" in unit_s else n_val)
+    elif re.search(r"\bfor\s+a\s+week\b", q_low):
+        trip_days = 7
+    elif re.search(r"\bfor\s+a\s+month\b", q_low):
+        trip_days = 30
+    elif is_constraint_only_followup and prev_state:
+        trip_days = prev_state.trip_days
+
     if query_has_explicit_day:
         if len(query_explicit_dates) >= 2:
             dep_date = query_explicit_dates[0]
             if not is_explicit_one_way and query_explicit_dates[1] != dep_date:
                 ret_date = query_explicit_dates[1]
         elif len(query_explicit_dates) == 1:
-            # Check if this single explicit date is a return-only update on an existing route
             is_ret_date_update = bool(
                 prev_state
                 and not route_changed
@@ -962,7 +999,9 @@ def parse_route_from_query(
     # 2. Month-level or Multi-Month Extraction when no specific day number was in q_text
     if not query_has_explicit_day and query_has_month_name:
         has_next_year = bool(re.search(r"\bnext\s+year\b", q_low))
-        explicit_years = [int(y) for y in re.findall(r"\b(20\d{2})\b", f"{q_text} {date or ''} {return_date or ''}")]
+        # Authoritative year comes from q_text when q_text is present so LLM-hallucinated tool-arg years never override "in december"
+        year_source = q_text if q_text else f"{date or ''} {return_date or ''}"
+        explicit_years = [int(y) for y in re.findall(r"\b(20\d{2})\b", year_source)]
 
         raw_month_matches = list(re.finditer(rf"\b({month_pattern})\.?(?:\s+(20\d{{2}}))?\b", q_text, re.IGNORECASE))
         unique_months: list[Tuple[int, Optional[int]]] = []
@@ -1068,17 +1107,6 @@ def parse_route_from_query(
         )
     )
 
-    # Extract optional trip duration in days for round-trip flexible scans ("for 2 weeks", "for 10 days")
-    trip_days: Optional[int] = None
-    m_stay = re.search(r"\bfor\s+(\d+)\s*(day|days|week|weeks)\b", q_low)
-    if m_stay:
-        n_val = int(m_stay.group(1))
-        trip_days = n_val * 7 if "week" in m_stay.group(2) else n_val
-    elif re.search(r"\bfor\s+a\s+week\b", q_low):
-        trip_days = 7
-    elif is_constraint_only_followup and prev_state:
-        trip_days = prev_state.trip_days
-
     # Stop filter detection (0 = nonstop, 1 = max 1 stop, 2 = max 2 stops)
     explicit_relax_stops = bool(re.search(r"\b(?:any\s+stops?|all\s+flights?)\b", q_low))
     if max_stops_arg is not None and int(max_stops_arg) in (0, 1, 2):
@@ -1089,12 +1117,7 @@ def parse_route_from_query(
         max_stops = 1
     elif re.search(r"\b(?:2[\s\-]?stops?|two[\s\-]?stops?)\b", q_low):
         max_stops = 2
-    elif (
-        prev_state
-        and not route_changed
-        and not explicit_relax_stops
-        and not (query_had_both_airports and (query_has_explicit_day or query_has_month_name))
-    ):
+    elif prev_state and not route_changed and not explicit_relax_stops:
         max_stops = prev_state.max_stops
     else:
         max_stops = None
@@ -1108,7 +1131,14 @@ def parse_route_from_query(
             dep_date = (now + timedelta(days=14)).strftime("%Y-%m-%d")
         defaulted_date = True
 
-    trip_type = "round-trip" if (ret_date or ret_month_window) else "one-way"
+    # If stay duration ('for 3 weeks', 'for 10 days') was given, automatically compute return date & set round-trip
+    if trip_days and not is_explicit_one_way and not ret_date and dep_date:
+        try:
+            ret_date = (datetime.strptime(dep_date, "%Y-%m-%d").date() + timedelta(days=trip_days)).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    trip_type = "round-trip" if (ret_date or ret_month_window or (trip_days and not is_explicit_one_way)) else "one-way"
 
     wants_flexible_scan = bool(
         not wants_latest_horizon
@@ -1119,6 +1149,7 @@ def parse_route_from_query(
             or (wants_direct_schedule and defaulted_date)
             or (sort_preference == "shortest" and defaulted_date)
             or (max_stops is not None and is_window_followup)
+            or (trip_days is not None and defaulted_date)
         )
     )
 
@@ -1126,6 +1157,8 @@ def parse_route_from_query(
         flex_start_date, flex_end_date, dep_label = dep_month_window
         if ret_month_window:
             flex_label = f"{dep_label} – {ret_month_window[2]}"
+        elif trip_days:
+            flex_label = f"{dep_label} (~{trip_days}-Day Round-Trip)"
         else:
             flex_label = dep_label
     elif not defaulted_date and dep_date:
@@ -1194,6 +1227,12 @@ def parse_route_from_query(
             }
         )
 
+    return_flex_label = (
+        ret_month_window[2]
+        if ret_month_window
+        else (f"{trip_days}-Day Stay (sample return {ret_date})" if (trip_days and ret_date) else None)
+    )
+
     return {
         "origin": orig_resolved,
         "destination": dest_resolved,
@@ -1212,10 +1251,75 @@ def parse_route_from_query(
         "ret_month_window": ret_month_window,
         "return_flex_start_date": ret_month_window[0] if ret_month_window else None,
         "return_flex_end_date": ret_month_window[1] if ret_month_window else None,
-        "return_flex_label": ret_month_window[2] if ret_month_window else None,
+        "return_flex_label": return_flex_label,
         "trip_days": trip_days,
         "cabin": cabin,
         "currency": currency,
         "max_stops": max_stops,
     }
+
+
+def detect_missed_flight_tool_call(
+    history: list,
+    active_channel_id: Optional[int] = None,
+) -> Optional[Tuple[str, dict]]:
+    """
+    Detects when an 8B model attempts to answer a flight search or follow-up refinement
+    from stale chat history without calling `skill_flight_info` or `skill_track_flight`.
+    """
+    if not history:
+        return None
+
+    latest_user_text = ""
+    for msg in reversed(history):
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        if role == "user":
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+            latest_user_text = str(content or "").strip()
+            latest_user_text = re.sub(r"^\[[^\]]+\]:\s*", "", latest_user_text).strip()
+            break
+    if not latest_user_text:
+        return None
+
+    q_low = latest_user_text.lower()
+    # Ignore explicit bot commands
+    if q_low.startswith("!"):
+        return None
+
+    # 1. Explicit flight tracking intent
+    if re.search(r"\b(?:track|watch|alert|untrack|stop\s+tracking)\b", q_low) and re.search(
+        r"\b(?:flights?|airfare|prices?|fares?)\b", q_low
+    ):
+        return ("skill_track_flight", {"action": "track", "query": latest_user_text})
+
+    month_pattern = "|".join(_MONTH_MAP.keys())
+    has_flight_kw = bool(
+        re.search(
+            r"\b(?:flights?|fly|flying|airfare|airlines?|nonstop|non-stop|layovers?|round[\s\-]?trip|one[\s\-]?way|1[\s\-]?stop)\b",
+            q_low,
+        )
+    )
+    has_refinement_cue = bool(
+        re.search(
+            rf"\b(?:return(?:ing)?|back\s+in|leav(?:e|ing)|depart(?:ing)?|for\s+\d+\s*(?:days?|weeks?|months?)|"
+            rf"1[\s\-]?stops?|one[\s\-]?stops?|single[\s\-]?stops?|nonstop|direct|shortest|fastest|cheapest|"
+            rf"round[\s\-]?trip|({month_pattern}))\b",
+            q_low,
+        )
+    )
+
+    state = get_channel_flight_state(active_channel_id)
+    had_prior_flight_tool = any(
+        (m.get("name") if isinstance(m, dict) else getattr(m, "name", None)) in ("skill_flight_info", "skill_track_flight")
+        for m in history
+    )
+
+    if has_flight_kw and (has_refinement_cue or " to " in q_low or " from " in q_low or state or had_prior_flight_tool):
+        return ("skill_flight_info", {"query": latest_user_text})
+
+    if (state or had_prior_flight_tool) and has_refinement_cue:
+        return ("skill_flight_info", {"query": latest_user_text})
+
+    return None
+
 

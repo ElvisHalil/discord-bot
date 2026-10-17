@@ -19,6 +19,9 @@ import re
 import types
 import typing
 
+from src.skills.flights.airports import (
+    detect_missed_flight_tool_call,
+)
 from src.skills.music.spectrum import (
     detect_missed_music_shift_tool_call,
     enrich_music_tool_args,
@@ -202,7 +205,7 @@ def normalize_tool_args(tool_name: str, func, args) -> dict:
 def enrich_flight_tool_args(args: dict, history: list) -> dict:
     """Ensure `query` on `skill_flight_info` / `skill_track_flight` preserves the user's latest prompt
     (including flexible-date intent, direct-schedule questions, sort preferences, and return dates)
-    even when an 8B model only populates `origin` and `destination`."""
+    even when an 8B model only populates `origin` and `destination` or hallucinates a stale year."""
     enriched = dict(args or {})
     latest_user_text = ""
     for msg in reversed(history or []):
@@ -214,11 +217,32 @@ def enrich_flight_tool_args(args: dict, history: list) -> dict:
             break
     if not latest_user_text:
         return enriched
+
+    user_years = set(re.findall(r"\b(20\d{2})\b", latest_user_text))
+    has_next_year = bool(re.search(r"\bnext\s+year\b", latest_user_text, re.IGNORECASE))
+
     cur_q = str(enriched.get("query") or "").strip()
+    if not has_next_year:
+        if cur_q:
+            cur_q = re.sub(
+                r"\b(20\d{2})\b",
+                lambda m: m.group(1) if m.group(1) in user_years else "",
+                cur_q,
+            )
+            cur_q = re.sub(r"\s{2,}", " ", cur_q).strip()
+        for d_key in ("date", "return_date"):
+            val = enriched.get(d_key)
+            if isinstance(val, str):
+                arg_years = set(re.findall(r"\b(20\d{2})\b", val))
+                if arg_years and not arg_years.issubset(user_years):
+                    enriched.pop(d_key, None)
+
     if not cur_q:
         enriched["query"] = latest_user_text
     elif latest_user_text.lower() not in cur_q.lower():
-        enriched["query"] = f"{cur_q} ({latest_user_text})"
+        enriched["query"] = f"{latest_user_text} ({cur_q})"
+    else:
+        enriched["query"] = cur_q
     return enriched
 
 
@@ -374,14 +398,65 @@ _HALLUCINATED_BETTING_URL_RE = re.compile(
 )
 
 
+def _convert_latex_tokens(fragment: str) -> str:
+    """Convert common LaTeX commands inside a math or text fragment into Discord-friendly Unicode/Markdown."""
+    s = fragment
+    s = re.sub(r'\\(?:longleftrightarrow|leftrightarrow|Leftrightarrow)\b\s*', '↔ ', s)
+    s = re.sub(r'\\(?:longrightarrow|rightarrow|Rightarrow|to)\b\s*', '→ ', s)
+    s = re.sub(r'\\(?:longleftarrow|leftarrow|Leftarrow)\b\s*', '← ', s)
+    s = re.sub(r'\\(?:sim|approx)\b\s*', '~', s)
+    s = re.sub(r'\\times\b\s*', '× ', s)
+    s = re.sub(r'\\(?:text|mathrm)\{([^}]*)\}', r'\1', s)
+    s = re.sub(r'\\(?:mathbf|textbf)\{([^}]*)\}', r'**\1**', s)
+    s = s.replace(r'\$', '$')
+    s = re.sub(r'[ \t]{2,}', ' ', s)
+    s = re.sub(r'\s+([,.:;)\]])', r'\1', s)
+    s = re.sub(r'([(\[])\s+', r'\1', s)
+    return s.strip()
+
+
+def _normalize_discord_latex(text: str) -> str:
+    """Strip inline LaTeX math wrappers ($...$) and LaTeX commands (\rightarrow, \to, \sim, \text{...})
+    that Discord cannot render, without touching normal currency dollar amounts ($1,328)."""
+    if not text or ('$' not in text and '\\' not in text):
+        return text
+
+    def _replace_math_span(m: re.Match) -> str:
+        inner = m.group(1)
+        # Only unwrap $...$ if it contains LaTeX commands or wraps an uppercase airport/route token (e.g. $YEG$)
+        if (
+            '\\' in inner
+            or re.fullmatch(r'\s*[A-Z]{3}(?:\s*(?:→|->|-)\s*[A-Z]{3})?\s*', inner)
+        ):
+            return _convert_latex_tokens(inner)
+        return m.group(0)
+
+    # Match inline $...$ where the opening $ is NOT immediately followed by a digit (preserving $1,328 to $1,671)
+    # and allow escaped \$ inside the math span without terminating early.
+    out = re.sub(r'\$(?!\d)((?:\\\$|[^$\n])+?)(?<!\\)\$', _replace_math_span, text)
+    if '\\' in out:
+        out = re.sub(r'\\(?:longleftrightarrow|leftrightarrow|Leftrightarrow)\b', '↔', out)
+        out = re.sub(r'\\(?:longrightarrow|rightarrow|Rightarrow|to)\b', '→', out)
+        out = re.sub(r'\\(?:longleftarrow|leftarrow|Leftarrow)\b', '←', out)
+        out = re.sub(r'\\(?:sim|approx)\b\s*', '~', out)
+        out = re.sub(r'\\times\b', '×', out)
+        out = re.sub(r'\\(?:text|mathrm)\{([^}]*)\}', r'\1', out)
+        out = re.sub(r'\\(?:mathbf|textbf)\{([^}]*)\}', r'**\1**', out)
+        out = out.replace(r'\$', '$')
+    out = re.sub(r'\*{4,}', '**', out)
+    out = re.sub(r'~[ \t]+\$', '~$', out)
+    return out
+
+
 def sanitize_agent_reply(reply: str) -> str:
     """Sanitizes replies by removing accidental leaks of internal function names,
-    hallucinated bookmaker URLs, and canned AI meta-excuses."""
+    hallucinated bookmaker URLs, unrendered LaTeX math, and canned AI meta-excuses."""
     if not reply:
         return reply
 
     lines = [line for line in reply.splitlines() if not _DISCLAIMER_HEADER_RE.search(line)]
     text = "\n".join(lines)
+    text = _normalize_discord_latex(text)
 
     text = re.sub(r'(?i)\buse\s+(?:my\s+)?search_web(?:\s+tool)?\b', 'search online', text)
     text = re.sub(r'(?i)\buse\s+(?:my\s+)?read_website(?:\s+tool)?\b', 'inspect the web page', text)

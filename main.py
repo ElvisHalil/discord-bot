@@ -39,6 +39,7 @@ from src.orchestrator import (
     enrich_tool_output_with_time_context,
     detect_missed_sports_tool_call,
     detect_missed_music_shift_tool_call,
+    detect_missed_flight_tool_call,
     trim_history,
     apply_auto_ping,
     join_orphan_bullets,
@@ -548,12 +549,15 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                 missed = (
                     detect_missed_sports_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_music_shift_tool_call(history)
+                    or detect_missed_flight_tool_call(history, active_channel_id=channel_id)
                 )
                 if missed and missed[0] in active_tools:
                     forced_tool_name, forced_raw_args = missed
                     func = active_tools[forced_tool_name]
                     forced_args = normalize_tool_args(forced_tool_name, func, forced_raw_args)
                     history.pop()  # Discard stale non-tool reply from iteration 0
+                    if forced_tool_name in ("skill_flight_info", "skill_track_flight"):
+                        forced_args = enrich_flight_tool_args(forced_args, history)
                     set_active_channel_id(channel_id)
                     print(f"⚡ [{current_mode.upper()}] Intercepted missed tool on turn 0 -> forcing {forced_tool_name}({forced_args})")
                     try:
@@ -563,6 +567,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                         tool_output = f"Tool execution failed: {e}"
                     if LIVE_TRACKER.tracked_matches:
                         LIVE_TRACKER.ensure_loop_running()
+                    if FLIGHT_TRACKER.tracked_flights or FLIGHT_TRACKER.price_watches:
+                        FLIGHT_TRACKER.ensure_loop_running()
                     history.append({
                         "role": "assistant",
                         "content": "",
@@ -641,6 +647,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
         tool_results = await asyncio.gather(*(run_tool(call) for call in tool_calls))
         if LIVE_TRACKER.tracked_matches:
             LIVE_TRACKER.ensure_loop_running()
+        if FLIGHT_TRACKER.tracked_flights or FLIGHT_TRACKER.price_watches:
+            FLIGHT_TRACKER.ensure_loop_running()
         history.extend(tool_results)
         called_names = {c.function.name for c in tool_calls}
         if (

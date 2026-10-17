@@ -314,6 +314,29 @@ class TestSanitizeAgentReply(unittest.TestCase):
         self.assertLessEqual(len(bounded_out), 10200)
         self.assertIn("=== CRITICAL INSTRUCTIONS FOR YOU (THE LLM) ===\nFollow rule 1.", bounded_out)
 
+    def test_sanitizes_latex_math_and_preserves_currency(self):
+        from src.orchestrator import sanitize_agent_reply
+
+        raw = (
+            "**Outbound ($YEG \\to ZAG$)**\n"
+            "* **Leg 1 (Transatlantic):** **Edmonton ($YEG$) $\\rightarrow$ Amsterdam ($AMS$)**\n"
+            "* **Expected 1-Stop Round-Trip Fare:** **$\\sim\\$1,329 \\text{ CAD}$**\n"
+            "* **Lowest Price Found:** $\\mathbf{\\$1328\\text{ CAD}}$ (Round-Trip)\n"
+            "* **Outbound ($\\text{May 20, 2027}$):**\n"
+            "Normal currency prose: Flights range from $1,328 CAD to $1,671 CAD."
+        )
+        cleaned = sanitize_agent_reply(raw)
+        self.assertIn("**Outbound (YEG → ZAG)**", cleaned)
+        self.assertIn("**Edmonton (YEG) → Amsterdam (AMS)**", cleaned)
+        self.assertIn("**~$1,329 CAD**", cleaned)
+        self.assertIn("**$1328 CAD** (Round-Trip)", cleaned)
+        self.assertIn("**Outbound (May 20, 2027):**", cleaned)
+        self.assertIn("Flights range from $1,328 CAD to $1,671 CAD.", cleaned)
+        self.assertNotIn("\\rightarrow", cleaned)
+        self.assertNotIn("\\to", cleaned)
+        self.assertNotIn("\\sim", cleaned)
+        self.assertNotIn("\\text", cleaned)
+
 
 class TestExtractReplyContext(unittest.TestCase):
     def test_extract_song_card_reply(self):
@@ -402,6 +425,45 @@ class TestSportsFollowupAndMissedToolEnforcement(unittest.TestCase):
         old_tool = [m for m in trimmed if m.get("role") == "tool"][0]
         self.assertIn("EXPIRED SPORTS SNAPSHOT", old_tool["content"])
         self.assertNotIn("55'", old_tool["content"])
+
+    def test_flight_missed_tool_and_hallucinated_year_enrichment(self):
+        from src.orchestrator import detect_missed_flight_tool_call, enrich_flight_tool_args
+        from src.skills.flights.airports import parse_route_from_query
+        from src.skills.sports.live_tracker import set_active_channel_id
+
+        set_active_channel_id(904)
+        parse_route_from_query("planning trip from Edmonton to Zagreb from May to August next year")
+
+        history = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "[Alex]: planning trip from Edmonton to Zagreb from May to August next year"},
+            {"role": "tool", "name": "skill_flight_info", "content": "[EXPIRED FLIGHT SEARCH SNAPSHOT]"},
+            {"role": "assistant", "content": "Here is the May 2027 schedule."},
+            {"role": "user", "content": "[Alex]: ok give me best flight from Edmonton to Zagreb in december for 3 weeks"},
+        ]
+
+        # 1. If the 8B model skips calling skill_flight_info on Turn 4, detect_missed_flight_tool_call intercepts it
+        missed = detect_missed_flight_tool_call(history, active_channel_id=904)
+        self.assertIsNotNone(missed)
+        self.assertEqual(missed[0], "skill_flight_info")
+        self.assertEqual(
+            missed[1]["query"],
+            "ok give me best flight from Edmonton to Zagreb in december for 3 weeks",
+        )
+
+        # 2. If the 8B model calls skill_flight_info with a hallucinated 2027 year in query/date, enrich_flight_tool_args strips it
+        enriched = enrich_flight_tool_args(
+            {
+                "query": "best flight Edmonton to Zagreb December 2027 3 weeks",
+                "origin": "Edmonton",
+                "destination": "Zagreb",
+                "date": "2027-12-01",
+            },
+            history,
+        )
+        self.assertNotIn("2027", enriched["query"])
+        self.assertNotIn("date", enriched)
+        self.assertIn("in december for 3 weeks", enriched["query"].lower())
 
 
 class TestCentralizedTimeAndTimezones(unittest.TestCase):

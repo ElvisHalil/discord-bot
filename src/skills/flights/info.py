@@ -87,18 +87,20 @@ def skill_flight_info(
 
     output += """
 === CRITICAL INSTRUCTIONS FOR YOU (THE LLM) ===
-1. Present the exact flight prices, airlines, departure/arrival times, durations, stops, layovers, and aircraft models from the data above.
-2. When reporting Google Flights ticket prices or Flexible-Date / Direct / 1-Stop Schedule Scans:
-   - Strictly respect the user's **Trip Type** (Round-Trip vs. One-Way) and **Stop Filter** (e.g. `Max 1 Stop(s)`). When the user asks for `1 stop only`, NEVER recommend 2-stop flights.
+1. Present the exact flight prices, travel dates, airlines, departure/arrival times, durations, stops, layovers, and aircraft models from the data above.
+2. ALWAYS include the concrete travel date(s) (e.g. `Tue, Dec 01, 2026 ↔ Tue, Dec 22, 2026` or `2026-12-01`) on EVERY recommended flight option. NEVER list a flight or price without stating its exact travel date(s).
+3. NEVER use LaTeX or math mode syntax (`$...$`, `\\rightarrow`, `\\to`, `\\leftrightarrow`, `\\sim`, `\\text{...}`, `\\mathbf{...}`) — Discord does NOT render LaTeX! Always write plain text with standard Unicode symbols (`→`, `↔`, `~$1,671 CAD`).
+4. When reporting Google Flights ticket prices or Flexible-Date / Direct / 1-Stop Schedule Scans:
+   - Strictly respect the user's **Trip Type** (Round-Trip vs. One-Way) and **Stop Filter** (e.g. `Max 1 Stop(s)`). When the user asks for `1 stop only`, NEVER recommend 2-stop flights. On Round-Trip searches, always quote **Round-Trip** prices and include both Outbound and Return dates.
    - If the report includes a **CONFIRMED 1-STOP GATEWAY SCHEDULE** (e.g. `YEG -> AMS -> ZAG` for dates >6 months out):
-     * Present the **🛫 Outbound 1-Stop Schedule** (`Leg 1: Origin -> Hub` + `Leg 2: Hub -> Destination`) AND, for Round-Trips, the **🛬 Return 1-Stop Schedule** (`Return Segment 1: Destination -> Hub` + `Return Segment 2: Hub -> Origin`).
+     * Present the **📅 Concrete Recommended 1-Stop Travel Dates**, the **🛫 Outbound 1-Stop Schedule** (`Leg 1: Origin -> Hub` + `Leg 2: Hub -> Destination`), AND for Round-Trips the **🛬 Return 1-Stop Schedule** (`Return Segment 1: Destination -> Hub` + `Return Segment 2: Hub -> Origin`).
      * NEVER confuse `Outbound Leg 2` (`Hub -> Destination`, e.g. `AMS -> ZAG`) with the return trip back home (`ZAG -> AMS -> YEG`)!
-     * Quote the **🔄 Published 1-Stop Round-Trip Benchmark** (or 6-month horizon fare) as the expected single-ticket price once the 6-month combined ticketing window opens, and **NEVER tell the user to fly on the 6-month benchmark date (e.g. April) when they asked for May–August**!
+     * Quote the **🔄 Published 1-Stop Round-Trip Benchmark** as the expected single-ticket Round-Trip price once the 6-month combined ticketing window opens, and **NEVER tell the user to fly on the 6-month benchmark date (e.g. April) when they asked for a different month**!
    - Always include the clickable **[Google Flights](<https://www.google.com/travel/flights/search?tfs=...>)` booking link** for the user's requested dates.
-3. When reporting Live Flight Status:
+5. When reporting Live Flight Status:
    - Clearly state whether the flight is **Scheduled**, **En Route / Airborne**, **Landed**, **Delayed**, or **Cancelled**, along with Terminal/Gate info and local departure/arrival times.
    - For airborne flights, include live radar telemetry (Altitude in ft, Ground Speed in kts/mph/kmh, route completion %, remaining distance, and the clickable Flightradar24 / ADSB.lol live radar map links).
-4. Mention that the user can track any live flight or set a quality-filtered (or direct-only) ticket price-drop alert anytime by asking (e.g. "track flight AC850" or "track price from Edmonton to Amsterdam under $900").
+6. Mention that the user can track any live flight or set a quality-filtered (or direct-only) ticket price-drop alert anytime by asking (e.g. "track flight AC850" or "track price from Edmonton to Amsterdam under $900").
 """
     return output
 
