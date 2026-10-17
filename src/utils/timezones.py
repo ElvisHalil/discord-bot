@@ -473,9 +473,9 @@ def enrich_tool_output_with_time_context(
             except Exception:
                 return full_match
 
-        out_lines.append(_TIMESTAMP_TOKEN_RE.sub(_replace_ts, line))
+        out_lines.append(_TIMESTAMP_TOKEN_RE.sub(_replace_ts, line, count=1))
 
-    enriched_body = "\n".join(out_lines)
+    enriched_body = _sanitize_and_bound_tool_output("\n".join(out_lines))
     has_date_context = (
         annotated_count > 0
         or current_section_date is not None

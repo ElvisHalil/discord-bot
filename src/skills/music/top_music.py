@@ -29,7 +29,12 @@ def _is_manager_mocked() -> bool:
     )
 
 
-def _pre_resolve_top_candidate(candidates: list[Track], ui_zone: Optional[str] = None) -> str:
+def _pre_resolve_top_candidate(
+    candidates: list[Track],
+    ui_zone: Optional[str] = None,
+    d_tempo: int = 0,
+    anchor_bpm: Optional[float] = None,
+) -> str:
     """
     Pre-resolves a verified, Discord-embeddable YouTube Music link for the top candidate track
     (trying up to 4 candidates if one has Discord embedding disabled by its label).
@@ -50,7 +55,15 @@ def _pre_resolve_top_candidate(candidates: list[Track], ui_zone: Optional[str] =
     ordered_candidates = fresh_diff_artist or fresh_any or candidates
 
     best_fallback = None
-    for cand in ordered_candidates[:4]:
+    for idx, cand in enumerate(ordered_candidates[:4]):
+        # If we already have an official fallback that satisfied the tempo shift, don't let a slower/faster
+        # runner-up that violates the tempo shift override it.
+        if best_fallback is not None and anchor_bpm is not None and cand.bpm is not None:
+            if d_tempo > 0 and cand.bpm < anchor_bpm and cand.bpm < (best_fallback[0].bpm or 0) - 2.0:
+                break
+            if d_tempo < 0 and cand.bpm > anchor_bpm and cand.bpm > (best_fallback[0].bpm or 999) + 2.0:
+                break
+
         query = f"{cand.title} by {cand.artist}"
         try:
             results = resolve_youtube_music_link(query, max_results=1)
@@ -60,13 +73,20 @@ def _pre_resolve_top_candidate(candidates: list[Track], ui_zone: Optional[str] =
                     if best_fallback is None:
                         best_fallback = (cand, r)
                     continue
+                if cand in candidates and candidates[0] is not cand:
+                    candidates.remove(cand)
+                    candidates.insert(0, cand)
                 return _format_pre_resolved_entry(cand, r, ui_zone=ui_zone)
         except Exception as e:
             print(f"  └─ ⚠️ [Top Music Pre-Resolver]: Error resolving '{query}': {e}")
             continue
 
     if best_fallback is not None:
-        return _format_pre_resolved_entry(best_fallback[0], best_fallback[1], ui_zone=ui_zone)
+        win_c, win_r = best_fallback
+        if win_c in candidates and candidates[0] is not win_c:
+            candidates.remove(win_c)
+            candidates.insert(0, win_c)
+        return _format_pre_resolved_entry(win_c, win_r, ui_zone=ui_zone)
     return ""
 
 
@@ -85,7 +105,17 @@ def _format_pre_resolved_entry(cand: Track, r: dict, ui_zone: Optional[str] = No
         if album and not MUSIC_METADATA_CACHE[vid].get("album"):
             MUSIC_METADATA_CACHE[vid]["album"] = album
 
-    record_channel_played_song(song=r["title"], artist=r["artist"], genre=genre, ui_zone=ui_zone)
+    record_channel_played_song(
+        song=r["title"],
+        artist=r["artist"],
+        genre=genre,
+        ui_zone=ui_zone,
+        alt_song=cand.title,
+        bpm=cand.bpm,
+        speed_score=cand.speed_score,
+        intensity_score=cand.intensity_score,
+        gain_db=cand.gain,
+    )
 
     lines = [
         "\n=== VERIFIED YOUTUBE MUSIC RESULT (PRE-RESOLVED & READY TO PRESENT) ===",
@@ -160,6 +190,7 @@ def skill_top_music(
             seed_artist = ""
             seed_genre = None
             known_zone = None
+            matched_last_played = False
 
             last_played = get_channel_last_played_song()
             if similar_to:
@@ -167,12 +198,21 @@ def skill_top_music(
                 seed_song = s_meta.get("song", "")
                 seed_artist = s_meta.get("artist", "")
                 seed_genre = s_meta.get("genre")
-                if last_played and (
-                    _norm_track_token(last_played.get("song") or "") == _norm_track_token(seed_song)
-                ):
-                    seed_genre = seed_genre or last_played.get("genre")
-                    known_zone = last_played.get("ui_zone")
+                if last_played:
+                    lp_song = _norm_track_token(last_played.get("song") or "")
+                    lp_alt = _norm_track_token(last_played.get("alt_song") or "")
+                    lp_artist = _norm_track_token(last_played.get("artist") or "")
+                    norm_seed_s = _norm_track_token(seed_song)
+                    norm_seed_a = _norm_track_token(seed_artist)
+                    if (
+                        (norm_seed_s and (norm_seed_s in (lp_song, lp_alt) or lp_song in norm_seed_s or (lp_alt and lp_alt in norm_seed_s)))
+                        or (norm_seed_a and lp_artist and (norm_seed_a in lp_artist or lp_artist in norm_seed_a))
+                    ):
+                        matched_last_played = True
+                        seed_genre = seed_genre or last_played.get("genre")
+                        known_zone = last_played.get("ui_zone")
             elif last_played:
+                matched_last_played = True
                 seed_song = last_played.get("song") or ""
                 seed_artist = last_played.get("artist") or ""
                 seed_genre = last_played.get("genre")
@@ -196,46 +236,126 @@ def skill_top_music(
                 f"-> Target Zone: {target_zone_name} (Boundary Deep-Cuts: {at_boundary})"
             )
 
+            anchor_profile = None
+            if not _is_manager_mocked():
+                try:
+                    from src.skills.music.audio_analyzer import get_track_acoustic_profile
+                    if seed_song:
+                        anchor_profile = get_track_acoustic_profile(seed_song, seed_artist)
+                        if not anchor_profile and matched_last_played and last_played and last_played.get("alt_song"):
+                            anchor_profile = get_track_acoustic_profile(last_played["alt_song"], seed_artist)
+                    if matched_last_played and last_played and last_played.get("bpm"):
+                        if anchor_profile is None:
+                            anchor_profile = {
+                                "bpm": float(last_played["bpm"]),
+                                "speed_score": float(last_played.get("speed_score") or 5.5),
+                                "intensity_score": float(last_played.get("intensity_score") or 5.5),
+                                "gain_db": float(last_played.get("gain_db") or -9.0),
+                            }
+                        else:
+                            # Preserve previously verified BPM/scores if this turn matched last_played
+                            anchor_profile["bpm"] = float(last_played["bpm"])
+                            if last_played.get("speed_score") is not None:
+                                anchor_profile["speed_score"] = float(last_played["speed_score"])
+                            if last_played.get("intensity_score") is not None:
+                                anchor_profile["intensity_score"] = float(last_played["intensity_score"])
+                    if anchor_profile is not None:
+                        anchor_profile["genre"] = resolved_genre or seed_genre
+                except Exception as e:
+                    print(f"  └─ ⚠️ [Spectrum Anchor Profile]: {e}")
+
             exclude_q = f"{seed_song} by {seed_artist}" if seed_song and seed_artist else None
-            all_tracks = manager.get_spectrum_tracks(
-                target_zone=target_zone,
-                prefer_deep_cuts=at_boundary,
-                exclude_query=exclude_q,
-            )
+            try:
+                all_tracks = manager.get_spectrum_tracks(
+                    target_zone=target_zone,
+                    prefer_deep_cuts=at_boundary,
+                    exclude_query=exclude_q,
+                    d_tempo=d_tempo,
+                    d_intensity=d_intensity,
+                    anchor_bpm=(anchor_profile or {}).get("bpm"),
+                    seed_genre=resolved_genre,
+                )
+            except TypeError:
+                all_tracks = manager.get_spectrum_tracks(
+                    target_zone=target_zone,
+                    prefer_deep_cuts=at_boundary,
+                    exclude_query=exclude_q,
+                )
             if not all_tracks:
                 return f"No tracks found for spectrum zone '{target_zone_name}'."
 
+            from src.skills.music.utils import is_recently_played
+            fresh_tracks = [t for t in all_tracks if not is_recently_played(t.title, t.artist)]
+            source_tracks = fresh_tracks or all_tracks
+
             artist_seen = set()
             featured_diverse = []
-            for t in all_tracks:
+            for t in source_tracks:
                 clean_artist = t.artist.lower().strip()
                 if clean_artist and clean_artist not in artist_seen:
                     artist_seen.add(clean_artist)
                     featured_diverse.append(t)
 
             random.shuffle(featured_diverse)
-            top_sample = (featured_diverse or all_tracks)[:15]
+            candidate_pool = featured_diverse or source_tracks
+
+            if not _is_manager_mocked():
+                try:
+                    from src.skills.music.audio_analyzer import rank_candidates_by_acoustic_shift
+                    candidate_pool = rank_candidates_by_acoustic_shift(
+                        candidate_pool,
+                        d_tempo=d_tempo,
+                        d_intensity=d_intensity,
+                        anchor_profile=anchor_profile,
+                        max_analyze=14,
+                    )
+                except Exception as e:
+                    print(f"  └─ ⚠️ [Spectrum Acoustic Re-Ranker]: {e}")
+
+            top_sample = candidate_pool[:15]
+            pre_resolved = _pre_resolve_top_candidate(
+                top_sample,
+                ui_zone=target_zone_name,
+                d_tempo=d_tempo,
+                anchor_bpm=(anchor_profile or {}).get("bpm"),
+            )
 
             styles_preview = ", ".join(
                 (target_zone.get("deep_cut_tags", []) if at_boundary else target_zone.get("mainstream_tags", []))[:4]
             )
+            acoustic_line = ""
+            if top_sample and top_sample[0].bpm and top_sample[0].intensity_score is not None:
+                win = top_sample[0]
+                if anchor_profile and anchor_profile.get("bpm"):
+                    acoustic_line = (
+                        f"• Acoustic Verification: ~{int(round(anchor_profile['bpm']))} BPM, "
+                        f"Intensity {anchor_profile['intensity_score']:.1f}/10 ({anchor_profile.get('gain_db', -9.0):+.1f} dB) "
+                        f"➔ ~{int(round(win.bpm))} BPM, Intensity {win.intensity_score:.1f}/10 ({(win.gain or -9.0):+.1f} dB)\n"
+                    )
+                else:
+                    acoustic_line = (
+                        f"• Acoustic Verification: ~{int(round(win.bpm))} BPM | "
+                        f"Speed {win.speed_score:.1f}/10 | Intensity {win.intensity_score:.1f}/10 ({(win.gain or -9.0):+.1f} dB)\n"
+                    )
+
             if seed_song and not used_default:
                 output = (
                     f"=== 🎛️ MUSIC SPECTRUM SHIFT: {shift_label.upper()} ===\n"
                     f"• Previous Track: {seed_song} by {seed_artist} "
                     f"(Genre: {resolved_genre or 'Detected'} | Zone: {step_info['start_zone']})\n"
                     f"• New Target Zone: {target_zone_name} "
-                    f"(Tempo: {target_zone['tempo'].upper()}, Intensity: {target_zone['intensity'].upper()} | Styles: {styles_preview})\n\n"
+                    f"(Tempo: {target_zone['tempo'].upper()}, Intensity: {target_zone['intensity'].upper()} | Styles: {styles_preview})\n"
+                    f"{acoustic_line}\n"
                 )
             else:
                 output = (
                     f"=== 🎛️ MUSIC SPECTRUM SHIFT: {shift_label.upper()} (DEFAULT CENTER START) ===\n"
                     f"• Starting Zone: mid_mid (Center Default — no active song or identifiable genre)\n"
                     f"• New Target Zone: {target_zone_name} "
-                    f"(Tempo: {target_zone['tempo'].upper()}, Intensity: {target_zone['intensity'].upper()} | Styles: {styles_preview})\n\n"
+                    f"(Tempo: {target_zone['tempo'].upper()}, Intensity: {target_zone['intensity'].upper()} | Styles: {styles_preview})\n"
+                    f"{acoustic_line}\n"
                 )
 
-            pre_resolved = _pre_resolve_top_candidate(top_sample, ui_zone=target_zone_name)
             if pre_resolved:
                 output += pre_resolved + "\n"
             elif top_sample:
@@ -244,6 +364,10 @@ def skill_top_music(
                     artist=top_sample[0].artist,
                     genre=top_sample[0].genre,
                     ui_zone=target_zone_name,
+                    bpm=top_sample[0].bpm,
+                    speed_score=top_sample[0].speed_score,
+                    intensity_score=top_sample[0].intensity_score,
+                    gain_db=top_sample[0].gain,
                 )
 
             for t in top_sample:

@@ -3,6 +3,7 @@ from src.skills.youtube import skill_youtube_searcher
 from src.skills.music import skill_top_music, skill_audio_intelligence
 from src.skills.sports import skill_csgo_esports, skill_sports_info, skill_betting_odds, skill_track_live_game
 from src.skills.news import skill_top_headlines
+from src.skills.flights import skill_flight_info, skill_track_flight
 
 __all__ = [
     "skill_weather_reporter",
@@ -14,5 +15,7 @@ __all__ = [
     "skill_betting_odds",
     "skill_track_live_game",
     "skill_top_headlines",
+    "skill_flight_info",
+    "skill_track_flight",
 ]
 

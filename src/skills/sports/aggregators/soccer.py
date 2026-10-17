@@ -186,8 +186,14 @@ class SoccerAggregator(BaseSportsAggregator):
             "last game", "last match", "previous match", "earlier", "history"
         )) or (any(w in q for w in ("played", "result", "results", "back")) and not any(w in q for w in ("upcoming", "next", "future", "schedule", "tomorrow")))
 
-        is_month = "month" in q and not is_past
-        is_week = any(w in q for w in ("week", "upcoming", "next", "fixtures", "schedule", "soon", "weekend", "saturday", "sunday", "few days", "coming up")) and not is_past
+        has_explicit_day = any(w in q for w in ("today", "tomorrow", "yesterday", "tonight"))
+        is_both_today_tomorrow = ("today" in q or "tonight" in q) and "tomorrow" in q
+        is_month = "month" in q and not is_past and not has_explicit_day
+        is_week = (
+            any(w in q for w in ("week", "upcoming", "next", "fixtures", "schedule", "soon", "weekend", "saturday", "sunday", "few days", "coming up"))
+            and not is_past
+            and (not has_explicit_day or "week" in q or "weekend" in q)
+        )
 
         if matched_team:
             team_sched_block = parse_team_schedule("soccer", league_code, matched_team["id"], matched_team["displayName"])
@@ -213,6 +219,11 @@ class SoccerAggregator(BaseSportsAggregator):
                 return self.get_multi_league_schedule_range(days_ahead=30, scope_label="MONTHLY FIXTURES")
             elif is_week:
                 return self.get_multi_league_schedule_range(days_ahead=8, scope_label="WEEKLY FIXTURES")
+            elif is_both_today_tomorrow:
+                tom_param = (now + timedelta(days=1)).strftime("%Y%m%d")
+                today_out = self.get_multi_league_matches(date_param=None)
+                tom_out = self.get_multi_league_matches(date_param=tom_param)
+                return f"{today_out}\n\n{tom_out}"
             elif "yesterday" in q:
                 date_param = (now - timedelta(days=1)).strftime("%Y%m%d")
                 return self.get_multi_league_matches(date_param=date_param)
@@ -229,6 +240,11 @@ class SoccerAggregator(BaseSportsAggregator):
             res = self.get_schedule_range(league_code, league_name, days_ahead=30, scope_label="MONTHLY FIXTURES", filter_query=effective_filter)
         elif is_week:
             res = self.get_schedule_range(league_code, league_name, days_ahead=8, scope_label="WEEKLY FIXTURES", filter_query=effective_filter)
+        elif is_both_today_tomorrow:
+            tom_param = (now + timedelta(days=1)).strftime("%Y%m%d")
+            today_out = self.get_matches(league_code, league_name, date_param=None, filter_query=effective_filter)
+            tom_out = self.get_matches(league_code, league_name, date_param=tom_param, filter_query=effective_filter)
+            res = f"{today_out}\n\n{tom_out}"
         elif "yesterday" in q:
             date_param = (now - timedelta(days=1)).strftime("%Y%m%d")
             res = self.get_matches(league_code, league_name, date_param=date_param, filter_query=effective_filter)

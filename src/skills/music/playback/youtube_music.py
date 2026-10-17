@@ -193,18 +193,24 @@ def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, in
         req_count = max(2, int(len(effective_song_tokens) * 0.6))
         song_match = len(effective_song_tokens.intersection(title_tokens)) >= req_count
 
+    if not exp_artist_tokens:
+        artist_match = True
+    elif len(exp_artist_tokens) <= 2:
+        artist_match = exp_artist_tokens.issubset(cand_tokens)
+    else:
+        req_art = max(2, int(len(exp_artist_tokens) * 0.6))
+        artist_match = len(exp_artist_tokens.intersection(cand_tokens)) >= req_art
+
     if is_topic:
-        artist_match = not exp_artist_tokens or bool(exp_artist_tokens.intersection(cand_tokens))
         if song_match and artist_match:
             return True, 3, "Topic channel match (song & artist verified)"
-        if song_match and len(overlap) >= max(1, len(q_tokens) * 0.5):
+        if not exp_artist_tokens and song_match and len(overlap) >= max(1, len(q_tokens) * 0.5):
             return True, 3, f"Topic channel match via token overlap ({len(overlap)}/{len(q_tokens)})"
         return False, 0, f"Rejected: Topic channel track mismatch (song_match={song_match}, artist_match={artist_match})"
 
     # Non-topic channels:
     if exp_song_tokens and exp_artist_tokens:
-        artist_overlap = exp_artist_tokens.intersection(cand_tokens)
-        if song_match and artist_overlap:
+        if song_match and artist_match:
             is_artist_channel = bool(exp_artist_tokens.intersection(author_tokens)) or "vevo" in author.lower()
             if not is_artist_channel:
                 m_fake_yr = _FAKE_OFFICIAL_YEAR_RE.search(title or "")

@@ -26,11 +26,16 @@ from src.skills.sports.live_tracker import (
     set_active_channel_id,
     skill_track_live_game,
 )
+from src.skills.flights import (
+    FLIGHT_TRACKER,
+    skill_track_flight,
+)
 from src.config import MODES
 from src.orchestrator import (
     normalize_tool_args,
     enrich_sports_tool_args,
     enrich_music_tool_args,
+    enrich_flight_tool_args,
     enrich_tool_output_with_time_context,
     detect_missed_sports_tool_call,
     detect_missed_music_shift_tool_call,
@@ -102,6 +107,7 @@ def clear_tool_caches(channel_id: int = None):
         from src.skills.music.spectrum import clear_channel_played_songs
         from src.skills.music.utils import clear_recently_played_tracks
         from src.skills.sports.live_tracker import clear_channel_last_match_query
+        from src.skills.flights.airports import clear_channel_flight_state
         from src.skills.sports.aggregators.liquipedia import clear_liquipedia_cache
         from src.skills.sports.aggregators.hltv import clear_hltv_cache
         from src.skills.sports.aggregators.kashrock import clear_kashrock_cache
@@ -109,6 +115,7 @@ def clear_tool_caches(channel_id: int = None):
         clear_channel_played_songs(channel_id)
         clear_recently_played_tracks(channel_id)
         clear_channel_last_match_query(channel_id)
+        clear_channel_flight_state(channel_id)
         if channel_id is None:
             clear_youtube_caches()
             clear_deezer_cache()
@@ -212,13 +219,46 @@ async def handle_live_match_update(match, snapshot, triggers):
         })
 
 
+async def handle_flight_tracker_update(channel_id: int, alert_text: str):
+    """Callback invoked by FLIGHT_TRACKER when a tracked flight changes state or a watched route price drops."""
+    is_tg = is_telegram_channel(channel_id)
+    channel = None
+    if not is_tg:
+        channel = client.get_channel(channel_id)
+        if not channel:
+            try:
+                channel = await client.fetch_channel(channel_id)
+            except Exception as e:
+                print(f"⚠️ [Flight Tracker]: Could not resolve channel {channel_id}: {e}")
+                return
+
+    if is_tg:
+        await send_telegram_message(channel_id, alert_text)
+    else:
+        await channel.send(alert_text)
+
+    mode_config = MODES[current_mode]
+    async with channel_locks[channel_id]:
+        if channel_id not in chat_history:
+            system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
+            chat_history[channel_id] = [system_msg]
+        chat_history[channel_id].append({
+            "role": "assistant",
+            "content": alert_text,
+        })
+
+
 @client.event
 async def on_ready():
     print(f"✅ Bot online as: {client.user}")
     print(f"🔥 Active Mode: {current_mode.upper()} (Switch with '!mode <name>': {', '.join(MODES)})")
-    bind_tracker_event_loop(asyncio.get_running_loop())
+    loop = asyncio.get_running_loop()
+    bind_tracker_event_loop(loop)
     LIVE_TRACKER.set_notify_callback(handle_live_match_update)
     LIVE_TRACKER.ensure_loop_running()
+    FLIGHT_TRACKER.bind_event_loop(loop)
+    FLIGHT_TRACKER.set_notify_callback(handle_flight_tracker_update)
+    FLIGHT_TRACKER.ensure_loop_running()
     asyncio.create_task(start_telegram_bridge(sys.modules[__name__]))
 
 
@@ -476,13 +516,27 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
             history.append({"role": "assistant", "content": text})
         return text
 
+    _TERMINAL_SKILLS = {
+        "skill_sports_info",
+        "skill_csgo_esports",
+        "skill_betting_odds",
+        "skill_track_live_game",
+        "skill_flight_info",
+        "skill_track_flight",
+        "skill_weather_reporter",
+        "skill_top_headlines",
+        "skill_audio_intelligence",
+        "evaluate_math",
+        "save_memory",
+    }
+    hide_tools_next_step = False
     iterations = 0
     reply = ""
     while iterations < max_iterations:
         # Dynamically construct chat arguments so tools are completely hidden
-        # from models that can't handle them.
+        # from models that can't handle them (or after self-contained terminal skills have returned).
         chat_kwargs = dict(base_kwargs, messages=history)
-        if supports_tools and tool_functions:
+        if supports_tools and tool_functions and not hide_tools_next_step:
             chat_kwargs["tools"] = tool_functions
 
         response = await ollama_client.chat(**chat_kwargs)
@@ -532,6 +586,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
 
         print(f"⚡ [{current_mode.upper()}] Model requested {len(tool_calls)} tools simultaneously!")
         has_top_music = any(call.function.name == "skill_top_music" for call in tool_calls)
+        per_tool_char_budget = 10000 if len(tool_calls) == 1 else max(4000, 18000 // len(tool_calls))
 
         async def run_tool(call):
             tool_name = call.function.name
@@ -559,6 +614,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     args = enrich_sports_tool_args(args, history, sibling_tools=sibling_tools)
                 elif tool_name == "skill_top_music":
                     args = enrich_music_tool_args(args, history)
+                elif tool_name in ("skill_flight_info", "skill_track_flight"):
+                    args = enrich_flight_tool_args(args, history)
                 set_active_channel_id(channel_id)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
                 try:
@@ -570,16 +627,28 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                 print(f"  └─ ⚠ Unknown tool requested: {tool_name}")
                 tool_output = f"Tool '{tool_name}' not available."
 
+            enriched_content = enrich_tool_output_with_time_context(str(tool_output))
+            if len(tool_calls) > 1 and len(enriched_content) > per_tool_char_budget:
+                from src.utils.timezones import _sanitize_and_bound_tool_output
+                enriched_content = _sanitize_and_bound_tool_output(enriched_content, max_chars=per_tool_char_budget)
+
             return {
                 "role": "tool",
                 "name": tool_name,
-                "content": enrich_tool_output_with_time_context(str(tool_output)),
+                "content": enriched_content,
             }
 
         tool_results = await asyncio.gather(*(run_tool(call) for call in tool_calls))
         if LIVE_TRACKER.tracked_matches:
             LIVE_TRACKER.ensure_loop_running()
         history.extend(tool_results)
+        called_names = {c.function.name for c in tool_calls}
+        if (
+            called_names.issubset(_TERMINAL_SKILLS)
+            and len(tool_calls) >= 2
+            and all("PARALLEL_EXECUTION_BLOCKED" not in r["content"] and not r["content"].startswith("⚠️") for r in tool_results)
+        ):
+            hide_tools_next_step = True
         iterations += 1
 
     if iterations >= max_iterations and not reply.strip():
@@ -657,6 +726,31 @@ async def on_message(message):
         chat_history.pop(message.channel.id, None)
         clear_tool_caches(message.channel.id)
         await message.channel.send("🧹 Memory and context wiped for this channel.")
+        return
+
+    # Direct Flight & Price Tracker Commands (!trackflight <flight/route>, !untrackflight [flight/route], !trackedflights)
+    if user_input.lower().startswith("!trackflight "):
+        active_channels.add(message.channel.id)
+        target_q = user_input[13:].strip()
+        set_active_channel_id(message.channel.id)
+        res = await run_in_worker(skill_track_flight, action="track", query=target_q)
+        FLIGHT_TRACKER.ensure_loop_running()
+        await message.channel.send(res)
+        return
+
+    if user_input.lower().startswith("!untrackflight"):
+        active_channels.add(message.channel.id)
+        target_q = user_input[14:].strip()
+        set_active_channel_id(message.channel.id)
+        res = await run_in_worker(skill_track_flight, action="untrack", query=target_q)
+        await message.channel.send(res)
+        return
+
+    if user_input.lower() in ("!trackedflights", "!trackflight"):
+        active_channels.add(message.channel.id)
+        set_active_channel_id(message.channel.id)
+        res = await run_in_worker(skill_track_flight, action="list")
+        await message.channel.send(res)
         return
 
     # Direct Live Sports Tracker Commands (!track <team>, !untrack [team], !tracked)

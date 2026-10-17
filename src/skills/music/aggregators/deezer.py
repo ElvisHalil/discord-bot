@@ -21,10 +21,12 @@ def _http_get(url: str, **kwargs):
 # 15-minute TTL cache for raw upstream Deezer lists (playlist searches, 40-track playlist pools, chart pools)
 # Random sampling still runs fresh on every call to preserve 100% track/artist diversity.
 _DEEZER_RAW_CACHE: dict[str, tuple[float, list]] = {}
+_DEEZER_TRACK_DETAIL_CACHE: dict[str, tuple[float, dict]] = {}
 _DEEZER_CACHE_TTL = 900.0
 
 def clear_deezer_cache() -> None:
     _DEEZER_RAW_CACHE.clear()
+    _DEEZER_TRACK_DETAIL_CACHE.clear()
 
 def _get_cached_deezer_data(cache_key: str, url: str) -> list:
     is_mocked = hasattr(requests.get, "assert_called")
@@ -41,6 +43,128 @@ def _get_cached_deezer_data(cache_key: str, url: str) -> list:
 
 class DeezerAggregator(BaseMusicAggregator):
     """Music recommendation provider leveraging Deezer's public catalog and artist graph."""
+
+    def resolve_track_details(self, title: str, artist: str = "", deezer_id: int = None) -> dict | None:
+        """
+        Resolve a track's single-track Deezer metadata (/track/{id}), returning:
+        {'id': int, 'title': str, 'artist': str, 'album': str, 'preview': str, 'bpm': float, 'gain': float}
+        """
+        is_mocked = hasattr(requests.get, "assert_called")
+        now = time.monotonic()
+        clean_title = (title or "").strip()
+        clean_artist = (artist or "").strip()
+        if clean_artist.lower() in ("unknown artist", "unknown"):
+            clean_artist = ""
+
+        cache_key = f"id:{deezer_id}" if deezer_id else f"q:{clean_title.lower()}|{clean_artist.lower()}"
+        if not is_mocked and cache_key in _DEEZER_TRACK_DETAIL_CACHE:
+            ts, cached_detail = _DEEZER_TRACK_DETAIL_CACHE[cache_key]
+            if now - ts < _DEEZER_CACHE_TTL:
+                return dict(cached_detail)
+
+        resolved_id = deezer_id
+        fallback_preview = None
+        fallback_title = clean_title
+        fallback_artist = clean_artist
+        fallback_album = None
+
+        if not resolved_id:
+            if not clean_title:
+                return None
+            q_str = f"{clean_title} {clean_artist}".strip()
+            try:
+                r = _http_get(
+                    f"https://api.deezer.com/search?q={urllib.parse.quote(q_str)}&limit=5",
+                    timeout=5,
+                )
+                items = (r.json() or {}).get("data") or []
+                if not items:
+                    return None
+
+                def _tokens(s: str) -> set[str]:
+                    return {w for w in re.findall(r"[a-z0-9]+", (s or "").lower()) if len(w) > 1}
+
+                req_title_toks = _tokens(clean_title)
+                req_art_toks = _tokens(clean_artist)
+                norm_req_art = re.sub(r"[^a-z0-9]+", "", clean_artist.lower())
+                norm_req_title = re.sub(r"[^a-z0-9]+", "", clean_title.lower())
+
+                matched_item = None
+                for cand_item in items:
+                    c_title = cand_item.get("title") or ""
+                    c_artist = (cand_item.get("artist") or {}).get("name") or ""
+                    norm_c_art = re.sub(r"[^a-z0-9]+", "", c_artist.lower())
+                    norm_c_title = re.sub(r"[^a-z0-9]+", "", c_title.lower())
+
+                    title_ok = (
+                        (norm_req_title and (norm_req_title in norm_c_title or norm_c_title in norm_req_title))
+                        or bool(req_title_toks and req_title_toks.intersection(_tokens(c_title)))
+                    )
+                    if not title_ok:
+                        continue
+
+                    if clean_artist:
+                        artist_ok = (
+                            (norm_req_art and (norm_req_art in norm_c_art or norm_c_art in norm_req_art))
+                            or bool(req_art_toks and req_art_toks.intersection(_tokens(c_artist)))
+                        )
+                        if not artist_ok:
+                            continue
+
+                    matched_item = cand_item
+                    break
+
+                if not matched_item:
+                    return None
+
+                resolved_id = matched_item.get("id")
+                fallback_preview = matched_item.get("preview")
+                fallback_title = matched_item.get("title") or clean_title
+                fallback_artist = (matched_item.get("artist") or {}).get("name") or clean_artist
+                fallback_album = (matched_item.get("album") or {}).get("title")
+            except Exception:
+                return None
+
+        if not resolved_id:
+            return None
+
+        detail = {
+            "id": resolved_id,
+            "title": fallback_title,
+            "artist": fallback_artist,
+            "album": fallback_album,
+            "preview": fallback_preview,
+            "bpm": 0.0,
+            "gain": None,
+        }
+
+        try:
+            r_trk = _http_get(f"https://api.deezer.com/track/{resolved_id}", timeout=5)
+            trk_json = r_trk.json() or {}
+            if trk_json.get("id"):
+                detail["title"] = trk_json.get("title") or detail["title"]
+                detail["artist"] = (trk_json.get("artist") or {}).get("name") or detail["artist"]
+                detail["album"] = (trk_json.get("album") or {}).get("title") or detail["album"]
+                detail["preview"] = trk_json.get("preview") or detail["preview"]
+                raw_bpm = trk_json.get("bpm")
+                if raw_bpm is not None:
+                    try:
+                        detail["bpm"] = float(raw_bpm)
+                    except (ValueError, TypeError):
+                        pass
+                raw_gain = trk_json.get("gain")
+                if raw_gain is not None:
+                    try:
+                        detail["gain"] = float(raw_gain)
+                    except (ValueError, TypeError):
+                        pass
+        except Exception:
+            pass
+
+        if not is_mocked:
+            _DEEZER_TRACK_DETAIL_CACHE[cache_key] = (now, dict(detail))
+            _DEEZER_TRACK_DETAIL_CACHE[f"id:{resolved_id}"] = (now, dict(detail))
+        return detail
 
     def get_similar(self, query: str) -> list[Track]:
         print(f"  └─ 🔍 [Deezer]: Finding similar songs for '{query}'...")
@@ -107,7 +231,9 @@ class DeezerAggregator(BaseMusicAggregator):
                                     title=t['title'],
                                     artist=t['artist']['name'],
                                     album=alb,
-                                    source="deezer"
+                                    source="deezer",
+                                    deezer_id=t.get("id"),
+                                    preview_url=t.get("preview"),
                                 ))
                     except Exception:
                         pass
@@ -126,7 +252,9 @@ class DeezerAggregator(BaseMusicAggregator):
                             title=t['title'],
                             artist=t['artist']['name'],
                             album=alb,
-                            source="deezer"
+                            source="deezer",
+                            deezer_id=t.get("id"),
+                            preview_url=t.get("preview"),
                         ))
         except Exception as e:
             print(f"  └─ ⚠️ [Deezer]: Error fetching recommendations: {e}")
@@ -175,7 +303,9 @@ class DeezerAggregator(BaseMusicAggregator):
                                             artist=artist,
                                             album=t.get("album", {}).get("title"),
                                             genre=clean_g.title(),
-                                            source=f"deezer_{clean_g.replace(' ', '_')}"
+                                            source=f"deezer_{clean_g.replace(' ', '_')}",
+                                            deezer_id=t.get("id"),
+                                            preview_url=t.get("preview"),
                                         ))
                                 return pl.get("title", str(pl_id)), local_tracks
                         except Exception:
@@ -219,7 +349,9 @@ class DeezerAggregator(BaseMusicAggregator):
                     artist=t.get("artist", {}).get("name", "Unknown"),
                     album=t.get("album", {}).get("title"),
                     genre="Pop",
-                    source="deezer_charts"
+                    source="deezer_charts",
+                    deezer_id=t.get("id"),
+                    preview_url=t.get("preview"),
                 ))
             return tracks
         except Exception as e:
@@ -254,7 +386,9 @@ class DeezerAggregator(BaseMusicAggregator):
                     title=t.get("title", "Unknown"),
                     artist=resolved_artist_name,
                     album=t.get("album", {}).get("title"),
-                    source="deezer_artist"
+                    source="deezer_artist",
+                    deezer_id=t.get("id"),
+                    preview_url=t.get("preview"),
                 ))
             return tracks
         except Exception as e:

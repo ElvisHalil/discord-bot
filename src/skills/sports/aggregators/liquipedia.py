@@ -428,10 +428,10 @@ class LiquipediaAggregator(BaseSportsAggregator):
                 output += "\n"
             if group_lines:
                 output += "=== GROUP STAGE SEEDING ===\n" + "\n".join(group_lines) + "\n\n"
-            if roster_lines:
-                output += "=== TOURNAMENT ROSTERS (Active Players & Coaches) ===\n" + "\n".join(roster_lines) + "\n\n"
             if match_lines:
                 output += "=== MATCH SCHEDULE & RESULTS (Exact Times) ===\n" + "\n".join(match_lines) + "\n\n"
+            if roster_lines:
+                output += "=== TOURNAMENT ROSTERS (Active Players & Coaches) ===\n" + "\n".join(roster_lines) + "\n\n"
             output += "=== EVENT DETAILS & FORMAT ===\n" + text + "\n"
             return output + "\n"
         except Exception as e:

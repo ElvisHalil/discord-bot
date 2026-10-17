@@ -35,6 +35,8 @@ from src.skills import (
     skill_betting_odds,
     skill_track_live_game,
     skill_top_headlines,
+    skill_flight_info,
+    skill_track_flight,
 )
 
 # Combined registries for mode execution
@@ -51,6 +53,8 @@ RESEARCH_TOOLS = {
     "skill_sports_info": skill_sports_info,
     "skill_betting_odds": skill_betting_odds,
     "skill_track_live_game": skill_track_live_game,
+    "skill_flight_info": skill_flight_info,
+    "skill_track_flight": skill_track_flight,
 }
 
 # Chat mode is a casual persona on a small model: keep the tool list short so the
@@ -60,5 +64,8 @@ CHAT_TOOLS = {
     **WEB_TOOLS,
     "skill_youtube_searcher": skill_youtube_searcher,
     "skill_track_live_game": skill_track_live_game,
+    "skill_flight_info": skill_flight_info,
+    "skill_track_flight": skill_track_flight,
 }
+
 

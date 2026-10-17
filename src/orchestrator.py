@@ -109,6 +109,28 @@ TOOL_ARG_ALIASES = {
         "song": "track", "query": "track", "q": "track", "title": "track", "seed": "track",
         "mode": "action", "type": "action", "bpm": "target_bpm", "tempo": "target_bpm",
     },
+    "skill_flight_info": {
+        "q": "query", "route": "query", "search": "query",
+        "from": "origin", "from_airport": "origin", "departure": "origin", "dep": "origin", "source": "origin",
+        "to": "destination", "to_airport": "destination", "arrival": "destination", "dest": "destination", "arr": "destination",
+        "departure_date": "date", "dep_date": "date", "when": "date",
+        "ret_date": "return_date", "return": "return_date",
+        "flight": "flight_number", "callsign": "flight_number", "code": "flight_number", "tail": "flight_number",
+        "seat": "cabin", "class": "cabin", "cabin_class": "cabin",
+        "curr": "currency",
+        "stops": "max_stops", "num_stops": "max_stops", "stop_limit": "max_stops",
+        "sort": "sort_by", "sort_preference": "sort_by", "order": "sort_by",
+        "trip": "trip_type", "type": "trip_type",
+    },
+    "skill_track_flight": {
+        "mode": "action", "command": "action", "cmd": "action",
+        "q": "query", "flight": "query", "flight_number": "query", "callsign": "query", "route": "query",
+        "from": "origin", "from_airport": "origin", "departure": "origin",
+        "to": "destination", "to_airport": "destination", "arrival": "destination", "dest": "destination",
+        "departure_date": "date", "dep_date": "date",
+        "ret_date": "return_date", "return": "return_date",
+        "price": "target_price", "max_price": "target_price", "threshold": "target_price",
+    },
     "evaluate_math": {
         "math": "expression", "expr": "expression", "equation": "expression",
         "formula": "expression", "query": "expression", "q": "expression",
@@ -177,6 +199,29 @@ def normalize_tool_args(tool_name: str, func, args) -> dict:
     return {k: _coerce(v, params[k].annotation) for k, v in normalized.items()}
 
 
+def enrich_flight_tool_args(args: dict, history: list) -> dict:
+    """Ensure `query` on `skill_flight_info` / `skill_track_flight` preserves the user's latest prompt
+    (including flexible-date intent, direct-schedule questions, sort preferences, and return dates)
+    even when an 8B model only populates `origin` and `destination`."""
+    enriched = dict(args or {})
+    latest_user_text = ""
+    for msg in reversed(history or []):
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        if role == "user":
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+            latest_user_text = str(content or "").strip()
+            latest_user_text = re.sub(r"^\[[^\]]+\]:\s*", "", latest_user_text).strip()
+            break
+    if not latest_user_text:
+        return enriched
+    cur_q = str(enriched.get("query") or "").strip()
+    if not cur_q:
+        enriched["query"] = latest_user_text
+    elif latest_user_text.lower() not in cur_q.lower():
+        enriched["query"] = f"{cur_q} ({latest_user_text})"
+    return enriched
+
+
 # ---------------------------------------------------------------------------
 # Chat history management
 # ---------------------------------------------------------------------------
@@ -219,6 +264,15 @@ def trim_history(history: list, limit: int, old_tool_chars: int = OLD_TOOL_OUTPU
                         "[EXPIRED SPORTS SNAPSHOT FROM EARLIER TURN — DO NOT REUSE OLD SCORES, MINUTE CLOCKS, "
                         "OR TRACKING STATUS. You MUST call skill_sports_info or skill_track_live_game again "
                         "for fresh real-time data.]"
+                    ),
+                }
+            elif tool_name == "skill_flight_info":
+                rest[i] = {
+                    **msg,
+                    "content": (
+                        "[EXPIRED FLIGHT SEARCH SNAPSHOT FROM EARLIER TURN — DO NOT REUSE OLD FARES OR BOOKING LINKS "
+                        "WHEN THE USER REFINES STOPS, DATES, OR ROUND-TRIP OPTIONS. You MUST call skill_flight_info "
+                        "again for the updated search.]"
                     ),
                 }
             elif len(content) > old_tool_chars:

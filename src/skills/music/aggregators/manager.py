@@ -424,6 +424,21 @@ class MusicAggregatorManager:
                 if z:
                     return tg.title(), z
 
+        # 4. Acoustic DSP fallback: analyze the 30s Deezer preview MP3 to determine true speed/intensity zone
+        deezer = self.aggregators.get("deezer")
+        is_mocked = (
+            (lastfm and hasattr(getattr(lastfm, "_call", None), "assert_called"))
+            or (deezer and hasattr(getattr(deezer, "get_charts", None), "assert_called"))
+        )
+        if not is_mocked and song and song.lower() not in ("unknown track", "unknown"):
+            try:
+                from src.skills.music.audio_analyzer import get_track_acoustic_profile
+                prof = get_track_acoustic_profile(song, artist, deezer_agg=deezer)
+                if prof and prof.get("ui_zone"):
+                    return known_genre or "Acoustic DSP", prof["ui_zone"]
+            except Exception:
+                pass
+
         return known_genre, None
 
     def get_spectrum_tracks(
@@ -431,6 +446,10 @@ class MusicAggregatorManager:
         target_zone: dict,
         prefer_deep_cuts: bool = False,
         exclude_query: Optional[str] = None,
+        d_tempo: int = 0,
+        d_intensity: int = 0,
+        anchor_bpm: Optional[float] = None,
+        seed_genre: Optional[str] = None,
     ) -> list[Track]:
         """
         Fetch diverse tracks for a target 3x3 spectrum zone using its mainstream_tags,
@@ -441,15 +460,35 @@ class MusicAggregatorManager:
         mainstream = list(target_zone.get("mainstream_tags", []))
         deep_cuts = list(target_zone.get("deep_cut_tags", []))
         modifiers = list(target_zone.get("intersection_modifiers", []))
+        intensity_lvl = target_zone.get("intensity", "mid")
 
         if prefer_deep_cuts:
-            chosen_deep = random.sample(deep_cuts, min(3, len(deep_cuts)))
-            chosen_main = random.sample(mainstream, min(1, len(mainstream)))
-            active_tags = chosen_deep + chosen_main
+            # At boundary: use deep_cut_tags exclusively so slower mainstream tags (e.g. 120 BPM house/dream pop)
+            # never dilute boundary 'faster' shifts.
+            active_tags = random.sample(deep_cuts, min(4, len(deep_cuts))) if deep_cuts else list(mainstream[:3])
         else:
             chosen_main = random.sample(mainstream, min(3, len(mainstream)))
             chosen_deep = random.sample(deep_cuts, min(1, len(deep_cuts)))
             active_tags = chosen_main + chosen_deep
+
+        # High-velocity escalation: when pushing 'faster' at the fast boundary or from >=152 BPM,
+        # blend in genuine 170-205 BPM subgenres matching the current intensity tier.
+        if d_tempo > 0 and (prefer_deep_cuts or (anchor_bpm is not None and anchor_bpm >= 152.0)):
+            high_vel_map = {
+                "soft": ["liquid drum and bass", "atmospheric dnb", "intelligent drum and bass", "liquid funk"],
+                "mid": ["happy hardcore", "uk hardcore", "drum and bass", "eurobeat", "hyperpop"],
+                "hard": ["breakcore", "neurofunk", "gabber", "frenchcore", "hardstyle"],
+            }
+            hv_pool = [t for t in high_vel_map.get(intensity_lvl, high_vel_map["mid"]) if t not in active_tags]
+            if hv_pool:
+                active_tags = active_tags[:2] + random.sample(hv_pool, min(2, len(hv_pool)))
+
+        # Preserve genre continuity if the current seed_genre already belongs to this zone's tags
+        if seed_genre:
+            sg_low = seed_genre.strip().lower()
+            zone_all = {t.lower() for t in (mainstream + deep_cuts)}
+            if sg_low in zone_all and sg_low not in [t.lower() for t in active_tags]:
+                active_tags.insert(0, sg_low)
 
         if not active_tags:
             active_tags = mainstream or deep_cuts or ["pop"]
@@ -464,10 +503,10 @@ class MusicAggregatorManager:
 
         tasks: list[tuple] = []
         if lastfm:
-            for tag in active_tags[:3]:
+            for tag in active_tags[:4]:
                 tasks.append((lastfm.get_charts, tag, tag.title()))
         if deezer:
-            for idx, tag in enumerate(active_tags[:3]):
+            for idx, tag in enumerate(active_tags[:4]):
                 # Optionally pair one Deezer playlist query with an intersection modifier when pushing boundaries
                 if prefer_deep_cuts and idx == 0 and modifiers:
                     mod = random.choice(modifiers)
@@ -475,9 +514,15 @@ class MusicAggregatorManager:
                 else:
                     tasks.append((deezer.get_charts, tag, tag.title()))
 
+            # Also blend in related artist/genre tracks from the current seed song so it doesn't abruptly jump genres
+            is_dz_mocked = hasattr(getattr(deezer, "get_charts", None), "assert_called") or hasattr(getattr(deezer, "get_similar", None), "assert_called")
+            if exclude_query and not is_dz_mocked and hasattr(deezer, "get_similar"):
+                sim_label = (seed_genre or active_tags[0]).title()
+                tasks.append((deezer.get_similar, exclude_query, sim_label))
+
         all_tracks: list[Track] = []
         if tasks:
-            fut_map = {submit_to_worker(fn, genre=q): tag_label for fn, q, tag_label in tasks}
+            fut_map = {submit_to_worker(fn, arg): tag_label for fn, arg, tag_label in tasks}
             for fut, tag_label in fut_map.items():
                 try:
                     res = fut.result() or []

@@ -58,7 +58,7 @@ SPECTRUM_CHART: List[Dict[str, Any]] = [
         "tempo": "fast",
         "intensity": "mid",
         "mainstream_tags": ["house", "nu-disco", "pop-punk", "electropop"],
-        "deep_cut_tags": ["hyperpop", "italo-disco", "bubblegum bass"],
+        "deep_cut_tags": ["hyperpop", "bubblegum bass", "eurobeat", "happy hardcore"],
         "intersection_modifiers": ["dance", "party", "energetic"],
     },
     {
@@ -232,19 +232,28 @@ def record_channel_played_song(
     genre: Optional[str] = None,
     ui_zone: Optional[str] = None,
     channel_id: Optional[int] = None,
+    alt_song: Optional[str] = None,
+    bpm: Optional[float] = None,
+    speed_score: Optional[float] = None,
+    intensity_score: Optional[float] = None,
+    gain_db: Optional[float] = None,
 ) -> None:
-    """Record the most recently served song in a channel along with its genre and spectrum zone."""
+    """Record the most recently served song in a channel along with its genre, spectrum zone, and acoustic metrics."""
     s_clean = (song or "").strip()
     a_clean = (artist or "").strip()
+    alt_clean = (alt_song or "").strip() or None
     if not s_clean or s_clean.lower() in ("unknown track", "unknown"):
         return
 
     cid = _get_channel_id(channel_id)
     prev = _CHANNEL_LAST_PLAYED_SONG.get(cid) or {}
+    norm_s = _norm_token(s_clean)
+    norm_alt = _norm_token(alt_clean or "")
+    prev_s = _norm_token(prev.get("song") or "")
+    prev_alt = _norm_token(prev.get("alt_song") or "")
     same_track = (
-        _norm_token(prev.get("song") or "") == _norm_token(s_clean)
-        and _norm_token(prev.get("artist") or "") == _norm_token(a_clean)
-    )
+        norm_s in (prev_s, prev_alt) or (norm_alt and norm_alt in (prev_s, prev_alt))
+    ) and _norm_token(prev.get("artist") or "") == _norm_token(a_clean)
 
     eff_genre = (genre or "").strip() or (prev.get("genre") if same_track else None)
     eff_zone = ui_zone or (prev.get("ui_zone") if same_track else None)
@@ -253,14 +262,19 @@ def record_channel_played_song(
 
     entry = {
         "song": s_clean,
+        "alt_song": alt_clean or (prev.get("alt_song") if same_track else None),
         "artist": a_clean,
         "genre": eff_genre,
         "ui_zone": eff_zone,
+        "bpm": bpm if bpm is not None else (prev.get("bpm") if same_track else None),
+        "speed_score": speed_score if speed_score is not None else (prev.get("speed_score") if same_track else None),
+        "intensity_score": intensity_score if intensity_score is not None else (prev.get("intensity_score") if same_track else None),
+        "gain_db": gain_db if gain_db is not None else (prev.get("gain_db") if same_track else None),
     }
     _CHANNEL_LAST_PLAYED_SONG[cid] = entry
 
 
-def get_channel_last_played_song(channel_id: Optional[int] = None) -> Optional[Dict[str, Optional[str]]]:
+def get_channel_last_played_song(channel_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
     """Retrieve the most recently served song in a specific channel."""
     cid = _get_channel_id(channel_id)
     if cid in _CHANNEL_LAST_PLAYED_SONG:

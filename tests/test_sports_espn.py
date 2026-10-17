@@ -970,6 +970,106 @@ class TestSportsEspnUpgrade(unittest.TestCase):
         self.assertIn("SPANISH LA LIGA", out)
         self.assertIn("Atletico Madrid at Barcelona", out)
 
+    @patch("src.skills.sports.sports.skill_csgo_esports")
+    @patch("src.skills.sports.aggregators.hockey.fetch_json")
+    @patch("src.skills.sports.aggregators.soccer.fetch_json")
+    @patch("src.skills.sports.aggregators.espn_utils.espn_search_auto_discover")
+    @patch("src.skills.sports.aggregators.espn_utils.resolve_espn_team")
+    def test_multi_sport_today_and_tomorrow_scoping_and_dual_day_fetch(
+        self, mock_resolve, mock_disc, mock_soccer_fetch, mock_hockey_fetch, mock_cs
+    ):
+        from datetime import datetime, timedelta
+        from src.skills.sports.aggregators.hockey import HockeyAggregator
+
+        mock_resolve.return_value = None
+        mock_disc.return_value = None
+        mock_cs.return_value = "[CS2 UPCOMING TOURNAMENTS]\n- **PGL Masters Bucharest 2026**"
+
+        today_dt = datetime.now()
+        tomorrow_dt = today_dt + timedelta(days=1)
+        today_ymd = today_dt.strftime("%Y%m%d")
+        tomorrow_ymd = tomorrow_dt.strftime("%Y%m%d")
+
+        def soccer_side_effect(url, timeout=6):
+            if f"eng.1/scoreboard?dates={today_ymd}" in url:
+                return {
+                    "events": [{
+                        "date": today_dt.strftime("%Y-%m-%dT14:00Z"),
+                        "competitions": [{
+                            "status": {"type": {"state": "pre", "detail": "Today 10:00 AM"}},
+                            "competitors": [
+                                {"homeAway": "home", "team": {"displayName": "Arsenal"}, "score": "0"},
+                                {"homeAway": "away", "team": {"displayName": "Chelsea"}, "score": "0"},
+                            ],
+                        }],
+                    }]
+                }
+            if f"eng.1/scoreboard?dates={tomorrow_ymd}" in url:
+                return {
+                    "events": [{
+                        "date": tomorrow_dt.strftime("%Y-%m-%dT15:30Z"),
+                        "competitions": [{
+                            "status": {"type": {"state": "pre", "detail": "Tomorrow 11:30 AM"}},
+                            "competitors": [
+                                {"homeAway": "home", "team": {"displayName": "Liverpool"}, "score": "0"},
+                                {"homeAway": "away", "team": {"displayName": "Everton"}, "score": "0"},
+                            ],
+                        }],
+                    }]
+                }
+            return {"events": []}
+
+        def hockey_side_effect(url, timeout=8):
+            if "dates=" not in url or f"dates={today_ymd}" in url:
+                return {
+                    "events": [{
+                        "date": today_dt.strftime("%Y-%m-%dT23:00Z"),
+                        "competitions": [{
+                            "status": {"type": {"state": "pre", "detail": "Today 7:00 PM"}},
+                            "competitors": [
+                                {"homeAway": "home", "team": {"displayName": "Boston Bruins"}, "score": "0"},
+                                {"homeAway": "away", "team": {"displayName": "Toronto Maple Leafs"}, "score": "0"},
+                            ],
+                        }],
+                    }]
+                }
+            if f"dates={tomorrow_ymd}" in url:
+                return {
+                    "events": [{
+                        "date": tomorrow_dt.strftime("%Y-%m-%dT23:00Z"),
+                        "competitions": [{
+                            "status": {"type": {"state": "pre", "detail": "Tomorrow 7:00 PM"}},
+                            "competitors": [
+                                {"homeAway": "home", "team": {"displayName": "New York Rangers"}, "score": "0"},
+                                {"homeAway": "away", "team": {"displayName": "New Jersey Devils"}, "score": "0"},
+                            ],
+                        }],
+                    }]
+                }
+            return {"events": []}
+
+        mock_soccer_fetch.side_effect = soccer_side_effect
+        mock_hockey_fetch.side_effect = hockey_side_effect
+
+        # 1. Full multi-sport compound query preserves both Today and Tomorrow across CS, Soccer, and NHL
+        multi_out = skill_sports_info(query="give me Counter-strike, soccer, and hockey games today and tomorrow")
+        self.assertIn("PGL Masters Bucharest 2026", multi_out)
+        self.assertIn("Arsenal 0 - 0 Chelsea", multi_out)
+        self.assertIn("Liverpool 0 - 0 Everton", multi_out)
+        self.assertIn("Toronto Maple Leafs 0 @ Boston Bruins 0", multi_out)
+        self.assertIn("New Jersey Devils 0 @ New York Rangers 0", multi_out)
+
+        # 2. Direct aggregator calls with "schedule today tomorrow" do not hijack into 8-day weekly schedule
+        soccer_out = SoccerAggregator().get_info("schedule today tomorrow")
+        self.assertNotIn("WEEKLY FIXTURES", soccer_out)
+        self.assertIn("Arsenal 0 - 0 Chelsea", soccer_out)
+        self.assertIn("Liverpool 0 - 0 Everton", soccer_out)
+
+        hockey_out = HockeyAggregator().get_info("schedule today tomorrow")
+        self.assertNotIn("WEEKLY SCHEDULE", hockey_out)
+        self.assertIn("Toronto Maple Leafs 0 @ Boston Bruins 0", hockey_out)
+        self.assertIn("New Jersey Devils 0 @ New York Rangers 0", hockey_out)
+
 
 if __name__ == "__main__":
     unittest.main()

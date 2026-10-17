@@ -166,7 +166,12 @@ def skill_sports_info(
         }.get(target_sport, ())
 
         # If the prompt has multiple clauses ('cs rankings and when do the lakers play'),
-        # drop clauses that only mention another sport so intent words like 'rankings' or 'play' don't bleed across sports.
+        # drop clauses that only mention another sport so intent words like 'rankings' or 'play' don't bleed across sports,
+        # while preserving shared day/time words ('today', 'tomorrow', 'yesterday', 'tonight') from list prompts.
+        shared_time_words = [
+            w for w in ("today", "tomorrow", "yesterday", "tonight")
+            if re.search(rf'\b{w}\b', q_text, re.IGNORECASE)
+        ]
         own_words = sport_vocab.get(target_sport, ())
         clauses = [c.strip() for c in re.split(r'\b(?:and\s+also|and|also|plus)\b|[,;]', cleaned, flags=re.IGNORECASE) if c and c.strip()]
         if len(clauses) >= 2 and other_sport_words:
@@ -181,6 +186,9 @@ def skill_sports_info(
 
         for w in other_sport_words:
             cleaned = re.sub(rf'\b{re.escape(w)}\b', ' ', cleaned, flags=re.IGNORECASE)
+        for tw in shared_time_words:
+            if not re.search(rf'\b{tw}\b', cleaned, re.IGNORECASE):
+                cleaned = f"{cleaned} {tw}"
         cleaned = re.sub(r'\s+', ' ', cleaned).strip(" ,;&")
         return cleaned or target_sport
 
