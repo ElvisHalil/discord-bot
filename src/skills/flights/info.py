@@ -96,7 +96,7 @@ def skill_flight_info(
      * Present the **📅 Concrete Recommended 1-Stop Travel Dates**, the **🛫 Outbound 1-Stop Schedule** (`Leg 1: Origin -> Hub` + `Leg 2: Hub -> Destination`), AND for Round-Trips the **🛬 Return 1-Stop Schedule** (`Return Segment 1: Destination -> Hub` + `Return Segment 2: Hub -> Origin`).
      * NEVER confuse `Outbound Leg 2` (`Hub -> Destination`, e.g. `AMS -> ZAG`) with the return trip back home (`ZAG -> AMS -> YEG`)!
      * Quote the **🔄 Published 1-Stop Round-Trip Benchmark** as the expected single-ticket Round-Trip price once the 6-month combined ticketing window opens, and **NEVER tell the user to fly on the 6-month benchmark date (e.g. April) when they asked for a different month**!
-   - Always include the clickable **[Google Flights](<https://www.google.com/travel/flights/search?tfs=...>)` booking link** for the user's requested dates.
+   - Always include the exact clickable **[Google Flights](<https://www.google.com/travel/flights/search?tfs=...>) booking link** that belongs to the specific date pair you are recommending — NEVER mix dates from one option with a price or booking link from a different date pair!
 5. When reporting Live Flight Status:
    - Clearly state whether the flight is **Scheduled**, **En Route / Airborne**, **Landed**, **Delayed**, or **Cancelled**, along with Terminal/Gate info and local departure/arrival times.
    - For airborne flights, include live radar telemetry (Altitude in ft, Ground Speed in kts/mph/kmh, route completion %, remaining distance, and the clickable Flightradar24 / ADSB.lol live radar map links).

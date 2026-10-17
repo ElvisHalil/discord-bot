@@ -1251,7 +1251,118 @@ class TestFlightsSkill(unittest.TestCase):
             self.assertIn("Tuesday, 2026-12-01 ↔ Return Tue 2026-12-22", out)
             self.assertIn("$1671 CAD Round-Trip", out)
 
+    def test_shopping_results_and_calendar_picker_rpc_for_cold_round_trips(self):
+        import json as _json
+
+        agg = GoogleFlightsPriceAggregator()
+
+        # 1. Cold SSR HTML where script.ds:1 has data[2]=null, data[3]=null, data[23]=1 and a continuation token
+        cold_html = (
+            '<html><head><script>window.WIZ_global_data = {"FdrFJe":"-123456","cfb2h":"boq_travel-frontend-flights-ui_20260414.02_p0",'
+            '"mnsUbf":[null,null,true,10,5,null,true,848625525]};</script>'
+            "<script>AF_dataServiceRequests = {'ds:1' : {id:'c64Xbe',request:[[],[null,null,1,null,[],1,[1,0,0,0],null,null,null,null,null,null,"
+            '[[[[["YEG",0]]],[[["ZAG",0]]],null,1,null,null,"2027-05-04",null,null,null,null,null,null,null,3],'
+            '[[[["ZAG",0]]],[[["YEG",0]]],null,1,null,null,"2027-08-10",null,null,null,null,null,null,null,3]]]]}};</script></head>'
+            '<body><script class="ds:1">AF_initDataCallback({key: \'ds:1\', hash: \'1\', data:'
+            '[[null,null,null,null,"CONT_TOKEN_123"],null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,1]'
+            ", sideChannel: {}});</script></body></html>"
+        )
+
+        # Verify _extract_rpc_context_from_html extracts token, travelSettings header (field 9 = 7), and BotGuard header
+        ctx = agg._extract_rpc_context_from_html(cold_html, currency="CAD")
+        self.assertIsNotNone(ctx)
+        self.assertEqual(ctx["token"], "CONT_TOKEN_123")
+        self.assertEqual(_json.loads(ctx["headers"]["x-goog-ext-259736195-jspb"])[8], 7)
+        self.assertIn("848625525", ctx["headers"]["X-Goog-BatchExecute-Bgr"])
+
+        # Synthetic 1-stop flight entry in GetShoppingResults wrb.fr format
+        leg1 = [None, None, None, "YEG", "Edmonton", "Amsterdam", "AMS", None, [17, 35], None, [10, 10], 515, None, None, None, None, None, "Airbus A330", None, None, [2027, 5, 4], [2027, 5, 5]]
+        leg2 = [None, None, None, "AMS", "Amsterdam", "Zagreb", "ZAG", None, [11, 20], None, [13, 15], 115, None, None, None, None, None, "Airbus A220", None, None, [2027, 5, 5], [2027, 5, 5]]
+        raw_entry = [["Round trip", ["KLM", "Croatia"], [leg1, leg2]], [[None, 1825]]]
+        inner_payload = _json.dumps([None, None, [[raw_entry]], None, None, [None, None, None, None, [None, 1650], [None, 2100]]])
+        streamed_rpc_text = ")]}'\n\n100\n" + _json.dumps([["wrb.fr", "GetShoppingResults", inner_payload, None, None, None, "generic"]]) + "\n"
+
+        with (
+            patch("src.skills.flights.aggregators.prices.fetch_flights_html", return_value=cold_html),
+            patch.object(GoogleFlightsPriceAggregator, "_post_google_flights_rpc", return_value=streamed_rpc_text) as mock_rpc,
+        ):
+            res = agg.fetch_structured_fares("YEG", "ZAG", "2027-05-04", "2027-08-10", max_stops=1)
+            self.assertEqual(mock_rpc.call_count, 1)
+            self.assertIsNotNone(res["best_overall"])
+            self.assertEqual(res["best_overall"]["price"], 1825)
+            self.assertEqual(res["best_overall"]["airlines"], "KLM, Croatia")
+            self.assertEqual(res["best_overall"]["stops"], 1)
+            self.assertEqual(res["verdict"], "🟡 TYPICAL")
+
+        # 2. Verify GetCalendarPicker integration in fetch_calendar_prices
+        cal_inner = _json.dumps(
+            [
+                [],
+                [
+                    ["2027-05-04", "2027-08-10", [[None, 1825], "tok1"], 1],
+                    ["2027-05-03", "2027-08-03", [[None, 1705], "tok2"], 1],
+                ],
+            ]
+        )
+        cal_rpc_text = ")]}'\n\n100\n" + _json.dumps([["wrb.fr", "GetCalendarPicker", cal_inner, None, None, None, "generic"]]) + "\n"
+        with (
+            patch("src.skills.flights.aggregators.prices.fetch_flights_html", return_value=cold_html),
+            patch.object(GoogleFlightsPriceAggregator, "_post_google_flights_rpc", return_value=cal_rpc_text),
+        ):
+            cal_rows = agg.fetch_calendar_prices(
+                origin_code="YEG",
+                dest_code="ZAG",
+                start_date="2027-05-01",
+                end_date="2027-05-31",
+                return_date="2027-08-10",
+                return_start_date="2027-08-01",
+                return_end_date="2027-08-31",
+                max_stops=1,
+            )
+            self.assertEqual(cal_rows[0], (1705, "2027-05-03", "2027-08-03"))
+            self.assertEqual(cal_rows[1], (1825, "2027-05-04", "2027-08-10"))
+
+        # 3. Verify cold initial GetCalendarPicker retry + scanner header/row link alignment (no [sample ...] decoy dates)
+        empty_cal_rpc = ")]}'\n\n100\n" + _json.dumps([["wrb.fr", "GetCalendarPicker", "[null,[],[]]", None, None, None, "generic"]]) + "\n"
+        with (
+            patch("src.skills.flights.aggregators.prices.fetch_flights_html", return_value=cold_html),
+            patch.object(
+                GoogleFlightsPriceAggregator,
+                "_post_google_flights_rpc",
+                side_effect=[empty_cal_rpc, cal_rpc_text, cal_rpc_text],
+            ) as mock_cal_retry,
+        ):
+            warmed_rows = agg.fetch_calendar_prices(
+                origin_code="YEG",
+                dest_code="ZAG",
+                start_date="2027-05-01",
+                end_date="2027-05-31",
+                return_date="2027-08-10",
+                return_start_date="2027-08-01",
+                return_end_date="2027-08-31",
+                max_stops=1,
+            )
+            self.assertEqual(mock_cal_retry.call_count, 3)
+            self.assertEqual(warmed_rows[0], (1705, "2027-05-03", "2027-08-03"))
+
+        # Verify sanitize_agent_reply deterministically rewrites mismatched Google Flights ?tfs= URLs to match the reply's prose dates
+        from src.orchestrator import _decode_google_flights_tfs, sanitize_agent_reply
+
+        mismatched_reply = (
+            "### ✈️ Best Round-Trip Flights: Edmonton (YEG) ↔ Zagreb (ZAG)\n"
+            "• **Best Value Dates:** Tue, 2027-05-04 ↔ Tue, 2027-08-10 | **Price:** ~$1707 CAD Round-Trip | **Duration:** ~11 hours 40 minutes | **Stops/Layover:** 1 Stop (AMS)\n"
+            "• **Airlines:** KLM + Croatia Airlines\n"
+            "• **Direct Link:** [Google Flights: Edmonton (YEG) <-> Zagreb (ZAG)](<https://www.google.com/travel/flights/search?tfs=GhwSCjIwMjctMDUtMDEoAWoFEgNZRUdyBRIDWkFHGhwSCjIwMjctMDgtMDkoAWoFEgNaQUdyBRIDWUVHQgEBSAGYAQE=&hl=en&curr=CAD>)"
+        )
+        synced_reply = sanitize_agent_reply(mismatched_reply)
+        decoded_after = _decode_google_flights_tfs(synced_reply)
+        self.assertIsNotNone(decoded_after)
+        self.assertEqual(decoded_after["origin_code"], "YEG")
+        self.assertEqual(decoded_after["dest_code"], "ZAG")
+        self.assertEqual(decoded_after["url_dates"], ["2027-05-04", "2027-08-10"])
+        self.assertEqual(decoded_after["max_stops"], 1)
+        self.assertEqual(decoded_after["currency"], "CAD")
+
 
 if __name__ == "__main__":
     unittest.main()
-

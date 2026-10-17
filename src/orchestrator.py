@@ -448,6 +448,212 @@ def _normalize_discord_latex(text: str) -> str:
     return out
 
 
+_MONTH_MAP_SYNC = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
+_PROSE_DATE_TOKEN_RE = re.compile(
+    r"\b(?P<iso>20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b"
+    r"|\b(?P<m1>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(?P<d1>[0-3]?\d)(?:st|nd|rd|th)?(?:,?\s+(?P<y1>20\d{2}))?\b"
+    r"|\b(?P<d2>[0-3]?\d)(?:st|nd|rd|th)?\s+(?P<m2>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?(?:,?\s+(?P<y2>20\d{2}))?\b",
+    re.IGNORECASE,
+)
+
+_GF_MD_OR_BARE_LINK_RE = re.compile(
+    r"(?:\[(?P<label>[^\]]+)\]\(\s*<?(?P<md_url>https?://www\.google\.com/travel/flights/search\?tfs=[^>\s)]+)>?\s*\))"
+    r"|(?P<bare_wrap><(?P<bare_url>https?://www\.google\.com/travel/flights/search\?tfs=[^>\s]+)>)",
+    re.IGNORECASE,
+)
+
+
+def _extract_prose_dates(fragment: str, default_year: typing.Optional[int] = None) -> list[str]:
+    """Extract ordered YYYY-MM-DD dates from prose after stripping markdown links and URLs."""
+    cleaned = re.sub(r"\[[^\]]*\]\(\s*<?https?://[^)\s]+>?\s*\)", " ", fragment)
+    cleaned = re.sub(r"<?https?://[^\s>]+>?", " ", cleaned)
+    explicit_years = [int(y) for y in re.findall(r"\b(20\d{2})\b", cleaned)]
+    eff_year = explicit_years[0] if explicit_years else default_year
+    results: list[str] = []
+    for m in _PROSE_DATE_TOKEN_RE.finditer(cleaned):
+        iso = m.group("iso")
+        if iso:
+            if iso not in results:
+                results.append(iso)
+            continue
+        m_str = m.group("m1") or m.group("m2")
+        d_str = m.group("d1") or m.group("d2")
+        y_str = m.group("y1") or m.group("y2")
+        yr = int(y_str) if y_str else eff_year
+        if not (m_str and d_str and yr):
+            continue
+        month_num = _MONTH_MAP_SYNC.get(m_str.lower().rstrip("."))
+        if not month_num:
+            continue
+        try:
+            dt_iso = datetime.date(yr, month_num, int(d_str)).strftime("%Y-%m-%d")
+            if dt_iso not in results:
+                results.append(dt_iso)
+        except Exception:
+            continue
+    return results
+
+
+def _decode_google_flights_tfs(url: str) -> typing.Optional[dict[str, typing.Any]]:
+    """Decode a Google Flights ?tfs= URL into origin, destination, encoded dates, max_stops, and currency."""
+    import base64
+
+    m_tfs = re.search(r"[?&]tfs=([^&#\s>]+)", url)
+    if not m_tfs:
+        return None
+    tfs_b64 = m_tfs.group(1)
+    try:
+        padded = tfs_b64 + "=" * (-len(tfs_b64) % 4)
+        raw = base64.urlsafe_b64decode(padded)
+    except Exception:
+        return None
+    legs = re.findall(rb"j\x05\x12\x03([A-Z]{3})r\x05\x12\x03([A-Z]{3})", raw)
+    if not legs:
+        return None
+    orig_code = legs[0][0].decode("ascii")
+    dest_code = legs[0][1].decode("ascii")
+    url_dates = [d.decode("ascii") for d in re.findall(rb"20\d{2}-\d{2}-\d{2}", raw)]
+    if not url_dates:
+        return None
+    if b"(\x00" in raw:
+        max_stops: typing.Optional[int] = 0
+    elif b"(\x01" in raw:
+        max_stops = 1
+    elif b"(\x02" in raw:
+        max_stops = 2
+    else:
+        max_stops = None
+    m_curr = re.search(r"[?&]curr=([A-Z]{3})", url)
+    currency = m_curr.group(1) if m_curr else "CAD"
+    return {
+        "origin_code": orig_code,
+        "dest_code": dest_code,
+        "url_dates": url_dates,
+        "max_stops": max_stops,
+        "currency": currency,
+    }
+
+
+def _sync_google_flights_links_with_reply_dates(text: str) -> str:
+    """Ensure every Google Flights ?tfs= booking link in the reply encodes the exact travel dates stated in the reply."""
+    if not text or "google.com/travel/flights/search?tfs=" not in text:
+        return text
+
+    all_links = list(_GF_MD_OR_BARE_LINK_RE.finditer(text))
+    if not all_links:
+        return text
+
+    first_decoded = _decode_google_flights_tfs(all_links[0].group("md_url") or all_links[0].group("bare_url"))
+    fallback_year = int(first_decoded["url_dates"][0][:4]) if first_decoded and first_decoded.get("url_dates") else None
+
+    lines = text.splitlines()
+    line_dates: list[list[str]] = []
+    benchmark_line_Re = re.compile(r"\b(?:horizon|benchmark|published up through|6-month)\b", re.IGNORECASE)
+    for line in lines:
+        if benchmark_line_Re.search(line) and "google.com/travel/flights/search?tfs=" not in line:
+            line_dates.append([])
+        else:
+            line_dates.append(_extract_prose_dates(line, default_year=fallback_year))
+
+    primary_dates: list[str] = []
+    for d_list in line_dates:
+        if len(d_list) >= 2:
+            primary_dates = d_list[:2]
+            break
+    if not primary_dates:
+        collected: list[str] = []
+        for d_list in line_dates:
+            for d_val in d_list:
+                if d_val not in collected:
+                    collected.append(d_val)
+                if len(collected) >= 2:
+                    break
+            if len(collected) >= 2:
+                break
+        primary_dates = collected
+
+    total_gf_links = len(all_links)
+    from src.skills.flights.aggregators.prices import GoogleFlightsPriceAggregator
+
+    new_lines: list[str] = []
+    for idx, line in enumerate(lines):
+        if "google.com/travel/flights/search?tfs=" not in line:
+            new_lines.append(line)
+            continue
+
+        target_dates = line_dates[idx]
+        if not target_dates:
+            if total_gf_links == 1 and primary_dates:
+                target_dates = primary_dates
+            else:
+                for back_idx in range(idx - 1, -1, -1):
+                    if line_dates[back_idx]:
+                        target_dates = line_dates[back_idx]
+                        break
+                if not target_dates:
+                    target_dates = primary_dates
+
+        def _replace_link(m: re.Match) -> str:
+            orig_url = m.group("md_url") or m.group("bare_url")
+            info = _decode_google_flights_tfs(orig_url)
+            if not info or not target_dates:
+                return m.group(0)
+            url_dates = info["url_dates"]
+            new_dep = url_dates[0]
+            new_ret = url_dates[1] if len(url_dates) >= 2 else None
+
+            if len(url_dates) >= 2 and len(target_dates) >= 2:
+                if target_dates[0] <= target_dates[1]:
+                    new_dep, new_ret = target_dates[0], target_dates[1]
+            elif len(url_dates) == 1 and len(target_dates) >= 1:
+                if len(target_dates) >= 2 and target_dates[0] < target_dates[1] and re.search(r"\bround[-\s]?trip\b|↔|<->", text, re.IGNORECASE):
+                    new_dep, new_ret = target_dates[0], target_dates[1]
+                else:
+                    new_dep = target_dates[0]
+
+            expected_dates = [new_dep, new_ret] if new_ret else [new_dep]
+            if expected_dates == url_dates[: len(expected_dates)] and len(expected_dates) == len(url_dates):
+                return m.group(0)
+
+            try:
+                rebuilt_url = GoogleFlightsPriceAggregator.build_google_flights_url(
+                    origin_code=info["origin_code"],
+                    dest_code=info["dest_code"],
+                    date=new_dep,
+                    return_date=new_ret,
+                    currency=info["currency"],
+                    max_stops=info["max_stops"],
+                )
+            except Exception:
+                return m.group(0)
+
+            label = m.group("label")
+            if label is not None:
+                new_label = label.replace(url_dates[0], new_dep)
+                if new_ret and len(url_dates) >= 2:
+                    new_label = new_label.replace(url_dates[1], new_ret)
+                return f"[{new_label}](<{rebuilt_url}>)"
+            return f"<{rebuilt_url}>"
+
+        new_lines.append(_GF_MD_OR_BARE_LINK_RE.sub(_replace_link, line))
+
+    return "\n".join(new_lines)
+
+
 def sanitize_agent_reply(reply: str) -> str:
     """Sanitizes replies by removing accidental leaks of internal function names,
     hallucinated bookmaker URLs, unrendered LaTeX math, and canned AI meta-excuses."""
@@ -457,6 +663,7 @@ def sanitize_agent_reply(reply: str) -> str:
     lines = [line for line in reply.splitlines() if not _DISCLAIMER_HEADER_RE.search(line)]
     text = "\n".join(lines)
     text = _normalize_discord_latex(text)
+    text = _sync_google_flights_links_with_reply_dates(text)
 
     text = re.sub(r'(?i)\buse\s+(?:my\s+)?search_web(?:\s+tool)?\b', 'search online', text)
     text = re.sub(r'(?i)\buse\s+(?:my\s+)?read_website(?:\s+tool)?\b', 'inspect the web page', text)

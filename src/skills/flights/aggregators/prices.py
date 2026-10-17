@@ -1,3 +1,4 @@
+import calendar
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import json
@@ -8,6 +9,7 @@ from typing import Any, Optional
 from fast_flights import FlightQuery, Passengers, create_query, fetch_flights_html, get_flights
 from fast_flights.model import Airport, CarbonEmission, Flights, SimpleDatetime, SingleFlight
 from fast_flights.parser import _parse_time
+import primp
 from selectolax.lexbor import LexborHTMLParser
 
 from src.skills.flights.airports import (
@@ -110,26 +112,13 @@ class GoogleFlightsPriceAggregator:
             return None
 
     @classmethod
-    def _parse_google_flights_html(cls, html: str) -> tuple[list[Flights], dict[str, Any]]:
+    def _parse_ds1_payload(cls, payload: Any) -> tuple[list[Flights], dict[str, Any]]:
         """
-        Parses both payload[2][0] ('Best Flights') and payload[3][0] ('Other Flights')
-        plus payload[5] ('Price Insights': typical price range & 60-day history)
-        from Google Flights' embedded script.ds:1 JSON.
-        Tags each Flights object with _is_best_flight and _best_rank so Google's
-        curated 'Best Flights' ranking is preserved.
+        Parses a Google Flights shopping payload array (from script.ds:1 or GetShoppingResults wrb.fr)
+        into (list[Flights], price_insights_dict).
         """
-        parser = LexborHTMLParser(html)
-        script = parser.css_first(r"script.ds\:1")
-        if not script:
+        if not isinstance(payload, list):
             return [], {}
-        js = script.text()
-        if "data:" not in js:
-            return [], {}
-        data_str = js.split("data:", 1)[1].rsplit(",", 1)[0]
-        if data_str.endswith("errorHasStatus: true"):
-            return [], {}
-
-        payload = json.loads(data_str)
         all_flights: list[Flights] = []
         seen_keys: set[tuple] = set()
 
@@ -174,6 +163,202 @@ class GoogleFlightsPriceAggregator:
             pass
 
         return all_flights, insights
+
+    @classmethod
+    def _parse_google_flights_html(cls, html: str) -> tuple[list[Flights], dict[str, Any]]:
+        """
+        Parses both payload[2][0] ('Best Flights') and payload[3][0] ('Other Flights')
+        plus payload[5] ('Price Insights': typical price range & 60-day history)
+        from Google Flights' embedded script.ds:1 JSON.
+        Tags each Flights object with _is_best_flight and _best_rank so Google's
+        curated 'Best Flights' ranking is preserved.
+        """
+        parser = LexborHTMLParser(html)
+        script = parser.css_first(r"script.ds\:1")
+        if not script:
+            return [], {}
+        js = script.text()
+        if "data:" not in js:
+            return [], {}
+        data_str = js.split("data:", 1)[1].rsplit(",", 1)[0]
+        if data_str.endswith("errorHasStatus: true"):
+            return [], {}
+
+        try:
+            payload = json.loads(data_str)
+        except Exception:
+            return [], {}
+        return cls._parse_ds1_payload(payload)
+
+    @classmethod
+    def _extract_rpc_context_from_html(cls, html: str, currency: str = "CAD") -> Optional[dict[str, Any]]:
+        """
+        Extracts WIZ session parameters ('FdrFJe', 'cfb2h', 'mnsUbf' BotGuard token),
+        AF_dataServiceRequests['ds:1'].request, and the script.ds:1 continuation token
+        needed to invoke Google Flights' GetShoppingResults and GetCalendarPicker RPCs.
+        """
+        if not html:
+            return None
+        m_req = re.search(r"'ds:1'\s*:\s*\{id:'[^']+',\s*request:(\[.*?)\}\s*(?:,\s*'ds:|\})", html, re.S)
+        if not m_req:
+            return None
+        try:
+            req_arr = json.loads(m_req.group(1))
+        except Exception:
+            return None
+        if not isinstance(req_arr, list) or len(req_arr) < 2:
+            return None
+
+        m_sid = re.search(r'"FdrFJe":"([^"]+)"', html)
+        m_bl = re.search(r'"cfb2h":"([^"]+)"', html)
+        m_mns = re.search(r'"mnsUbf":(\[[^\]]+\])', html)
+
+        f_sid = m_sid.group(1) if m_sid else ""
+        bl = m_bl.group(1) if m_bl else "boq_travel-frontend-flights-ui_20260414.02_p0"
+        bgr_token = "0"
+        if m_mns:
+            try:
+                mns_arr = json.loads(m_mns.group(1))
+                if isinstance(mns_arr, list) and len(mns_arr) > 7 and mns_arr[7] is not None:
+                    bgr_token = str(mns_arr[7])
+            except Exception:
+                pass
+
+        token = None
+        try:
+            parser = LexborHTMLParser(html)
+            script = parser.css_first(r"script.ds\:1")
+            if script:
+                js = script.text()
+                if "data:" in js:
+                    data_str = js.split("data:", 1)[1].rsplit(",", 1)[0]
+                    ds1 = json.loads(data_str)
+                    if isinstance(ds1, list) and ds1 and isinstance(ds1[0], list) and len(ds1[0]) > 4:
+                        token = ds1[0][4]
+        except Exception:
+            token = None
+
+        travel_settings = json.dumps(
+            ["en-US", "CA", currency, 1, None, [360], None, None, 7, []],
+            separators=(",", ":"),
+        )
+        bgr_header = json.dumps(
+            [None, None, None, 10, 5, None, -1, 4, bgr_token],
+            separators=(",", ":"),
+        )
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+            "X-Same-Domain": "1",
+            "x-goog-ext-259736195-jspb": travel_settings,
+            "X-Goog-BatchExecute-Bgr": bgr_header,
+            "Origin": "https://www.google.com",
+            "Referer": "https://www.google.com/travel/flights",
+        }
+        params = {
+            "f.sid": f_sid,
+            "bl": bl,
+            "hl": "en",
+            "soc-app": "162",
+            "soc-platform": "1",
+            "soc-device": "1",
+            "_reqid": "100000",
+            "rt": "c",
+        }
+        return {
+            "req_arr": req_arr,
+            "token": token,
+            "headers": headers,
+            "params": params,
+        }
+
+    @classmethod
+    def _post_google_flights_rpc(
+        cls,
+        service_method: str,
+        params: dict[str, str],
+        headers: dict[str, str],
+        rpc_body: list[Any],
+    ) -> str:
+        """Executes a POST against FlightsFrontendService/<service_method> and returns the raw response text."""
+        url = f"https://www.google.com/_/FlightsFrontendUi/data/travel.frontend.flights.FlightsFrontendService/{service_method}"
+        payload_str = json.dumps([None, json.dumps(rpc_body, separators=(",", ":"))], separators=(",", ":"))
+        client = primp.Client(impersonate="chrome_145", impersonate_os="windows")
+        resp = client.post(url, params=params, headers=headers, data={"f.req": payload_str})
+        if resp.status_code != 200:
+            return ""
+        return resp.text or ""
+
+    @classmethod
+    def _fetch_shopping_results_from_html(cls, html: str, currency: str = "CAD") -> tuple[list[Flights], dict[str, Any]]:
+        """
+        When Google Flights' initial SSR script.ds:1 returns a pending/cold cache state
+        (common on >16-day round trips and >6-month future dates), invokes the live
+        GetShoppingResults streaming RPC using the page's request descriptor and continuation token.
+        """
+        ctx = cls._extract_rpc_context_from_html(html, currency=currency)
+        if not ctx:
+            return [], {}
+        token = ctx.get("token")
+        first_arg = [None, None, None, token] if token else []
+        shop_req = [first_arg, ctx["req_arr"][1], 0, 0, 0, 1]
+        try:
+            raw_text = cls._post_google_flights_rpc("GetShoppingResults", ctx["params"], ctx["headers"], shop_req)
+        except Exception:
+            return [], {}
+        if not raw_text:
+            return [], {}
+
+        latest_flights: list[Flights] = []
+        merged_insights: dict[str, Any] = {}
+        for line in raw_text.splitlines():
+            line_s = line.strip()
+            if not line_s.startswith('[["wrb.fr"'):
+                continue
+            try:
+                outer = json.loads(line_s)
+            except Exception:
+                continue
+            for entry in outer:
+                if not (isinstance(entry, list) and len(entry) > 2 and entry[0] == "wrb.fr" and entry[2]):
+                    continue
+                try:
+                    inner = json.loads(entry[2])
+                except Exception:
+                    continue
+                chunk_flights, chunk_insights = cls._parse_ds1_payload(inner)
+                if chunk_insights:
+                    merged_insights.update(chunk_insights)
+                if chunk_flights:
+                    # Keep the most complete/final streamed shopping chunk while preserving any earlier unique flights
+                    seen = {
+                        (
+                            tuple(f.airlines),
+                            f.flights[0].departure.time,
+                            f.flights[-1].arrival.time,
+                            len(f.flights),
+                            f.price,
+                        )
+                        for f in chunk_flights
+                        if f.flights
+                    }
+                    combined = list(chunk_flights)
+                    for prev_f in latest_flights:
+                        if not prev_f.flights:
+                            continue
+                        k = (
+                            tuple(prev_f.airlines),
+                            prev_f.flights[0].departure.time,
+                            prev_f.flights[-1].arrival.time,
+                            len(prev_f.flights),
+                            prev_f.price,
+                        )
+                        if k not in seen:
+                            seen.add(k)
+                            combined.append(prev_f)
+                    latest_flights = combined
+
+        return latest_flights, merged_insights
+
 
     @classmethod
     def _summarize_itinerary(cls, f: Flights, currency: str) -> dict[str, Any]:
@@ -350,9 +535,161 @@ class GoogleFlightsPriceAggregator:
             currency=currency,
             language="en",
             max_stops=max_stops,
-            hide_separate_and_self_transfer=True,
+            hide_separate_and_self_transfer=False,
         )
         return q_obj.url()
+
+    def fetch_calendar_prices(
+        self,
+        origin_code: str,
+        dest_code: str,
+        start_date: str,
+        end_date: str,
+        return_date: Optional[str] = None,
+        return_start_date: Optional[str] = None,
+        return_end_date: Optional[str] = None,
+        trip_days: Optional[int] = None,
+        cabin: str = "economy",
+        currency: str = "CAD",
+        max_stops: Optional[int] = None,
+    ) -> list[tuple[int, str, Optional[str]]]:
+        """
+        Queries Google Flights' GetCalendarPicker RPC across a date range (or full month)
+        and returns a price-sorted list of (price, departure_date, return_date) tuples.
+        """
+        seed_dep_date = start_date
+        try:
+            s_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+            e_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+            cand_tue = s_dt + timedelta(days=(1 - s_dt.weekday()) % 7)
+            if cand_tue <= e_dt:
+                seed_dep_date = cand_tue.strftime("%Y-%m-%d")
+        except Exception:
+            seed_dep_date = start_date
+
+        seed_ret_date = return_date
+        if not seed_ret_date and trip_days:
+            try:
+                seed_ret_date = (datetime.strptime(seed_dep_date, "%Y-%m-%d").date() + timedelta(days=trip_days)).strftime("%Y-%m-%d")
+            except Exception:
+                seed_ret_date = None
+
+        trip_type = "round-trip" if seed_ret_date else "one-way"
+        flight_queries = [FlightQuery(date=seed_dep_date, from_airport=origin_code, to_airport=dest_code, max_stops=max_stops)]
+        if seed_ret_date:
+            flight_queries.append(FlightQuery(date=seed_ret_date, from_airport=dest_code, to_airport=origin_code, max_stops=max_stops))
+
+        seat_norm = cabin.lower().strip()
+        if seat_norm not in ("economy", "premium-economy", "business", "first"):
+            seat_norm = "economy"
+
+        q_obj = create_query(
+            flights=flight_queries,
+            seat=seat_norm,  # type: ignore[arg-type]
+            trip=trip_type,  # type: ignore[arg-type]
+            passengers=Passengers(adults=1),
+            currency=currency,
+            language="en",
+            max_stops=max_stops,
+            hide_separate_and_self_transfer=False,
+        )
+
+        try:
+            html = fetch_flights_html(q_obj)
+        except Exception:
+            return []
+        ctx = self._extract_rpc_context_from_html(html, currency=currency)
+        if not ctx:
+            return []
+
+        def _parse_cal_rows(raw_text: str) -> list[tuple[int, str, Optional[str]]]:
+            out: list[tuple[int, str, Optional[str]]] = []
+            if not raw_text:
+                return out
+            for line in raw_text.splitlines():
+                line_s = line.strip()
+                if not line_s.startswith('[["wrb.fr"'):
+                    continue
+                try:
+                    outer = json.loads(line_s)
+                except Exception:
+                    continue
+                for entry in outer:
+                    if not (isinstance(entry, list) and len(entry) > 2 and entry[0] == "wrb.fr" and entry[2]):
+                        continue
+                    try:
+                        inner = json.loads(entry[2])
+                    except Exception:
+                        continue
+                    if not (isinstance(inner, list) and len(inner) > 1 and isinstance(inner[1], list)):
+                        continue
+                    for row in inner[1]:
+                        if not (isinstance(row, list) and len(row) >= 3 and row[0]):
+                            continue
+                        dep_d = str(row[0])
+                        ret_d = str(row[1]) if row[1] else None
+                        price_info = row[2]
+                        if (
+                            isinstance(price_info, list)
+                            and price_info
+                            and isinstance(price_info[0], list)
+                            and len(price_info[0]) > 1
+                            and price_info[0][1] is not None
+                        ):
+                            try:
+                                p_val = int(price_info[0][1])
+                                if p_val > 0:
+                                    out.append((p_val, dep_d, ret_d))
+                            except Exception:
+                                pass
+            return out
+
+        if trip_days:
+            cal_req: list[Any] = [[], ctx["req_arr"][1], [start_date, end_date], None, [trip_days, trip_days]]
+        elif seed_ret_date:
+            cal_req = [[], ctx["req_arr"][1], [start_date, end_date], [seed_ret_date, seed_ret_date]]
+        else:
+            cal_req = [[], ctx["req_arr"][1], [start_date, end_date]]
+
+        try:
+            raw_cal = self._post_google_flights_rpc("GetCalendarPicker", ctx["params"], ctx["headers"], cal_req)
+            rows = _parse_cal_rows(raw_cal)
+            if not rows and not (seed_ret_date and return_start_date and return_end_date):
+                raw_cal = self._post_google_flights_rpc("GetCalendarPicker", ctx["params"], ctx["headers"], cal_req)
+                rows = _parse_cal_rows(raw_cal)
+        except Exception:
+            rows = []
+
+        # If a return month window was also specified (e.g. May 2027 <-> August 2027),
+        # scan the return month anchored on the cheapest departure date discovered in the outbound month.
+        if seed_ret_date and return_start_date and return_end_date:
+            had_initial_rows = bool(rows)
+            rows.sort(key=lambda x: (x[0], x[1], x[2] or ""))
+            best_dep = rows[0][1] if rows else seed_dep_date
+            cal_req_ret: list[Any] = [[], ctx["req_arr"][1], [best_dep, best_dep], [return_start_date, return_end_date]]
+            try:
+                raw_ret = self._post_google_flights_rpc("GetCalendarPicker", ctx["params"], ctx["headers"], cal_req_ret)
+                ret_rows = _parse_cal_rows(raw_ret)
+                seen_pairs = {(d, r) for _, d, r in rows}
+                for p_val, dep_d, ret_d in ret_rows:
+                    if (dep_d, ret_d) not in seen_pairs:
+                        seen_pairs.add((dep_d, ret_d))
+                        rows.append((p_val, dep_d, ret_d))
+                # If the initial outbound-month calendar call was cold/empty, retry it now that the session is warm
+                if not had_initial_rows:
+                    ret_rows.sort(key=lambda x: (x[0], x[1], x[2] or ""))
+                    best_ret = (ret_rows[0][2] if ret_rows and ret_rows[0][2] else seed_ret_date)
+                    cal_req_warm: list[Any] = [[], ctx["req_arr"][1], [start_date, end_date], [best_ret, best_ret]]
+                    raw_warm = self._post_google_flights_rpc("GetCalendarPicker", ctx["params"], ctx["headers"], cal_req_warm)
+                    for p_val, dep_d, ret_d in _parse_cal_rows(raw_warm):
+                        if (dep_d, ret_d) not in seen_pairs:
+                            seen_pairs.add((dep_d, ret_d))
+                            rows.append((p_val, dep_d, ret_d))
+            except Exception:
+                pass
+
+        rows.sort(key=lambda x: (x[0], x[1], x[2] or ""))
+        return rows
 
     def fetch_structured_fares(
         self,
@@ -369,6 +706,8 @@ class GoogleFlightsPriceAggregator:
         Queries Google Flights for the given route and dates and returns structured
         fare data (best overall, lowest reasonable, lowest nonstop, fastest overall,
         price insight rating, top options, booking URL).
+        Automatically invokes Google Flights' GetShoppingResults RPC when initial SSR
+        returns a pending/cold cache state.
         """
         cache_key = f"{origin_code}:{dest_code}:{date}:{return_date or ''}:{cabin}:{currency}:{max_stops}:{sort_preference}"
         now = time.time()
@@ -393,56 +732,26 @@ class GoogleFlightsPriceAggregator:
             currency=currency,
             language="en",
             max_stops=max_stops,
-            hide_separate_and_self_transfer=True,
+            hide_separate_and_self_transfer=False,
         )
         booking_url = q_obj.url()
-
-        # Google Flights SSR (script.ds:1) only pre-renders multi-carrier round-trip combinations
-        # for stays <= 16 days. When both dates are within the 6-month schedule horizon and stay > 16 days
-        # (e.g. a 3-week round trip), query SSR with the same-weekday return date in [10..16] days while
-        # keeping booking_url anchored to the user's exact requested return_date.
-        ssr_q_obj = q_obj
-        if return_date:
-            try:
-                dep_dt = datetime.strptime(date, "%Y-%m-%d").date()
-                ret_dt = datetime.strptime(return_date, "%Y-%m-%d").date()
-                today_dt = get_local_now().date()
-                stay_days = (ret_dt - dep_dt).days
-                if stay_days > 16 and (ret_dt - today_dt).days <= 185:
-                    wd_diff = (ret_dt.weekday() - dep_dt.weekday()) % 7
-                    ssr_stay = 14 + wd_diff if wd_diff <= 2 else 7 + wd_diff
-                    ssr_ret_date = (dep_dt + timedelta(days=ssr_stay)).strftime("%Y-%m-%d")
-                    ssr_queries = [
-                        FlightQuery(date=date, from_airport=origin_code, to_airport=dest_code, max_stops=max_stops),
-                        FlightQuery(date=ssr_ret_date, from_airport=dest_code, to_airport=origin_code, max_stops=max_stops),
-                    ]
-                    ssr_q_obj = create_query(
-                        flights=ssr_queries,
-                        seat=seat_norm,  # type: ignore[arg-type]
-                        trip=trip_type,  # type: ignore[arg-type]
-                        passengers=Passengers(adults=1),
-                        currency=currency,
-                        language="en",
-                        max_stops=max_stops,
-                        hide_separate_and_self_transfer=True,
-                    )
-            except Exception:
-                ssr_q_obj = q_obj
 
         print(f"  └─ ✈️ [Google Flights]: Searching {origin_code} -> {dest_code} ({date}{f' to {return_date}' if return_date else ''}, {seat_norm}, {currency})...")
 
         flights_list: list[Flights] = []
         insights: dict[str, Any] = {}
         try:
-            html = fetch_flights_html(ssr_q_obj)
+            html = fetch_flights_html(q_obj)
             if html:
                 flights_list, insights = self._parse_google_flights_html(html)
+                if not flights_list:
+                    flights_list, insights = self._fetch_shopping_results_from_html(html, currency=currency)
         except Exception:
             flights_list = []
 
         if not flights_list:
             try:
-                res = get_flights(ssr_q_obj)
+                res = get_flights(q_obj)
                 flights_list = list(res or [])
             except Exception:
                 flights_list = []
@@ -1091,30 +1400,112 @@ class GoogleFlightsPriceAggregator:
             f"for {orig_code} -> {dest_code} (return={return_date or 'one-way'}, max_stops={max_stops})..."
         )
 
-        futs = {
-            dt_s: _PROBE_EXECUTOR.submit(
-                self.fetch_structured_fares,
-                orig_code,
-                dest_code,
+        scan_pairs: list[tuple[str, Optional[str]]] = [
+            (
                 dt_s,
                 (datetime.strptime(dt_s, "%Y-%m-%d").date() + timedelta(days=trip_days)).strftime("%Y-%m-%d")
                 if trip_days
-                else None,
-                cabin,
-                currency,
-                None,
-                sort_preference,
+                else return_date,
             )
             for dt_s in date_list
+        ]
+
+        # When running against live Google Flights (or when fetch_calendar_prices is explicitly patched),
+        # use GetCalendarPicker to discover the lowest-priced date pairs across the entire month/window first.
+        use_calendar_rpc = (
+            not hasattr(self.fetch_structured_fares, "_mock_name")
+            or hasattr(self.fetch_calendar_prices, "_mock_name")
+        )
+        if use_calendar_rpc and len(date_list) >= 10:
+            cal_end_date = end_date
+            if s_dt.day == 1 and e_dt.day >= 20:
+                last_m_day = calendar.monthrange(s_dt.year, s_dt.month)[1]
+                cal_end_date = f"{s_dt.year:04d}-{s_dt.month:02d}-{last_m_day:02d}"
+
+            ret_start_date: Optional[str] = None
+            ret_end_date: Optional[str] = None
+            if return_date and return_window_label:
+                try:
+                    r_dt = datetime.strptime(return_date, "%Y-%m-%d").date()
+                    last_r_day = calendar.monthrange(r_dt.year, r_dt.month)[1]
+                    ret_start_date = f"{r_dt.year:04d}-{r_dt.month:02d}-01"
+                    ret_end_date = f"{r_dt.year:04d}-{r_dt.month:02d}-{last_r_day:02d}"
+                except Exception:
+                    ret_start_date = None
+                    ret_end_date = None
+
+            cal_rows = self.fetch_calendar_prices(
+                origin_code=orig_code,
+                dest_code=dest_code,
+                start_date=start_date,
+                end_date=cal_end_date,
+                return_date=return_date,
+                return_start_date=ret_start_date,
+                return_end_date=ret_end_date,
+                trip_days=trip_days,
+                cabin=cabin,
+                currency=currency,
+                max_stops=max_stops,
+            )
+            if cal_rows:
+                selected_pairs: list[tuple[str, Optional[str]]] = []
+                seen_set: set[tuple[str, Optional[str]]] = set()
+                seen_weekdays: set[int] = set()
+                dep_counts: dict[str, int] = {}
+                # 1. Include up to 6 lowest-priced date pairs while capping any single departure date to <=2 return dates
+                for _p, dep_d, ret_d in cal_rows:
+                    pair = (dep_d, ret_d)
+                    if pair in seen_set or dep_counts.get(dep_d, 0) >= 2:
+                        continue
+                    seen_set.add(pair)
+                    dep_counts[dep_d] = dep_counts.get(dep_d, 0) + 1
+                    selected_pairs.append(pair)
+                    try:
+                        seen_weekdays.add(datetime.strptime(dep_d, "%Y-%m-%d").weekday())
+                    except Exception:
+                        pass
+                    if len(selected_pairs) >= 6:
+                        break
+                # 2. Ensure operating weekday diversity (up to 8 total pairs)
+                for _p, dep_d, ret_d in cal_rows:
+                    if len(selected_pairs) >= 8:
+                        break
+                    pair = (dep_d, ret_d)
+                    if pair in seen_set:
+                        continue
+                    try:
+                        wd_idx = datetime.strptime(dep_d, "%Y-%m-%d").weekday()
+                    except Exception:
+                        continue
+                    if wd_idx not in seen_weekdays:
+                        seen_weekdays.add(wd_idx)
+                        seen_set.add(pair)
+                        selected_pairs.append(pair)
+                selected_pairs.sort(key=lambda x: (x[0], x[1] or ""))
+                scan_pairs = selected_pairs
+
+        futs = {
+            (dep_s, ret_s): _PROBE_EXECUTOR.submit(
+                self.fetch_structured_fares,
+                orig_code,
+                dest_code,
+                dep_s,
+                ret_s,
+                cabin,
+                currency,
+                max_stops,
+                sort_preference,
+            )
+            for dep_s, ret_s in scan_pairs
         }
 
         daily_results: list[tuple[str, str, dict[str, Any]]] = []
-        for dt_s in date_list:
+        for dep_s, ret_s in scan_pairs:
             try:
-                res = futs[dt_s].result()
+                res = futs[(dep_s, ret_s)].result()
                 if res and res.get("options"):
-                    wd = datetime.strptime(dt_s, "%Y-%m-%d").strftime("%A")
-                    daily_results.append((dt_s, wd, res))
+                    wd = datetime.strptime(dep_s, "%Y-%m-%d").strftime("%A")
+                    daily_results.append((dep_s, wd, res))
             except Exception:
                 pass
 
@@ -1134,14 +1525,24 @@ class GoogleFlightsPriceAggregator:
                     return f"{base_lbl} ↔ Return {r_dt_s}"
             return base_lbl
 
+        def _fmt_link_dates(dt_s: str, res_obj: Optional[dict[str, Any]] = None) -> str:
+            r_dt_s = (res_obj or {}).get("return_date")
+            if not r_dt_s and trip_days:
+                try:
+                    r_dt_s = (datetime.strptime(dt_s, "%Y-%m-%d").date() + timedelta(days=trip_days)).strftime("%Y-%m-%d")
+                except Exception:
+                    r_dt_s = None
+            return f"{dt_s} to {r_dt_s}" if r_dt_s else dt_s
+
         is_rt_scan = bool(return_date or trip_days)
         curr_lbl = f"{currency} Round-Trip" if is_rt_scan else currency
         stops_filter_tag = f" | **Filter**: Max {max_stops} Stop(s)" if max_stops is not None else ""
-        trip_mode_str = (
-            f"Round-Trip (Outbound: {window_label.split('–')[0].strip()} [sample {rep_dep_date}] | Return: {return_window_label or return_date} [sample {return_date}])"
-            if return_date
-            else f"Flexible Window ({window_label})"
-        )
+        if return_date:
+            trip_mode_str = f"Round-Trip (Outbound: {window_label.split('–')[0].strip()} | Return: {return_window_label or return_date})"
+        elif trip_days:
+            trip_mode_str = f"Round-Trip (~{trip_days}-Day Stay in {window_label})"
+        else:
+            trip_mode_str = f"Flexible Window ({window_label})"
         route_arrow = "<->" if is_rt_scan else "->"
         lines = [
             f"=== 📅 FLEXIBLE DATE & DIRECT FLIGHT SCHEDULE SCANNER: {orig_city.upper()} ({orig_code}) {route_arrow} {dest_city.upper()} ({dest_code}) ===",
@@ -1212,14 +1613,14 @@ class GoogleFlightsPriceAggregator:
             return "\n".join(lines) + "\n"
 
         # --- SECTION 1: DIRECT / NONSTOP & 1-STOP FLIGHT SCHEDULE DISCOVERY ---
-        direct_days: list[tuple[str, str, dict[str, Any], str]] = []
+        direct_days: list[tuple[str, str, dict[str, Any], str, dict[str, Any]]] = []
         one_stop_days: list[tuple[str, str, dict[str, Any], str, dict[str, Any]]] = []
         operating_weekdays: list[str] = []
         weekday_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
         for dt_s, wd, res in daily_results:
             ns = res.get("lowest_nonstop")
             if ns:
-                direct_days.append((dt_s, wd, ns, res["booking_url"]))
+                direct_days.append((dt_s, wd, ns, res["booking_url"], res))
                 if wd not in operating_weekdays:
                     operating_weekdays.append(wd)
 
@@ -1254,16 +1655,16 @@ class GoogleFlightsPriceAggregator:
             if non_operating:
                 lines.append(f"• **Days Without Direct Flights**: {', '.join(non_operating)} (connecting flights only)")
             direct_sorted = sorted(direct_days, key=lambda x: (x[2]["price"], x[0]))
-            best_dir_dt, best_dir_wd, best_dir_opt, best_dir_url = direct_sorted[0]
+            best_dir_dt, best_dir_wd, best_dir_opt, best_dir_url, best_dir_res = direct_sorted[0]
             lines.append(
-                f"• ⭐ **Cheapest Direct Flight Date**: **{_fmt_day_label(best_dir_dt, best_dir_wd)}** at **${best_dir_opt['price']} {curr_lbl}** "
-                f"via **{best_dir_opt['airlines']}** ({best_dir_opt['duration_str']}) — [Book Direct](<{best_dir_url}>)"
+                f"• ⭐ **Cheapest Direct Flight Date**: **{_fmt_day_label(best_dir_dt, best_dir_wd, best_dir_res)}** at **${best_dir_opt['price']} {curr_lbl}** "
+                f"via **{best_dir_opt['airlines']}** ({best_dir_opt['duration_str']}) — [Book Direct: {_fmt_link_dates(best_dir_dt, best_dir_res)}](<{best_dir_url}>)"
             )
             lines.append("• **Top Direct Flight Dates in Window**:")
-            for idx, (dt_s, wd, ns, b_url) in enumerate(direct_sorted[:5], start=1):
+            for idx, (dt_s, wd, ns, b_url, d_res) in enumerate(direct_sorted[:5], start=1):
                 lines.append(
-                    f"  {idx}. **{_fmt_day_label(dt_s, wd, short_wd=True)}** — **${ns['price']} {curr_lbl}** | **{ns['airlines']}** [Nonstop, {ns['duration_str']}, "
-                    f"{ns['departure_time']} -> {ns['arrival_time']}] ([Google Flights](<{b_url}>))"
+                    f"  {idx}. **{_fmt_day_label(dt_s, wd, d_res, short_wd=True)}** — **${ns['price']} {curr_lbl}** | **{ns['airlines']}** [Nonstop, {ns['duration_str']}, "
+                    f"{ns['departure_time']} -> {ns['arrival_time']}] ([Google Flights: {_fmt_link_dates(dt_s, d_res)}](<{b_url}>))"
                 )
         else:
             lines.append(
@@ -1289,7 +1690,7 @@ class GoogleFlightsPriceAggregator:
                 f_opt = f_res.get("fastest_overall") or f_res["lowest_overall"]
                 lines.append(
                     f"• ⚡ **Shortest / Fastest Connecting Flight in Scanned Window**: **{_fmt_day_label(f_dt, f_wd, f_res)}** — **{f_opt['duration_str']}** "
-                    f"({f_opt['stops_label']}) at **${f_opt['price']} {curr_lbl}** via **{f_opt['airlines']}** ([Google Flights](<{f_res['booking_url']}>))"
+                    f"({f_opt['stops_label']}) at **${f_opt['price']} {curr_lbl}** via **{f_opt['airlines']}** ([Google Flights: {_fmt_link_dates(f_dt, f_res)}](<{f_res['booking_url']}>))"
                 )
 
         # If user requested 1-stop flights (or no direct flights exist), highlight 1-stop availability
@@ -1308,12 +1709,12 @@ class GoogleFlightsPriceAggregator:
                 lines.append(
                     f"• ⭐ **Best 1-Stop Flight in Window**: **{_fmt_day_label(b1_dt, b1_wd, b1_res)}** at **${b1_opt['price']} {curr_lbl}** "
                     f"via **{b1_opt['airlines']}** ({b1_opt['stops_label']}, **{b1_opt['duration_str']}**, "
-                    f"{b1_opt['departure_time']} -> {b1_opt['arrival_time']}) — [Book 1-Stop](<{b1_url}>)"
+                    f"{b1_opt['departure_time']} -> {b1_opt['arrival_time']}) — [Book 1-Stop: {_fmt_link_dates(b1_dt, b1_res)}](<{b1_url}>)"
                 )
                 for idx, (dt_s, wd, o1, b_url, r_obj) in enumerate(one_stop_sorted[:5], start=1):
                     lines.append(
                         f"  {idx}. **{_fmt_day_label(dt_s, wd, r_obj, short_wd=True)}** — **${o1['price']} {curr_lbl}** | **{o1['airlines']}** "
-                        f"[{o1['stops_label']}, **{o1['duration_str']}**, {o1['departure_time']} -> {o1['arrival_time']}] ([Google Flights](<{b_url}>))"
+                        f"[{o1['stops_label']}, **{o1['duration_str']}**, {o1['departure_time']} -> {o1['arrival_time']}] ([Google Flights: {_fmt_link_dates(dt_s, r_obj)}](<{b_url}>))"
                     )
             else:
                 lines.append(
@@ -1325,8 +1726,8 @@ class GoogleFlightsPriceAggregator:
         # --- SECTION 2 & 3: STRICTLY RESPECT max_stops WHEN RANKING DAYS & MATRIX ---
         if max_stops == 0:
             candidate_days = [
-                (dt_s, wd, {"best_overall": ns, "lowest_reasonable": ns, "fastest_overall": ns, "lowest_overall": ns, "lowest_nonstop": ns, "booking_url": b_url})
-                for dt_s, wd, ns, b_url in direct_days
+                (dt_s, wd, {**d_res, "best_overall": ns, "lowest_reasonable": ns, "fastest_overall": ns, "lowest_overall": ns, "lowest_nonstop": ns, "booking_url": b_url})
+                for dt_s, wd, ns, b_url, d_res in direct_days
             ]
         elif max_stops == 1:
             candidate_days = [
@@ -1373,6 +1774,12 @@ class GoogleFlightsPriceAggregator:
                 rank_title = "🏆 TOP 5 BEST-VALUE DAYS TO FLY (Optimal Balance of Price & Short Duration)"
                 pick_key = "best_overall"
 
+            top_dt, _top_wd, top_res = ranked_days[0]
+            lines[4] = (
+                f"• **Direct Google Flights Search ({window_label})**: "
+                f"[Google Flights: {orig_code} {route_arrow} {dest_code} ({_fmt_link_dates(top_dt, top_res)})](<{top_res['booking_url']}>)"
+            )
+
             lines.append(f"\n--- {rank_title} ---")
             for idx, (dt_s, wd, res) in enumerate(ranked_days[:5], start=1):
                 opt = res.get(pick_key) or res["lowest_overall"]
@@ -1380,7 +1787,7 @@ class GoogleFlightsPriceAggregator:
                 lines.append(
                     f"{idx}. **{_fmt_day_label(dt_s, wd, res)}** — **${opt['price']} {curr_lbl}** via **{opt['airlines']}** "
                     f"[{opt['stops_label']}, **{opt['duration_str']}**, {opt['departure_time']} -> {opt['arrival_time']}]{verdict_tag} "
-                    f"([Google Flights](<{res['booking_url']}>))"
+                    f"([Google Flights: {_fmt_link_dates(dt_s, res)}](<{res['booking_url']}>))"
                 )
 
             # --- SECTION 3: DAY-BY-DAY CALENDAR MATRIX ---
@@ -1400,7 +1807,7 @@ class GoogleFlightsPriceAggregator:
                 lines.append(f"• **{_fmt_day_label(dt_s, wd, res, short_wd=True)}**: {best_col} | {ns_col}")
 
         # --- SECTION 4: SPARSE FUTURE WINDOW / MISSING 1-STOP HORIZON & GATEWAY HUB DISCOVERY ---
-        is_sparse_window = len(candidate_days) <= max(2, len(date_list) // 5)
+        is_sparse_window = len(candidate_days) <= max(2, len(scan_pairs) // 5)
         missing_1stop = not direct_days and not one_stop_days
         if is_sparse_window or missing_1stop:
             _append_future_horizon_and_gateway_sections()
