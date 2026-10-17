@@ -58,9 +58,10 @@ class NbaAggregator(BaseSportsAggregator):
         is_month = "month" in q and not is_past
         is_week = any(w in q for w in ("week", "upcoming", "next", "schedule", "fixtures", "next games", "few days", "coming up", "soon", "weekend", "saturday", "sunday")) and not is_past
 
-        team_sched_block = ""
         if matched_team:
             team_sched_block = parse_team_schedule("basketball", "nba", matched_team["id"], matched_team["displayName"])
+            if team_sched_block:
+                return team_sched_block
 
         if is_past and "yesterday" not in q:
             res = self.get_past_schedule_range(days_back=7, scope_label="RECENT NBA RESULTS")
@@ -77,8 +78,6 @@ class NbaAggregator(BaseSportsAggregator):
         else:
             res = self.get_games(filter_query=q)
 
-        if team_sched_block:
-            return f"{team_sched_block}\n\n{res}"
         return res
 
     @staticmethod

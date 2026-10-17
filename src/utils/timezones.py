@@ -309,6 +309,32 @@ def _infer_nearest_year(mon: int, day: int, ref_date: date) -> int:
     return yr
 
 
+MAX_TURN_TOOL_CHARS = 10000
+_RAW_HTML_DOC_RE = re.compile(r'(?is)<!doctype\s+html\b.*?</html>|<html\b.*?</html>')
+
+
+def _sanitize_and_bound_tool_output(text: str, max_chars: int = MAX_TURN_TOOL_CHARS) -> str:
+    """Guard the LLM context window against accidental raw HTML dumps or oversized tool payloads,
+    while preserving any trailing '=== ... INSTRUCTIONS ... ===' footer block."""
+    if not text:
+        return text
+    if "<!doctype html" in text.lower() or "<html" in text.lower():
+        def _strip_html(m: re.Match) -> str:
+            raw = m.group(0)
+            raw = re.sub(r'(?is)<(?:script|style|head)\b.*?</(?:script|style|head)>', ' ', raw)
+            raw = re.sub(r'<[^>]+>', ' ', raw)
+            return re.sub(r'\s+', ' ', raw).strip()[:600]
+        text = _RAW_HTML_DOC_RE.sub(_strip_html, text)
+    if len(text) <= max_chars:
+        return text
+    m_inst = re.search(r'\n(===\s*(?:CRITICAL|SKILL)\s+INSTRUCTIONS\b[\s\S]*)$', text)
+    if m_inst:
+        footer = m_inst.group(1)
+        head_budget = max(1000, max_chars - len(footer) - 80)
+        return text[:head_budget].rstrip() + "\n...[tool output truncated to fit context window]...\n\n" + footer
+    return text[:max_chars].rstrip() + "\n...[tool output truncated to fit context window]..."
+
+
 def enrich_tool_output_with_time_context(
     tool_output: str,
     now: datetime | None = None,
@@ -322,6 +348,7 @@ def enrich_tool_output_with_time_context(
     """
     if not tool_output or not isinstance(tool_output, str):
         return tool_output
+    tool_output = _sanitize_and_bound_tool_output(tool_output)
     if (
         tool_output.startswith("🕒 Current Time:")
         or tool_output.startswith("[🕒 Current Time:")

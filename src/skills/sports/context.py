@@ -78,15 +78,27 @@ _NON_SPORTS_CLAUSE_PATTERNS = [
     ),
     # Weather / News / Math / Tech / Greeting clauses in compound prompts
     re.compile(
-        r"(?:[,;.]?\s*\b(?:and|also|plus|then)\s+)?(?:"
-        r"what(?:'s|\s+is)\s+the\s+weather\b[^,;.]*|"
-        r"check\s+the\s+weather\b[^,;.]*|"
-        r"(?:get|check|show|what\s+are)\s+(?:the\s+)?(?:top\s+|latest\s+)?(?:news|headlines)\b[^,;.]*|"
-        r"(?:why|how)\s+(?:is|are|does|do)\s+(?:python|c\+\+|rust|javascript|rtx|nvidia|amd|claude|gpt|gemini|llama|qwen)\b[^,;.]*"
+        r"(?:[,;.?]?\s*\b(?:and|also|plus|then)\s+)?(?:"
+        r"what(?:'?s|\s+is)\s+the\s+weather\b[^,;.?!]*|"
+        r"how(?:'?s|\s+is)\s+the\s+weather\b[^,;.?!]*|"
+        r"check\s+the\s+weather\b[^,;.?!]*|"
+        r"(?:get|check|show|what\s+are)\s+(?:the\s+)?(?:top\s+|latest\s+)?(?:news|headlines)\b[^,;.?!]*|"
+        r"(?:why|how)\s+(?:is|are|does|do)\s+(?:python|c\+\+|rust|javascript|rtx|nvidia|amd|claude|gpt|gemini|llama|qwen)\b[^,;.?!]*|"
+        r"(?:hey\s+|hi\s+|yo\s+)?how(?:'?s\s+it\s+going|\s+are\s+you(?:\s+doing)?)\b[?!.,\s]*"
         r")",
         re.IGNORECASE,
     ),
 ]
+
+_SPORTS_SUBVIEW_RE = re.compile(
+    r"\b(?:rosters?|squads?|injur(?:y|ies|ed)|standings?|tables?|stats|statistics|lineups?|starting\s+xi|"
+    r"scores?|results?|live|status|yesterday|tomorrow|today|schedule|fixtures?|next|upcoming|odds?|betting)\b",
+    re.IGNORECASE,
+)
+
+_GENERIC_SINGLE_WORD_QUERIES = {
+    "", "schedule", "games", "game", "matches", "match", "scores", "score", "status", "info", "upcoming", "next"
+}
 
 _CS_WORD_RE = re.compile(
     r"\b(?:cs2?|csgo|counter-strike|counter\s+strike|esports|spirit|vitality|navi|natus\s+vincere|faze|mouz|g2|astralis|mongolz|furia|eternal\s+fire|blast|iem|pgl|esl|hltv)\b",
@@ -127,7 +139,8 @@ def enrich_sports_tool_args(
     sibling_tools: typing.Optional[list] = None,
 ) -> dict:
     """Ensure sports tools never lose team/player/league context from the user's prompt
-    or from earlier user turns on pronoun/match follow-ups (e.g. 'track this game', 'hows the game going')."""
+    or from earlier user turns on pronoun/match follow-ups (e.g. 'track this game', 'hows the game going'),
+    while trusting the LLM when it has already decomposed a compound request into structured args."""
     if not isinstance(args, dict) or not history:
         return args
 
@@ -166,12 +179,31 @@ def enrich_sports_tool_args(
                     context_snippets.append(prev_entities)
                 break
 
-    if scoped_latest.lower() not in combined_args_str:
-        context_snippets.append(scoped_latest)
+    existing_q = str(args.get("query") or "").strip()
+    if args.get("team") or args.get("player"):
+        # The LLM already extracted the target team/player. Only attach lightweight sports view keywords
+        # (e.g. 'roster', 'injuries', 'next') if query is empty—never dump the raw multi-clause sentence.
+        if not existing_q:
+            views = []
+            for m in _SPORTS_SUBVIEW_RE.finditer(scoped_latest):
+                tok = m.group(0).lower()
+                if tok not in views and tok not in combined_args_str:
+                    views.append(tok)
+            if views:
+                context_snippets.append(" ".join(views))
+    elif sibling_tools and existing_q and existing_q.lower() not in _GENERIC_SINGLE_WORD_QUERIES:
+        # The LLM already split a multi-tool turn and provided a specific query: clean any sibling overlap in-place.
+        cleaned_existing = _strip_non_sports_clauses(existing_q, sibling_tools=sibling_tools) or existing_q
+        if cleaned_existing != existing_q and not context_snippets:
+            enriched = dict(args)
+            enriched["query"] = cleaned_existing
+            return enriched
+    else:
+        if scoped_latest.lower() not in combined_args_str:
+            context_snippets.append(scoped_latest)
 
     if context_snippets:
         enriched = dict(args)
-        existing_q = str(enriched.get("query") or "").strip()
         extra_context = " ".join(context_snippets).strip()
         enriched["query"] = f"{existing_q} {extra_context}".strip() if existing_q else extra_context
         return enriched

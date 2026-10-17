@@ -275,6 +275,45 @@ class TestSanitizeAgentReply(unittest.TestCase):
         self.assertIn("***Key Matchup*** with __underlined note__", cleaned)
         self.assertIn("### CS Esports Schedule", cleaned)
 
+    def test_modular_compound_prompt_and_tool_output_bounds(self):
+        from src.orchestrator import enrich_sports_tool_args, enrich_tool_output_with_time_context
+        from src.skills.weather.aggregators.wttr import WttrAggregator
+
+        # 1. When LLM already decomposed team='Edmonton Oilers' on a 3-part prompt, only sports view ('next') is attached
+        hist = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Alex says: When do oilers play next and whats the weather in Edmonton like?  Also how are you?"},
+        ]
+        enriched = enrich_sports_tool_args(
+            {"sport": "nhl", "team": "Edmonton Oilers"},
+            hist,
+            sibling_tools=["skill_weather_reporter"],
+        )
+        self.assertEqual(enriched, {"sport": "nhl", "team": "Edmonton Oilers", "query": "next"})
+
+        # 2. WttrAggregator passes curl User-Agent and guards against raw HTML pages
+        agg = WttrAggregator()
+        with patch("src.skills.weather.aggregators.wttr.fetch_text", return_value="Sunny +18°C ↑8km/h 29%") as mock_ft:
+            res = agg.get_weather("Edmonton")
+            self.assertEqual(res, "Sunny +18°C ↑8km/h 29%")
+            self.assertEqual(mock_ft.call_args.kwargs.get("headers"), {"User-Agent": "curl/8.0"})
+
+        with patch("src.skills.weather.aggregators.wttr.fetch_text", return_value="<!DOCTYPE html><html><body>Error</body></html>"):
+            self.assertEqual(agg.get_weather("Edmonton"), "Weather service temporarily unavailable.")
+
+        # 3. enrich_tool_output_with_time_context strips stray HTML docs and preserves trailing instructions on huge payloads
+        html_leak = "=== RAW WEATHER DATA ===\nConditions: <!DOCTYPE html><html><head><style>body{color:red}</style></head><body>Sunny 18C</body></html>\n\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\nKeep it concise."
+        cleaned_out = enrich_tool_output_with_time_context(html_leak)
+        self.assertNotIn("<!DOCTYPE html>", cleaned_out)
+        self.assertNotIn("body{color:red}", cleaned_out)
+        self.assertIn("Sunny 18C", cleaned_out)
+        self.assertIn("=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===", cleaned_out)
+
+        huge_payload = "A" * 15000 + "\n=== CRITICAL INSTRUCTIONS FOR YOU (THE LLM) ===\nFollow rule 1."
+        bounded_out = enrich_tool_output_with_time_context(huge_payload)
+        self.assertLessEqual(len(bounded_out), 10200)
+        self.assertIn("=== CRITICAL INSTRUCTIONS FOR YOU (THE LLM) ===\nFollow rule 1.", bounded_out)
+
 
 class TestExtractReplyContext(unittest.TestCase):
     def test_extract_song_card_reply(self):

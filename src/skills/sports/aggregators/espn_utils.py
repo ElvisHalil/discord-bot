@@ -108,12 +108,19 @@ def extract_score_str(score_field: Any) -> str:
 
 
 def format_espn_iso_date(date_raw: str) -> str:
-    """Convert an ESPN ISO-8601 UTC timestamp (e.g. '2026-10-14T19:00Z') into a readable string."""
+    """Convert an ESPN ISO-8601 UTC timestamp (e.g. '2026-10-14T19:00Z') into the bot's local timezone."""
     if not date_raw:
         return "TBD"
     try:
-        dt = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
-        return dt.strftime("%a, %b %d, %Y at %H:%M UTC")
+        from src.utils.timezones import resolve_configured_timezone, _short_tz_abbr
+        dt_utc = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+        local_tz = resolve_configured_timezone(ref_utc=dt_utc)
+        dt_local = dt_utc.astimezone(local_tz)
+        tz_abbr = _short_tz_abbr(dt_local)
+        clock_str = dt_local.strftime("%I:%M %p").lstrip("0")
+        return f"{dt_local.strftime('%a, %b %d, %Y')} at {clock_str} {tz_abbr}"
     except ValueError:
         return date_raw
 

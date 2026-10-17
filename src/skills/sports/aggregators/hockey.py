@@ -85,13 +85,20 @@ class HockeyAggregator(BaseSportsAggregator):
         is_month = "month" in q and not is_past
         is_week = any(w in q for w in ("week", "upcoming", "next", "schedule", "fixtures", "next games", "few days", "coming up", "soon", "weekend", "saturday", "sunday")) and not is_past
 
-        team_sched_block = ""
-        match_sum_block = ""
         if matched_team:
             team_sched_block = parse_team_schedule("hockey", "nhl", matched_team["id"], matched_team["displayName"])
-            is_live_now = "🔴 **LIVE" in team_sched_block
-            if is_live_now or is_live_or_sched or is_past or any(w in q for w in ("boxscore", "summary", "who scored", "goal", "goals")):
-                match_sum_block = self._get_team_match_summary(matched_team["id"])
+            if team_sched_block:
+                is_live_now = "🔴 **LIVE" in team_sched_block
+                wants_boxscore = is_live_now or is_past or any(
+                    w in q for w in ("status", "current", "currently", "live", "playing", "score", "scores", "scored", "goal", "goals", "going", "period", "boxscore", "summary", "who scored")
+                )
+                if wants_boxscore:
+                    match_sum_block = self._get_team_match_summary(matched_team["id"])
+                    if match_sum_block:
+                        if is_live_now or any(w in q for w in ("status", "current", "currently", "live", "playing", "score", "scored", "goal", "goals", "going", "period")):
+                            return f"{match_sum_block}\n\n{team_sched_block}"
+                        return f"{team_sched_block}\n\n{match_sum_block}"
+                return team_sched_block
 
         if is_past and "yesterday" not in q:
             res = self.get_past_schedule_range(days_back=7, scope_label="RECENT NHL RESULTS")
@@ -108,8 +115,7 @@ class HockeyAggregator(BaseSportsAggregator):
         else:
             res = self.get_games(filter_query=q)
 
-        blocks = [b for b in (match_sum_block, team_sched_block, res) if b]
-        return "\n\n".join(blocks)
+        return res
 
     @staticmethod
     def _extract_team_leaders(competitor: Dict[str, Any]) -> str:
