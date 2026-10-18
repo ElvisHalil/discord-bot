@@ -13,9 +13,9 @@ from src.skills.sports.aggregators import (
     UniversalEspnAggregator,
 )
 from src.skills.sports.aggregators.espn_utils import (
-    SPORTS_EXECUTOR,
     espn_search_auto_discover,
 )
+from src.utils.workers import map_in_workers, submit_to_worker
 from src.skills.sports.catalogs import CS_KEYWORDS
 from src.skills.sports.enums import CsQueryType, SportId, TrackerAction
 from src.skills.sports.templates import (
@@ -95,14 +95,14 @@ def skill_sports_esports(
             q_type = CsQueryType.ALL
 
     if q_type == CsQueryType.ALL:
-        fut_esl = SPORTS_EXECUTOR.submit(_esl_aggregator.get_live_matches)
+        fut_esl = submit_to_worker(_esl_aggregator.get_live_matches)
         if event_page:
-            fut_tourn = SPORTS_EXECUTOR.submit(_liquipedia_aggregator.get_s_tier_tournaments, False)
+            fut_tourn = submit_to_worker(_liquipedia_aggregator.get_s_tier_tournaments, False)
         else:
-            fut_tourn = SPORTS_EXECUTOR.submit(_liquipedia_aggregator.get_s_tier_tournaments)
-        fut_rank = SPORTS_EXECUTOR.submit(_hltv_aggregator.get_rankings, 7)
+            fut_tourn = submit_to_worker(_liquipedia_aggregator.get_s_tier_tournaments)
+        fut_rank = submit_to_worker(_hltv_aggregator.get_rankings, 7)
         if event_page:
-            fut_ev = SPORTS_EXECUTOR.submit(_liquipedia_aggregator.get_event_info, event_page)
+            fut_ev = submit_to_worker(_liquipedia_aggregator.get_event_info, event_page)
             output += fut_esl.result() + fut_tourn.result() + fut_rank.result() + fut_ev.result()
         else:
             output += fut_esl.result() + fut_tourn.result() + fut_rank.result()
@@ -429,8 +429,8 @@ def skill_sports_info(
             sp_key, fn, _ = item
             return fn(_scope_query_for_sport(combined, sp_key))
 
-        # Run multiple sport aggregators in parallel
-        section_outputs = list(SPORTS_EXECUTOR.map(_exec_task, matched_tasks))
+        # Run multiple sport aggregators in parallel while preserving ContextVars
+        section_outputs = map_in_workers(_exec_task, matched_tasks)
         data = "\n\n" + ("\n\n" + ("=" * 45) + "\n\n").join(s.strip() for s in section_outputs if s and s.strip())
     else:
         # Universal Auto-Discovery Fallback
@@ -471,12 +471,12 @@ def skill_sports_info(
 
     if wants_games_and_odds:
         if len(matched_tasks) >= 2:
-            odds_parts = []
-            for sp_key, _, _ in matched_tasks:
+            def _fetch_sport_odds(item) -> str:
+                sp_key, _, _ = item
                 odds_sp = "cs2" if sp_key == SportId.CS else sp_key
-                sec = _odds_aggregator.get_odds(_scope_query_for_sport(combined, sp_key), sport=odds_sp)
-                if sec and sec.strip():
-                    odds_parts.append(sec.strip())
+                return _odds_aggregator.get_odds(_scope_query_for_sport(combined, sp_key), sport=odds_sp) or ""
+
+            odds_parts = [sec.strip() for sec in map_in_workers(_fetch_sport_odds, matched_tasks) if sec and sec.strip()]
             odds_section = "\n\n".join(odds_parts)
         else:
             odds_sp = "cs2" if sport_raw == SportId.CS else sport_raw

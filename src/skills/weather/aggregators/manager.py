@@ -5,14 +5,17 @@ and provides a 10-minute TTL cache.
 
 from __future__ import annotations
 
+import re
 import time
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 from src.skills.weather.aggregators.open_meteo import OpenMeteoAggregator, clear_geocode_cache
 from src.skills.weather.aggregators.wttr import WttrAggregator
+from src.utils.workers import map_in_workers
 
 _WEATHER_CACHE: Dict[Tuple[str, int], Tuple[float, str]] = {}
 WEATHER_CACHE_TTL_SECONDS = 600
+_MULTI_CITY_SPLIT_RE = re.compile(r"\s*(?:;|\band\b|\bvs\.?\b|\bversus\b|&|/)\s*", re.IGNORECASE)
 
 
 def clear_weather_cache() -> None:
@@ -28,13 +31,21 @@ class WeatherAggregatorManager:
         self.open_meteo = OpenMeteoAggregator()
         self.wttr = WttrAggregator()
 
-    def get_weather(self, city: str, days: int = 7) -> str:
-        """Fetch current conditions and multi-day forecast using Open-Meteo with wttr.in fallback."""
-        clean_city = (city or "").strip()
-        if not clean_city:
-            return "Please specify a city name."
+    @staticmethod
+    def _split_cities(city_query: str) -> List[str]:
+        """Split multi-city queries (e.g. 'Tokyo and London' or 'Paris, France; Berlin, Germany')
+        while preserving comma-separated region/country qualifiers like 'Paris, France'."""
+        parts = [p.strip() for p in _MULTI_CITY_SPLIT_RE.split(city_query) if p and p.strip()]
+        seen = set()
+        unique_cities: List[str] = []
+        for p in parts:
+            key = p.lower()
+            if key not in seen:
+                seen.add(key)
+                unique_cities.append(p)
+        return unique_cities[:4]
 
-        forecast_days = max(1, min(int(days or 7), 16))
+    def _get_single_city_weather(self, clean_city: str, forecast_days: int) -> str:
         cache_key = (clean_city.lower(), forecast_days)
         now = time.time()
 
@@ -58,4 +69,20 @@ class WeatherAggregatorManager:
         ):
             _WEATHER_CACHE[cache_key] = (now, fallback)
         return fallback
+
+    def get_weather(self, city: str, days: int = 7) -> str:
+        """Fetch current conditions and multi-day forecast using Open-Meteo with wttr.in fallback.
+        Automatically fans out across SUB_WORKER_POOL when multiple cities are requested."""
+        clean_city = (city or "").strip()
+        if not clean_city:
+            return "Please specify a city name."
+
+        forecast_days = max(1, min(int(days or 7), 16))
+        cities = self._split_cities(clean_city)
+        reports = map_in_workers(
+            lambda c: self._get_single_city_weather(c, forecast_days),
+            cities,
+        )
+        return "\n\n=============================================\n\n".join(r for r in reports if r)
+
 

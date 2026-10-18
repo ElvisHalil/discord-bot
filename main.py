@@ -126,6 +126,7 @@ def clear_tool_caches(channel_id: int = None):
         from src.skills.sports.aggregators.hltv import clear_hltv_cache
         from src.skills.sports.aggregators.kashrock import clear_kashrock_cache
         from src.skills.sports.aggregators.espn_utils import clear_espn_cache
+        from src.skills.weather.aggregators import clear_weather_cache
         clear_channel_played_songs(channel_id)
         clear_recently_played_tracks(channel_id)
         clear_channel_last_match_query(channel_id)
@@ -140,6 +141,7 @@ def clear_tool_caches(channel_id: int = None):
             clear_hltv_cache()
             clear_kashrock_cache()
             clear_espn_cache()
+            clear_weather_cache()
     except Exception:
         pass
 

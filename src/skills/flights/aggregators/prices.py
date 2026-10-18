@@ -22,10 +22,9 @@ from src.skills.flights.catalogs import (
     ORIGIN_INTERNATIONAL_GATEWAYS,
 )
 from src.utils.timezones import get_local_now
-from src.utils.workers import SUB_WORKER_POOL, submit_to_worker
+from src.utils.workers import submit_to_worker
 
 logger = logging.getLogger(__name__)
-_PROBE_EXECUTOR = SUB_WORKER_POOL
 
 
 class GoogleFlightsPriceAggregator(BaseFlightAggregator):

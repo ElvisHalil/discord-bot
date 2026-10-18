@@ -163,7 +163,7 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
         )
 
     def test_centralized_worker_pool_discipline(self):
-        """Only src/utils/workers.py should instantiate ThreadPoolExecutor directly inside src/."""
+        """Only src/utils/workers.py should instantiate ThreadPoolExecutor or call .submit/.map on raw executors inside src/."""
         violations: list[str] = []
         workers_file = (SRC_ROOT / "utils" / "workers.py").resolve()
 
@@ -178,6 +178,14 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
                         func_name = node.func.id
                     elif isinstance(node.func, ast.Attribute):
                         func_name = node.func.attr
+                        if (
+                            isinstance(node.func.value, ast.Name)
+                            and node.func.value.id in ("WORKER_POOL", "SUB_WORKER_POOL", "SPORTS_EXECUTOR", "_PROBE_EXECUTOR")
+                            and func_name in ("submit", "map")
+                        ):
+                            violations.append(
+                                f"{py_file.relative_to(REPO_ROOT)}:{getattr(node, 'lineno', '?')} calls {node.func.value.id}.{func_name}() directly instead of submit_to_worker/map_in_workers"
+                            )
                     if func_name == "ThreadPoolExecutor":
                         violations.append(
                             f"{py_file.relative_to(REPO_ROOT)}:{getattr(node, 'lineno', '?')} instantiates ThreadPoolExecutor directly"
@@ -186,7 +194,7 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
         self.assertEqual(
             violations,
             [],
-            "Found ad-hoc ThreadPoolExecutor instantiations outside src/utils/workers.py:\n" + "\n".join(violations),
+            "Found ad-hoc executor usage outside src/utils/workers.py:\n" + "\n".join(violations),
         )
 
     def test_strict_separation_of_enums_models_and_catalogs(self):

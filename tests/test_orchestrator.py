@@ -1472,9 +1472,27 @@ class TestMultiUserDiscordChannelConcurrency(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(t.daemon for t in SUB_WORKER_POOL._threads))
         self.assertTrue(getattr(threading._shutdown, "_bot_wrapped", False))
 
+    def test_multi_city_weather_fan_out_in_workers(self):
+        from src.skills.weather.aggregators.manager import WeatherAggregatorManager, clear_weather_cache
+
+        clear_weather_cache()
+        mgr = WeatherAggregatorManager()
+        with patch.object(
+            mgr.open_meteo,
+            "get_weather",
+            side_effect=lambda city, days=7: f"Report for {city} ({days}d)",
+        ) as mock_om:
+            res = mgr.get_weather("Paris, France and Tokyo; Berlin", days=5)
+            self.assertEqual(mock_om.call_count, 3)
+            self.assertIn("Report for Paris, France (5d)", res)
+            self.assertIn("Report for Tokyo (5d)", res)
+            self.assertIn("Report for Berlin (5d)", res)
+        clear_weather_cache()
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

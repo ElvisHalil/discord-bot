@@ -9,7 +9,7 @@ from requests.adapters import HTTPAdapter
 from src.context import get_active_channel_id, set_active_channel_id
 from src.utils import timezones
 from src.utils.domain_vocab import compile_phrase_stripper, compile_word_boundary_re
-from src.utils.workers import SUB_WORKER_POOL, map_in_workers
+from src.utils.workers import map_in_workers
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,6 @@ _SESSION.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 })
 
-SPORTS_EXECUTOR = SUB_WORKER_POOL
 _CACHE: Dict[str, Tuple[float, Any]] = {}
 
 
