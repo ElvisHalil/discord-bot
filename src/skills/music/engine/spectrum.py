@@ -9,7 +9,6 @@ is playing or its genre cannot be identified.
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from src.context import get_active_channel_id
 from src.skills.music.catalogs import (
     BROAD_GENRE_TO_ZONE,
     COORDS_BY_ZONE,
@@ -25,6 +24,13 @@ from src.skills.music.catalogs import (
     ZONE_BY_COORDS,
     ZONE_BY_NAME,
 )
+from src.skills.music.context import (
+    clear_channel_played_songs,
+    detect_missed_music_shift_tool_call,
+    enrich_music_tool_args,
+    get_channel_last_played_song,
+    record_channel_played_song,
+)
 from src.skills.music.enums import (
     IntensityLevel,
     SpectrumZoneId,
@@ -36,82 +42,31 @@ from src.skills.music.models import (
 )
 from src.utils.domain_vocab import compile_word_boundary_re, has_non_music_domain_signal
 
-# Per-channel active song context: {channel_id: PlayedSongRecord}
-_CHANNEL_LAST_PLAYED_SONG: Dict[int, PlayedSongRecord] = {}
-
-
-def _get_channel_id(channel_id: Optional[int] = None) -> int:
-    if channel_id is not None:
-        return channel_id
-    return get_active_channel_id()
-
-
-def _norm_token(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())
-
-
-def record_channel_played_song(
-    song: str,
-    artist: str,
-    genre: Optional[str] = None,
-    ui_zone: Optional[str] = None,
-    channel_id: Optional[int] = None,
-    alt_song: Optional[str] = None,
-    bpm: Optional[float] = None,
-    speed_score: Optional[float] = None,
-    intensity_score: Optional[float] = None,
-    gain_db: Optional[float] = None,
-) -> None:
-    """Record the most recently served song in a channel along with its genre, spectrum zone, and acoustic metrics."""
-    s_clean = (song or "").strip()
-    a_clean = (artist or "").strip()
-    alt_clean = (alt_song or "").strip() or None
-    if not s_clean or s_clean.lower() in ("unknown track", "unknown"):
-        return
-
-    cid = _get_channel_id(channel_id)
-    prev = _CHANNEL_LAST_PLAYED_SONG.get(cid)
-    norm_s = _norm_token(s_clean)
-    norm_alt = _norm_token(alt_clean or "")
-    prev_s = _norm_token(prev.song if prev else "")
-    prev_alt = _norm_token(prev.alt_song if prev and prev.alt_song else "")
-    same_track = bool(
-        prev
-        and (norm_s in (prev_s, prev_alt) or (norm_alt and norm_alt in (prev_s, prev_alt)))
-        and _norm_token(prev.artist) == _norm_token(a_clean)
-    )
-
-    eff_genre = (genre or "").strip() or (prev.genre if same_track and prev else None)
-    eff_zone = ui_zone or (prev.ui_zone if same_track and prev else None)
-    if not eff_zone and eff_genre:
-        eff_zone = classify_genre_to_zone(eff_genre)
-
-    entry = PlayedSongRecord(
-        song=s_clean,
-        alt_song=alt_clean or (prev.alt_song if same_track and prev else None),
-        artist=a_clean,
-        genre=eff_genre,
-        ui_zone=eff_zone,
-        bpm=bpm if bpm is not None else (prev.bpm if same_track and prev else None),
-        speed_score=speed_score if speed_score is not None else (prev.speed_score if same_track and prev else None),
-        intensity_score=intensity_score if intensity_score is not None else (prev.intensity_score if same_track and prev else None),
-        gain_db=gain_db if gain_db is not None else (prev.gain_db if same_track and prev else None),
-    )
-    _CHANNEL_LAST_PLAYED_SONG[cid] = entry
-
-
-def get_channel_last_played_song(channel_id: Optional[int] = None) -> Optional[PlayedSongRecord]:
-    """Retrieve the most recently served song in a specific channel."""
-    cid = _get_channel_id(channel_id)
-    return _CHANNEL_LAST_PLAYED_SONG.get(cid)
-
-
-def clear_channel_played_songs(channel_id: Optional[int] = None) -> None:
-    """Clear per-channel active song state (for one channel if channel_id is given, else all)."""
-    if channel_id is not None:
-        _CHANNEL_LAST_PLAYED_SONG.pop(channel_id, None)
-    else:
-        _CHANNEL_LAST_PLAYED_SONG.clear()
+__all__ = [
+    "BROAD_GENRE_TO_ZONE",
+    "COORDS_BY_ZONE",
+    "DEFAULT_CENTER_ZONE",
+    "INTENSITY_AXIS",
+    "IntensityLevel",
+    "PlayedSongRecord",
+    "SPECTRUM_CHART",
+    "SpectrumZone",
+    "SpectrumZoneId",
+    "TEMPO_AXIS",
+    "TempoLevel",
+    "ZONE_BY_COORDS",
+    "ZONE_BY_NAME",
+    "classify_genre_to_zone",
+    "clear_channel_played_songs",
+    "detect_missed_music_shift_tool_call",
+    "enrich_music_tool_args",
+    "get_channel_last_played_song",
+    "has_non_music_domain_context",
+    "is_valid_music_shift_context",
+    "parse_spectrum_shift",
+    "record_channel_played_song",
+    "step_spectrum_zone",
+]
 
 
 def classify_genre_to_zone(genre_or_tags: Union[str, List[str], None]) -> Optional[str]:
@@ -171,10 +126,6 @@ def classify_genre_to_zone(genre_or_tags: Union[str, List[str], None]) -> Option
     return None
 
 
-# ---------------------------------------------------------------------------
-# Conversational Disambiguation & Shift Parsing
-# ---------------------------------------------------------------------------
-
 # Comparative question / factual comparison patterns ("faster than", "why is X slower", "is it harder to")
 _COMPARATIVE_QUESTION_RE = re.compile(
     r"(?:"
@@ -199,7 +150,6 @@ def has_non_music_domain_context(text: str) -> bool:
     """Return True if the text contains non-music domain keywords (tech, sports, flights, weather, finance) or comparative factual questions."""
     if not text:
         return False
-    # Strip any [Replying to song card: ...] wrapper before checking domain keywords
     cleaned = re.sub(r"\[Replying to song card:.*?\]", "", text, flags=re.IGNORECASE).strip()
     if has_non_music_domain_signal(cleaned):
         return True
@@ -291,7 +241,6 @@ def is_valid_music_shift_context(user_text: str, history: Optional[list] = None)
     # Tier 2: Short directive immediately following a music turn in chat_history
     word_count = len(re.findall(r"\w+", cleaned))
     if word_count <= 10 and not cleaned.endswith("?") and history:
-        # Find the most recent assistant message before the current user turn
         prior_msgs = list(history[:-1]) if history else []
         for msg in reversed(prior_msgs):
             role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
@@ -304,7 +253,7 @@ def is_valid_music_shift_context(user_text: str, history: Optional[list] = None)
                 return is_song_card
             if role == "tool":
                 t_name = msg.get("name", "") if isinstance(msg, dict) else getattr(msg, "name", "")
-                if t_name == "skill_top_music":
+                if t_name == "skill_music_discovery":
                     return True
 
     return False
@@ -343,112 +292,4 @@ def step_spectrum_zone(
         "used_default_start": used_default_start,
         "at_boundary": at_boundary,
     }
-
-
-_REPLY_SONG_CARD_RE = re.compile(
-    r"\[Replying to song card:\s*'([^']+)'\s*by\s*'([^']+)'\]",
-    re.IGNORECASE,
-)
-
-
-def _extract_raw_user_text(msg) -> str:
-    """Strip Discord/Telegram wrapper prefixes ('User X says: ...') from a user message in history."""
-    content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
-    if not content:
-        return ""
-    text = str(content).strip()
-    m = re.match(
-        r"^(?:User\s+.+?\s+says(?:\s*\[.*?\])*|.+\(User ID:\s*\d+\)(?:\s*\[.*?\])*)\s*:\s*(.+)$",
-        text,
-        flags=re.DOTALL,
-    )
-    return m.group(1).strip() if m else text
-
-
-def enrich_music_tool_args(args: dict, history: list) -> dict:
-    """Enrich skill_top_music arguments with song-card reply seeds and validate 3-Tier
-    music spectrum shift context so comparative words in normal conversation are never treated as shifts."""
-    if not isinstance(args, dict) or not history:
-        return args
-
-    user_msgs = [
-        m for m in history
-        if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
-    ]
-    if not user_msgs:
-        return args
-
-    last_msg = user_msgs[-1]
-    raw_content = str(last_msg.get("content", "") if isinstance(last_msg, dict) else getattr(last_msg, "content", "") or "")
-    clean_user = _extract_raw_user_text(last_msg)
-    if not clean_user or clean_user.startswith("Now summarize") or clean_user.startswith("You have used"):
-        return args
-
-    enriched = dict(args)
-
-    # Check 3-Tier Music Spectrum Shift context disambiguation
-    valid_shift_ctx = is_valid_music_shift_context(raw_content, history)
-    user_shift = parse_spectrum_shift(clean_user)
-    arg_shift = (
-        parse_spectrum_shift(str(enriched.get("shift") or ""))
-        or parse_spectrum_shift(str(enriched.get("mood") or ""))
-    )
-
-    # 1. If the user is replying to a song card and didn't specify a seed song or artist, attach it
-    # (unless they are explicitly switching to a specific genre without asking for similarity/shift)
-    m_reply = _REPLY_SONG_CARD_RE.search(raw_content)
-    if m_reply and not enriched.get("similar_to") and not enriched.get("artist"):
-        wants_card_similarity = bool(
-            not enriched.get("genre")
-            or enriched.get("shift")
-            or user_shift is not None
-            or re.search(r"\b(?:similar|like\s+this|like\s+that|same\s+vibe|another\s+one)\b", clean_user, re.IGNORECASE)
-        )
-        if wants_card_similarity:
-            enriched["similar_to"] = f"{m_reply.group(1).strip()} by {m_reply.group(2).strip()}"
-
-    # 2. Apply or sanitize spectrum shift parameter
-    if valid_shift_ctx and user_shift is not None:
-        if not enriched.get("shift") and not enriched.get("genre") and not enriched.get("artist"):
-            enriched["shift"] = clean_user
-    elif (user_shift is not None or arg_shift is not None) and not valid_shift_ctx:
-        has_explicit_music_request = bool(
-            enriched.get("genre")
-            or enriched.get("artist")
-            or enriched.get("similar_to")
-            or (enriched.get("mood") and not parse_spectrum_shift(str(enriched.get("mood") or "")))
-            or _EXPLICIT_MUSIC_CUE_RE.search(clean_user)
-        )
-        if has_explicit_music_request:
-            enriched.pop("shift", None)
-        elif has_non_music_domain_context(clean_user) or not enriched.get("genre"):
-            enriched["shift"] = f"NON_MUSIC_CONVERSATION: {clean_user}"
-
-    return enriched
-
-
-def detect_missed_music_shift_tool_call(history: list) -> Optional[Tuple[str, dict]]:
-    """Detect when an 8B model skips calling skill_top_music on a valid 3-Tier music spectrum shift
-    (e.g. replying 'faster' to a song card or typing 'go harder' right after a song card)."""
-    if not history:
-        return None
-
-    user_msgs = [
-        m for m in history
-        if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
-    ]
-    if not user_msgs:
-        return None
-
-    last_msg = user_msgs[-1]
-    raw_content = str(last_msg.get("content", "") if isinstance(last_msg, dict) else getattr(last_msg, "content", "") or "")
-    clean_user = _extract_raw_user_text(last_msg)
-    if not clean_user or clean_user.startswith("!") or clean_user.startswith("Now summarize") or clean_user.startswith("You have used"):
-        return None
-
-    if is_valid_music_shift_context(raw_content, history):
-        args = enrich_music_tool_args({"shift": clean_user}, history)
-        return ("skill_top_music", args)
-
-    return None
 

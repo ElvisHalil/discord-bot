@@ -26,35 +26,34 @@ from src.tools.web import (
     YOUTUBE_CACHE,
 )
 from src.skills import (
-    skill_weather_reporter,
-    skill_youtube_searcher,
-    skill_top_music,
-    skill_audio_intelligence,
-    skill_csgo_esports,
+    skill_weather_info,
+    skill_youtube_search,
+    skill_music_discovery,
+    skill_music_analysis,
+    skill_sports_esports,
     skill_sports_info,
-    skill_betting_odds,
-    skill_track_live_game,
-    skill_top_headlines,
+    skill_sports_odds,
+    skill_sports_tracker,
+    skill_news_headlines,
     skill_flight_info,
-    skill_track_flight,
+    skill_flight_tracker,
 )
 
 # Combined registries for mode execution
 RESEARCH_TOOLS = {
     **SYSTEM_TOOLS,
     **WEB_TOOLS,
-    "skill_top_headlines": skill_top_headlines,
-    "get_top_headlines": skill_top_headlines,  # Alias for backward compatibility
-    "skill_weather_reporter": skill_weather_reporter,
-    "skill_youtube_searcher": skill_youtube_searcher,
-    "skill_top_music": skill_top_music,
-    "skill_audio_intelligence": skill_audio_intelligence,
-    "skill_csgo_esports": skill_csgo_esports,
+    "skill_news_headlines": skill_news_headlines,
+    "skill_weather_info": skill_weather_info,
+    "skill_youtube_search": skill_youtube_search,
+    "skill_music_discovery": skill_music_discovery,
+    "skill_music_analysis": skill_music_analysis,
+    "skill_sports_esports": skill_sports_esports,
     "skill_sports_info": skill_sports_info,
-    "skill_betting_odds": skill_betting_odds,
-    "skill_track_live_game": skill_track_live_game,
+    "skill_sports_odds": skill_sports_odds,
+    "skill_sports_tracker": skill_sports_tracker,
     "skill_flight_info": skill_flight_info,
-    "skill_track_flight": skill_track_flight,
+    "skill_flight_tracker": skill_flight_tracker,
 }
 
 # Chat mode is a casual persona on a small model: keep the tool list short so the
@@ -62,10 +61,8 @@ RESEARCH_TOOLS = {
 CHAT_TOOLS = {
     **SYSTEM_TOOLS,
     **WEB_TOOLS,
-    "skill_youtube_searcher": skill_youtube_searcher,
-    "skill_track_live_game": skill_track_live_game,
+    "skill_youtube_search": skill_youtube_search,
+    "skill_sports_tracker": skill_sports_tracker,
     "skill_flight_info": skill_flight_info,
-    "skill_track_flight": skill_track_flight,
+    "skill_flight_tracker": skill_flight_tracker,
 }
-
-

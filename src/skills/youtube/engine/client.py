@@ -1,9 +1,11 @@
 import logging
-import os
 import re
 import requests
 from requests.adapters import HTTPAdapter
-from ddgs import DDGS
+from src.skills.youtube.aggregators import (
+    YouTubeAggregatorManager,
+)
+from src.skills.youtube.catalogs import UNPLAYABLE_EMBED_MARKERS
 from src.utils.workers import submit_to_worker
 
 logger = logging.getLogger(__name__)
@@ -90,19 +92,7 @@ def verify_embeddable(vid: str) -> bool:
             return False
 
         embed_text = embed_res.text
-        unplayable_markers = (
-            "Playback on other websites has been disabled",
-            "blocked it from display on this website or application",
-            '"playableInEmbed":false',
-            '"playableInEmbed": false',
-            "UNPLAYABLE",
-            "LOGIN_REQUIRED",
-            "Video unavailable",
-            "This video is unavailable",
-            "This video is private",
-            "error-message",
-        )
-        if any(marker in embed_text for marker in unplayable_markers):
+        if any(marker in embed_text for marker in UNPLAYABLE_EMBED_MARKERS):
             print(f"⚠️ [YouTube]: Skipping {vid} because embed page indicated unplayable/disabled on Discord.")
             _EMBEDDABLE_CACHE[vid] = False
             return False
@@ -172,25 +162,23 @@ def is_youtube_short(vid: str, href: str = "", title: str = "") -> bool:
         logger.debug(f"is_youtube_short HEAD check failed for {vid}: {e}")
     return False
 
-from src.skills.youtube.aggregators import (
-    YouTubeApiAggregator,
-    DuckDuckGoYouTubeAggregator,
-    YouTubeSearchManager,
-)
 
-_search_manager = YouTubeSearchManager(
+_search_manager = YouTubeAggregatorManager(
     verify_embeddable_fn=verify_embeddable,
     get_oembed_fn=get_video_oembed,
     is_short_fn=is_youtube_short
 )
 
+
 def search_youtube_api(query: str, max_results: int = 1) -> list[dict]:
     """Searches YouTube using the official YouTube Data API v3."""
     return _search_manager.api_aggregator.search(query, max_results=max_results)
 
+
 def search_youtube_ddg(query: str, max_results: int = 1) -> list[dict]:
     """Fallback search using DuckDuckGo scraping to find working, embeddable YouTube videos."""
     return _search_manager.ddg_aggregator.search(query, max_results=max_results)
+
 
 def search_youtube(query: str, max_results: int = 1) -> list[dict]:
     """Main YouTube search client. Tries official API first, falls back to DuckDuckGo."""

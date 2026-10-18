@@ -71,10 +71,11 @@ class MusicProvider(StrEnum):
 
 
 class AudioAction(StrEnum):
-    """Supported actions for `skill_audio_intelligence`."""
+    """Supported actions for `skill_music_analysis`."""
     BPM_KEY = "bpm_key"
     MATCH_MOOD = "match_mood"
     TRANSITION = "transition"
     BPM_SEARCH = "bpm_search"
     HARMONIC_RADIO = "harmonic_radio"
+
 

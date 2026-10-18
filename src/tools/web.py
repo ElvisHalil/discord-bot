@@ -117,7 +117,7 @@ def search_web(query: str, news: Optional[bool] = None, timelimit: Optional[str]
 
     Args:
         query: The search keywords.
-        news: Set true to search recent news articles about a specific subject or event. For general top headlines of a country or topic, use `skill_top_headlines` instead.
+        news: Set true to search recent news articles about a specific subject or event. For general top headlines of a country or topic, use `skill_news_headlines` instead.
         timelimit: Optional recency filter: 'd' (past day), 'w' (past week), 'm' (past month) or 'y' (past year).
     """
     global VISITED_URLS, SEARCH_CACHE

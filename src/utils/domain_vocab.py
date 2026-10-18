@@ -220,8 +220,8 @@ def has_non_sports_track_signal(text: str) -> bool:
 
 EPHEMERAL_SPORTS_TOOLS: frozenset[str] = frozenset({
     "skill_sports_info",
-    "skill_track_live_game",
-    "skill_betting_odds",
+    "skill_sports_tracker",
+    "skill_sports_odds",
 })
 
 MONTH_MAP_SYNC: Dict[str, int] = {
@@ -252,27 +252,23 @@ TOOL_ARG_ALIASES: Dict[str, Dict[str, str]] = {
         "link": "url", "video_url": "url", "video": "url", "uri": "url",
         "href": "url", "video_id": "url", "id": "url",
     },
-    "skill_top_headlines": {
+    "skill_news_headlines": {
         "country": "region", "location": "region", "place": "region", "nation": "region",
         "category": "topic", "section": "topic",
     },
-    "get_top_headlines": {
-        "country": "region", "location": "region", "place": "region", "nation": "region",
-        "category": "topic", "section": "topic",
-    },
-    "skill_top_music": {
+    "skill_music_discovery": {
         "artist_name": "artist", "band": "artist", "creator": "artist",
         "style": "genre", "vibe": "mood", "energy": "mood", "feel": "mood",
         "seed": "similar_to", "song": "similar_to", "track": "similar_to",
         "direction": "shift", "notch": "shift", "scale": "shift", "tempo": "shift", "intensity": "shift",
     },
-    "skill_csgo_esports": {
+    "skill_sports_esports": {
         "type": "query_type", "category": "query_type", "query": "query_type", "mode": "query_type",
         "event": "event_page", "page": "event_page", "tournament": "event_page",
         "player": "player_url", "player_name": "player_url", "name": "player_url", "target": "player_url",
         "team": "matchup", "matchup": "matchup", "match": "matchup", "teams": "matchup",
     },
-    "skill_betting_odds": {
+    "skill_sports_odds": {
         "matchup": "query", "match": "query", "game": "query", "event": "query", "teams": "query",
         "category": "sport", "league": "sport",
     },
@@ -286,21 +282,21 @@ TOOL_ARG_ALIASES: Dict[str, Dict[str, str]] = {
         "matchup": "query", "match": "query", "matches": "query", "filter": "query",
         "outcomes": "query", "outcome": "query",
     },
-    "skill_track_live_game": {
+    "skill_sports_tracker": {
         "team": "query", "club": "query", "match": "query", "matchup": "query",
         "game": "query", "event": "query", "target": "query", "q": "query",
         "command": "action", "mode": "action", "type": "action",
         "league": "sport", "category": "sport",
     },
-    "skill_weather_reporter": {
+    "skill_weather_info": {
         "location": "city", "place": "city", "town": "city", "region": "city", "q": "city", "query": "city",
     },
-    "skill_youtube_searcher": {
+    "skill_youtube_search": {
         "q": "query", "search_query": "query", "search": "query", "video": "query",
         "song": "query", "track": "query", "title": "query",
         "limit": "max_results", "count": "max_results", "music": "is_music",
     },
-    "skill_audio_intelligence": {
+    "skill_music_analysis": {
         "song": "track", "query": "track", "q": "track", "title": "track", "seed": "track",
         "mode": "action", "type": "action", "bpm": "target_bpm", "tempo": "target_bpm",
     },
@@ -317,7 +313,7 @@ TOOL_ARG_ALIASES: Dict[str, Dict[str, str]] = {
         "sort": "sort_by", "sort_preference": "sort_by", "order": "sort_by",
         "trip": "trip_type", "type": "trip_type",
     },
-    "skill_track_flight": {
+    "skill_flight_tracker": {
         "mode": "action", "command": "action", "cmd": "action",
         "q": "query", "flight": "query", "flight_number": "query", "callsign": "query", "route": "query",
         "from": "origin", "from_airport": "origin", "departure": "origin",

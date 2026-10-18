@@ -5,7 +5,7 @@ import requests
 from dotenv import load_dotenv
 from src.skills.music.aggregators.base import BaseMusicAggregator
 from src.skills.music.models import Track
-from src.skills.music.utils import parse_song_meta
+from src.skills.music.engine.formatting import parse_song_meta
 
 load_dotenv()
 

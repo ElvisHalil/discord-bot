@@ -32,19 +32,19 @@ from src.orchestrator import (
 from src.context import set_active_channel_id
 from src.skills.flights import (
     FLIGHT_TRACKER,
-    skill_track_flight,
+    skill_flight_tracker,
 )
-from src.skills.music.utils import format_song_card, get_music_metadata, standardize_song_reply
-from src.skills.sports.live_tracker import (
-    LIVE_TRACKER,
-    skill_track_live_game,
+from src.skills.music.engine.formatting import format_song_card, get_music_metadata, standardize_song_reply
+from src.skills.sports.tracker import (
+    SPORTS_TRACKER,
+    skill_sports_tracker,
 )
 from src.utils import chunk_message, run_in_worker
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
 # Maps internal negative channel_id -> real Telegram chat_id (so positive Telegram DM chat_ids
-# never collide with positive Discord channel snowflakes in chat_history / LIVE_TRACKER).
+# never collide with positive Discord channel snowflakes in chat_history / SPORTS_TRACKER).
 _TG_CHANNEL_OFFSET = -10_000_000_000_000_000
 _TG_CHANNEL_MAP: Dict[int, int] = {}
 
@@ -351,7 +351,7 @@ async def _handle_telegram_reaction(
     search_query = f"{clean_title} by {orig_artist}".strip() if orig_artist else clean_title
 
     set_active_channel_id(internal_cid)
-    similar_res = await run_in_worker(tools.skill_top_music, similar_to=search_query)
+    similar_res = await run_in_worker(tools.skill_music_discovery, similar_to=search_query)
     verified_url = None
     chosen_track = None
     if "=== VERIFIED YOUTUBE MUSIC RESULT" in similar_res:
@@ -371,7 +371,7 @@ async def _handle_telegram_reaction(
         ]
         random.shuffle(similar_tracks)
         for candidate in similar_tracks[:4]:
-            yt_output = await run_in_worker(tools.skill_youtube_searcher, candidate, max_results=1, is_music=True)
+            yt_output = await run_in_worker(tools.skill_youtube_search, candidate, max_results=1, is_music=True)
             m_url = re.search(r"(https:\/\/(?:music|www)\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})", yt_output)
             if m_url:
                 verified_url = m_url.group(1).replace("www.youtube.com", "music.youtube.com")
@@ -521,7 +521,7 @@ async def handle_telegram_update(
     if low_input.startswith("!trackflight "):
         target_q = normalized_input[13:].strip()
         set_active_channel_id(internal_cid)
-        res = await run_in_worker(skill_track_flight, action="start", query=target_q)
+        res = await run_in_worker(skill_flight_tracker, action="start", query=target_q)
         FLIGHT_TRACKER.ensure_loop_running()
         await send_telegram_message(internal_cid, res, token=bot_token)
         return
@@ -529,34 +529,34 @@ async def handle_telegram_update(
     if low_input.startswith("!untrackflight"):
         target_q = normalized_input[14:].strip()
         set_active_channel_id(internal_cid)
-        res = await run_in_worker(skill_track_flight, action="stop", query=target_q)
+        res = await run_in_worker(skill_flight_tracker, action="stop", query=target_q)
         await send_telegram_message(internal_cid, res, token=bot_token)
         return
 
     if low_input in ("!trackedflights", "!trackflight"):
         set_active_channel_id(internal_cid)
-        res = await run_in_worker(skill_track_flight, action="list")
+        res = await run_in_worker(skill_flight_tracker, action="list")
         await send_telegram_message(internal_cid, res, token=bot_token)
         return
 
     if low_input.startswith("!track "):
         target_q = normalized_input[7:].strip()
         set_active_channel_id(internal_cid)
-        res = await run_in_worker(skill_track_live_game, action="start", query=target_q)
-        LIVE_TRACKER.ensure_loop_running()
+        res = await run_in_worker(skill_sports_tracker, action="start", query=target_q)
+        SPORTS_TRACKER.ensure_loop_running()
         await send_telegram_message(internal_cid, res, token=bot_token)
         return
 
     if low_input.startswith("!untrack"):
         target_q = normalized_input[8:].strip()
         set_active_channel_id(internal_cid)
-        res = await run_in_worker(skill_track_live_game, action="stop", query=target_q)
+        res = await run_in_worker(skill_sports_tracker, action="stop", query=target_q)
         await send_telegram_message(internal_cid, res, token=bot_token)
         return
 
     if low_input in ("!tracked", "!track"):
         set_active_channel_id(internal_cid)
-        res = await run_in_worker(skill_track_live_game, action="list")
+        res = await run_in_worker(skill_sports_tracker, action="list")
         await send_telegram_message(internal_cid, res, token=bot_token)
         return
 

@@ -4,7 +4,7 @@ from src.skills.weather.templates import WEATHER_INSTRUCTIONS
 _weather_aggregator = WttrAggregator()
 
 
-def skill_weather_reporter(city: str) -> str:
+def skill_weather_info(city: str) -> str:
     """
     A full 'Skill' packaged as a tool. Fetches the current weather for a city.
     Use this whenever the user asks about the weather.

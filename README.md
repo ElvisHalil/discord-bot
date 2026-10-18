@@ -20,7 +20,7 @@ Designed specifically to give compact local LLMs (4B–8B parameters) **determin
 
 ## 🏗️ Architecture Overview
 
-Skills are strictly isolated by domain and follow a standardized internal module layout (`enums.py`, `models.py`, `catalogs.py`, `templates.py`). Cross-cutting concerns live in a shared core execution context (`src/context.py`), shared domain vocabularies (`src/utils/domain_vocab.py`), and a centralized background worker pool (`src/utils/workers.py`).
+Every skill under `src/skills/` follows an identical, standardized package layout (`__init__.py`, `<skill_name>.py`, `enums.py`, `models.py`, `catalogs.py`, `templates.py`, `aggregators/`, plus optional `context.py`, `tracker.py`, `engine/`, `playback/`), with a copy-paste-ready skeleton in `src/skills/.example/`. Cross-cutting concerns live in a shared core execution context (`src/context.py`), shared domain vocabularies (`src/utils/domain_vocab.py`), and a centralized background worker pool (`src/utils/workers.py`).
 
 ```mermaid
 flowchart TD
@@ -40,13 +40,14 @@ flowchart TD
         TZ["src/utils/timezones.py (Dual Local + UTC/CET Formatter)"]
     end
 
-    subgraph Skills["Isolated Domain Skills (src/skills/)"]
-        MUS["🎵 music\n(enums, models, catalogs, templates,\ntop_music, spectrum, moods, harmonic,\naudio_analyzer, aggregators/, playback/)"]
-        SPT["🏟️ sports\n(enums, models, catalogs, templates,\nsports, csgo, odds, live_tracker,\ncontext, aggregators/)"]
-        FLT["✈️ flights\n(enums, models, catalogs, templates,\ninfo, airports, tracker, aggregators/)"]
-        NWS["📰 news\n(enums, models, catalogs, templates, headlines)"]
-        WTH["🌤️ weather\n(templates, reporter, aggregators/)"]
-        YT["📺 youtube\n(client, searcher)"]
+    subgraph Skills["Standardized Domain Skills (src/skills/)"]
+        MUS["🎵 music\n(music.py, enums, models, catalogs, templates,\ncontext, engine/, aggregators/, playback/)"]
+        SPT["🏟️ sports\n(sports.py, enums, models, catalogs, templates,\ncontext, tracker, aggregators/)"]
+        FLT["✈️ flights\n(flights.py, enums, models, catalogs, templates,\ncontext, tracker, engine/, aggregators/)"]
+        NWS["📰 news\n(news.py, enums, models, catalogs, templates,\naggregators/)"]
+        WTH["🌤️ weather\n(weather.py, enums, models, catalogs, templates,\naggregators/)"]
+        YT["📺 youtube\n(youtube.py, enums, models, catalogs, templates,\nengine/, aggregators/)"]
+        EX["🧩 .example\n(example.py + Copy-Paste Skeleton)"]
     end
 
     MAIN --> ORCH
@@ -57,6 +58,39 @@ flowchart TD
     REG --> Skills
     Skills --> Core
 ```
+
+### 📁 Standard Skill Package Layout (`src/skills/<skill_name>/`)
+
+Every skill package under `src/skills/<skill_name>/` follows this exact structure, with the primary module named `<skill_name>.py` to match its folder name (see `src/skills/.example/` for a copy-paste-ready skeleton):
+
+```text
+src/skills/<skill_name>/
+├── __init__.py             # Public exports (skill_<skill_name>_* entrypoints & optional tracker)
+├── <skill_name>.py         # Constructor-style main module with LLM tool entrypoint(s) (skill_<skill_name>_*)
+├── enums.py                # Strictly enum.StrEnum classes (modes, states, providers)
+├── models.py               # Strictly @dataclass(slots=True) domain models
+├── catalogs.py             # Strictly static registries, lookup dicts & frozenset stopwords
+├── templates.py            # Concise LLM formatting instructions (3–4 lines max)
+├── context.py              # [Optional] Per-channel state, arg enrichment & turn-0 recovery
+├── tracker.py              # [Optional] Asyncio background polling service (<Domain>TrackerService)
+├── engine/                 # [Optional] Pure domain algorithms, parsers, or DSP helpers
+└── aggregators/            # External API & scraping providers
+    ├── __init__.py
+    ├── base.py             # Abstract base class (Base<Domain>Aggregator)
+    └── example_provider.py # Concrete data fetcher using src/utils/http.py & workers.py
+```
+
+#### 🧩 Adding a New Skill in 5 Steps
+1. **Copy the skeleton** to `src/skills/<your_skill>/` and rename `example.py` to `<your_skill>.py`:
+   ```bash
+   cp -r src/skills/.example src/skills/<your_skill>
+   mv src/skills/<your_skill>/example.py src/skills/<your_skill>/<your_skill>.py
+   ```
+2. **Define your types & static data**:
+   - Put `StrEnum`s in `enums.py`, `@dataclass(slots=True)` models in `models.py`, static dicts/`frozenset` stopwords in `catalogs.py`, and concise LLM rules in `templates.py`.
+3. **Implement your data provider** in `aggregators/` inheriting from `Base<Domain>Aggregator` in `aggregators/base.py`, using `fetch_json` / `fetch_text` from `src.utils.http` and `map_in_workers` / `submit_to_worker` from `src.utils.workers`.
+4. **Implement your tool entrypoint** (`def skill_<your_skill>_info(...) -> str:`) in `<your_skill>.py` and export it in `src/skills/<your_skill>/__init__.py` and `src/skills/__init__.py`.
+5. **Register the tool** in `src/registry.py` (`RESEARCH_TOOLS` / `CHAT_TOOLS`) and add parameter synonyms to `TOOL_ARG_ALIASES` in `src/utils/domain_vocab.py`.
 
 ---
 

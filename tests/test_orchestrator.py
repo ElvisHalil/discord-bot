@@ -15,7 +15,7 @@ from src.orchestrator import (
     apply_auto_ping,
     join_orphan_bullets,
 )
-from src.skills.music.utils import standardize_song_reply
+from src.skills.music.engine.formatting import standardize_song_reply
 from src.utils import suppress_discord_embeds
 
 
@@ -23,8 +23,8 @@ def search_web(query: str, news: Optional[bool] = None, timelimit: Optional[str]
     """Stand-in with the real search_web signature (no network)."""
 
 
-def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music: Optional[bool] = False):
-    """Stand-in with the real skill_youtube_searcher signature (no network)."""
+def skill_youtube_search(query: str, max_results: Optional[int] = 1, is_music: Optional[bool] = False):
+    """Stand-in with the real skill_youtube_search signature (no network)."""
 
 
 def skill_sports_info(sport: Optional[str] = None, query: Optional[str] = None):
@@ -45,7 +45,7 @@ class TestNormalizeToolArgs(unittest.TestCase):
 
     def test_string_bool_and_int_coercion(self):
         args = normalize_tool_args(
-            "skill_youtube_searcher", skill_youtube_searcher,
+            "skill_youtube_search", skill_youtube_search,
             {"query": "x", "max_results": "3", "is_music": "false"},
         )
         self.assertEqual(args, {"query": "x", "max_results": 3, "is_music": False})
@@ -144,7 +144,7 @@ class TestOrphanBullets(unittest.TestCase):
 
 
 class TestReplyPostProcessing(unittest.TestCase):
-    @patch("src.skills.music.utils.get_music_metadata")
+    @patch("src.skills.music.engine.formatting.get_music_metadata")
     def test_news_reply_not_treated_as_song_card(self, mock_meta):
         reply = (
             "**Canada**\n"
@@ -154,8 +154,8 @@ class TestReplyPostProcessing(unittest.TestCase):
         self.assertEqual(standardize_song_reply(reply), reply)
         mock_meta.assert_not_called()
 
-    @patch("src.skills.youtube.client.verify_embeddable", return_value=True)
-    @patch("src.skills.music.utils.get_music_metadata")
+    @patch("src.skills.youtube.engine.client.verify_embeddable", return_value=True)
+    @patch("src.skills.music.engine.formatting.get_music_metadata")
     def test_compound_prompt_and_song_reply_preserved(self, mock_meta, mock_embed):
         mock_meta.return_value = {
             "song": "Strobe",
@@ -287,7 +287,7 @@ class TestSanitizeAgentReply(unittest.TestCase):
         enriched = enrich_sports_tool_args(
             {"sport": "nhl", "team": "Edmonton Oilers"},
             hist,
-            sibling_tools=["skill_weather_reporter"],
+            sibling_tools=["skill_weather_info"],
         )
         self.assertEqual(enriched, {"sport": "nhl", "team": "Edmonton Oilers", "query": "next"})
 
@@ -392,7 +392,7 @@ class TestSportsFollowupAndMissedToolEnforcement(unittest.TestCase):
         ]
         missed_track = detect_missed_sports_tool_call(history_track, active_channel_id=101)
         self.assertIsNotNone(missed_track)
-        self.assertEqual(missed_track[0], "skill_track_live_game")
+        self.assertEqual(missed_track[0], "skill_sports_tracker")
         self.assertEqual(missed_track[1]["action"], "start")
         self.assertIn("real madrid", missed_track[1]["query"].lower())
 
@@ -428,8 +428,8 @@ class TestSportsFollowupAndMissedToolEnforcement(unittest.TestCase):
 
     def test_flight_missed_tool_and_hallucinated_year_enrichment(self):
         from src.orchestrator import detect_missed_flight_tool_call, enrich_flight_tool_args
-        from src.skills.flights.airports import parse_route_from_query
-        from src.skills.sports.live_tracker import set_active_channel_id
+        from src.skills.flights.engine.resolver import parse_route_from_query
+        from src.skills.sports.tracker import set_active_channel_id
 
         set_active_channel_id(904)
         parse_route_from_query("planning trip from Edmonton to Zagreb from May to August next year")
@@ -545,7 +545,7 @@ class TestWorkerConcurrencyAndLockFreeTurns(unittest.IsolatedAsyncioTestCase):
     async def test_contextvar_propagation_across_nested_workers(self):
         import asyncio
         import time
-        from src.skills.sports.live_tracker import get_active_channel_id, set_active_channel_id
+        from src.skills.sports.tracker import get_active_channel_id, set_active_channel_id
         from src.tools.system import _get_active_memory_file, set_memory_file
         from src.utils.workers import map_in_workers, run_in_worker, submit_to_worker
 
@@ -694,7 +694,7 @@ class TestTimeConverterAccuracy(unittest.TestCase):
     def test_liquipedia_discord_epoch_line_not_double_annotated_and_uses_bot_tz(self):
         from datetime import datetime, timezone
         from src.orchestrator import enrich_tool_output_with_time_context, sanitize_agent_reply
-        from src.skills.music.utils import standardize_song_reply
+        from src.skills.music.engine.formatting import standardize_song_reply
         from src.skills.sports.aggregators.liquipedia import LiquipediaAggregator
 
         ref_utc = datetime(2026, 10, 16, 14, 0, tzinfo=timezone.utc)
@@ -806,11 +806,11 @@ class TestConversationWithAllToolsAndSkills(unittest.IsolatedAsyncioTestCase):
 
     def test_conversation_plus_all_registered_tools_argument_enrichment_and_execution(self):
         from src.orchestrator import enrich_sports_tool_args, normalize_tool_args
-        from src.skills.weather.reporter import skill_weather_reporter
+        from src.skills.weather.weather import skill_weather_info
 
         # Weather skill prompt instruction must allow answering other questions in full
-        with patch("src.skills.weather.reporter._weather_aggregator.get_weather", return_value="Sunny, +22°C"):
-            w_out = skill_weather_reporter("Tokyo")
+        with patch("src.skills.weather.weather._weather_aggregator.get_weather", return_value="Sunny, +22°C"):
+            w_out = skill_weather_info("Tokyo")
         self.assertIn("Keep the weather section under 4 sentences", w_out)
         self.assertIn("answer any other questions or requests from the user in full", w_out)
 
@@ -828,18 +828,17 @@ class TestConversationWithAllToolsAndSkills(unittest.IsolatedAsyncioTestCase):
             "search_web",
             "read_website",
             "read_youtube_video",
-            "skill_weather_reporter",
-            "skill_top_headlines",
-            "get_top_headlines",
-            "skill_youtube_searcher",
-            "skill_top_music",
-            "skill_audio_intelligence",
-            "skill_csgo_esports",
-            "skill_betting_odds",
+            "skill_weather_info",
+            "skill_news_headlines",
+            "skill_youtube_search",
+            "skill_music_discovery",
+            "skill_music_analysis",
+            "skill_sports_esports",
+            "skill_sports_odds",
             "skill_sports_info",
-            "skill_track_live_game",
+            "skill_sports_tracker",
             "skill_flight_info",
-            "skill_track_flight",
+            "skill_flight_tracker",
             "evaluate_math",
             "get_current_datetime",
             "save_memory",
@@ -851,18 +850,18 @@ class TestConversationWithAllToolsAndSkills(unittest.IsolatedAsyncioTestCase):
             ("search_web", {"q": "quantum computing"}, {"query": "quantum computing"}),
             ("read_website", {"link": "https://example.com"}, {"url": "https://example.com"}),
             ("read_youtube_video", {"link": "https://www.youtube.com/watch?v=12345678901"}, {"url": "https://www.youtube.com/watch?v=12345678901"}),
-            ("skill_weather_reporter", {"location": "Paris"}, {"city": "Paris"}),
-            ("skill_top_headlines", {"country": "Canada"}, {"region": "Canada"}),
-            ("get_top_headlines", {"category": "Technology"}, {"topic": "Technology"}),
-            ("skill_youtube_searcher", {"q": "elden ring trailer", "is_music": "false"}, {"query": "elden ring trailer", "is_music": False}),
-            ("skill_top_music", {"vibe": "chill", "style": "synthwave"}, {"mood": "chill", "genre": "synthwave"}),
-            ("skill_audio_intelligence", {"song": "Strobe by deadmau5"}, {"track": "Strobe by deadmau5"}),
-            ("skill_csgo_esports", {"type": "rankings"}, {"query_type": "rankings"}),
-            ("skill_betting_odds", {"match": "Falcons vs Vitality", "league": "cs2"}, {"query": "Falcons vs Vitality", "sport": "cs2"}),
+            ("skill_weather_info", {"location": "Paris"}, {"city": "Paris"}),
+            ("skill_news_headlines", {"country": "Canada"}, {"region": "Canada"}),
+            ("skill_news_headlines", {"category": "Technology"}, {"topic": "Technology"}),
+            ("skill_youtube_search", {"q": "elden ring trailer", "is_music": "false"}, {"query": "elden ring trailer", "is_music": False}),
+            ("skill_music_discovery", {"vibe": "chill", "style": "synthwave"}, {"mood": "chill", "genre": "synthwave"}),
+            ("skill_music_analysis", {"song": "Strobe by deadmau5"}, {"track": "Strobe by deadmau5"}),
+            ("skill_sports_esports", {"type": "rankings"}, {"query_type": "rankings"}),
+            ("skill_sports_odds", {"match": "Falcons vs Vitality", "league": "cs2"}, {"query": "Falcons vs Vitality", "sport": "cs2"}),
             ("skill_sports_info", {"league": "nba", "q": "lakers schedule"}, {"sport": "nba", "query": "lakers schedule"}),
-            ("skill_track_live_game", {"team": "Real Madrid"}, {"query": "Real Madrid"}),
+            ("skill_sports_tracker", {"team": "Real Madrid"}, {"query": "Real Madrid"}),
             ("skill_flight_info", {"from": "Calgary", "to": "Tokyo"}, {"origin": "Calgary", "destination": "Tokyo"}),
-            ("skill_track_flight", {"flight": "AC850"}, {"query": "AC850"}),
+            ("skill_flight_tracker", {"flight": "AC850"}, {"query": "AC850"}),
             ("evaluate_math", {"math": "25 * 14"}, {"expression": "25 * 14"}),
             ("get_current_datetime", {}, {}),
             ("save_memory", {"memory": "Likes synthwave"}, {"fact": "Likes synthwave"}),
@@ -878,8 +877,8 @@ class TestAllToolAndSkillCombinations(unittest.IsolatedAsyncioTestCase):
     """Tests cross-domain multi-tool combinations (Music + Sports, CS + Soccer, Video + Song Card,
     Sports + CS sibling scoping, and 4-tool mega-turns) through orchestration and post-processing."""
 
-    @patch("src.skills.youtube.client.verify_embeddable", return_value=True)
-    @patch("src.skills.music.utils.get_music_metadata")
+    @patch("src.skills.youtube.engine.client.verify_embeddable", return_value=True)
+    @patch("src.skills.music.engine.formatting.get_music_metadata")
     def test_video_link_and_music_song_card_both_preserved_in_standardize_song_reply(self, mock_meta, _mock_embed):
         mock_meta.return_value = {
             "song": "Nightcall",
@@ -905,7 +904,7 @@ class TestAllToolAndSkillCombinations(unittest.IsolatedAsyncioTestCase):
     def test_sibling_tools_scoping_prevents_duplicate_cs_and_odds_in_sports_info(self):
         from src.orchestrator import enrich_sports_tool_args
 
-        # When model calls both skill_sports_info(sport='nhl') and skill_csgo_esports in parallel
+        # When model calls both skill_sports_info(sport='nhl') and skill_sports_esports in parallel
         hist = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "User Alex says: when does Team Spirit play in CS2 and what are the NHL games today?"},
@@ -913,12 +912,12 @@ class TestAllToolAndSkillCombinations(unittest.IsolatedAsyncioTestCase):
         enriched = enrich_sports_tool_args(
             {"sport": "nhl", "query": "NHL games today"},
             hist,
-            sibling_tools=["skill_csgo_esports"],
+            sibling_tools=["skill_sports_esports"],
         )
         self.assertNotIn("spirit", enriched["query"].lower())
         self.assertNotIn("cs2", enriched["query"].lower())
 
-        # When model calls both skill_sports_info(sport='nba') and skill_betting_odds in parallel
+        # When model calls both skill_sports_info(sport='nba') and skill_sports_odds in parallel
         hist_odds = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "User Alex says: what are the NBA games today and their betting odds"},
@@ -926,7 +925,7 @@ class TestAllToolAndSkillCombinations(unittest.IsolatedAsyncioTestCase):
         enriched_odds = enrich_sports_tool_args(
             {"sport": "nba", "query": "NBA games today"},
             hist_odds,
-            sibling_tools=["skill_betting_odds"],
+            sibling_tools=["skill_sports_odds"],
         )
         self.assertNotIn("odds", enriched_odds["query"].lower())
 
@@ -938,15 +937,15 @@ class TestAllToolAndSkillCombinations(unittest.IsolatedAsyncioTestCase):
         called_tools = []
 
         def fake_top_music(genre: Optional[str] = None, mood: Optional[str] = None):
-            called_tools.append(("skill_top_music", genre))
+            called_tools.append(("skill_music_discovery", genre))
             return "=== TODAY'S TOP CHARTING MUSIC ===\n**Song:** Strobe\n**Artist:** deadmau5\nhttps://music.youtube.com/watch?v=tKi9Z-f6qX4"
 
         def fake_yt_searcher(query: str, max_results: Optional[int] = 1, is_music: Optional[bool] = False):
-            called_tools.append(("skill_youtube_searcher", query, is_music))
+            called_tools.append(("skill_youtube_search", query, is_music))
             return "https://www.youtube.com/watch?v=QdBZY2fkU-0"
 
         def fake_weather(city: str):
-            called_tools.append(("skill_weather_reporter", city))
+            called_tools.append(("skill_weather_info", city))
             return "Sunny +20C"
 
         def fake_sports(sport: Optional[str] = None, query: Optional[str] = None):
@@ -961,20 +960,20 @@ class TestAllToolAndSkillCombinations(unittest.IsolatedAsyncioTestCase):
             "history_limit": 40,
             "ollama_options": {},
             "tools": {
-                "skill_top_music": fake_top_music,
-                "skill_youtube_searcher": fake_yt_searcher,
-                "skill_weather_reporter": fake_weather,
+                "skill_music_discovery": fake_top_music,
+                "skill_youtube_search": fake_yt_searcher,
+                "skill_weather_info": fake_weather,
                 "skill_sports_info": fake_sports,
             },
         }
 
-        # Case 1: 4 tools in parallel including skill_youtube_searcher(is_music=False) + skill_top_music -> ALL 4 execute!
+        # Case 1: 4 tools in parallel including skill_youtube_search(is_music=False) + skill_music_discovery -> ALL 4 execute!
         step1_msg = SimpleNamespace(
             content="",
             tool_calls=[
-                SimpleNamespace(function=SimpleNamespace(name="skill_top_music", arguments={"genre": "synthwave"})),
-                SimpleNamespace(function=SimpleNamespace(name="skill_youtube_searcher", arguments={"query": "GTA 6 trailer", "is_music": False})),
-                SimpleNamespace(function=SimpleNamespace(name="skill_weather_reporter", arguments={"city": "Calgary"})),
+                SimpleNamespace(function=SimpleNamespace(name="skill_music_discovery", arguments={"genre": "synthwave"})),
+                SimpleNamespace(function=SimpleNamespace(name="skill_youtube_search", arguments={"query": "GTA 6 trailer", "is_music": False})),
+                SimpleNamespace(function=SimpleNamespace(name="skill_weather_info", arguments={"city": "Calgary"})),
                 SimpleNamespace(function=SimpleNamespace(name="skill_sports_info", arguments={"sport": "nhl", "query": "games today"})),
             ],
         )
@@ -997,13 +996,13 @@ class TestAllToolAndSkillCombinations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(tool_msgs), 4)
         self.assertTrue(all("PARALLEL_EXECUTION_BLOCKED" not in m["content"] for m in tool_msgs))
 
-        # Case 2: skill_youtube_searcher(is_music=True) called in parallel with skill_top_music -> blocked!
+        # Case 2: skill_youtube_search(is_music=True) called in parallel with skill_music_discovery -> blocked!
         called_tools.clear()
         step1_blocked = SimpleNamespace(
             content="",
             tool_calls=[
-                SimpleNamespace(function=SimpleNamespace(name="skill_top_music", arguments={"genre": "rock"})),
-                SimpleNamespace(function=SimpleNamespace(name="skill_youtube_searcher", arguments={"query": "rock song", "is_music": True})),
+                SimpleNamespace(function=SimpleNamespace(name="skill_music_discovery", arguments={"genre": "rock"})),
+                SimpleNamespace(function=SimpleNamespace(name="skill_youtube_search", arguments={"query": "rock song", "is_music": True})),
             ],
         )
         mock_chat_blocked = unittest.mock.AsyncMock(side_effect=[
@@ -1017,7 +1016,7 @@ class TestAllToolAndSkillCombinations(unittest.IsolatedAsyncioTestCase):
         with patch.object(main_mod.ollama_client, "chat", mock_chat_blocked):
             await main_mod.run_agent_turn(778, fake_mode_cfg, turn_history=turn_hist_blocked)
 
-        blocked_msgs = [m for m in turn_hist_blocked if isinstance(m, dict) and m.get("role") == "tool" and m.get("name") == "skill_youtube_searcher"]
+        blocked_msgs = [m for m in turn_hist_blocked if isinstance(m, dict) and m.get("role") == "tool" and m.get("name") == "skill_youtube_search"]
         self.assertEqual(len(blocked_msgs), 1)
         self.assertIn("PARALLEL_EXECUTION_BLOCKED", blocked_msgs[0]["content"])
 
@@ -1168,10 +1167,10 @@ class TestMultiUserDiscordChannelConcurrency(unittest.IsolatedAsyncioTestCase):
                 history.append({
                     "role": "assistant",
                     "content": "",
-                    "tool_calls": [{"function": {"name": "skill_top_music", "arguments": {"genre": "synthwave"}}}],
+                    "tool_calls": [{"function": {"name": "skill_music_discovery", "arguments": {"genre": "synthwave"}}}],
                 })
                 tool_out = await run_in_worker(lambda: (time.sleep(0.06), "Song: Nightcall\nArtist: Kavinsky")[1])
-                history.append({"role": "tool", "name": "skill_top_music", "content": tool_out})
+                history.append({"role": "tool", "name": "skill_music_discovery", "content": tool_out})
                 raw_reply = (
                     "Here you go Sam:\n"
                     "**Song:** Nightcall\n"
@@ -1195,9 +1194,9 @@ class TestMultiUserDiscordChannelConcurrency(unittest.IsolatedAsyncioTestCase):
             with patch.object(main_mod, "client", SimpleNamespace(user=bot_user)), patch.object(
                 main_mod, "run_agent_turn", side_effect=fake_run_agent_turn
             ), patch(
-                "src.skills.youtube.client.verify_embeddable", return_value=True
+                "src.skills.youtube.engine.client.verify_embeddable", return_value=True
             ), patch(
-                "src.skills.music.utils.get_music_metadata",
+                "src.skills.music.engine.formatting.get_music_metadata",
                 return_value={"song": "Nightcall", "artist": "Kavinsky", "album": "OutRun", "genre": "Synthwave"},
             ):
                 t_alex = asyncio.create_task(main_mod.on_message(msg_alex))
@@ -1317,10 +1316,10 @@ class TestMultiUserDiscordChannelConcurrency(unittest.IsolatedAsyncioTestCase):
             turn_history.append({
                 "role": "assistant",
                 "content": "",
-                "tool_calls": [{"function": {"name": "skill_weather_reporter", "arguments": {"city": "Tokyo"}}}],
+                "tool_calls": [{"function": {"name": "skill_weather_info", "arguments": {"city": "Tokyo"}}}],
             })
             out = await run_in_worker(lambda: (time.sleep(0.12), "Sunny +22C")[1])
-            turn_history.append({"role": "tool", "name": "skill_weather_reporter", "content": out})
+            turn_history.append({"role": "tool", "name": "skill_weather_info", "content": out})
             reply = "Tokyo is currently Sunny and +22C."
             turn_history.append({"role": "assistant", "content": reply})
             return reply
@@ -1336,7 +1335,7 @@ class TestMultiUserDiscordChannelConcurrency(unittest.IsolatedAsyncioTestCase):
                 "chat",
                 AsyncMock(return_value=SimpleNamespace(message=SimpleNamespace(content="Here is a similar synthwave track!"))),
             ), patch(
-                "main.tools.skill_top_music",
+                "main.tools.skill_music_discovery",
                 return_value=(
                     "=== VERIFIED YOUTUBE MUSIC RESULT ===\n"
                     "Song: Midnight City\n"
@@ -1364,7 +1363,7 @@ class TestMultiUserDiscordChannelConcurrency(unittest.IsolatedAsyncioTestCase):
 
             # Verify Alex's [assistant(tool_call), tool(output), assistant(reply)] block in chat_history was NOT split
             hist = main_mod.chat_history[channel_id]
-            tool_idx = next(i for i, m in enumerate(hist) if m.get("role") == "tool" and m.get("name") == "skill_weather_reporter")
+            tool_idx = next(i for i, m in enumerate(hist) if m.get("role") == "tool" and m.get("name") == "skill_weather_info")
             self.assertEqual(hist[tool_idx - 1].get("role"), "assistant")
             self.assertTrue(hist[tool_idx - 1].get("tool_calls"))
             self.assertEqual(hist[tool_idx + 1].get("role"), "assistant")

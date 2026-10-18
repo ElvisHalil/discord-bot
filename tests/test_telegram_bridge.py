@@ -206,7 +206,7 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
                 },
             }
             with patch(
-                "src.utils.telegram.tools.skill_top_music",
+                "src.utils.telegram.tools.skill_music_discovery",
                 return_value=(
                     "=== VERIFIED YOUTUBE MUSIC RESULT ===\n"
                     "Song: One More Time\n"
@@ -214,7 +214,7 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
                     "Genre: Electronic\n"
                     "Link: https://music.youtube.com/watch?v=FGBhQbmPwH8\n"
                 ),
-            ) as mock_top_music:
+            ) as mock_music_discovery:
                 await handle_telegram_update(
                     reaction_update,
                     main_mod=main_mod,
@@ -222,22 +222,20 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
                     bot_username="TestBot",
                     bot_id=111,
                 )
-                mock_top_music.assert_called_once_with(
+                mock_music_discovery.assert_called_once_with(
                     similar_to="Harder, Better, Faster, Stronger by Daft Punk"
                 )
 
     async def test_mode_switch_broadcasts_globally_and_no_cross_chat_leakage(self):
-        from src.skills.music.spectrum import (
+        from src.skills.music.context import (
             clear_channel_played_songs,
-            get_channel_last_played_song,
-            record_channel_played_song,
-        )
-        from src.skills.music.utils import (
             clear_recently_played_tracks,
+            get_channel_last_played_song,
             is_recently_played,
+            record_channel_played_song,
             record_played_track,
         )
-        from src.skills.sports.live_tracker import (
+        from src.skills.sports.tracker import (
             clear_channel_last_match_query,
             get_channel_last_match_query,
             record_channel_last_match_query,

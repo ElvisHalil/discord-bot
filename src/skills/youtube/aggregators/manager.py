@@ -1,9 +1,9 @@
 from typing import Optional
-from src.skills.youtube.aggregators.base import BaseYouTubeSearchAggregator
+from src.skills.youtube.aggregators.base import BaseYouTubeAggregator
 from src.skills.youtube.aggregators.api import YouTubeApiAggregator
 from src.skills.youtube.aggregators.ddg import DuckDuckGoYouTubeAggregator
 
-class YouTubeSearchManager:
+class YouTubeAggregatorManager:
     """
     Orchestrates YouTube search across multiple aggregators.
     Prioritizes free DuckDuckGo search (0 quota units) and gracefully falls back

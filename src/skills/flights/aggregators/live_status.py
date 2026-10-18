@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from FlightRadarAPI import FlightRadar24API
 
+from src.skills.flights.aggregators.base import BaseFlightAggregator
 from src.skills.flights.enums import FlightState
 from src.utils.http import fetch_json
 from src.utils.timezones import get_local_now
@@ -15,7 +16,7 @@ from src.utils.timezones import get_local_now
 logger = logging.getLogger(__name__)
 
 
-class LiveFlightStatusAggregator:
+class LiveFlightStatusAggregator(BaseFlightAggregator):
     """
     Aggregates real-time commercial flight status, gate/terminal assignments,
     scheduled vs. estimated departure/arrival times, and live airborne radar

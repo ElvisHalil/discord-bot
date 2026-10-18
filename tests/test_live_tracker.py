@@ -3,16 +3,16 @@ import time
 import unittest
 from unittest.mock import patch
 
-from src.skills.sports.live_tracker import (
-    LIVE_TRACKER,
+from src.skills.sports.tracker import (
+    SPORTS_TRACKER,
     SAFETY_TIMEOUT_SECONDS,
-    LiveSportsTracker,
+    SportsTrackerService,
     MatchSnapshot,
     TrackedMatch,
     diff_snapshots,
     extract_snapshot_from_summary,
     set_active_channel_id,
-    skill_track_live_game,
+    skill_sports_tracker,
 )
 from src.skills.sports.sports import skill_sports_info
 
@@ -81,9 +81,9 @@ def _make_summary_payload(
     }
 
 
-class TestLiveSportsTracker(unittest.TestCase):
+class TestSportsTrackerService(unittest.TestCase):
     def setUp(self):
-        LIVE_TRACKER.tracked_matches.clear()
+        SPORTS_TRACKER.tracked_matches.clear()
         set_active_channel_id(12345)
 
     def test_safety_timeout_is_4_hours(self):
@@ -319,7 +319,7 @@ class TestLiveSportsTracker(unittest.TestCase):
         self.assertIn("SCORE UPDATE", triggers[0])
 
     def test_poll_once_self_stops_on_full_time_and_timeout(self):
-        tracker = LiveSportsTracker(poll_interval=1)
+        tracker = SportsTrackerService(poll_interval=1)
         notifications = []
 
         async def fake_notify(match, snapshot, triggers):
@@ -364,7 +364,7 @@ class TestLiveSportsTracker(unittest.TestCase):
             away_score="2",
         )
 
-        with patch("src.skills.sports.live_tracker.fetch_json", return_value=ft_payload):
+        with patch("src.skills.sports.tracker.fetch_json", return_value=ft_payload):
             asyncio.run(tracker.poll_once())
 
         # Both matches should now be automatically removed!
@@ -374,8 +374,8 @@ class TestLiveSportsTracker(unittest.TestCase):
         self.assertEqual(notifications[0][0], "7001")
         self.assertTrue(any("FULL-TIME" in t for t in notifications[0][3]))
 
-    @patch("src.skills.sports.live_tracker.resolve_live_or_next_event")
-    def test_skill_track_live_game_and_sports_info_delegation(self, mock_resolve):
+    @patch("src.skills.sports.tracker.resolve_live_or_next_event")
+    def test_skill_sports_tracker_and_sports_info_delegation(self, mock_resolve):
         mock_resolve.return_value = {
             "sport_path": "soccer",
             "league_code": "uefa.champions",
@@ -394,17 +394,17 @@ class TestLiveSportsTracker(unittest.TestCase):
         self.assertIn("AS Roma vs Real Madrid", start_msg)
 
         # List tracked games
-        list_msg = skill_track_live_game(action="list")
+        list_msg = skill_sports_tracker(action="list")
         self.assertIn("AS Roma 1 - 0 Real Madrid", list_msg)
 
         # Stop tracking
-        stop_msg = skill_track_live_game(action="stop", query="Real Madrid")
+        stop_msg = skill_sports_tracker(action="stop", query="Real Madrid")
         self.assertIn("Stopped live tracking", stop_msg)
-        self.assertEqual(len(LIVE_TRACKER.tracked_matches), 0)
+        self.assertEqual(len(SPORTS_TRACKER.tracked_matches), 0)
 
-    @patch("src.skills.sports.live_tracker.resolve_live_or_next_event")
+    @patch("src.skills.sports.tracker.resolve_live_or_next_event")
     def test_track_this_game_uses_channel_last_match_context(self, mock_resolve):
-        from src.skills.sports.live_tracker import (
+        from src.skills.sports.tracker import (
             set_active_channel_id,
             record_channel_last_match_query,
             _clean_tracking_query,
@@ -430,17 +430,17 @@ class TestLiveSportsTracker(unittest.TestCase):
             ),
         }
 
-        out = skill_track_live_game(query="this game", action="start")
+        out = skill_sports_tracker(query="this game", action="start")
         mock_resolve.assert_called_with("AS Roma vs Real Madrid", sport="soccer")
         self.assertIn("LIVE MATCH TRACKER ACTIVATED", out)
         self.assertIn("ONGOING, NOT FINISHED", out)
         self.assertIn("Do NOT say the game ended at 55'", out)
-        LIVE_TRACKER.stop_tracking(99999)
+        SPORTS_TRACKER.stop_tracking(99999)
 
     @patch("src.skills.sports.aggregators.espn_utils.cached_espn_get")
     def test_parse_match_summary_marks_live_in_progress(self, mock_get):
         from src.skills.sports.aggregators.espn_utils import parse_match_summary
-        from src.skills.sports.live_tracker import set_active_channel_id, get_channel_last_match_query
+        from src.skills.sports.tracker import set_active_channel_id, get_channel_last_match_query
 
         set_active_channel_id(88888)
         mock_get.return_value = _make_summary_payload(
@@ -551,7 +551,7 @@ class TestLiveSportsTracker(unittest.TestCase):
             }
         ]
 
-        tracker = LiveSportsTracker(poll_interval=1)
+        tracker = SportsTrackerService(poll_interval=1)
         notifications = []
 
         async def fake_notify(match, snapshot, triggers):
@@ -575,7 +575,7 @@ class TestLiveSportsTracker(unittest.TestCase):
                 raise TypeError("headers must be dict or None")
             return nhl_summary_goal
 
-        with patch("src.skills.sports.live_tracker.fetch_json", side_effect=strict_fetch_json):
+        with patch("src.skills.sports.tracker.fetch_json", side_effect=strict_fetch_json):
             asyncio.run(tracker.poll_once())
 
         self.assertEqual(len(notifications), 1)

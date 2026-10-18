@@ -3,6 +3,7 @@ from src.skills.music.aggregators.lastfm import LastFmAggregator
 from src.skills.music.aggregators.deezer import DeezerAggregator
 from src.skills.music.aggregators.beatport import BeatportAggregator
 from src.skills.music.aggregators.charts import ChartsAggregator
+from src.skills.music.aggregators.freqblog import FreqBlogAggregator
 from src.skills.music.aggregators.manager import MusicAggregatorManager
 
 __all__ = [
@@ -11,6 +12,6 @@ __all__ = [
     "DeezerAggregator",
     "BeatportAggregator",
     "ChartsAggregator",
+    "FreqBlogAggregator",
     "MusicAggregatorManager",
 ]
-

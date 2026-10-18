@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 
-class BaseYouTubeSearchAggregator(ABC):
+
+class BaseYouTubeAggregator(ABC):
     """Abstract base class for YouTube video search providers."""
 
     @abstractmethod
@@ -10,4 +11,3 @@ class BaseYouTubeSearchAggregator(ABC):
         [{"id": vid, "title": title, "channel": channel, "url": url}]
         """
         pass
-

@@ -653,8 +653,8 @@ class TestSportsEspnUpgrade(unittest.TestCase):
     @patch("src.skills.sports.aggregators.odds.fetch_json")
     @patch("src.skills.sports.aggregators.espn_utils.espn_search_auto_discover")
     def test_nhl_matchup_and_tracked_games_odds(self, mock_disc, mock_fetch_json):
-        from src.skills.sports.odds import skill_betting_odds
-        from src.skills.sports.live_tracker import LIVE_TRACKER, TrackedMatch, MatchSnapshot, set_active_channel_id
+        from src.skills.sports.sports import skill_sports_odds
+        from src.skills.sports.tracker import SPORTS_TRACKER, TrackedMatch, MatchSnapshot, set_active_channel_id
         import os
 
         def disc_side_effect(query, sport_hint=None):
@@ -766,17 +766,17 @@ class TestSportsEspnUpgrade(unittest.TestCase):
         mock_fetch_json.side_effect = fetch_side_effect
 
         with patch.dict(os.environ, {"THE_ODDS_API_KEY": "test_key"}):
-            # 1. Calling skill_betting_odds with default sport and "Team A vs Team B" (unaccented Montreal)
-            res_single = skill_betting_odds("Washington Capitals vs Montreal Canadiens")
+            # 1. Calling skill_sports_odds with default sport and "Team A vs Team B" (unaccented Montreal)
+            res_single = skill_sports_odds("Washington Capitals vs Montreal Canadiens")
             self.assertIn("[MATCH BETTING ODDS: Washington Capitals vs Montreal Canadiens]", res_single)
             self.assertIn("Best Odds Available:", res_single)
             self.assertIn("1.91 | Win probability: ~52.4%", res_single)
 
-            # 2. Calling skill_betting_odds for "tracked games" when 2 live games are tracked in LIVE_TRACKER
-            LIVE_TRACKER.tracked_matches.clear()
+            # 2. Calling skill_sports_odds for "tracked games" when 2 live games are tracked in SPORTS_TRACKER
+            SPORTS_TRACKER.tracked_matches.clear()
             set_active_channel_id(777)
             snap = MatchSnapshot(state="in", status_detail="Live", home_team="H", away_team="A", home_score="1", away_score="1")
-            LIVE_TRACKER.tracked_matches[(777, "401892504")] = TrackedMatch(
+            SPORTS_TRACKER.tracked_matches[(777, "401892504")] = TrackedMatch(
                 channel_id=777,
                 sport_path="hockey",
                 league_code="nhl",
@@ -786,7 +786,7 @@ class TestSportsEspnUpgrade(unittest.TestCase):
                 away_team="Montreal Canadiens",
                 last_snapshot=snap,
             )
-            LIVE_TRACKER.tracked_matches[(777, "401892505")] = TrackedMatch(
+            SPORTS_TRACKER.tracked_matches[(777, "401892505")] = TrackedMatch(
                 channel_id=777,
                 sport_path="hockey",
                 league_code="nhl",
@@ -797,11 +797,11 @@ class TestSportsEspnUpgrade(unittest.TestCase):
                 last_snapshot=snap,
             )
             try:
-                res_tracked = skill_betting_odds("check the odds of the tracked games")
+                res_tracked = skill_sports_odds("check the odds of the tracked games")
                 self.assertIn("Washington Capitals vs Montreal Canadiens", res_tracked)
                 self.assertIn("Colorado Avalanche vs Dallas Stars", res_tracked)
             finally:
-                LIVE_TRACKER.tracked_matches.clear()
+                SPORTS_TRACKER.tracked_matches.clear()
 
     @patch("src.skills.sports.aggregators.odds.fetch_json")
     @patch("src.tools.web.search_web")
@@ -970,7 +970,7 @@ class TestSportsEspnUpgrade(unittest.TestCase):
         self.assertIn("SPANISH LA LIGA", out)
         self.assertIn("Atletico Madrid at Barcelona", out)
 
-    @patch("src.skills.sports.sports.skill_csgo_esports")
+    @patch("src.skills.sports.sports.skill_sports_esports")
     @patch("src.skills.sports.aggregators.hockey.fetch_json")
     @patch("src.skills.sports.aggregators.soccer.fetch_json")
     @patch("src.skills.sports.aggregators.espn_utils.espn_search_auto_discover")

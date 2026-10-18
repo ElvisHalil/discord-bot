@@ -9,7 +9,7 @@ import logging
 import re
 import typing
 
-from src.skills.sports.live_tracker import get_channel_last_match_query
+from src.skills.sports.tracker import get_channel_last_match_query
 from src.skills.sports.catalogs import (
     GENERIC_SINGLE_WORD_QUERIES as _GENERIC_SINGLE_WORD_QUERIES,
     SPORTS_INTENT_STOPWORDS as _INTENT_WORDS_TO_STRIP,
@@ -110,14 +110,14 @@ def _strip_non_sports_clauses(text: str, sibling_tools: typing.Optional[list] = 
     for pat in _NON_SPORTS_CLAUSE_PATTERNS:
         cleaned = pat.sub(" ", cleaned)
     siblings = set(sibling_tools or ())
-    if "skill_csgo_esports" in siblings:
+    if "skill_sports_esports" in siblings:
         clauses = [c.strip() for c in re.split(r"\b(?:and\s+also|and|also|plus)\b|[,;.]", cleaned, flags=re.IGNORECASE) if c and c.strip()]
         non_cs_clauses = [c for c in clauses if not _CS_WORD_RE.search(c)]
         if non_cs_clauses:
             cleaned = " ".join(non_cs_clauses)
         else:
             cleaned = _CS_WORD_RE.sub(" ", cleaned)
-    if "skill_betting_odds" in siblings:
+    if "skill_sports_odds" in siblings:
         cleaned = _ODDS_CLAUSE_RE.sub(" ", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,;.&!?-")
     return cleaned
@@ -285,7 +285,7 @@ def detect_missed_sports_tool_call(
         args = {"action": action, "query": target_q}
         if action == TrackerAction.START:
             args = enrich_sports_tool_args(args, history)
-        return ("skill_track_live_game", args)
+        return ("skill_sports_tracker", args)
 
     # 2. Live sports status / score / match follow-up when channel already has sports context
     if has_non_sports_track_signal(latest_user) or q_low.startswith("!"):
@@ -294,7 +294,7 @@ def detect_missed_sports_tool_call(
     has_prior_sports_turn = any(
         (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "tool"
         and (m.get("name") if isinstance(m, dict) else getattr(m, "name", None))
-        in ("skill_sports_info", "skill_track_live_game", "skill_betting_odds")
+        in ("skill_sports_info", "skill_sports_tracker", "skill_sports_odds")
         for m in history
     )
     last_match_q = ""

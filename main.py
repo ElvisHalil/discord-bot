@@ -21,17 +21,16 @@ from src.utils import (
 )
 from src.context import (
     bind_event_loop,
-    bind_tracker_event_loop,
     set_active_channel_id,
 )
-from src.skills.music.utils import format_song_card, get_music_metadata, standardize_song_reply
-from src.skills.sports.live_tracker import (
-    LIVE_TRACKER,
-    skill_track_live_game,
+from src.skills.music.engine.formatting import format_song_card, get_music_metadata, standardize_song_reply
+from src.skills.sports.tracker import (
+    SPORTS_TRACKER,
+    skill_sports_tracker,
 )
 from src.skills.flights import (
     FLIGHT_TRACKER,
-    skill_track_flight,
+    skill_flight_tracker,
 )
 try:
     from src.config import MODES
@@ -112,15 +111,17 @@ def clear_tool_caches(channel_id: int = None):
         tools.SEARCH_CACHE.clear()
         tools.YOUTUBE_CACHE.clear()
     try:
-        from src.skills.youtube.client import clear_youtube_caches
+        from src.skills.youtube.engine.client import clear_youtube_caches
         from src.skills.music.playback.youtube_music import clear_resolved_music_cache
         from src.skills.music.aggregators.deezer import clear_deezer_cache
         from src.skills.music.aggregators.lastfm import clear_lastfm_cache
         from src.skills.music.aggregators.charts import clear_charts_cache
-        from src.skills.music.spectrum import clear_channel_played_songs
-        from src.skills.music.utils import clear_recently_played_tracks
-        from src.skills.sports.live_tracker import clear_channel_last_match_query
-        from src.skills.flights.airports import clear_channel_flight_state
+        from src.skills.music.context import (
+            clear_channel_played_songs,
+            clear_recently_played_tracks,
+        )
+        from src.skills.sports.tracker import clear_channel_last_match_query
+        from src.skills.flights.context import clear_channel_flight_state
         from src.skills.sports.aggregators.liquipedia import clear_liquipedia_cache
         from src.skills.sports.aggregators.hltv import clear_hltv_cache
         from src.skills.sports.aggregators.kashrock import clear_kashrock_cache
@@ -144,7 +145,7 @@ def clear_tool_caches(channel_id: int = None):
 
 
 async def handle_live_match_update(match, snapshot, triggers):
-    """Callback invoked by LIVE_TRACKER when a tracked game has a score change, red card, halftime, or full-time."""
+    """Callback invoked by SPORTS_TRACKER when a tracked game has a score change, red card, halftime, or full-time."""
     is_tg = is_telegram_channel(match.channel_id)
     channel = None
     if not is_tg:
@@ -267,9 +268,9 @@ async def on_ready():
     print(f"✅ Bot online as: {client.user}")
     print(f"🔥 Active Mode: {current_mode.upper()} (Switch with '!mode <name>': {', '.join(MODES)})")
     loop = asyncio.get_running_loop()
-    bind_tracker_event_loop(loop)
-    LIVE_TRACKER.set_notify_callback(handle_live_match_update)
-    LIVE_TRACKER.ensure_loop_running()
+    bind_event_loop(loop)
+    SPORTS_TRACKER.set_notify_callback(handle_live_match_update)
+    SPORTS_TRACKER.ensure_loop_running()
     FLIGHT_TRACKER.bind_event_loop(loop)
     FLIGHT_TRACKER.set_notify_callback(handle_flight_tracker_update)
     FLIGHT_TRACKER.ensure_loop_running()
@@ -341,9 +342,9 @@ async def on_raw_reaction_add(payload):
                     search_query = f"{clean_title} by {orig_artist}".strip() if orig_artist else clean_title
                     print(f"🎵 [Reaction Target]: Cleaned '{clean_title}' by '{orig_artist}'")
 
-                    # 2. Get recommendations (and pre-resolved verified YouTube link) from skill_top_music
+                    # 2. Get recommendations (and pre-resolved verified YouTube link) from skill_music_discovery
                     set_active_channel_id(channel.id)
-                    similar_res = await run_in_worker(tools.skill_top_music, similar_to=search_query)
+                    similar_res = await run_in_worker(tools.skill_music_discovery, similar_to=search_query)
                     is_unrelated_fallback = "NO DIRECT SIMILAR SONGS FOUND" in similar_res
                     similar_tracks = []
                     for line in similar_res.split("\n"):
@@ -357,14 +358,14 @@ async def on_raw_reaction_add(payload):
                     if not similar_tracks:
                         is_unrelated_fallback = True
                         print("⚠️ [Reaction Fallback]: No similar tracks found, pulling general charts...")
-                        bp_res = await run_in_worker(tools.skill_top_music, genre=None)
+                        bp_res = await run_in_worker(tools.skill_music_discovery, genre=None)
                         similar_res = bp_res
                         for line in bp_res.split("\n"):
                             line = line.strip()
                             if line.startswith("- "):
                                 similar_tracks.append(line[2:].strip())
 
-                    # 3. Extract pre-resolved verified YouTube Music link if already resolved inside skill_top_music
+                    # 3. Extract pre-resolved verified YouTube Music link if already resolved inside skill_music_discovery
                     verified_url = None
                     chosen_track = None
                     if "=== VERIFIED YOUTUBE MUSIC RESULT" in similar_res:
@@ -383,7 +384,7 @@ async def on_raw_reaction_add(payload):
                     if not verified_url or not chosen_track:
                         random.shuffle(similar_tracks)
                         for candidate in similar_tracks[:6]:
-                            yt_output = await run_in_worker(tools.skill_youtube_searcher, candidate, max_results=1, is_music=True)
+                            yt_output = await run_in_worker(tools.skill_youtube_search, candidate, max_results=1, is_music=True)
                             m_url = re.search(r'(https:\/\/music\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})', yt_output)
                             if not m_url:
                                 m_url = re.search(r'(https:\/\/www\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})', yt_output)
@@ -532,14 +533,14 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
 
     _TERMINAL_SKILLS = {
         "skill_sports_info",
-        "skill_csgo_esports",
-        "skill_betting_odds",
-        "skill_track_live_game",
+        "skill_sports_esports",
+        "skill_sports_odds",
+        "skill_sports_tracker",
         "skill_flight_info",
-        "skill_track_flight",
-        "skill_weather_reporter",
-        "skill_top_headlines",
-        "skill_audio_intelligence",
+        "skill_flight_tracker",
+        "skill_weather_info",
+        "skill_news_headlines",
+        "skill_music_analysis",
         "evaluate_math",
         "save_memory",
     }
@@ -569,7 +570,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     func = active_tools[forced_tool_name]
                     forced_args = normalize_tool_args(forced_tool_name, func, forced_raw_args)
                     history.pop()  # Discard stale non-tool reply from iteration 0
-                    if forced_tool_name in ("skill_flight_info", "skill_track_flight"):
+                    if forced_tool_name in ("skill_flight_info", "skill_flight_tracker"):
                         forced_args = enrich_flight_tool_args(forced_args, history)
                     set_active_channel_id(channel_id)
                     print(f"⚡ [{current_mode.upper()}] Intercepted missed tool on turn 0 -> forcing {forced_tool_name}({forced_args})")
@@ -578,8 +579,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     except Exception as e:
                         print(f"  └─ ❌ Forced tool {forced_tool_name} crashed: {e}")
                         tool_output = f"Tool execution failed: {e}"
-                    if LIVE_TRACKER.tracked_matches:
-                        LIVE_TRACKER.ensure_loop_running()
+                    if SPORTS_TRACKER.tracked_matches:
+                        SPORTS_TRACKER.ensure_loop_running()
                     if FLIGHT_TRACKER.tracked_flights or FLIGHT_TRACKER.price_watches:
                         FLIGHT_TRACKER.ensure_loop_running()
                     history.append({
@@ -604,7 +605,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
             break
 
         print(f"⚡ [{current_mode.upper()}] Model requested {len(tool_calls)} tools simultaneously!")
-        has_top_music = any(call.function.name == "skill_top_music" for call in tool_calls)
+        has_top_music = any(call.function.name == "skill_music_discovery" for call in tool_calls)
         per_tool_char_budget = 10000 if len(tool_calls) == 1 else max(4000, 18000 // len(tool_calls))
 
         async def run_tool(call):
@@ -613,27 +614,27 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
             func = active_tools.get(tool_name)
             norm_args = normalize_tool_args(tool_name, func, raw_args) if func else (raw_args if isinstance(raw_args, dict) else {})
 
-            # Guardrail: Prevent running youtube searcher (in music mode) in parallel with top music
-            if tool_name == "skill_youtube_searcher" and has_top_music and bool(norm_args.get("is_music")):
-                print(f"  └─ ⚠️ [Orchestrator]: Blocked parallel {tool_name}(is_music=True) call while skill_top_music is executing.")
+            # Guardrail: Prevent running youtube searcher (in music mode) in parallel with music discovery
+            if tool_name == "skill_youtube_search" and has_top_music and bool(norm_args.get("is_music")):
+                print(f"  └─ ⚠️ [Orchestrator]: Blocked parallel {tool_name}(is_music=True) call while skill_music_discovery is executing.")
                 return {
                     "role": "tool",
                     "name": tool_name,
                     "content": (
-                        "PARALLEL_EXECUTION_BLOCKED: You cannot call `skill_youtube_searcher(is_music=True)` at the same time as `skill_top_music`. "
-                        "You must first review the songs returned by `skill_top_music` in this step, select ONE specific song, "
-                        "and then call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` in your NEXT step to get its link."
+                        "PARALLEL_EXECUTION_BLOCKED: You cannot call `skill_youtube_search(is_music=True)` at the same time as `skill_music_discovery`. "
+                        "You must first review the songs returned by `skill_music_discovery` in this step, select ONE specific song, "
+                        "and then call `skill_youtube_search(query='<Song Title> by <Artist Name>', is_music=True)` in your NEXT step to get its link."
                     )
                 }
 
             if tool_name in active_tools:
                 args = norm_args
-                if tool_name in ("skill_sports_info", "skill_track_live_game", "skill_betting_odds"):
+                if tool_name in ("skill_sports_info", "skill_sports_tracker", "skill_sports_odds"):
                     sibling_tools = [c.function.name for c in tool_calls if c is not call]
                     args = enrich_sports_tool_args(args, history, sibling_tools=sibling_tools)
-                elif tool_name == "skill_top_music":
+                elif tool_name == "skill_music_discovery":
                     args = enrich_music_tool_args(args, history)
-                elif tool_name in ("skill_flight_info", "skill_track_flight"):
+                elif tool_name in ("skill_flight_info", "skill_flight_tracker"):
                     args = enrich_flight_tool_args(args, history)
                 set_active_channel_id(channel_id)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
@@ -658,8 +659,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
             }
 
         tool_results = await asyncio.gather(*(run_tool(call) for call in tool_calls))
-        if LIVE_TRACKER.tracked_matches:
-            LIVE_TRACKER.ensure_loop_running()
+        if SPORTS_TRACKER.tracked_matches:
+            SPORTS_TRACKER.ensure_loop_running()
         if FLIGHT_TRACKER.tracked_flights or FLIGHT_TRACKER.price_watches:
             FLIGHT_TRACKER.ensure_loop_running()
         history.extend(tool_results)
@@ -754,7 +755,7 @@ async def on_message(message):
         active_channels.add(message.channel.id)
         target_q = user_input[13:].strip()
         set_active_channel_id(message.channel.id)
-        res = await run_in_worker(skill_track_flight, action="track", query=target_q)
+        res = await run_in_worker(skill_flight_tracker, action="track", query=target_q)
         FLIGHT_TRACKER.ensure_loop_running()
         await message.channel.send(res)
         return
@@ -763,14 +764,14 @@ async def on_message(message):
         active_channels.add(message.channel.id)
         target_q = user_input[14:].strip()
         set_active_channel_id(message.channel.id)
-        res = await run_in_worker(skill_track_flight, action="untrack", query=target_q)
+        res = await run_in_worker(skill_flight_tracker, action="untrack", query=target_q)
         await message.channel.send(res)
         return
 
     if user_input.lower() in ("!trackedflights", "!trackflight"):
         active_channels.add(message.channel.id)
         set_active_channel_id(message.channel.id)
-        res = await run_in_worker(skill_track_flight, action="list")
+        res = await run_in_worker(skill_flight_tracker, action="list")
         await message.channel.send(res)
         return
 
@@ -779,8 +780,8 @@ async def on_message(message):
         active_channels.add(message.channel.id)
         target_q = user_input[7:].strip()
         set_active_channel_id(message.channel.id)
-        res = await run_in_worker(skill_track_live_game, action="start", query=target_q)
-        LIVE_TRACKER.ensure_loop_running()
+        res = await run_in_worker(skill_sports_tracker, action="start", query=target_q)
+        SPORTS_TRACKER.ensure_loop_running()
         await message.channel.send(res)
         return
 
@@ -788,14 +789,14 @@ async def on_message(message):
         active_channels.add(message.channel.id)
         target_q = user_input[8:].strip()
         set_active_channel_id(message.channel.id)
-        res = await run_in_worker(skill_track_live_game, action="stop", query=target_q)
+        res = await run_in_worker(skill_sports_tracker, action="stop", query=target_q)
         await message.channel.send(res)
         return
 
     if user_input.lower() in ("!tracked", "!track"):
         active_channels.add(message.channel.id)
         set_active_channel_id(message.channel.id)
-        res = await run_in_worker(skill_track_live_game, action="list")
+        res = await run_in_worker(skill_sports_tracker, action="list")
         await message.channel.send(res)
         return
 
@@ -902,7 +903,7 @@ if __name__ == "__main__":
         pass
     finally:
         try:
-            LIVE_TRACKER.shutdown()
+            SPORTS_TRACKER.shutdown()
         except Exception:
             pass
         shutdown_worker_pool()

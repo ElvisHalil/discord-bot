@@ -1,8 +1,8 @@
 import re
 from ddgs import DDGS
-from src.skills.youtube.aggregators.base import BaseYouTubeSearchAggregator
+from src.skills.youtube.aggregators.base import BaseYouTubeAggregator
 
-class DuckDuckGoYouTubeAggregator(BaseYouTubeSearchAggregator):
+class DuckDuckGoYouTubeAggregator(BaseYouTubeAggregator):
     """Fallback search aggregator that scrapes DuckDuckGo for working, embeddable YouTube videos."""
 
     def __init__(self, verify_embeddable_fn=None, get_oembed_fn=None, is_short_fn=None):

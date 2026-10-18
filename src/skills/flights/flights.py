@@ -1,7 +1,7 @@
 from typing import Optional
 
 from src.skills.flights.aggregators import GoogleFlightsPriceAggregator, LiveFlightStatusAggregator
-from src.skills.flights.airports import extract_flight_numbers, parse_route_from_query
+from src.skills.flights.engine.resolver import extract_flight_numbers, parse_route_from_query
 from src.skills.flights.templates import build_flight_search_instructions
 from src.utils.timezones import get_local_now
 from src.utils.workers import submit_to_worker

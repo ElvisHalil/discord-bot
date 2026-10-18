@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from src.context import get_active_channel_id, get_bound_event_loop
 from src.skills.flights.aggregators import GoogleFlightsPriceAggregator, LiveFlightStatusAggregator
-from src.skills.flights.airports import extract_flight_numbers, parse_route_from_query
+from src.skills.flights.engine.resolver import extract_flight_numbers, parse_route_from_query
 from src.skills.flights.enums import (
     CabinClass,
     FlightState,
@@ -26,7 +26,7 @@ DEFAULT_FLIGHT_POLL_SECONDS = 60
 DEFAULT_PRICE_POLL_SECONDS = 1800  # 30 minutes
 
 
-class FlightTrackerManager:
+class FlightTrackerService:
     """
     Background manager that polls:
       1. Active live flights (every 60s) for takeoff, gate changes, delays (>=15m), and landing.
@@ -562,10 +562,10 @@ class FlightTrackerManager:
         return "\n".join(lines)
 
 
-FLIGHT_TRACKER = FlightTrackerManager()
+FLIGHT_TRACKER = FlightTrackerService()
 
 
-def skill_track_flight(
+def skill_flight_tracker(
     action: Optional[str] = "track",
     query: Optional[str] = None,
     origin: Optional[str] = None,
@@ -593,7 +593,7 @@ def skill_track_flight(
     channel_id = get_active_channel_id()
 
     print(
-        f"✈️ [Executing Track Flight Skill] Action: {act}, Query: '{q_str}', "
+        f"✈️ [Executing Flight Tracker Skill] Action: {act}, Query: '{q_str}', "
         f"Origin: {origin}, Dest: {destination}, Date: {date}, TargetPrice: {target_price}"
     )
 

@@ -1,11 +1,11 @@
 import os
 import requests
 from dotenv import load_dotenv
-from src.skills.youtube.aggregators.base import BaseYouTubeSearchAggregator
+from src.skills.youtube.aggregators.base import BaseYouTubeAggregator
 
 load_dotenv()
 
-class YouTubeApiAggregator(BaseYouTubeSearchAggregator):
+class YouTubeApiAggregator(BaseYouTubeAggregator):
     """Searches YouTube using the official Google YouTube Data API v3."""
 
     def search(self, query: str, max_results: int = 1) -> list[dict]:

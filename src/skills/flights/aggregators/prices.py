@@ -12,7 +12,8 @@ from fast_flights.parser import _parse_time
 import primp
 from selectolax.lexbor import LexborHTMLParser
 
-from src.skills.flights.airports import (
+from src.skills.flights.aggregators.base import BaseFlightAggregator
+from src.skills.flights.engine.resolver import (
     parse_route_from_query,
     resolve_airport,
 )
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 _PROBE_EXECUTOR = SUB_WORKER_POOL
 
 
-class GoogleFlightsPriceAggregator:
+class GoogleFlightsPriceAggregator(BaseFlightAggregator):
     """
     Fetches real-time flight ticket prices, itineraries, layovers, and historical
     price insights ('Low' / 'Typical' / 'High') directly from Google Flights

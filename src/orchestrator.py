@@ -11,7 +11,7 @@ Domain-specific helpers live in their respective modules and are re-exported her
 for convenience:
 - Timezone & clock enrichment: `src.utils.timezones`
 - Sports follow-up & tracker context: `src.skills.sports.context`
-- Music spectrum shift context: `src.skills.music.spectrum`
+- Music spectrum shift context: `src.skills.music.context`
 """
 
 import base64
@@ -23,10 +23,10 @@ import types
 import typing
 
 from src.skills.flights.aggregators.prices import GoogleFlightsPriceAggregator
-from src.skills.flights.airports import (
+from src.skills.flights.context import (
     detect_missed_flight_tool_call,
 )
-from src.skills.music.spectrum import (
+from src.skills.music.context import (
     detect_missed_music_shift_tool_call,
     enrich_music_tool_args,
 )
@@ -109,7 +109,7 @@ def normalize_tool_args(tool_name: str, func, args) -> dict:
 
 
 def enrich_flight_tool_args(args: dict, history: list) -> dict:
-    """Ensure `query` on `skill_flight_info` / `skill_track_flight` preserves the user's latest prompt
+    """Ensure `query` on `skill_flight_info` / `skill_flight_tracker` preserves the user's latest prompt
     (including flexible-date intent, direct-schedule questions, sort preferences, and return dates)
     even when an 8B model only populates `origin` and `destination` or hallucinates a stale year."""
     enriched = dict(args or {})
@@ -191,7 +191,7 @@ def trim_history(history: list, limit: int, old_tool_chars: int = OLD_TOOL_OUTPU
                     **msg,
                     "content": (
                         "[EXPIRED SPORTS SNAPSHOT FROM EARLIER TURN — DO NOT REUSE OLD SCORES, MINUTE CLOCKS, "
-                        "OR TRACKING STATUS. You MUST call skill_sports_info or skill_track_live_game again "
+                        "OR TRACKING STATUS. You MUST call skill_sports_info or skill_sports_tracker again "
                         "for fresh real-time data.]"
                     ),
                 }

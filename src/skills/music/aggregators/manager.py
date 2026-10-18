@@ -15,13 +15,13 @@ from src.skills.music.catalogs import (
 )
 from src.skills.music.enums import MusicProvider
 from src.skills.music.models import Track
-from src.skills.music.moods import parse_mood_and_genre
-from src.skills.music.utils import (
+from src.skills.music.engine.formatting import (
     MUSIC_METADATA_CACHE,
     _norm_track_token,
     is_recently_played,
     parse_song_meta,
 )
+from src.skills.music.engine.moods import parse_mood_and_genre
 
 logger = logging.getLogger(__name__)
 
@@ -379,7 +379,7 @@ class MusicAggregatorManager:
         2. Check MUSIC_METADATA_CACHE for matching (song, artist).
         3. Query Last.fm track.gettoptags -> artist.gettoptags and classify the returned tags.
         """
-        from src.skills.music.spectrum import classify_genre_to_zone
+        from src.skills.music.engine.spectrum import classify_genre_to_zone
 
         if known_zone:
             return known_genre, known_zone
@@ -439,7 +439,7 @@ class MusicAggregatorManager:
         deezer = self.aggregators.get("deezer")
         if song and song.lower() not in ("unknown track", "unknown"):
             try:
-                from src.skills.music.audio_analyzer import get_track_acoustic_profile
+                from src.skills.music.engine.dsp import get_track_acoustic_profile
                 prof = get_track_acoustic_profile(song, artist, deezer_agg=deezer)
                 if prof and prof.get("ui_zone"):
                     return known_genre or "Acoustic DSP", prof["ui_zone"]

@@ -6,17 +6,17 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from src.orchestrator import normalize_tool_args
-from src.skills.flights import FLIGHT_TRACKER, skill_flight_info, skill_track_flight
+from src.skills.flights import FLIGHT_TRACKER, skill_flight_info, skill_flight_tracker
 from src.skills.flights.aggregators.live_status import LiveFlightStatusAggregator
 from src.skills.flights.aggregators.prices import GoogleFlightsPriceAggregator
-from src.skills.flights.airports import (
+from src.skills.flights.engine.resolver import (
     extract_flight_numbers,
     parse_natural_date,
     parse_route_from_query,
     resolve_airport,
 )
 from src.skills.flights.tracker import (
-    FlightTrackerManager,
+    FlightTrackerService,
     TrackedFlight,
     TrackedPriceWatch,
 )
@@ -79,8 +79,8 @@ class TestFlightsSkill(unittest.TestCase):
         self.assertEqual(norm_info["cabin"], "business")
 
         norm_track = normalize_tool_args(
-            "skill_track_flight",
-            skill_track_flight,
+            "skill_flight_tracker",
+            skill_flight_tracker,
             {"cmd": "track", "route": "Calgary to Toronto", "max_price": "200"},
         )
         self.assertEqual(norm_track["action"], "track")
@@ -232,7 +232,7 @@ class TestFlightsSkill(unittest.TestCase):
     def test_flight_tracker_state_transitions_and_price_alerts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             watch_path = os.path.join(tmpdir, "watches.json")
-            mgr = FlightTrackerManager(watch_file=watch_path)
+            mgr = FlightTrackerService(watch_file=watch_path)
 
             # 1. Test live flight state transitions (scheduled -> airborne -> delayed -> landed)
             tf = TrackedFlight(
@@ -323,7 +323,7 @@ class TestFlightsSkill(unittest.TestCase):
 
     @patch.object(FLIGHT_TRACKER._price_agg, "fetch_structured_fares")
     @patch.object(FLIGHT_TRACKER._status_agg, "fetch_flight_snapshot")
-    def test_skill_track_flight_end_to_end(self, mock_snap, mock_fares):
+    def test_skill_flight_tracker_end_to_end(self, mock_snap, mock_fares):
         set_active_channel_id(555)
         FLIGHT_TRACKER.clear_channel(555)
 
@@ -406,18 +406,18 @@ class TestFlightsSkill(unittest.TestCase):
         }
 
         try:
-            res_f = skill_track_flight(action="track", query="track flight AC850")
+            res_f = skill_flight_tracker(action="track", query="track flight AC850")
             self.assertIn("NOW TRACKING LIVE FLIGHT: AC850", res_f)
 
-            res_p = skill_track_flight(action="track", query="Calgary to Tokyo on 2026-11-15 under $750")
+            res_p = skill_flight_tracker(action="track", query="Calgary to Tokyo on 2026-11-15 under $750")
             self.assertIn("PRICE WATCH CREATED: Calgary (YYC) -> Tokyo (HND)", res_p)
             self.assertIn("$750 CAD", res_p)
 
-            res_list = skill_track_flight(action="list")
+            res_list = skill_flight_tracker(action="list")
             self.assertIn("AC850", res_list)
             self.assertIn("Calgary (YYC) -> Tokyo (HND)", res_list)
 
-            res_untrack = skill_track_flight(action="untrack", query="AC850")
+            res_untrack = skill_flight_tracker(action="untrack", query="AC850")
             self.assertIn("Stopped tracking: Live Flight **AC850**", res_untrack)
         finally:
             FLIGHT_TRACKER.clear_channel(555)
@@ -818,7 +818,7 @@ class TestFlightsSkill(unittest.TestCase):
     def test_quality_filtered_and_direct_only_price_watch(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             watch_path = os.path.join(tmpdir, "watches.json")
-            mgr = FlightTrackerManager(watch_file=watch_path)
+            mgr = FlightTrackerService(watch_file=watch_path)
 
             # 1. Standard quality-filtered watch ignores raw 34h marathon fare if lowest_reasonable is $950
             pw_quality = TrackedPriceWatch(
@@ -880,7 +880,7 @@ class TestFlightsSkill(unittest.TestCase):
             self.assertIn("KLM", direct_alert)
 
     def test_multi_month_range_1stop_followup_and_gateway_verification(self):
-        from src.skills.flights.airports import clear_channel_flight_state
+        from src.skills.flights.context import clear_channel_flight_state
         set_active_channel_id(909)
         clear_channel_flight_state(909)
 
@@ -1167,7 +1167,7 @@ class TestFlightsSkill(unittest.TestCase):
             self.assertIn("Published 1-Stop Round-Trip Benchmark (YEG <-> ZAG)**: **$1695 CAD Round-Trip** via **KLM, Croatia**", out)
 
     def test_december_three_weeks_round_trip_and_paired_dates(self):
-        from src.skills.flights.airports import extract_flight_numbers, parse_natural_date
+        from src.skills.flights.engine.resolver import extract_flight_numbers, parse_natural_date
 
         set_active_channel_id(903)
         # 1. Duration phrases ("for 3 weeks", "max 1 stop") must never be extracted as flight numbers
@@ -1372,7 +1372,7 @@ class TestFlightsSkill(unittest.TestCase):
 
     def test_comprehensive_flight_query_option_combinations(self):
         from src.orchestrator import _decode_google_flights_tfs, sanitize_agent_reply
-        from src.skills.flights.airports import clear_channel_flight_state
+        from src.skills.flights.context import clear_channel_flight_state
 
         set_active_channel_id(950)
         clear_channel_flight_state(950)
@@ -1501,8 +1501,8 @@ class TestFlightsSkill(unittest.TestCase):
     def test_flight_worker_pool_concurrency_and_contextvar_isolation(self):
         import asyncio
         import threading
-        from src.skills.flights.airports import clear_channel_flight_state, get_channel_flight_state
-        from src.skills.flights.info import _price_aggregator
+        from src.skills.flights.context import clear_channel_flight_state, get_channel_flight_state
+        from src.skills.flights.flights import _price_aggregator
         from src.utils.workers import run_in_worker
 
         clear_channel_flight_state(801)

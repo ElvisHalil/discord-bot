@@ -3,7 +3,7 @@ from unittest.mock import patch, MagicMock
 import numpy as np
 
 from src.skills.music.models import Track
-from src.skills.music.audio_analyzer import (
+from src.skills.music.engine.dsp import (
     analyze_waveform,
     classify_scores_to_zone,
     rank_candidates_by_acoustic_shift,
@@ -109,7 +109,7 @@ class TestAudioAnalyzer(unittest.TestCase):
         def _fake_get_profile(title, artist="", deezer_id=None, preview_url=None, deezer_agg=None):
             return dict(fake_profiles[title])
 
-        with patch("src.skills.music.audio_analyzer.get_track_acoustic_profile", side_effect=_fake_get_profile):
+        with patch("src.skills.music.engine.dsp.get_track_acoustic_profile", side_effect=_fake_get_profile):
             # 1. Faster (+1 tempo, 0 intensity) -> Fast Mid should win
             ranked_faster = rank_candidates_by_acoustic_shift(
                 [t_slow_soft, t_mid_hard, t_fast_mid],
@@ -137,9 +137,9 @@ class TestAudioAnalyzer(unittest.TestCase):
             )
             self.assertEqual(ranked_slower_softer[0].title, "Slow Soft")
 
-    def test_skill_audio_intelligence_uses_dsp_and_gemma_when_freqblog_empty(self):
-        """When FreqBlog has no API key or returns empty, skill_audio_intelligence(action='bpm_key') should use DSP + gemma4:e4b."""
-        from src.skills.music.harmonic import skill_audio_intelligence
+    def test_skill_music_analysis_uses_dsp_and_gemma_when_freqblog_empty(self):
+        """When FreqBlog has no API key or returns empty, skill_music_analysis(action='bpm_key') should use DSP + gemma4:e4b."""
+        from src.skills.music.music import skill_music_analysis
 
         fake_prof = {
             "title": "Feather",
@@ -161,10 +161,10 @@ class TestAudioAnalyzer(unittest.TestCase):
         }
 
         with (
-            patch("src.skills.music.audio_analyzer.get_track_acoustic_profile", return_value=fake_prof),
-            patch("src.skills.music.audio_analyzer.listen_with_gemma_audio", return_value=fake_gemma),
+            patch("src.skills.music.engine.dsp.get_track_acoustic_profile", return_value=fake_prof),
+            patch("src.skills.music.engine.dsp.listen_with_gemma_audio", return_value=fake_gemma),
         ):
-            out = skill_audio_intelligence(track="Feather by Nujabes", action="bpm_key")
+            out = skill_music_analysis(track="Feather by Nujabes", action="bpm_key")
 
         self.assertIn("AUDIO INTELLIGENCE FOR 'Feather'", out)
         self.assertIn("BPM: ~89.1", out)
@@ -207,7 +207,7 @@ class TestAudioAnalyzer(unittest.TestCase):
 
     def test_channel_played_song_preserves_alt_song_and_acoustic_metrics(self):
         """record_channel_played_song should store alt_song, bpm, speed_score, intensity_score, and gain_db across chained shifts."""
-        from src.skills.music.spectrum import (
+        from src.skills.music.engine.spectrum import (
             record_channel_played_song,
             get_channel_last_played_song,
             clear_channel_played_songs,
@@ -235,7 +235,7 @@ class TestAudioAnalyzer(unittest.TestCase):
     def test_boundary_spectrum_shift_excludes_mainstream_and_escalates_high_velocity(self):
         """At the fast boundary (prefer_deep_cuts=True, d_tempo=1), get_spectrum_tracks must not dilute with slow mainstream tags."""
         from src.skills.music.aggregators.manager import MusicAggregatorManager
-        from src.skills.music.spectrum import ZONE_BY_NAME
+        from src.skills.music.engine.spectrum import ZONE_BY_NAME
 
         mgr = MusicAggregatorManager()
         mock_lfm = MagicMock()

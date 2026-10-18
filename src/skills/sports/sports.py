@@ -2,8 +2,11 @@ import re
 from typing import Optional
 
 from src.skills.sports.aggregators import (
+    EslLiveAggregator,
     F1Aggregator,
+    HltvAggregator,
     HockeyAggregator,
+    LiquipediaAggregator,
     NbaAggregator,
     OddsAggregator,
     SoccerAggregator,
@@ -13,17 +16,23 @@ from src.skills.sports.aggregators.espn_utils import (
     SPORTS_EXECUTOR,
     espn_search_auto_discover,
 )
-from src.skills.sports.csgo import skill_csgo_esports
-from src.skills.sports.live_tracker import (
-    get_channel_last_match_query,
-    skill_track_live_game,
-)
 from src.skills.sports.catalogs import CS_KEYWORDS
-from src.skills.sports.enums import SportId, TrackerAction
-from src.skills.sports.templates import build_sports_llm_instructions
+from src.skills.sports.enums import CsQueryType, SportId, TrackerAction
+from src.skills.sports.templates import (
+    build_cs_llm_instructions,
+    build_odds_llm_instructions,
+    build_sports_llm_instructions,
+)
+from src.skills.sports.tracker import (
+    get_channel_last_match_query,
+    skill_sports_tracker,
+)
 from src.utils.domain_vocab import has_non_sports_track_signal
 from src.utils.timezones import get_local_now
 
+_esl_aggregator = EslLiveAggregator()
+_liquipedia_aggregator = LiquipediaAggregator()
+_hltv_aggregator = HltvAggregator()
 _f1_aggregator = F1Aggregator()
 _soccer_aggregator = SoccerAggregator()
 _nba_aggregator = NbaAggregator()
@@ -35,6 +44,113 @@ _TECH_RE = re.compile(
     r'\b(?:gemini|opus|claude|chatgpt|gpt-[0-9a-z]+|deepseek|qwen|llama|llms?|benchmarks?|antigravity|coding|python|javascript|nvidia|rtx|intel|amd)\b',
     re.IGNORECASE,
 )
+
+
+def skill_sports_esports(
+    query_type: Optional[str] = CsQueryType.ALL,
+    event_page: Optional[str] = None,
+    player_url: Optional[str] = None,
+    matchup: Optional[str] = None,
+) -> str:
+    """
+    Use this skill to fetch Counter-Strike (CS) esports information.
+    query_type can be:
+      - 'tournaments': Gets upcoming and ongoing S-Tier tournaments from Liquipedia.
+      - 'event_info': Gets detailed info about a specific event, including CURRENT MATCHES and full TEAM ROSTERS (requires event_page).
+      - 'rankings': Gets the current world team rankings from HLTV, including team rosters.
+      - 'player_stats': Gets stats for a specific player (requires player_url).
+      - 'live_streams': Checks if ESLCS, BLASTPremier, or thunderpickesports is currently streaming a live match on YouTube.
+      - 'odds': Gets live betting odds, moneylines, and win probabilities for a matchup (pass matchup or event_page).
+      - 'all': Fetches 'tournaments', 'rankings', and 'live_streams'.
+
+    Args:
+        query_type: One of 'tournaments', 'event_info', 'rankings', 'player_stats', 'live_streams', 'odds', 'all' (default).
+        event_page: Liquipedia event page, required for query_type='event_info'.
+        player_url: Player profile URL, required for query_type='player_stats'.
+        matchup: Team matchup for betting odds (e.g. 'Falcons vs Ninjas in Pyjamas'), used for query_type='odds'.
+    """
+    print(f"🎮 [Executing CS Esports Skill] Type: {query_type}, Matchup: {matchup}")
+    output = "=== COUNTER-STRIKE ESPORTS DATA ===\n\n"
+
+    # Normalize query_type to prevent empty data when models pass natural language
+    q_type = (query_type or CsQueryType.ALL).lower().strip()
+    if any(w in q_type for w in ("odd", "bet", "moneyline", "payout", "win", "prop", "line")):
+        q_type = CsQueryType.ODDS
+    elif any(w in q_type for w in ("stat", "rating", "kdr", "kd")) or q_type == CsQueryType.PLAYER_STATS or player_url:
+        q_type = CsQueryType.PLAYER_STATS
+    elif any(w in q_type for w in ("event", "roster", "lineup", "group", "bracket", "table")) or ("player" in q_type and not player_url):
+        q_type = CsQueryType.EVENT_INFO
+    elif any(w in q_type for w in ("live", "stream", "broadcast")):
+        q_type = CsQueryType.LIVE_STREAMS
+    elif any(w in q_type for w in ("tourn", "schedule", "calendar", "match", "matches", "time", "today", "tomorrow", "upcoming", "next")):
+        q_type = CsQueryType.TOURNAMENTS
+    elif any(w in q_type for w in ("rank", "top", "leader", "standings")):
+        q_type = CsQueryType.RANKINGS
+    elif q_type not in tuple(CsQueryType):
+        if any(team in q_type for team in _odds_aggregator.CS_TEAMS):
+            q_type = CsQueryType.ODDS
+            if not matchup:
+                matchup = query_type
+        else:
+            q_type = CsQueryType.ALL
+
+    if q_type == CsQueryType.ALL:
+        fut_esl = SPORTS_EXECUTOR.submit(_esl_aggregator.get_live_matches)
+        if event_page:
+            fut_tourn = SPORTS_EXECUTOR.submit(_liquipedia_aggregator.get_s_tier_tournaments, False)
+        else:
+            fut_tourn = SPORTS_EXECUTOR.submit(_liquipedia_aggregator.get_s_tier_tournaments)
+        fut_rank = SPORTS_EXECUTOR.submit(_hltv_aggregator.get_rankings, 7)
+        if event_page:
+            fut_ev = SPORTS_EXECUTOR.submit(_liquipedia_aggregator.get_event_info, event_page)
+            output += fut_esl.result() + fut_tourn.result() + fut_rank.result() + fut_ev.result()
+        else:
+            output += fut_esl.result() + fut_tourn.result() + fut_rank.result()
+    else:
+        # 1. LIVE STREAMS
+        if q_type == CsQueryType.LIVE_STREAMS:
+            output += _esl_aggregator.get_live_matches()
+
+        # 2. TOURNAMENTS (auto-includes active/next event details unless a specific event_page is requested below)
+        if q_type == CsQueryType.TOURNAMENTS:
+            if event_page:
+                output += _liquipedia_aggregator.get_s_tier_tournaments(include_next_event_details=False)
+            else:
+                output += _liquipedia_aggregator.get_s_tier_tournaments()
+
+        # 3. HLTV RANKINGS
+        if q_type == CsQueryType.RANKINGS:
+            output += _hltv_aggregator.get_rankings(limit=15)
+
+        # 4. EVENT INFO (triggered when q_type == 'event_info' OR whenever event_page is provided for non-odds/non-stats queries)
+        if q_type == CsQueryType.EVENT_INFO or (event_page and q_type not in (CsQueryType.ODDS, "betting", CsQueryType.PLAYER_STATS)):
+            output += _liquipedia_aggregator.get_event_info(event_page)
+
+    # 5. PLAYER / TEAM STATS
+    if q_type == CsQueryType.PLAYER_STATS:
+        stats_target = player_url or matchup or event_page or (query_type if q_type != (query_type or "").lower().strip() else None)
+        output += _hltv_aggregator.get_player_stats(stats_target)
+
+    # 6. BETTING ODDS / TEAM MATCHUP
+    if q_type in (CsQueryType.ODDS, "betting") or (matchup and q_type not in (CsQueryType.PLAYER_STATS, CsQueryType.EVENT_INFO)):
+        target = matchup or event_page or player_url or "Falcons vs Ninjas in Pyjamas"
+        output += _odds_aggregator.get_odds(target, sport="cs2")
+
+    output += build_cs_llm_instructions()
+    return output
+
+
+def skill_sports_odds(query: str, sport: Optional[str] = SportId.SPORTS) -> str:
+    """
+    Fetch current match betting odds, decimal payout multipliers, and implied win probabilities for sports, F1, and esports.
+
+    Args:
+        query: Matchup, team, league, event name, or 'tracked games' (e.g. 'Washington Capitals vs Montreal Canadiens', 'soccer odds', 'nhl odds', 'f1 odds', 'Real Madrid', 'Aurora vs 9z').
+        sport: Sport category, default 'sports' (e.g. 'nhl', 'nba', 'nfl', 'soccer', 'ucl', 'epl', 'mlb', 'f1', 'cs2', 'esports').
+    """
+    print(f"🎲 [Executing Sports Odds Skill] Matchup: '{query}' (Sport: '{sport}')")
+    odds_data = _odds_aggregator.get_odds(query, sport=sport)
+    return odds_data + build_odds_llm_instructions()
 
 
 def skill_sports_info(
@@ -101,15 +217,15 @@ def skill_sports_info(
         combined = _TECH_RE.sub(" ", combined)
         combined = re.sub(r"\s{2,}", " ", combined).strip()
 
-    # 0. Live Match Tracking Check (if LLM calls skill_sports_info instead of skill_track_live_game)
+    # 0. Live Match Tracking Check (if LLM calls skill_sports_info instead of skill_sports_tracker)
     if re.search(r'\b(?:untrack|stop\s+tracking)\b', combined):
-        return skill_track_live_game(action=TrackerAction.STOP, query=team_raw or query_raw or combined, sport=sport_raw)
+        return skill_sports_tracker(action=TrackerAction.STOP, query=team_raw or query_raw or combined, sport=sport_raw)
     if (
         re.search(r'\b(?:track|tracking)\b', combined)
         and not re.search(r'\b(?:track\s+and\s+field|race\s+track|soundtrack)\b', combined)
         and not has_non_sports_track_signal(combined)
     ):
-        return skill_track_live_game(action=TrackerAction.START, query=team_raw or query_raw or combined, sport=sport_raw)
+        return skill_sports_tracker(action=TrackerAction.START, query=team_raw or query_raw or combined, sport=sport_raw)
 
     # 0b. If query is a generic follow-up about "the game" / "last goal" / "how's it going" with no team entity,
     # inherit the channel's last inspected or actively tracked match.
@@ -207,20 +323,20 @@ def skill_sports_info(
         if has_odds_kw and not wants_games_and_odds:
             return _odds_aggregator.get_odds(target_q, sport="cs2")
         elif re.search(r'\b(?:stats|statistics|rating|kdr|kd)\b', q_str):
-            return skill_csgo_esports(query_type="player_stats", player_url=player_raw or team_raw or target_q)
+            return skill_sports_esports(query_type="player_stats", player_url=player_raw or team_raw or target_q)
         elif any(k in q_str for k in ("roster", "player", "lineup", "group", "bracket", "teams", "table", "tables")) or (named_event and "standings" in q_str):
-            return skill_csgo_esports(query_type="event_info", event_page=named_event or (target_q if target_q not in ("schedule", "") else None))
+            return skill_sports_esports(query_type="event_info", event_page=named_event or (target_q if target_q not in ("schedule", "") else None))
         elif any(k in q_str for k in ("rank", "top", "leader", "standings")) and not any(k in q_str for k in ("tourn", "schedule", "match", "matches")):
-            return skill_csgo_esports(query_type="rankings")
+            return skill_sports_esports(query_type="rankings")
         elif any(k in q_str for k in ("live", "stream", "broadcast")):
-            return skill_csgo_esports(query_type="live_streams")
+            return skill_sports_esports(query_type="live_streams")
         elif re.search(r'\b(?:tourn\w*|schedule|next|upcoming|events?|match|matches|time|today|tomorrow|when|playing|plays)\b|\bplay\b(?!\s+(?:a|an|some|me|music|song|track))', q_str):
-            return skill_csgo_esports(query_type="tournaments", event_page=named_event)
+            return skill_sports_esports(query_type="tournaments", event_page=named_event)
         elif any(k in q_str for k in ("rank", "top", "leader", "standings")):
-            return skill_csgo_esports(query_type="rankings")
+            return skill_sports_esports(query_type="rankings")
         else:
             is_team_matchup = " vs " in q_str or sum(1 for t in _odds_aggregator.CS_TEAMS if bool(re.search(rf'\b{re.escape(t)}\b', q_str))) >= 2
-            return skill_csgo_esports(
+            return skill_sports_esports(
                 query_type="all",
                 event_page=named_event,
                 matchup=target_q if is_team_matchup else None,
@@ -377,3 +493,4 @@ def skill_sports_info(
     output = f"📅 CURRENT REFERENCE DATE: {today_str}\n\n" + data
     output += build_sports_llm_instructions(today_str, guidance)
     return output
+

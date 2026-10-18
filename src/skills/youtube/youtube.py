@@ -1,30 +1,28 @@
 import re
 from typing import Optional
-from src.skills.youtube.client import search_youtube
 from src.skills.music.playback.youtube_music import (
-    resolve_youtube_music_link,
+    get_blocked_official_info,
     get_served_song_vids,
     record_served_song_vid,
-    get_blocked_official_info,
+    resolve_youtube_music_link,
 )
 from src.skills.music.templates import SONG_TEMPLATE
-from src.skills.music.top_music import skill_top_music
+from src.skills.music import skill_music_discovery
+from src.skills.youtube.catalogs import BARE_RANDOM_SONG_TERMS, KNOWN_BARE_MUSIC_GENRES
+from src.skills.youtube.engine.client import search_youtube
+from src.skills.youtube.templates import (
+    VIDEO_RESULTS_TEMPLATE,
+    build_no_tracks_found_message,
+    build_no_videos_found_message,
+)
 
 MAX_YOUTUBE_RESULTS = 5
 
-VIDEO_RESULTS_TEMPLATE = (
-    "=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-    "Present the video(s) to the user.\n"
-    "1. Paste the raw standard YouTube video link (https://www.youtube.com/watch?v=...) on its own blank line so Discord embeds the media player.\n"
-    "2. Do NOT wrap the URL in markdown `[Title](link)` or `<>` brackets, and do NOT use `music.youtube.com` in video mode.\n"
-    "3. If searching for a single video, present ONLY the best single link."
-)
 
-
-def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music: Optional[bool] = False) -> str:
+def skill_youtube_search(query: str, max_results: Optional[int] = 1, is_music: Optional[bool] = False) -> str:
     """
     Searches YouTube for videos to WATCH (dance clips, tutorials, live sets, visual performances) or,
-    in music mode, fetches the playback link for a specific song found via `skill_top_music`.
+    in music mode, fetches the playback link for a specific song found via `skill_music_discovery`.
 
     Args:
         query: What to search for. In music mode use 'Song Title by Artist Name'.
@@ -49,25 +47,15 @@ def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music:
             # Guard against generic genre / non-song queries (e.g. "phonk", "phonk song", "techno music", "play a song")
             clean_q_low = re.sub(r'^(?:play\s+)?(?:me\s+)?(?:a\s+|some\s+)?', '', query.strip(), flags=re.IGNORECASE).strip()
             generic_m = re.match(r'^([a-z0-9\s&]+?)\s+(?:song|track|music|beat|video|banger)s?$', clean_q_low, re.IGNORECASE)
-            BARE_RANDOM_SONG = {"song", "songs", "track", "tracks", "music", "random", "random song", "random track", "good", "good song", "something", "anything", ""}
-            KNOWN_BARE_GENRES = {
-                "phonk", "drift phonk", "synthwave", "retrowave", "darksynth", "hardstyle",
-                "dnb", "drum and bass", "drum & bass", "drumnbass", "jungle", "neurofunk",
-                "techno", "hard techno", "melodic techno", "house", "tech house", "deep house",
-                "trance", "psytrance", "dubstep", "edm", "electronic", "ambient", "lofi", "lo-fi",
-                "rap", "hip hop", "hip-hop", "trap", "drill", "uk drill", "german rap", "deutschrap",
-                "rock", "metal", "heavy metal", "indie", "pop", "r&b", "rnb", "jazz", "classical",
-                "banger", "chill", "melodic", "hard", "dark", "sad", "love", "workout",
-            }
             if (" by " not in query.lower() and " - " not in query.lower()) and (
-                clean_q_low.lower() in BARE_RANDOM_SONG or generic_m or clean_q_low.lower() in KNOWN_BARE_GENRES
+                clean_q_low.lower() in BARE_RANDOM_SONG_TERMS or generic_m or clean_q_low.lower() in KNOWN_BARE_MUSIC_GENRES
             ):
-                if clean_q_low.lower() in BARE_RANDOM_SONG or (generic_m and generic_m.group(1).strip().lower() in BARE_RANDOM_SONG):
-                    print(f"🔄 [YouTube Search Skill]: Redirecting generic song request '{query}' -> skill_top_music().")
-                    return skill_top_music()
+                if clean_q_low.lower() in BARE_RANDOM_SONG_TERMS or (generic_m and generic_m.group(1).strip().lower() in BARE_RANDOM_SONG_TERMS):
+                    print(f"🔄 [YouTube Search Skill]: Redirecting generic song request '{query}' -> skill_music_discovery().")
+                    return skill_music_discovery()
                 genre_term = generic_m.group(1).strip() if generic_m else clean_q_low
-                print(f"🔄 [YouTube Search Skill]: Redirecting genre/vibe query '{query}' -> skill_top_music(genre='{genre_term}').")
-                return skill_top_music(genre=genre_term)
+                print(f"🔄 [YouTube Search Skill]: Redirecting genre/vibe query '{query}' -> skill_music_discovery(genre='{genre_term}').")
+                return skill_music_discovery(genre=genre_term)
 
             previously_served = get_served_song_vids(query)
             if previously_served:
@@ -93,13 +81,7 @@ def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music:
                     )
                 else:
                     reason_detail = f"Could not find any embeddable YouTube Music link for '{query}' (all uploads blocked third-party Discord embeds or were unavailable)."
-                return (
-                    f"NO_TRACKS_FOUND: {reason_detail}\n"
-                    f"CRITICAL INSTRUCTIONS FOR YOUR RESPONSE:\n"
-                    f"1. If you were picking a song from a `skill_top_music` list, immediately call `skill_youtube_searcher(query='<Another Song Title> by <Artist Name>', is_music=True)` for a DIFFERENT track from that list.\n"
-                    f"2. Otherwise, do NOT output the '**Song:**' or '**Artist:**' template and do NOT output any URL or placeholder.\n"
-                    f"3. Simply inform the user in a short conversational sentence that the record label has disabled Discord playback for that track on YouTube (or that no working alternative upload exists)."
-                )
+                return build_no_tracks_found_message(reason_detail)
 
             print(f"✅ [YouTube Search Skill]: Returning {len(results)} music link(s) for '{query}'")
             formatted_results = ""
@@ -120,12 +102,7 @@ def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music:
         results = search_youtube(query, max_results=max_results)
         if not results:
             print(f"❌ [YouTube Search Skill]: No video results found for '{query}'.")
-            return (
-                f"NO_VIDEOS_FOUND: Could not find any playable YouTube video for '{query}'.\n"
-                f"CRITICAL INSTRUCTIONS FOR YOUR RESPONSE:\n"
-                f"1. Do NOT guess or invent any YouTube link or URL placeholder.\n"
-                f"2. Simply tell the user in a short sentence that no matching video was found."
-            )
+            return build_no_videos_found_message(query)
 
         print(f"✅ [YouTube Search Skill]: Returning {len(results)} video link(s) for '{query}'")
         formatted_results = ""

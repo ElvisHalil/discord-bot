@@ -116,7 +116,7 @@ def _format_date(pub: str) -> str:
         return pub or ""
 
 
-def skill_top_headlines(region: Optional[str] = None, topic: Optional[str] = None) -> str:
+def skill_news_headlines(region: Optional[str] = None, topic: Optional[str] = None) -> str:
     """Get today's actual top news headlines (ranked by Google News) for a country, region or topic.
     Use this for "top/latest headlines" or "what's in the news" requests. For news about one
     specific subject or event, use `search_web` with news=true instead.
@@ -172,6 +172,3 @@ def skill_top_headlines(region: Optional[str] = None, topic: Optional[str] = Non
     _CACHE[feed_url] = (time.time(), output)
     return output
 
-
-# Backward compatibility alias
-get_top_headlines = skill_top_headlines

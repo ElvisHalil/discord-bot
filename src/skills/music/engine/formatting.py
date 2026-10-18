@@ -1,83 +1,36 @@
 import re
-from collections import defaultdict, deque
-import requests
 
-from src.context import get_active_channel_id
+from src.skills.music.context import (
+    RECENTLY_PLAYED_TRACKS,
+    _CHANNEL_RECENTLY_PLAYED_TRACKS,
+    _clean_song_token,
+    _get_music_channel_deque,
+    _norm_track_token,
+    clear_recently_played_tracks,
+    is_recently_played,
+    record_channel_played_song,
+    record_played_track,
+)
 
 # Global in-memory cache of resolved music metadata
 MUSIC_METADATA_CACHE = {}
 
-# Rolling session history of recently played/recommended tracks to prevent repeats across turns
-# Scoped per channel_id so one chat's music history never affects another chat.
-_CHANNEL_RECENTLY_PLAYED_TRACKS = defaultdict(lambda: deque(maxlen=30))
-
-
-class _ChannelAwareDeque(deque):
-    def clear(self) -> None:
-        super().clear()
-        _CHANNEL_RECENTLY_PLAYED_TRACKS.clear()
-
-
-RECENTLY_PLAYED_TRACKS = _ChannelAwareDeque(maxlen=30)
-
-
-def _get_music_channel_deque(channel_id: int = None) -> deque:
-    if channel_id is None:
-        channel_id = get_active_channel_id()
-    if not channel_id:
-        return RECENTLY_PLAYED_TRACKS
-    return _CHANNEL_RECENTLY_PLAYED_TRACKS[channel_id]
-
-
-def clear_recently_played_tracks(channel_id: int = None) -> None:
-    if channel_id is not None:
-        if channel_id == 0:
-             super(_ChannelAwareDeque, RECENTLY_PLAYED_TRACKS).clear()
-        else:
-            _CHANNEL_RECENTLY_PLAYED_TRACKS.pop(channel_id, None)
-    else:
-        RECENTLY_PLAYED_TRACKS.clear()
-
-
-def _norm_track_token(text: str) -> str:
-    return re.sub(r'[^a-z0-9]+', '', (text or '').lower())
-
-def _clean_song_token(text: str) -> str:
-    """Normalizes a song title after stripping parentheticals and dash suffixes (e.g., '- Slowed', '(Official Audio)')."""
-    s = re.sub(r'[\(\[\{].*?[\)\]\}]', '', text or '')
-    s = re.sub(r'\s+[-–—|/]\s+.*$', '', s)
-    return _norm_track_token(s)
-
-def record_played_track(song: str, artist: str, channel_id: int = None) -> None:
-    """Records a song and artist in the channel's rolling session exclusion deque."""
-    s_norm = _norm_track_token(song)
-    s_clean = _clean_song_token(song)
-    a_norm = _norm_track_token(artist)
-    if not s_norm or s_norm in ("unknowntrack", "unknownsong", "unknown"):
-        return
-    target_deque = _get_music_channel_deque(channel_id)
-    for tok in {s_norm, s_clean}:
-        if tok:
-            entry = (tok, a_norm)
-            if entry in target_deque:
-                target_deque.remove(entry)
-            target_deque.append(entry)
-
-def is_recently_played(song: str, artist: str = "", channel_id: int = None) -> bool:
-    """Checks whether a candidate track matches a recently played song in this channel's session."""
-    target_deque = _get_music_channel_deque(channel_id)
-    if not target_deque:
-        return False
-    s_norm = _norm_track_token(song)
-    s_clean = _clean_song_token(song)
-    a_norm = _norm_track_token(artist)
-    if not s_norm:
-        return False
-    candidate_tokens = {t for t in (s_norm, s_clean) if t}
-    for rec_s, rec_a in target_deque:
-        if rec_s in candidate_tokens and (not a_norm or not rec_a or a_norm == rec_a or a_norm in rec_a or rec_a in a_norm):
-            return True
-    return False
+__all__ = [
+    "MUSIC_METADATA_CACHE",
+    "RECENTLY_PLAYED_TRACKS",
+    "_CHANNEL_RECENTLY_PLAYED_TRACKS",
+    "_clean_song_token",
+    "_get_music_channel_deque",
+    "_norm_track_token",
+    "clear_recently_played_tracks",
+    "format_song_card",
+    "get_music_metadata",
+    "is_placeholder_text",
+    "is_recently_played",
+    "parse_song_meta",
+    "record_played_track",
+    "standardize_song_reply",
+]
 
 
 def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
@@ -89,7 +42,7 @@ def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
     - album: album title if present in tag, else None
     """
     title = re.sub(r'https?://\S+', '', title or "").strip()
-    
+
     # Extract embedded genre or album tags if present (e.g., "(Genre: Techno)", "(Album: Cruisin)", "(Album: X, Genre: Y)")
     genre = None
     m_genre = re.search(r'(?:\(|,\s*)Genre:\s*([^,)]+)', title, flags=re.IGNORECASE)
@@ -110,7 +63,7 @@ def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
         r'[\(\[\{].*?(?:official|video|audio|lyrics|visualizer|download|remastered|remaster|hd|4k|hq|original mix|extended mix|radio edit|free download).*?[\)\]\}]',
         '',
         title,
-        flags=re.IGNORECASE
+        flags=re.IGNORECASE,
     )
     clean = re.sub(r'[\(\[\{](?:feat\.|ft\.).*?[\)\]\}]', '', clean, flags=re.IGNORECASE).strip()
 
@@ -163,8 +116,9 @@ def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
         "song": song,
         "artist": artist,
         "genre": genre,
-        "album": album
+        "album": album,
     }
+
 
 def get_music_metadata(vid: str, fallback_text: str = "", fallback_title: str = "", fallback_author: str = "") -> dict:
     """
@@ -173,7 +127,6 @@ def get_music_metadata(vid: str, fallback_text: str = "", fallback_title: str = 
     """
     if vid and vid in MUSIC_METADATA_CACHE:
         cached = dict(MUSIC_METADATA_CACHE[vid])
-        # If fallback text has genre or album not in cache, merge them
         if fallback_text:
             parsed_fb = parse_song_meta(fallback_text)
             if parsed_fb.get("genre") and not cached.get("genre"):
@@ -188,7 +141,7 @@ def get_music_metadata(vid: str, fallback_text: str = "", fallback_title: str = 
 
     if vid:
         try:
-            from src.skills.youtube.client import get_video_oembed
+            from src.skills.youtube.engine.client import get_video_oembed
             data = get_video_oembed(vid)
             if data and data.get("title"):
                 title = data.get("title", title)
@@ -207,16 +160,17 @@ def get_music_metadata(vid: str, fallback_text: str = "", fallback_title: str = 
 
     return meta
 
+
 def format_song_card(song: str, artist: str, url: str, genre: str = None, album: str = None, intro: str = "") -> str:
     """
     Constructs the clean, consistent Markdown template for returning a song in Discord:
     [Optional Intro / Similarity Description]
-    
+
     **Song:** <Song Title>
     **Artist:** <Artist Name>
     **Album:** <Album Title> (optional)
     **Genre:** <Genre Name> (optional)
-    
+
     <Raw YouTube Music URL>
     """
     lines = []
@@ -226,7 +180,6 @@ def format_song_card(song: str, artist: str, url: str, genre: str = None, album:
 
     record_played_track(song, artist)
     try:
-        from src.skills.music.spectrum import record_channel_played_song
         record_channel_played_song(song=song, artist=artist, genre=genre)
     except Exception:
         pass
@@ -250,22 +203,31 @@ def format_song_card(song: str, artist: str, url: str, genre: str = None, album:
     lines.append(url.strip())
     return "\n".join(lines)
 
+
 def is_placeholder_text(text: str) -> bool:
     """Detects if text contains empty strings or LLM template placeholders."""
     if not text:
         return True
     t = text.strip(" *-_#:`\"'").lower()
-    return t in (
-        "", "unknown", "unknown track", "unknown artist", "none",
-        "<song title>", "<artist name>", "<genre name>", "<album name>",
-        "<raw youtube music url>", "<raw youtube music url on its own blank line>",
-        "<youtube url>", "song title", "artist name", "genre name", "album name"
-    ) or t.startswith("<raw youtube") or t.startswith("<song") or t.startswith("<artist") or "<song" in t or "<artist" in t or "song title" in t or "artist name" in t
+    return (
+        t in (
+            "", "unknown", "unknown track", "unknown artist", "none",
+            "<song title>", "<artist name>", "<genre name>", "<album name>",
+            "<raw youtube music url>", "<raw youtube music url on its own blank line>",
+            "<youtube url>", "song title", "artist name", "genre name", "album name",
+        )
+        or t.startswith("<raw youtube")
+        or t.startswith("<song")
+        or t.startswith("<artist")
+        or "<song" in t
+        or "<artist" in t
+        or "song title" in t
+        or "artist name" in t
+    )
 
-# A song-card title line: "**Song:** X", "Song: X" or "**Track:** X" at the start of a line
-# (optionally after a bullet). Anchoring matters: news headlines like "- **Fast Track: ...**"
-# must not be mistaken for a song card.
+
 _SONG_LINE = re.compile(r'(?im)^[^\S\n]*(?:[-*•][^\S\n]*)?(?:\*\*)?(?:Song|Track):(?:\*\*)?[^\S\n]*\S')
+
 
 def standardize_song_reply(reply: str) -> str:
     """
@@ -288,7 +250,6 @@ def standardize_song_reply(reply: str) -> str:
     )
     card_vid = yt_match.group(2) if (has_song_header and yt_match) else None
 
-    # Helper: Extract all non-card conversational / multi-task lines (both before and after the song card)
     intro_lines = []
     for line in reply.split('\n'):
         line_stripped = line.strip()
@@ -302,12 +263,10 @@ def standardize_song_reply(reply: str) -> str:
         if "<raw" in low_l:
             continue
         if "youtube.com" in low_l or "youtu.be" in low_l:
-            # Preserve non-music YouTube video links from a compound tool call when their video ID differs from the song card
             m_other_yt = re.search(r'https:\/\/www\.youtube\.com\/watch\?v=([0-9A-Za-z_-]{11})', line_stripped)
             if has_song_header and m_other_yt and card_vid and m_other_yt.group(1) != card_vid and "music.youtube.com" not in low_l:
                 intro_lines.append(line_stripped)
             continue
-        # Strip only hallucinated YouTube/music-player markdown links, preserving legitimate research/news/sports links
         clean_l = re.sub(r'\[[^\]]*\]\([^\)]*(?:youtube\.com|youtu\.be)[^\)]*\)', '', line_stripped, flags=re.IGNORECASE)
         clean_l = re.sub(
             r'\[(?:YouTube|Channel|Topic|Play|Watch|Video|Track)\b[^\]]*\]\((?:[^\)]*(?:youtube\.com|youtu\.be|<raw)[^\)]*|\s*)\)',
@@ -321,7 +280,6 @@ def standardize_song_reply(reply: str) -> str:
         intro_lines.pop()
     intro_text = "\n".join(intro_lines).strip()
 
-    # If message was formatted with a song template:
     if has_song_header:
         extracted_song = None
         extracted_artist = None
@@ -331,7 +289,6 @@ def standardize_song_reply(reply: str) -> str:
         m_song = re.search(r'(?im)^[^\S\n]*(?:[-*•][^\S\n]*)?(?:\*\*)?(?:Song|Track):\*{0,2}\s*(.+)', reply)
         if m_song:
             clean_s = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_song.group(1)).strip()
-            # If multiple fields are inline (e.g. "Song: X Artist: Y")
             if "artist:" in clean_s.lower():
                 clean_s = re.split(r'\s+(?:\*\*|\b)Artist:\*{0,2}\s*', clean_s, flags=re.IGNORECASE)[0].strip()
             clean_s = re.sub(r'^(?:\*\*|\b)(?:Song|Track):\*{0,2}\s*', '', clean_s, flags=re.IGNORECASE).strip(" *-_#:`\"'")
@@ -344,7 +301,6 @@ def standardize_song_reply(reply: str) -> str:
         )
         if m_art:
             clean_a = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_art.group(1)).strip()
-            # If URL is inline (e.g. "Artist: Y https://...")
             clean_a = re.sub(r'https?://\S+', '', clean_a).strip()
             clean_a = re.sub(r'^(?:\*\*|\b)Artist:\*{0,2}\s*', '', clean_a, flags=re.IGNORECASE).strip(" *-_#:`\"'")
             if clean_a and not is_placeholder_text(clean_a):
@@ -368,7 +324,7 @@ def standardize_song_reply(reply: str) -> str:
         if yt_match:
             full_url = yt_match.group(1)
             vid = yt_match.group(2)
-            from src.skills.youtube.client import verify_embeddable
+            from src.skills.youtube.engine.client import verify_embeddable
             is_embeddable = verify_embeddable(vid)
             meta = get_music_metadata(vid)
             if meta.get("song") != "Unknown Track":
@@ -381,7 +337,6 @@ def standardize_song_reply(reply: str) -> str:
                 if not extracted_genre:
                     extracted_genre = meta.get("genre")
 
-                # Verify that the LLM did not paste a stale video URL from an earlier turn for a different song/artist
                 meta_s = _clean_song_token(meta.get("song", ""))
                 meta_a = _norm_track_token(meta.get("artist", ""))
                 ext_s = _clean_song_token(extracted_song or "")
@@ -406,7 +361,6 @@ def standardize_song_reply(reply: str) -> str:
         else:
             print("⚠️ [standardize_song_reply]: No YouTube URL found in song template. Attempting auto-resolution...")
 
-        # If music_url is still not verified, attempt auto-resolution via YouTube Music search
         if not music_url and extracted_song and extracted_artist and not is_placeholder_text(extracted_song) and not is_placeholder_text(extracted_artist):
             try:
                 from src.skills.music.playback.youtube_music import resolve_youtube_music_link
@@ -417,7 +371,6 @@ def standardize_song_reply(reply: str) -> str:
             except Exception as e:
                 print(f"  └─ ⚠️ [standardize_song_reply]: Auto-resolution failed: {e}")
 
-        # If we have a verified music_url and valid song/artist:
         if music_url and extracted_song and extracted_artist and not is_placeholder_text(extracted_song) and not is_placeholder_text(extracted_artist):
             print(f"🎵 [standardize_song_reply]: Formatted verified song card for '{extracted_song}' by '{extracted_artist}' -> {music_url}")
             return format_song_card(
@@ -426,10 +379,9 @@ def standardize_song_reply(reply: str) -> str:
                 url=music_url,
                 genre=extracted_genre,
                 album=extracted_album,
-                intro=intro_text
+                intro=intro_text,
             )
 
-        # If valid song and artist exist but URL could not be resolved, still output the card cleanly without the fake link
         if extracted_song and extracted_artist and not is_placeholder_text(extracted_song) and not is_placeholder_text(extracted_artist):
             print(f"⚠️ [standardize_song_reply]: Could not resolve URL for '{extracted_song}' by '{extracted_artist}', presenting text card.")
             lines = []
@@ -446,16 +398,14 @@ def standardize_song_reply(reply: str) -> str:
             lines.append("⚠️ Could not verify playback link on YouTube Music.")
             return "\n".join(lines).strip()
 
-        # If song or artist is missing/placeholder:
         print("⚠️ [standardize_song_reply]: Stripping broken song template with missing/placeholder metadata.")
         return intro_text if intro_text else "⚠️ Could not find a verified track on YouTube Music."
 
-    # Video mode (no **Song:** header):
     if yt_match:
         full_url = yt_match.group(1)
         vid = yt_match.group(2)
         video_url = full_url.replace("music.youtube.com", "www.youtube.com")
-        from src.skills.youtube.client import verify_embeddable, get_video_oembed, search_youtube
+        from src.skills.youtube.engine.client import get_video_oembed, search_youtube, verify_embeddable
         if not verify_embeddable(vid):
             print(f"⚠️ [standardize_song_reply]: Video mode ID {vid} is not embeddable in Discord. Attempting auto-resolution...")
             oembed = get_video_oembed(vid)
@@ -471,7 +421,6 @@ def standardize_song_reply(reply: str) -> str:
         if video_url != full_url:
             reply = reply.replace(full_url, video_url)
 
-    # Strip hallucinated YouTube markdown links and accidental raw placeholders
     reply = re.sub(
         r'\[(?:YouTube|Channel|Topic|Play|Watch|Video|Track)\b[^\]]*\]\((?:[^\)]*(?:youtube\.com|youtu\.be|<raw)[^\)]*|\s*)\)',
         '',

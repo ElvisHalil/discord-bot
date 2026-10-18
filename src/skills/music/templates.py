@@ -1,9 +1,9 @@
 """
 Shared response templates and concise LLM prompt instruction builders for the Music Skill.
 
-Kept in one place so `skill_top_music`, `skill_audio_intelligence`, and `skill_youtube_searcher`
+Kept in one place so `skill_music_discovery`, `skill_music_analysis`, and `skill_youtube_search`
 give the model identical, token-efficient instructions. The field layout (`**Song:**` / `**Artist:**` / bare URL)
-is also what `standardize_song_reply()` in `src/skills/music/utils.py` parses, so change both together.
+is also what `standardize_song_reply()` in `src/skills/music/engine/formatting.py` parses, so change both together.
 """
 
 from typing import Optional
@@ -29,7 +29,7 @@ def build_music_llm_instructions(
     require_youtube_lookup: bool = False,
 ) -> str:
     """
-    Build a concise, centralized instruction block for `skill_top_music` and `skill_audio_intelligence`.
+    Build a concise, centralized instruction block for `skill_music_discovery` and `skill_music_analysis`.
     """
     lines = ["\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ==="]
     if shift_note:
@@ -42,14 +42,14 @@ def build_music_llm_instructions(
         )
     if require_youtube_lookup:
         lines.append(
-            "Select ONE best matching song from above and call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` "
+            "Select ONE best matching song from above and call `skill_youtube_search(query='<Song Title> by <Artist Name>', is_music=True)` "
             "to fetch its verified YouTube Music link before presenting it with the template below.\n"
         )
     else:
         lines.append(
             "CRITICAL: If `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, present THAT EXACT Song, Artist, "
-            "and Link immediately using the template below without calling `skill_youtube_searcher` again. "
-            "Only call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` if no pre-resolved link is shown or if the user asked for multiple songs.\n"
+            "and Link immediately using the template below without calling `skill_youtube_search` again. "
+            "Only call `skill_youtube_search(query='<Song Title> by <Artist Name>', is_music=True)` if no pre-resolved link is shown or if the user asked for multiple songs.\n"
         )
     lines.append(SONG_TEMPLATE)
     return "\n".join(lines)

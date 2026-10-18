@@ -1,4 +1,3 @@
-from src.skills.weather.reporter import skill_weather_reporter
+from src.skills.weather.weather import skill_weather_info
 
-__all__ = ["skill_weather_reporter"]
-
+__all__ = ["skill_weather_info"]

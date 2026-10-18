@@ -56,7 +56,7 @@ from src.skills.music.models import (
     SpectrumZone,
     Track,
 )
-from src.skills.music.spectrum import (
+from src.skills.music.engine.spectrum import (
     clear_channel_played_songs,
     has_non_music_domain_context,
     is_valid_music_shift_context,
@@ -78,7 +78,7 @@ from src.skills.sports.enums import (
     SportId,
     TrackerAction,
 )
-from src.skills.sports.live_tracker import skill_track_live_game
+from src.skills.sports.tracker import skill_sports_tracker
 from src.skills.sports.models import (
     EsportsStreamChannel,
     MatchSnapshot,
@@ -369,9 +369,9 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
                     f"Flight query '{fq}' must not validate as a music shift context",
                 )
 
-            # Verify sports live tracker rejects flight tracking and points to skill_flights_info
-            tracker_resp = skill_track_live_game(action="start", query="track flight AC850")
-            self.assertIn("skill_flights_info", tracker_resp)
+            # Verify sports live tracker rejects flight tracking and points to skill_flight_tracker
+            tracker_resp = skill_sports_tracker(action="start", query="track flight AC850")
+            self.assertIn("skill_flight_tracker", tracker_resp)
 
             # Verify genuine music shift still works as expected
             music_query = "play something a little faster and harder"
@@ -405,6 +405,166 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
             prompt_text = mod.MODES[required_mode]["get_prompt"]("User likes hockey.")
             self.assertIn("User likes hockey.", prompt_text)
 
+    def test_standardized_skill_package_layout_and_example_skeleton(self):
+        """Every skill package under src/skills/ (including .example) must strictly follow the constructor-style <skill_name>.py file structure."""
+        import importlib.util
+        import sys
+
+        common_required_files = {
+            "__init__.py",
+            "enums.py",
+            "models.py",
+            "catalogs.py",
+            "templates.py",
+        }
+        allowed_subdirs = {"aggregators", "engine", "playback"}
+
+        skill_dirs = [
+            d for d in SKILLS_ROOT.iterdir()
+            if d.is_dir() and d.name != "__pycache__"
+        ]
+        skill_names = {d.name for d in skill_dirs}
+        self.assertEqual(
+            skill_names,
+            {".example", "flights", "music", "news", "sports", "weather", "youtube"},
+        )
+
+        expected_base_aggregators = {
+            ".example": "BaseExampleAggregator",
+            "flights": "BaseFlightAggregator",
+            "music": "BaseMusicAggregator",
+            "news": "BaseNewsAggregator",
+            "sports": "BaseSportsAggregator",
+            "weather": "BaseWeatherAggregator",
+            "youtube": "BaseYouTubeAggregator",
+        }
+
+        for sdir in skill_dirs:
+            constructor_py = f"{sdir.name.lstrip('.')}.py"
+            required_files = common_required_files | {constructor_py}
+            allowed_top_py_files = required_files | {"context.py", "tracker.py"}
+
+            present_py = {f.name for f in sdir.glob("*.py")}
+            self.assertNotIn(
+                "skill.py",
+                present_py,
+                f"Skill package '{sdir.name}' must use constructor-style '{constructor_py}' instead of 'skill.py'",
+            )
+            missing = required_files - present_py
+            self.assertFalse(
+                missing,
+                f"Skill package '{sdir.name}' is missing required standardized files: {sorted(missing)}",
+            )
+            unexpected = present_py - allowed_top_py_files
+            self.assertFalse(
+                unexpected,
+                f"Skill package '{sdir.name}' contains non-standard top-level .py files: {sorted(unexpected)}",
+            )
+
+            agg_dir = sdir / "aggregators"
+            self.assertTrue(
+                agg_dir.is_dir() and (agg_dir / "__init__.py").exists() and (agg_dir / "base.py").exists(),
+                f"Skill package '{sdir.name}' must have an 'aggregators/' subpackage with __init__.py and base.py",
+            )
+            base_source = (agg_dir / "base.py").read_text(encoding="utf-8")
+            expected_base_cls = expected_base_aggregators[sdir.name]
+            self.assertIn(
+                f"class {expected_base_cls}",
+                base_source,
+                f"{sdir.name}/aggregators/base.py must define {expected_base_cls}",
+            )
+
+            subdirs = {
+                sub.name for sub in sdir.iterdir()
+                if sub.is_dir() and sub.name != "__pycache__"
+            }
+            unexpected_subdirs = subdirs - allowed_subdirs
+            self.assertFalse(
+                unexpected_subdirs,
+                f"Skill package '{sdir.name}' contains non-standard subdirectories: {sorted(unexpected_subdirs)}",
+            )
+            for sub in subdirs:
+                self.assertTrue(
+                    (sdir / sub / "__init__.py").exists(),
+                    f"Subpackage '{sdir.name}/{sub}' must contain __init__.py",
+                )
+
+        # Verify src/skills/.example has context.py, tracker.py and executes cleanly
+        example_dir = SKILLS_ROOT / ".example"
+        self.assertFalse((example_dir / "README.md").exists(), "Do not keep a separate README.md inside src/skills/.example")
+        self.assertTrue((example_dir / "context.py").exists())
+        self.assertTrue((example_dir / "tracker.py").exists())
+
+        pkg_name = "src.skills._example_skeleton_test"
+        spec = importlib.util.spec_from_file_location(
+            pkg_name,
+            example_dir / "__init__.py",
+            submodule_search_locations=[str(example_dir)],
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[pkg_name] = mod
+        try:
+            spec.loader.exec_module(mod)
+            out_info = mod.skill_example_info(query="test item", action="lookup")
+            self.assertIn("EXAMPLE SKILL DATA", out_info)
+            self.assertIn("test item", out_info)
+            out_track = mod.skill_example_tracker(action="list")
+            self.assertIn("active", out_track.lower())
+        finally:
+            for k in list(sys.modules):
+                if k == pkg_name or k.startswith(f"{pkg_name}."):
+                    sys.modules.pop(k, None)
+
+    def test_zero_legacy_skill_and_class_aliases_in_codebase(self):
+        """Ensure zero stale legacy skill_* function names, deprecated class/singleton names, or .skill paths remain in src/, main.py, or tests/."""
+        legacy_identifiers = (
+            "skill_top_music",
+            "skill_audio_intelligence",
+            "skill_weather_reporter",
+            "skill_top_headlines",
+            "get_top_headlines",
+            "skill_youtube_searcher",
+            "skill_csgo_esports",
+            "skill_betting_odds",
+            "skill_track_live_game",
+            "skill_track_flight",
+            "skill_flights_info",
+            "skill_example_lookup",
+            "skill_track_example",
+            "BaseYouTubeSearchAggregator",
+            "YouTubeSearchManager",
+            "LiveSportsTracker",
+            "LIVE_TRACKER",
+            "FlightTrackerManager",
+            ".skill import",
+            ".skill.",
+        )
+        this_file = Path(__file__).resolve()
+        tests_root = REPO_ROOT / "tests"
+        violations: list[str] = []
+        files_to_scan = (
+            list(SRC_ROOT.rglob("*.py"))
+            + [REPO_ROOT / "main.py"]
+            + [f for f in tests_root.rglob("*.py") if f.resolve() != this_file]
+        )
+        for py_file in files_to_scan:
+            if not py_file.exists():
+                continue
+            source = py_file.read_text(encoding="utf-8")
+            for lineno, line in enumerate(source.splitlines(), start=1):
+                for legacy_id in legacy_identifiers:
+                    if legacy_id in line:
+                        violations.append(
+                            f"{py_file.relative_to(REPO_ROOT)}:{lineno} contains stale identifier '{legacy_id}'"
+                        )
+
+        self.assertEqual(
+            violations,
+            [],
+            "Found stale legacy identifiers in codebase:\n" + "\n".join(violations),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
+

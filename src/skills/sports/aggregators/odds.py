@@ -1302,14 +1302,14 @@ class OddsAggregator(BaseSportsAggregator):
         if wants_tracked or (not cleaned_main and not detected_scope):
             try:
                 from src.context import get_active_channel_id
-                from src.skills.sports.live_tracker import LIVE_TRACKER, get_channel_last_match_query
+                from src.skills.sports.tracker import SPORTS_TRACKER, get_channel_last_match_query
                 ch_id = get_active_channel_id()
                 active_matches = [
-                    m for (cid, _), m in LIVE_TRACKER.tracked_matches.items()
+                    m for (cid, _), m in SPORTS_TRACKER.tracked_matches.items()
                     if ch_id is None or cid == ch_id
                 ]
-                if not active_matches and LIVE_TRACKER.tracked_matches:
-                    active_matches = list(LIVE_TRACKER.tracked_matches.values())
+                if not active_matches and SPORTS_TRACKER.tracked_matches:
+                    active_matches = list(SPORTS_TRACKER.tracked_matches.values())
                 for m in active_matches:
                     match_q = f"{m.home_team} vs {m.away_team}"
                     match_sp = m.league_code or m.sport_path or sport_clean

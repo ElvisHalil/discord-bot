@@ -36,7 +36,7 @@ import numpy as np
 import requests
 
 from src.skills.music.models import Track
-from src.skills.music.utils import _norm_track_token
+from src.skills.music.context import _norm_track_token
 
 logger = logging.getLogger(__name__)
 

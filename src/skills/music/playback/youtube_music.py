@@ -5,8 +5,8 @@ import urllib.parse
 import requests
 from dotenv import load_dotenv
 from ddgs import DDGS
-from src.skills.music.utils import parse_song_meta, MUSIC_METADATA_CACHE, record_played_track
-from src.skills.youtube.client import (
+from src.skills.music.engine.formatting import parse_song_meta, MUSIC_METADATA_CACHE, record_played_track
+from src.skills.youtube.engine.client import (
     verify_embeddable,
     get_video_oembed,
     is_youtube_short,
@@ -17,7 +17,7 @@ from src.utils.workers import map_in_workers
 
 load_dotenv()
 
-# 15-minute cache for resolved YouTube Music queries (eliminates duplicate DDGS + HTTP lookups when pre-resolved in skill_top_music)
+# 15-minute cache for resolved YouTube Music queries (eliminates duplicate DDGS + HTTP lookups when pre-resolved in skill_music_discovery)
 _RESOLVED_MUSIC_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _RESOLVED_MUSIC_TTL = 900.0
 

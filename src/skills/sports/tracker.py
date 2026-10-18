@@ -16,7 +16,6 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from src.context import (
     ACTIVE_CHANNEL_ID,
     bind_event_loop,
-    bind_tracker_event_loop,
     get_active_channel_id,
     get_bound_event_loop,
     set_active_channel_id,
@@ -58,7 +57,7 @@ def get_channel_last_match_query(channel_id: Optional[int] = None) -> Tuple[str,
     cid = channel_id if channel_id is not None else get_active_channel_id()
     if cid in _CHANNEL_LAST_MATCH_QUERY:
         return _CHANNEL_LAST_MATCH_QUERY[cid]
-    for (t_cid, _), m in LIVE_TRACKER.tracked_matches.items():
+    for (t_cid, _), m in SPORTS_TRACKER.tracked_matches.items():
         if t_cid == cid:
             return (f"{m.home_team} vs {m.away_team}", m.sport_path)
     return ("", None)
@@ -464,7 +463,7 @@ def resolve_live_or_next_event(
 NotifyCallback = Callable[[TrackedMatch, MatchSnapshot, List[str]], Awaitable[None]]
 
 
-class LiveSportsTracker:
+class SportsTrackerService:
     """
     Manages active live match subscriptions across Discord channels and runs an
     on-demand background polling task that automatically stops itself when all
@@ -589,7 +588,7 @@ class LiveSportsTracker:
         if query and has_non_sports_track_signal(query):
             return (
                 f"⚠️ '{query}' appears to be a flight, music, or package tracking request rather than a sports game. "
-                "For commercial flights or route prices, use `skill_flights_info(action='track', ...)`."
+                "For commercial flights or route prices, use `skill_flight_tracker(action='track', ...)`."
             )
         effective_query = query
         effective_sport = sport
@@ -707,10 +706,10 @@ class LiveSportsTracker:
         return "\n".join(lines)
 
 
-LIVE_TRACKER = LiveSportsTracker()
+SPORTS_TRACKER = SportsTrackerService()
 
 
-def skill_track_live_game(
+def skill_sports_tracker(
     query: str = "",
     action: Optional[str] = TrackerAction.START,
     sport: Optional[str] = None,
@@ -730,16 +729,16 @@ def skill_track_live_game(
     act = (action or TrackerAction.START).strip().lower()
 
     if act in (TrackerAction.STOP, "untrack", "cancel", "remove", "end"):
-        return LIVE_TRACKER.stop_tracking(channel_id, query=query)
+        return SPORTS_TRACKER.stop_tracking(channel_id, query=query)
     if act in (TrackerAction.LIST, "status", "active", "show"):
-        return LIVE_TRACKER.list_tracked(channel_id)
+        return SPORTS_TRACKER.list_tracked(channel_id)
 
-    res = LIVE_TRACKER.start_tracking(channel_id, query=query, sport=sport)
+    res = SPORTS_TRACKER.start_tracking(channel_id, query=query, sport=sport)
     # Schedule the polling loop on the main Discord event loop if called from a worker thread
     bound_loop = get_bound_event_loop()
-    if bound_loop is not None and LIVE_TRACKER.tracked_matches:
+    if bound_loop is not None and SPORTS_TRACKER.tracked_matches:
         try:
-            bound_loop.call_soon_threadsafe(LIVE_TRACKER.ensure_loop_running)
+            bound_loop.call_soon_threadsafe(SPORTS_TRACKER.ensure_loop_running)
         except RuntimeError:
             pass
     return res

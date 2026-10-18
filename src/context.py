@@ -41,7 +41,3 @@ def get_bound_event_loop() -> Optional[asyncio.AbstractEventLoop]:
     except RuntimeError:
         return _MAIN_EVENT_LOOP
 
-
-# Backward-compatible alias
-bind_tracker_event_loop = bind_event_loop
-

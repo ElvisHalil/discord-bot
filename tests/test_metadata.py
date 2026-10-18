@@ -7,7 +7,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from src.skills.music.utils import (
+from src.skills.music.engine.formatting import (
     parse_song_meta,
     format_song_card,
     is_placeholder_text,
@@ -82,7 +82,7 @@ class TestMusicMetadata(unittest.TestCase):
         self.assertFalse(is_placeholder_text("Give Nothing"))
 
     @patch("src.skills.music.playback.youtube_music.resolve_youtube_music_link")
-    @patch("src.skills.youtube.client.verify_embeddable", return_value=False)
+    @patch("src.skills.youtube.engine.client.verify_embeddable", return_value=False)
     def test_standardize_song_reply_auto_resolve(self, _mock_verify, mock_resolve):
         mock_resolve.return_value = [{
             "id": "ueT3qH1GC5E",
@@ -113,7 +113,7 @@ class TestMusicMetadata(unittest.TestCase):
         self.assertNotIn("<song title>", res)
         self.assertIn("Here is your recommendation:", res)
 
-    @patch("src.skills.youtube.client.verify_embeddable", return_value=True)
+    @patch("src.skills.youtube.engine.client.verify_embeddable", return_value=True)
     def test_standardize_song_reply_preserves_user_mention(self, _mock_verify):
         mention_reply = (
             "<@123456789> Since you liked that track, here is another one:\n\n"
@@ -131,34 +131,34 @@ class TestEmbeddability(unittest.TestCase):
     """Test suite ensuring YouTube links are embeddable and playable in Discord."""
 
     def setUp(self):
-        from src.skills.youtube.client import clear_youtube_caches
+        from src.skills.youtube.engine.client import clear_youtube_caches
         from src.skills.music.playback.youtube_music import clear_resolved_music_cache
         clear_youtube_caches()
         clear_resolved_music_cache()
 
     def tearDown(self):
-        from src.skills.youtube.client import clear_youtube_caches
+        from src.skills.youtube.engine.client import clear_youtube_caches
         from src.skills.music.playback.youtube_music import clear_resolved_music_cache
         clear_youtube_caches()
         clear_resolved_music_cache()
 
     def test_verify_embeddable_invalid_id(self):
-        from src.skills.youtube.client import verify_embeddable
+        from src.skills.youtube.engine.client import verify_embeddable
         self.assertFalse(verify_embeddable(""))
         self.assertFalse(verify_embeddable("abc"))
         self.assertFalse(verify_embeddable("toolongvideoid12345"))
 
-    @patch("src.skills.youtube.client._HTTP_SESSION.get")
+    @patch("src.skills.youtube.engine.client._HTTP_SESSION.get")
     def test_verify_embeddable_oembed_unauthorized(self, mock_get):
-        from src.skills.youtube.client import verify_embeddable
+        from src.skills.youtube.engine.client import verify_embeddable
         mock_resp = MagicMock()
         mock_resp.status_code = 401
         mock_get.return_value = mock_resp
         self.assertFalse(verify_embeddable("12345678901"))
 
-    @patch("src.skills.youtube.client._HTTP_SESSION.get")
+    @patch("src.skills.youtube.engine.client._HTTP_SESSION.get")
     def test_verify_embeddable_markers(self, mock_get):
-        from src.skills.youtube.client import verify_embeddable, clear_youtube_caches
+        from src.skills.youtube.engine.client import verify_embeddable, clear_youtube_caches
         oembed_resp = MagicMock()
         oembed_resp.status_code = 200
 
@@ -181,9 +181,9 @@ class TestEmbeddability(unittest.TestCase):
                 any(call.kwargs.get("headers", {}).get("Referer") == "https://discord.com/" for call in mock_get.call_args_list)
             )
 
-    @patch("src.skills.youtube.client._HTTP_SESSION.get")
+    @patch("src.skills.youtube.engine.client._HTTP_SESSION.get")
     def test_verify_embeddable_success(self, mock_get):
-        from src.skills.youtube.client import verify_embeddable, get_video_oembed
+        from src.skills.youtube.engine.client import verify_embeddable, get_video_oembed
         oembed_resp = MagicMock()
         oembed_resp.status_code = 200
         oembed_resp.json.return_value = {"title": "Strobe", "author_name": "deadmau5 - Topic"}
@@ -200,9 +200,9 @@ class TestEmbeddability(unittest.TestCase):
         self.assertTrue(verify_embeddable("12345678901"))
         self.assertEqual(mock_get.call_count, 2)
 
-    @patch("src.skills.youtube.client.verify_embeddable")
+    @patch("src.skills.youtube.engine.client.verify_embeddable")
     @patch("src.skills.music.playback.youtube_music.resolve_youtube_music_link")
-    @patch("src.skills.music.utils.get_music_metadata")
+    @patch("src.skills.music.engine.formatting.get_music_metadata")
     def test_standardize_song_reply_unembeddable_auto_resolve(self, mock_get_meta, mock_resolve, mock_verify):
         mock_verify.return_value = False
         mock_get_meta.return_value = {"song": "Unembeddable Hit", "artist": "Secret Artist"}
@@ -293,12 +293,12 @@ class TestDeezerExpansion(unittest.TestCase):
         self.assertEqual(tracks[0].title, "Dracula")
         self.assertEqual(tracks[0].artist, "Tame Impala")
 
-    def test_skill_top_music_artist_alias_normalization(self):
+    def test_skill_music_discovery_artist_alias_normalization(self):
         from src.orchestrator import normalize_tool_args
-        from src.skills.music.top_music import skill_top_music
+        from src.skills.music.music import skill_music_discovery
         args = normalize_tool_args(
-            "skill_top_music",
-            skill_top_music,
+            "skill_music_discovery",
+            skill_music_discovery,
             {"artist_name": "Deadmau5", "style": "techno"}
         )
         self.assertEqual(args, {"artist": "Deadmau5", "genre": "techno"})
@@ -308,15 +308,15 @@ class TestMusicDiversityExpansion(unittest.TestCase):
     """Tests for session exclusion, multi-playlist pooling, multi-region/nationality charts, Beatport subgenres, and Last.fm rotation."""
 
     def setUp(self):
-        from src.skills.music.utils import RECENTLY_PLAYED_TRACKS
+        from src.skills.music.engine.formatting import RECENTLY_PLAYED_TRACKS
         RECENTLY_PLAYED_TRACKS.clear()
 
     def tearDown(self):
-        from src.skills.music.utils import RECENTLY_PLAYED_TRACKS
+        from src.skills.music.engine.formatting import RECENTLY_PLAYED_TRACKS
         RECENTLY_PLAYED_TRACKS.clear()
 
     def test_recently_played_exclusion_in_manager(self):
-        from src.skills.music.utils import record_played_track, is_recently_played
+        from src.skills.music.engine.formatting import record_played_track, is_recently_played
         from src.skills.music.aggregators.manager import MusicAggregatorManager
         from src.skills.music.models import Track
 
@@ -337,7 +337,7 @@ class TestMusicDiversityExpansion(unittest.TestCase):
     def test_unknown_song_similarity_fallback_marks_unrelated(self):
         from src.skills.music.aggregators.manager import MusicAggregatorManager
         from src.skills.music.models import Track
-        from src.skills.music.top_music import skill_top_music
+        from src.skills.music.music import skill_music_discovery
 
         mgr = MusicAggregatorManager()
         for name in ("lastfm", "deezer", "freqblog"):
@@ -351,10 +351,10 @@ class TestMusicDiversityExpansion(unittest.TestCase):
         self.assertEqual(tracks[0].source, "fallback_unrelated")
 
         with (
-            patch("src.skills.music.top_music.manager", mgr),
-            patch("src.skills.music.top_music._pre_resolve_top_candidate", return_value=""),
+            patch("src.skills.music.music.manager", mgr),
+            patch("src.skills.music.music._pre_resolve_top_candidate", return_value=""),
         ):
-            out = skill_top_music(similar_to="Completely Unknown Obscure Track 99999 by Nobody")
+            out = skill_music_discovery(similar_to="Completely Unknown Obscure Track 99999 by Nobody")
             self.assertIn("NO DIRECT SIMILAR SONGS FOUND", out)
             self.assertIn("couldn't find any directly related songs", out)
 
@@ -498,15 +498,15 @@ class TestMoodVibeDiscovery(unittest.TestCase):
     """Tests for mood/vibe parsing, standalone multi-genre vibe profiles, and genre+mood matrix."""
 
     def setUp(self):
-        from src.skills.music.utils import RECENTLY_PLAYED_TRACKS
+        from src.skills.music.engine.formatting import RECENTLY_PLAYED_TRACKS
         RECENTLY_PLAYED_TRACKS.clear()
 
     def tearDown(self):
-        from src.skills.music.utils import RECENTLY_PLAYED_TRACKS
+        from src.skills.music.engine.formatting import RECENTLY_PLAYED_TRACKS
         RECENTLY_PLAYED_TRACKS.clear()
 
     def test_parse_mood_and_genre(self):
-        from src.skills.music.moods import parse_mood_and_genre
+        from src.skills.music.engine.moods import parse_mood_and_genre
 
         # Standalone vibes passed via genre or mood
         self.assertEqual(parse_mood_and_genre(mood="banger"), (None, "banger"))
@@ -559,12 +559,12 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         self.assertEqual(dz_called_genres, {"Liquid Drum & Bass", "Melodic Drum and Bass"})
         self.assertTrue(len(melodic_dnb) >= 3)
 
-    def test_skill_top_music_mood_routing_and_alias(self):
+    def test_skill_music_discovery_mood_routing_and_alias(self):
         from src.orchestrator import normalize_tool_args
-        from src.skills.music.top_music import skill_top_music
+        from src.skills.music.music import skill_music_discovery
         from src.skills.music.models import Track
 
-        args = normalize_tool_args("skill_top_music", skill_top_music, {"vibe": "love"})
+        args = normalize_tool_args("skill_music_discovery", skill_music_discovery, {"vibe": "love"})
         self.assertEqual(args, {"mood": "love"})
 
         fake_mgr = MagicMock()
@@ -572,17 +572,17 @@ class TestMoodVibeDiscovery(unittest.TestCase):
             Track(title="Adorn", artist="Miguel", genre="R&B", source="deezer_love")
         ]
         with (
-            patch("src.skills.music.top_music.manager", fake_mgr),
-            patch("src.skills.music.top_music._pre_resolve_top_candidate", return_value=""),
+            patch("src.skills.music.music.manager", fake_mgr),
+            patch("src.skills.music.music._pre_resolve_top_candidate", return_value=""),
         ):
-            out = skill_top_music(mood="love")
+            out = skill_music_discovery(mood="love")
             fake_mgr.get_mood_tracks.assert_called_once_with(mood="love", genre=None)
             self.assertIn("TOP VIBE / MOOD SELECTION: LOVE (MULTI-GENRE MIX)", out)
             self.assertIn("Adorn by Miguel", out)
 
-    @patch("src.skills.music.top_music.resolve_youtube_music_link")
-    def test_skill_top_music_pre_resolves_and_skips_unembeddable(self, mock_resolve):
-        from src.skills.music.top_music import skill_top_music
+    @patch("src.skills.music.music.resolve_youtube_music_link")
+    def test_skill_music_discovery_pre_resolves_and_skips_unembeddable(self, mock_resolve):
+        from src.skills.music.music import skill_music_discovery
         from src.skills.music.models import Track
 
         fake_mgr = MagicMock()
@@ -602,17 +602,17 @@ class TestMoodVibeDiscovery(unittest.TestCase):
             }]
 
         mock_resolve.side_effect = fake_yt
-        with patch("src.skills.music.top_music.manager", fake_mgr):
-            out = skill_top_music(similar_to="Strobe by Deadmau5")
+        with patch("src.skills.music.music.manager", fake_mgr):
+            out = skill_music_discovery(similar_to="Strobe by Deadmau5")
             self.assertIn("=== VERIFIED YOUTUBE MUSIC RESULT (PRE-RESOLVED & READY TO PRESENT) ===", out)
             self.assertIn("Song: Playable Song", out)
             self.assertIn("Artist: Artist B", out)
             self.assertIn("Link: https://music.youtube.com/watch?v=playable123", out)
 
-    @patch("src.skills.youtube.client._HTTP_SESSION.head")
-    @patch("src.skills.youtube.client._HTTP_SESSION.get")
+    @patch("src.skills.youtube.engine.client._HTTP_SESSION.head")
+    @patch("src.skills.youtube.engine.client._HTTP_SESSION.get")
     def test_topic_channel_skips_short_head_request(self, mock_get, mock_head):
-        from src.skills.youtube.client import verify_embeddable, is_youtube_short, clear_youtube_caches
+        from src.skills.youtube.engine.client import verify_embeddable, is_youtube_short, clear_youtube_caches
         clear_youtube_caches()
 
         oembed_resp = MagicMock()
@@ -761,13 +761,13 @@ class TestMoodVibeDiscovery(unittest.TestCase):
     @patch("src.skills.music.playback.youtube_music.verify_embeddable")
     @patch("src.skills.music.playback.youtube_music.DDGS")
     def test_retry_exclusion_and_official_fallback_hierarchy(self, mock_ddgs, mock_verify, mock_oembed, mock_short, _mock_direct):
-        from src.skills.youtube.client import clear_youtube_caches, _OEMBED_CACHE
+        from src.skills.youtube.engine.client import clear_youtube_caches, _OEMBED_CACHE
         from src.skills.music.playback.youtube_music import (
             clear_resolved_music_cache,
             get_blocked_official_info,
             resolve_youtube_music_link,
         )
-        from src.skills.youtube.searcher import skill_youtube_searcher
+        from src.skills.youtube.youtube import skill_youtube_search
 
         clear_youtube_caches()
         clear_resolved_music_cache()
@@ -791,13 +791,13 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         mock_verify.side_effect = fake_verify
         mock_oembed.side_effect = lambda vid: _OEMBED_CACHE.get(vid, {"title": "", "author": ""})
 
-        out_fallback = skill_youtube_searcher("Lay Low by Snoop Dogg", max_results=1, is_music=True)
+        out_fallback = skill_youtube_search("Lay Low by Snoop Dogg", max_results=1, is_music=True)
         self.assertIn("https://music.youtube.com/watch?v=mG9UXeDvsTA", out_fallback)
         self.assertNotIn("-2f1baeNfLE", out_fallback)
         self.assertIsNotNone(get_blocked_official_info("Lay Low by Snoop Dogg"))
 
         # Verify standardize_song_reply preserves the official fallback URL even though verify_embeddable is False
-        with patch("src.skills.youtube.client.verify_embeddable", return_value=False):
+        with patch("src.skills.youtube.engine.client.verify_embeddable", return_value=False):
             card = standardize_song_reply(
                 "**Song:** Lay Low\n"
                 "**Artist:** Snoop Dogg\n\n"
@@ -839,11 +839,11 @@ class TestMoodVibeDiscovery(unittest.TestCase):
             "secondvid22": {"title": "Strobe (Radio Edit)", "author": "deadmau5 - Topic"},
         }[vid]
 
-        first_res = skill_youtube_searcher("Strobe by deadmau5", max_results=1, is_music=True)
+        first_res = skill_youtube_search("Strobe by deadmau5", max_results=1, is_music=True)
         self.assertIn("firstvid111", first_res)
 
         # Second call for the same song automatically excludes firstvid111 and serves secondvid22
-        second_res = skill_youtube_searcher("Strobe by deadmau5", max_results=1, is_music=True)
+        second_res = skill_youtube_search("Strobe by deadmau5", max_results=1, is_music=True)
         self.assertIn("secondvid22", second_res)
         self.assertNotIn("firstvid111", second_res)
 

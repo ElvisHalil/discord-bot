@@ -3,7 +3,7 @@ from unittest.mock import patch, MagicMock
 from datetime import datetime
 
 from src.skills.sports.aggregators.liquipedia import LiquipediaAggregator
-from src.skills.sports.csgo import skill_csgo_esports
+from src.skills.sports.sports import skill_sports_esports
 from src.orchestrator import normalize_tool_args
 
 
@@ -134,15 +134,15 @@ class TestLiquipediaAggregator(unittest.TestCase):
 
 class TestCsgoSkill(unittest.TestCase):
 
-    @patch("src.skills.sports.csgo._esl_aggregator.get_live_matches")
-    @patch("src.skills.sports.csgo._liquipedia_aggregator.get_s_tier_tournaments")
-    @patch("src.skills.sports.csgo._hltv_aggregator.get_rankings")
-    def test_skill_csgo_esports_all(self, mock_hltv, mock_liquipedia, mock_esl):
+    @patch("src.skills.sports.sports._esl_aggregator.get_live_matches")
+    @patch("src.skills.sports.sports._liquipedia_aggregator.get_s_tier_tournaments")
+    @patch("src.skills.sports.sports._hltv_aggregator.get_rankings")
+    def test_skill_sports_esports_all(self, mock_hltv, mock_liquipedia, mock_esl):
         mock_esl.return_value = "[LIVE ESL MATCHES]\nNo matches.\n"
         mock_liquipedia.return_value = "[CURRENT & UPCOMING S-TIER TOURNAMENTS (2026)]\n- Tourney\n"
         mock_hltv.return_value = "[HLTV TOP 7 WORLD RANKINGS]\n1. Spirit\n"
 
-        res = skill_csgo_esports(query_type="all")
+        res = skill_sports_esports(query_type="all")
 
         self.assertIn("COUNTER-STRIKE ESPORTS DATA", res)
         self.assertIn("No matches.", res)
@@ -153,18 +153,18 @@ class TestCsgoSkill(unittest.TestCase):
         self.assertIn("DO NOT create a prominent empty section", res)
         self.assertIn("MATCH SCHEDULE & RESULTS (Exact Times)", res)
 
-    @patch("src.skills.sports.csgo._liquipedia_aggregator.get_event_info")
-    @patch("src.skills.sports.csgo._liquipedia_aggregator.get_s_tier_tournaments")
-    def test_skill_csgo_esports_honors_event_page_across_query_types(self, mock_tournaments, mock_event_info):
+    @patch("src.skills.sports.sports._liquipedia_aggregator.get_event_info")
+    @patch("src.skills.sports.sports._liquipedia_aggregator.get_s_tier_tournaments")
+    def test_skill_sports_esports_honors_event_page_across_query_types(self, mock_tournaments, mock_event_info):
         mock_tournaments.return_value = "[CURRENT & UPCOMING S-TIER TOURNAMENTS]\n"
         mock_event_info.return_value = "=== EVENT DETAILS: Thunderpick/World_Championship/2026 ===\n"
 
-        res = skill_csgo_esports(query_type="tournaments", event_page="Thunderpick/World_Championship/2026")
+        res = skill_sports_esports(query_type="tournaments", event_page="Thunderpick/World_Championship/2026")
         mock_tournaments.assert_called_once_with(include_next_event_details=False)
         mock_event_info.assert_called_once_with("Thunderpick/World_Championship/2026")
         self.assertIn("EVENT DETAILS: Thunderpick/World_Championship/2026", res)
 
-    @patch("src.skills.sports.sports.skill_csgo_esports")
+    @patch("src.skills.sports.sports.skill_sports_esports")
     def test_sports_info_routes_cs_match_time_queries_to_schedule(self, mock_csgo):
         from src.skills.sports.sports import skill_sports_info
         mock_csgo.return_value = "CS SCHEDULE DATA"
@@ -173,7 +173,7 @@ class TestCsgoSkill(unittest.TestCase):
         mock_csgo.assert_called_once_with(query_type="tournaments", event_page=None)
         self.assertEqual(res, "CS SCHEDULE DATA")
 
-    @patch("src.skills.sports.sports.skill_csgo_esports")
+    @patch("src.skills.sports.sports.skill_sports_esports")
     def test_sports_info_routes_cs_player_stats_queries_to_player_stats(self, mock_csgo):
         from src.skills.sports.sports import skill_sports_info
         mock_csgo.return_value = "CS PLAYER STATS DATA"
@@ -240,7 +240,7 @@ class TestCsgoSkill(unittest.TestCase):
     def test_tool_arg_aliases_for_csgo(self):
         # Model passing 'category' or 'tournament' or 'type'
         args = {"type": "tournaments", "tournament": "ESL/Pro_League", "match": "Falcons vs NIP"}
-        norm = normalize_tool_args("skill_csgo_esports", skill_csgo_esports, args)
+        norm = normalize_tool_args("skill_sports_esports", skill_sports_esports, args)
         self.assertEqual(norm.get("query_type"), "tournaments")
         self.assertEqual(norm.get("event_page"), "ESL/Pro_League")
         self.assertEqual(norm.get("matchup"), "Falcons vs NIP")
@@ -284,7 +284,7 @@ class TestCsgoSkill(unittest.TestCase):
         self.assertIn("Thunderpick World Championship 2026 Finals - Day 3", out)
         self.assertIn("https://www.youtube.com/watch?v=7Ql1O23W-hk", out)
 
-    @patch("src.skills.sports.sports.skill_csgo_esports")
+    @patch("src.skills.sports.sports.skill_sports_esports")
     def test_sports_info_routes_cs_live_stream_queries_to_live_streams(self, mock_csgo):
         from src.skills.sports.sports import skill_sports_info
         mock_csgo.return_value = "[LIVE CS2 STREAMS]"
@@ -293,7 +293,7 @@ class TestCsgoSkill(unittest.TestCase):
         mock_csgo.assert_called_once_with(query_type="live_streams")
         self.assertEqual(res, "[LIVE CS2 STREAMS]")
 
-    @patch("src.skills.sports.sports.skill_csgo_esports")
+    @patch("src.skills.sports.sports.skill_sports_esports")
     def test_thunderpicks_and_blast_tournament_routing_and_group_records(self, mock_csgo):
         from bs4 import BeautifulSoup
         from src.skills.sports.sports import skill_sports_info
@@ -362,9 +362,9 @@ class TestOdds(unittest.TestCase):
             self.assertIn("- **Ninjas in Pyjamas**: 4.20 | Win probability: ~23.8%", res)
 
     def test_tool_arg_aliases_for_odds(self):
-        from src.skills.sports.odds import skill_betting_odds
+        from src.skills.sports.sports import skill_sports_odds
         args = {"matchup": "Falcons vs NIP", "category": "cs2"}
-        norm = normalize_tool_args("skill_betting_odds", skill_betting_odds, args)
+        norm = normalize_tool_args("skill_sports_odds", skill_sports_odds, args)
         self.assertEqual(norm.get("query"), "Falcons vs NIP")
         self.assertEqual(norm.get("sport"), "cs2")
 

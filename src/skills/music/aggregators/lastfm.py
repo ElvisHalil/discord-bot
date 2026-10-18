@@ -7,7 +7,7 @@ from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
 from src.skills.music.aggregators.base import BaseMusicAggregator
 from src.skills.music.models import Track
-from src.skills.music.utils import parse_song_meta
+from src.skills.music.engine.formatting import parse_song_meta
 from src.utils.workers import map_in_workers, submit_to_worker
 
 load_dotenv()
@@ -313,7 +313,7 @@ class LastFmAggregator(BaseMusicAggregator):
         tracks = []
         if genre and genre.lower() not in ("all", "general", "none"):
             from collections import Counter
-            from src.skills.music.utils import is_recently_played, RECENTLY_PLAYED_TRACKS, _norm_track_token
+            from src.skills.music.engine.formatting import is_recently_played, RECENTLY_PLAYED_TRACKS, _norm_track_token
             from src.skills.music.playback.youtube_music import is_garbage_music_title
             tag = genre.lower().strip()
             print(f"  └─ 📻 [Last.fm]: Fetching top tracks & verified genre artists for tag '{tag}'...")

@@ -1,12 +1,11 @@
-from src.skills.youtube.aggregators.base import BaseYouTubeSearchAggregator
+from src.skills.youtube.aggregators.base import BaseYouTubeAggregator
 from src.skills.youtube.aggregators.api import YouTubeApiAggregator
 from src.skills.youtube.aggregators.ddg import DuckDuckGoYouTubeAggregator
-from src.skills.youtube.aggregators.manager import YouTubeSearchManager
+from src.skills.youtube.aggregators.manager import YouTubeAggregatorManager
 
 __all__ = [
-    "BaseYouTubeSearchAggregator",
+    "BaseYouTubeAggregator",
     "YouTubeApiAggregator",
     "DuckDuckGoYouTubeAggregator",
-    "YouTubeSearchManager",
+    "YouTubeAggregatorManager",
 ]
-

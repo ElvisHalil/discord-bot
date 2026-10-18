@@ -697,7 +697,7 @@ class TestSkillSportsInfo(unittest.TestCase):
         self.assertIn("- **Edmonton Oilers**: 1.62 | Win probability: ~61.7%", res)
 
     @patch("src.skills.sports.aggregators.espn_utils.cached_espn_get", return_value=None)
-    @patch("src.skills.sports.sports.skill_csgo_esports")
+    @patch("src.skills.sports.sports.skill_sports_esports")
     @patch("src.skills.sports.aggregators.soccer.fetch_json")
     def test_multi_sport_cs_and_soccer_routing(self, mock_soccer_fetch, mock_csgo, _mock_espn_get):
         mock_csgo.return_value = "=== COUNTER-STRIKE ESPORTS DATA ===\n• Spirit vs Vitality [18:00 UTC]"
@@ -719,7 +719,7 @@ class TestSkillSportsInfo(unittest.TestCase):
         self.assertIn("Arsenal", res)
 
     @patch("src.skills.sports.aggregators.espn_utils.cached_espn_get", return_value=None)
-    @patch("src.skills.sports.sports.skill_csgo_esports")
+    @patch("src.skills.sports.sports.skill_sports_esports")
     @patch("src.skills.sports.aggregators.nba.fetch_json")
     def test_multi_sport_cs_rankings_and_nba_schedule_scoping(self, mock_nba_fetch, mock_csgo, _mock_espn_get):
         mock_csgo.return_value = "=== HLTV WORLD RANKINGS ===\n1. Team Spirit"

@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from src.skills.music.models import Track
-from src.skills.music.spectrum import (
+from src.skills.music.engine.spectrum import (
     SPECTRUM_CHART,
     ZONE_BY_NAME,
     classify_genre_to_zone,
@@ -14,8 +14,8 @@ from src.skills.music.spectrum import (
     get_channel_last_played_song,
     clear_channel_played_songs,
 )
-from src.skills.music.utils import format_song_card
-from src.skills.music.top_music import skill_top_music
+from src.skills.music.engine.formatting import format_song_card
+from src.skills.music.music import skill_music_discovery
 from src.orchestrator import (
     normalize_tool_args,
     enrich_music_tool_args,
@@ -163,7 +163,7 @@ class TestMusicSpectrumContextDisambiguation(unittest.TestCase):
         self.assertEqual(enriched.get("shift"), "harder")
 
         missed = detect_missed_music_shift_tool_call(history)
-        self.assertEqual(missed, ("skill_top_music", {"shift": "harder", "similar_to": "Nightcall by Kavinsky"}))
+        self.assertEqual(missed, ("skill_music_discovery", {"shift": "harder", "similar_to": "Nightcall by Kavinsky"}))
 
     def test_tier_1b_explicit_music_shift_accepted(self):
         user_msg = "User Alex says: play something faster and harder"
@@ -189,17 +189,17 @@ class TestMusicSpectrumContextDisambiguation(unittest.TestCase):
         ]
         self.assertTrue(is_valid_music_shift_context(history[-1]["content"], history))
         missed = detect_missed_music_shift_tool_call(history)
-        self.assertEqual(missed, ("skill_top_music", {"shift": "faster"}))
+        self.assertEqual(missed, ("skill_music_discovery", {"shift": "faster"}))
 
 
-class TestSkillTopMusicSpectrumIntegration(unittest.TestCase):
+class TestSkillMusicDiscoverySpectrumIntegration(unittest.TestCase):
     def setUp(self):
         clear_channel_played_songs()
 
-    @patch("src.skills.music.audio_analyzer.rank_candidates_by_acoustic_shift", side_effect=lambda pool, **kw: pool)
-    @patch("src.skills.music.audio_analyzer.get_track_acoustic_profile", return_value=None)
-    @patch("src.skills.music.top_music._pre_resolve_top_candidate", return_value="")
-    @patch("src.skills.music.top_music.manager")
+    @patch("src.skills.music.engine.dsp.rank_candidates_by_acoustic_shift", side_effect=lambda pool, **kw: pool)
+    @patch("src.skills.music.engine.dsp.get_track_acoustic_profile", return_value=None)
+    @patch("src.skills.music.music._pre_resolve_top_candidate", return_value="")
+    @patch("src.skills.music.music.manager")
     def test_chained_notches_from_playing_song(self, mock_manager, _mock_pre, _mock_prof, _mock_rank):
         # 1. Simulate a song card being formatted in the channel ("Holocene" by "Bon Iver", Indie Folk -> mid_soft)
         format_song_card(
@@ -230,48 +230,48 @@ class TestSkillTopMusicSpectrumIntegration(unittest.TestCase):
         ]
 
         # 2. User says "faster" -> moves 1 notch from mid_soft to fast_soft
-        out1 = skill_top_music(shift="faster")
+        out1 = skill_music_discovery(shift="faster")
         self.assertIn("New Target Zone: fast_soft", out1)
         self.assertEqual(get_channel_last_played_song()["ui_zone"], "fast_soft")
 
         # 3. User says "harder" -> moves 1 notch from fast_soft to fast_mid
-        out2 = skill_top_music(shift="harder")
+        out2 = skill_music_discovery(shift="harder")
         self.assertIn("New Target Zone: fast_mid", out2)
         self.assertEqual(get_channel_last_played_song()["ui_zone"], "fast_mid")
 
         # 4. User says "harder" -> moves 1 notch from fast_mid to fast_hard
-        out3 = skill_top_music(shift="harder")
+        out3 = skill_music_discovery(shift="harder")
         self.assertIn("New Target Zone: fast_hard", out3)
         self.assertEqual(get_channel_last_played_song()["ui_zone"], "fast_hard")
 
         # 5. User says "harder" again at boundary -> stays at fast_hard and uses deep_cut_tags
-        out4 = skill_top_music(shift="harder")
+        out4 = skill_music_discovery(shift="harder")
         self.assertIn("New Target Zone: fast_hard", out4)
         _, kwargs = mock_manager.get_spectrum_tracks.call_args
         self.assertTrue(kwargs.get("prefer_deep_cuts"))
 
-    @patch("src.skills.music.audio_analyzer.rank_candidates_by_acoustic_shift", side_effect=lambda pool, **kw: pool)
-    @patch("src.skills.music.audio_analyzer.get_track_acoustic_profile", return_value=None)
-    @patch("src.skills.music.top_music._pre_resolve_top_candidate", return_value="")
-    @patch("src.skills.music.top_music.manager")
+    @patch("src.skills.music.engine.dsp.rank_candidates_by_acoustic_shift", side_effect=lambda pool, **kw: pool)
+    @patch("src.skills.music.engine.dsp.get_track_acoustic_profile", return_value=None)
+    @patch("src.skills.music.music._pre_resolve_top_candidate", return_value="")
+    @patch("src.skills.music.music.manager")
     def test_default_center_start_when_no_song_playing(self, mock_manager, _mock_pre, _mock_prof, _mock_rank):
         mock_manager.resolve_track_genre_and_zone.return_value = (None, None)
         mock_manager.get_spectrum_tracks.return_value = [
             Track(title=" Neon Drive ", artist="Kavinsky", source="Deezer", genre="Synthwave")
         ]
 
-        out = skill_top_music(shift="faster")
+        out = skill_music_discovery(shift="faster")
         self.assertIn("DEFAULT CENTER START", out)
         self.assertIn("Starting Zone: mid_mid", out)
         self.assertIn("New Target Zone: fast_mid", out)
         self.assertEqual(get_channel_last_played_song()["ui_zone"], "fast_mid")
 
-    def test_skill_top_music_rejects_non_music_shift_string(self):
-        out = skill_top_music(shift="Is the RTX 5090 faster than the 4090?")
+    def test_skill_music_discovery_rejects_non_music_shift_string(self):
+        out = skill_music_discovery(shift="Is the RTX 5090 faster than the 4090?")
         self.assertIn("non-music comparison or domain question", out)
 
     def test_normalize_tool_args_maps_shift_aliases(self):
-        norm = normalize_tool_args("skill_top_music", skill_top_music, {"direction": "harder"})
+        norm = normalize_tool_args("skill_music_discovery", skill_music_discovery, {"direction": "harder"})
         self.assertEqual(norm, {"shift": "harder"})
 
 
