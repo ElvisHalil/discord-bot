@@ -138,15 +138,14 @@ pip install -r requirements.txt
 python main.py
 ```
 
-#### Option B: Run in a Hardened, Isolated Docker Container
-For complete filesystem isolation from the host machine:
-1. Ensure Ollama on the host accepts connections from the Docker bridge (`OLLAMA_HOST=0.0.0.0:11434`).
-2. Build and start the sandboxed container:
-   ```bash
-   docker compose up -d --build
-   ```
-   - **Zero Host Bind-Mounts**: No host folders are mounted into the container (`bot_data` and `bot_workspace` use isolated Docker-managed named volumes).
-   - **Read-Only Root Filesystem**: `/`, `/usr`, and `/app` are mounted read-only; the bot runs as an unprivileged user (`1000:1000`) with `cap_drop: [ALL]` and `no-new-privileges:true`.
+#### Option B: Run in a Hardened, Self-Contained Docker Stack (`ollama` + `discord-bot`)
+For complete filesystem and network isolation from the host machine:
+```bash
+docker compose up -d --build
+```
+- **Dedicated GPU `ollama` Container**: Runs `ollama/ollama` inside a sibling container on a private internal bridge network (`http://ollama:11434`) with GPU passthrough (`capabilities: [gpu]`) and an isolated `ollama_models` volume. Missing models in `MODES` are pulled automatically on first boot (`OLLAMA_AUTO_PULL=true`).
+- **Zero Host Bind-Mounts**: No host folders are mounted into either container (`ollama_models`, `bot_data`, and `bot_workspace` use isolated Docker-managed named volumes).
+- **Read-Only Root Filesystem**: `/`, `/usr`, and `/app` in `discord-bot` are mounted read-only; the bot runs as an unprivileged user (`1000:1000`) with `cap_drop: [ALL]` and `no-new-privileges:true`.
 
 ---
 

@@ -16,8 +16,66 @@ def get_ollama_base_url() -> str:
     return raw.rstrip("/")
 
 
+def ensure_ollama_models(base_url: str, models: list[str] | None = None) -> None:
+    """Verify configured Ollama models exist in the target Ollama instance and pull any missing ones."""
+    if models is None:
+        try:
+            from src.config import MODES
+        except ImportError:
+            from src.config_example_loader import MODES  # type: ignore[import-not-found]
+        except Exception:
+            MODES = {}
+        if not MODES:
+            try:
+                import importlib.util
+                from pathlib import Path
+                spec = importlib.util.spec_from_file_location(
+                    "src.config",
+                    Path(__file__).resolve().parent.parent / "config.example.py",
+                )
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    MODES = getattr(mod, "MODES", {})
+            except Exception:
+                MODES = {}
+        models = list(dict.fromkeys(m.get("model", "") for m in MODES.values() if m.get("model")))
+
+    if not models:
+        return
+
+    try:
+        tags_resp = requests.get(f"{base_url}/api/tags", timeout=5)
+        tags_resp.raise_for_status()
+        installed = {
+            m.get("name", "")
+            for m in (tags_resp.json() or {}).get("models", [])
+            if isinstance(m, dict) and m.get("name")
+        }
+    except Exception as e:
+        print(f"⚠️ [Boot] Could not query installed Ollama models at {base_url}: {e}")
+        return
+
+    for model_name in models:
+        if model_name in installed or f"{model_name}:latest" in installed:
+            continue
+        print(f"📥 [Boot] Pulling missing model '{model_name}' into Ollama ({base_url})...")
+        try:
+            pull_resp = requests.post(
+                f"{base_url}/api/pull",
+                json={"name": model_name, "stream": False},
+                timeout=1800,
+            )
+            if pull_resp.status_code == 200:
+                print(f"✅ [Boot] Model '{model_name}' is ready.")
+            else:
+                print(f"⚠️ [Boot] Ollama pull for '{model_name}' returned HTTP {pull_resp.status_code}: {pull_resp.text[:200]}")
+        except Exception as e:
+            print(f"⚠️ [Boot] Failed to pull model '{model_name}': {e}")
+
+
 def ensure_ollama_running():
-    """Checks if Ollama is running and starts it invisibly when running natively on localhost."""
+    """Checks if Ollama is running, starts it if running natively on localhost, and auto-pulls models when OLLAMA_AUTO_PULL=true."""
     base_url = get_ollama_base_url()
     print(f"⚙️ [Boot] Checking Ollama server status at {base_url}...")
     try:
@@ -42,8 +100,12 @@ def ensure_ollama_running():
         else:
             print(
                 f"⚠️ [Boot] Could not reach Ollama at {base_url}. "
-                "If running in Docker, ensure Ollama is running on the host with OLLAMA_HOST=0.0.0.0:11434."
+                "Ensure the 'ollama' container service or host server is running."
             )
+            return
+
+    if os.getenv("OLLAMA_AUTO_PULL", "").strip().lower() in ("1", "true", "yes", "on"):
+        ensure_ollama_models(base_url)
 
 
 def chunk_message(text: str, max_length: int = 1900) -> list[str]:

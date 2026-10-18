@@ -1,21 +1,46 @@
 services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: chappie-ollama
+    restart: unless-stopped
+    networks:
+      - bot_internal
+    volumes:
+      # Isolated Docker-managed named volume for LLM weights (zero host path mounts)
+      - ollama_models:/root/.ollama
+    # Pass host NVIDIA GPU into the Ollama container (Docker Desktop WSL2 / NVIDIA Container Toolkit)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
   discord-bot:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: chappie-discord-bot
     restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - bot_internal
 
     # Inject environment variables at runtime without mounting .env into the container
     env_file:
       - .env
     environment:
-      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
-
-    # Route host.docker.internal to the host gateway so the container can reach
-    # the host's GPU-accelerated Ollama server without host network mode
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
+      - OLLAMA_AUTO_PULL=${OLLAMA_AUTO_PULL:-true}
 
     # =========================================================================
     # STRICT SANDBOX & HOST FILESYSTEM ISOLATION
@@ -47,7 +72,11 @@ services:
     mem_limit: 2g
     cpus: 2.0
 
+networks:
+  bot_internal:
+    driver: bridge
+
 volumes:
+  ollama_models:
   bot_data:
   bot_workspace:
-

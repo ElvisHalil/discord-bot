@@ -1491,19 +1491,36 @@ class TestMultiUserDiscordChannelConcurrency(unittest.IsolatedAsyncioTestCase):
 
     def test_ollama_base_url_and_docker_boot_check(self):
         import requests
-        from src.utils.discord import ensure_ollama_running, get_ollama_base_url
+        from unittest.mock import MagicMock
+        from src.utils.discord import ensure_ollama_models, ensure_ollama_running, get_ollama_base_url
 
-        with patch.dict("os.environ", {"OLLAMA_HOST": "host.docker.internal:11434/"}, clear=False):
-            self.assertEqual(get_ollama_base_url(), "http://host.docker.internal:11434")
+        with patch.dict("os.environ", {"OLLAMA_HOST": "ollama:11434/"}, clear=False):
+            self.assertEqual(get_ollama_base_url(), "http://ollama:11434")
             with patch("src.utils.discord.requests.get", side_effect=requests.exceptions.ConnectionError("unreachable")), \
                  patch("src.utils.discord.subprocess.Popen") as mock_popen:
                 ensure_ollama_running()
-                # Must NOT attempt to spawn a local ollama subprocess when pointing at host.docker.internal
+                # Must NOT attempt to spawn a local ollama subprocess when pointing at the ollama container
                 mock_popen.assert_not_called()
+
+        mock_tags_resp = MagicMock()
+        mock_tags_resp.status_code = 200
+        mock_tags_resp.json.return_value = {"models": [{"name": "gemma4:e4b"}]}
+        mock_pull_resp = MagicMock()
+        mock_pull_resp.status_code = 200
+
+        with patch("src.utils.discord.requests.get", return_value=mock_tags_resp), \
+             patch("src.utils.discord.requests.post", return_value=mock_pull_resp) as mock_post:
+            ensure_ollama_models("http://ollama:11434", models=["gemma4:e4b", "qwen3:8b"])
+            mock_post.assert_called_once_with(
+                "http://ollama:11434/api/pull",
+                json={"name": "qwen3:8b", "stream": False},
+                timeout=1800,
+            )
 
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
