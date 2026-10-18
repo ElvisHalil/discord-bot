@@ -22,8 +22,8 @@ import re
 import types
 import typing
 
-from src.skills.flights.aggregators.prices import GoogleFlightsPriceAggregator
 from src.skills.flights.context import (
+    build_google_flights_url,
     detect_missed_flight_tool_call,
 )
 from src.skills.music.context import (
@@ -566,7 +566,7 @@ def _sync_google_flights_links_with_reply_dates(text: str) -> str:
                 return m.group(0)
 
             try:
-                rebuilt_url = GoogleFlightsPriceAggregator.build_google_flights_url(
+                rebuilt_url = build_google_flights_url(
                     origin_code=info["origin_code"],
                     dest_code=info["dest_code"],
                     date=new_dep,

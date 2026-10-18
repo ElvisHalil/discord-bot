@@ -14,3 +14,5 @@ numpy~=2.5
 miniaudio~=1.71
 fast-flights~=3.1
 FlightRadarAPI~=1.6
+primp~=0.15
+selectolax~=0.3

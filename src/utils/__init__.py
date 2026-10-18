@@ -1,7 +1,16 @@
+from src.utils.cache import (
+    BoundedCache,
+    BoundedSet,
+)
 from src.utils.discord import (
     ensure_ollama_running,
     chunk_message,
     suppress_discord_embeds,
+)
+from src.utils.dispatcher import (
+    dispatch_tracker_command,
+    extract_song_card_target,
+    resolve_reaction_recommendation,
 )
 from src.utils.http import (
     fetch_url,
@@ -11,6 +20,9 @@ from src.utils.http import (
     _fetch_public,
     _is_private_or_local_host,
     BlockedRedirectError,
+    ThreadLocalRequestsSession,
+    clear_http_caches,
+    decode_google_news_url,
 )
 from src.utils.timezones import (
     build_reference_clock,
@@ -28,9 +40,14 @@ from src.utils.workers import (
 )
 
 __all__ = [
+    "BoundedCache",
+    "BoundedSet",
     "ensure_ollama_running",
     "chunk_message",
     "suppress_discord_embeds",
+    "dispatch_tracker_command",
+    "extract_song_card_target",
+    "resolve_reaction_recommendation",
     "fetch_url",
     "fetch_soup",
     "fetch_json",
@@ -38,6 +55,9 @@ __all__ = [
     "_fetch_public",
     "_is_private_or_local_host",
     "BlockedRedirectError",
+    "ThreadLocalRequestsSession",
+    "clear_http_caches",
+    "decode_google_news_url",
     "build_reference_clock",
     "enrich_tool_output_with_time_context",
     "get_local_now",
@@ -49,4 +69,5 @@ __all__ = [
     "map_in_workers",
     "shutdown_worker_pool",
 ]
+
 

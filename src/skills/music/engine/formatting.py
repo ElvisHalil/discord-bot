@@ -12,8 +12,10 @@ from src.skills.music.context import (
     record_played_track,
 )
 
-# Global in-memory cache of resolved music metadata
-MUSIC_METADATA_CACHE = {}
+from src.utils.cache import BoundedCache
+
+# Global bounded in-memory cache of resolved music metadata
+MUSIC_METADATA_CACHE = BoundedCache(maxsize=512)
 
 __all__ = [
     "MUSIC_METADATA_CACHE",

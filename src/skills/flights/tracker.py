@@ -88,8 +88,15 @@ class FlightTrackerService:
             if target_loop and target_loop.is_running():
                 def _start():
                     if self._task is None or self._task.done():
-                        self._task = asyncio.create_task(self._poll_loop())
+                        self._task = target_loop.create_task(self._poll_loop())
                 target_loop.call_soon_threadsafe(_start)
+
+    def shutdown(self) -> None:
+        """Cleanly cancel the background polling task and clear ephemeral flight state on process exit."""
+        self.tracked_flights.clear()
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            self._task = None
 
     @staticmethod
     def diff_flight_snapshots(

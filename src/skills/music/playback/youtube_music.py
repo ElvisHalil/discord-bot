@@ -7,29 +7,30 @@ from dotenv import load_dotenv
 from ddgs import DDGS
 from src.skills.music.engine.formatting import parse_song_meta, MUSIC_METADATA_CACHE, record_played_track
 from src.skills.youtube.engine.client import (
-    verify_embeddable,
+    get_cached_oembed,
     get_video_oembed,
     is_youtube_short,
-    _OEMBED_CACHE,
-    _http_get,
+    verify_embeddable,
+    youtube_http_get,
 )
+from src.utils.cache import BoundedCache
 from src.utils.workers import map_in_workers
 
 load_dotenv()
 
 # 15-minute cache for resolved YouTube Music queries (eliminates duplicate DDGS + HTTP lookups when pre-resolved in skill_music_discovery)
-_RESOLVED_MUSIC_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_RESOLVED_MUSIC_CACHE: dict[str, tuple[float, list[dict]]] = BoundedCache(maxsize=256)
 _RESOLVED_MUSIC_TTL = 900.0
 
 # Short-lived negative cache (15s) to prevent duplicate lookups within the same turn when all uploads are blocked
-_FAILED_MUSIC_CACHE: dict[str, float] = {}
+_FAILED_MUSIC_CACHE: dict[str, float] = BoundedCache(maxsize=256)
 _FAILED_MUSIC_TTL = 15.0
 
 # Tracks queries where official Topic/VEVO/Artist uploads were found on YouTube but blocked from Discord embedding by the label
-_LAST_BLOCKED_OFFICIAL: dict[str, dict] = {}
+_LAST_BLOCKED_OFFICIAL: dict[str, dict] = BoundedCache(maxsize=256)
 
 # Tracks video IDs already presented in Discord song cards per normalized song/query so retries pick a different link
-SERVED_SONG_VIDS: dict[str, set[str]] = {}
+SERVED_SONG_VIDS: dict[str, set[str]] = BoundedCache(maxsize=256)
 
 
 def _norm_lookup_key(query: str) -> str:
@@ -247,7 +248,7 @@ def _fetch_direct_youtube_video_ids(yt_q: str, limit: int) -> list[str]:
     try:
         print(f"  └─ 🔍 [YouTube Direct]: Querying '{yt_q}'...")
         yt_search_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(yt_q)}"
-        r_yt = _http_get(
+        r_yt = youtube_http_get(
             yt_search_url,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
             timeout=3.5,
@@ -328,7 +329,7 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
         # 2. Embeddability check (with Discord third-party Referer/origin; also populates _OEMBED_CACHE
         # and marks '- Topic' art tracks as non-Shorts in _SHORT_CACHE so step 3 is 0ms!)
         if not verify_embeddable(vid):
-            cached_oe = _OEMBED_CACHE.get(vid) or get_video_oembed(vid)
+            cached_oe = get_cached_oembed(vid) or get_video_oembed(vid)
             b_title = (cached_oe or {}).get("title", "")
             b_author = (cached_oe or {}).get("author", "")
             if b_title and not is_youtube_short(vid, href=href, title=b_title):

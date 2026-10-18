@@ -8,13 +8,17 @@ import re
 from typing import Dict, Optional, Tuple, Union
 
 from src.context import get_active_channel_id
+from src.skills.flights.aggregators.prices import GoogleFlightsPriceAggregator
 from src.skills.flights.catalogs import MONTH_MAP as _MONTH_MAP
 from src.skills.flights.enums import FlightTrackerAction
 from src.skills.flights.models import AirportRecord, FlightSearchState
+from src.utils.cache import BoundedCache
 
-_CHANNEL_FLIGHT_STATE: Dict[int, FlightSearchState] = {}
-_CHANNEL_LAST_ROUTE: Dict[int, Tuple[Union[AirportRecord, Tuple[str, str, str, str]], Union[AirportRecord, Tuple[str, str, str, str]]]] = {}
-_CHANNEL_LAST_WINDOW: Dict[int, dict] = {}
+build_google_flights_url = GoogleFlightsPriceAggregator.build_google_flights_url
+
+_CHANNEL_FLIGHT_STATE: Dict[int, FlightSearchState] = BoundedCache(maxsize=128)
+_CHANNEL_LAST_ROUTE: Dict[int, Tuple[Union[AirportRecord, Tuple[str, str, str, str]], Union[AirportRecord, Tuple[str, str, str, str]]]] = BoundedCache(maxsize=128)
+_CHANNEL_LAST_WINDOW: Dict[int, dict] = BoundedCache(maxsize=128)
 
 
 def _resolve_cid(channel_id: Optional[int] = None) -> int:

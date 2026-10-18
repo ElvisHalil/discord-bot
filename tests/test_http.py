@@ -7,9 +7,13 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+from src.utils.cache import BoundedCache, BoundedSet
+from src.utils.dispatcher import extract_song_card_target
 from src.utils.http import (
     _is_private_or_local_host,
     BlockedRedirectError,
+    ThreadLocalRequestsSession,
+    clear_http_caches,
     fetch_url,
     fetch_soup,
     fetch_json,
@@ -22,11 +26,13 @@ class TestHttpClient(unittest.TestCase):
     """Test suite for centralized stealth HTTP client and SSRF protection."""
 
     def test_ssrf_host_detection(self):
-        # Localhost and loopback
+        # Localhost and loopback (IPv4 and IPv6)
         self.assertTrue(_is_private_or_local_host("localhost"))
         self.assertTrue(_is_private_or_local_host("127.0.0.1"))
         self.assertTrue(_is_private_or_local_host("127.0.0.2"))
         self.assertTrue(_is_private_or_local_host("::1"))
+        self.assertTrue(_is_private_or_local_host("fe80::1"))
+        self.assertTrue(_is_private_or_local_host("::ffff:127.0.0.1"))
         self.assertTrue(_is_private_or_local_host("0.0.0.0"))
 
         # Private / link-local / cloud metadata ranges
@@ -45,6 +51,68 @@ class TestHttpClient(unittest.TestCase):
         self.assertFalse(_is_private_or_local_host("example.com"))
         self.assertFalse(_is_private_or_local_host("google.com"))
         self.assertFalse(_is_private_or_local_host("api.deezer.com"))
+
+    @patch("src.utils.http.socket.getaddrinfo")
+    def test_ssrf_dns_ipv6_rebind_blocked(self, mock_getaddrinfo):
+        clear_http_caches()
+        mock_getaddrinfo.return_value = [
+            (10, 1, 6, "", ("::1", 80, 0, 0)),
+        ]
+        self.assertTrue(_is_private_or_local_host("evil-ipv6-rebind.example.org"))
+        clear_http_caches()
+
+    def test_bounded_cache_and_set_eviction(self):
+        cache = BoundedCache(maxsize=3)
+        cache["a"] = 1
+        cache["b"] = 2
+        cache["c"] = 3
+        # Touch "a" so "b" becomes least-recently-used
+        _ = cache.get("a")
+        cache["d"] = 4
+        self.assertEqual(list(cache.keys()), ["c", "a", "d"])
+        self.assertNotIn("b", cache)
+
+        bset = BoundedSet(maxsize=2)
+        bset.add("x")
+        bset.add("y")
+        bset.add("z")
+        self.assertEqual(len(bset), 2)
+        self.assertNotIn("x", bset)
+        self.assertIn("y", bset)
+        self.assertIn("z", bset)
+
+    def test_thread_local_requests_session_isolation(self):
+        import threading
+
+        tls_session = ThreadLocalRequestsSession(headers={"User-Agent": "TestAgent"})
+        sessions = []
+
+        def _worker():
+            sessions.append(tls_session._get_session())
+
+        t1 = threading.Thread(target=_worker)
+        t2 = threading.Thread(target=_worker)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        self.assertEqual(len(sessions), 2)
+        self.assertIsNot(sessions[0], sessions[1])
+        self.assertEqual(sessions[0].headers.get("User-Agent"), "TestAgent")
+
+    def test_extract_song_card_target(self):
+        card = (
+            "**Song:** Midnight City (Official Video)\n"
+            "**Artist:** M83\n"
+            "**Genre:** Synthpop\n"
+            "https://music.youtube.com/watch?v=dX3k_QDnzHE"
+        )
+        parsed = extract_song_card_target(card)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["clean_title"], "Midnight City")
+        self.assertEqual(parsed["orig_artist"], "M83")
+        self.assertEqual(parsed["search_query"], "Midnight City by M83")
+        self.assertEqual(parsed["video_id"], "dX3k_QDnzHE")
 
     def test_direct_private_target_blocked(self):
         with self.assertRaises(BlockedRedirectError):
@@ -124,5 +192,6 @@ class TestBeatportGracefulFallback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

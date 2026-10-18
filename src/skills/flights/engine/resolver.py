@@ -36,12 +36,13 @@ from src.skills.flights.models import (
     GatewayAirportRecord,
     NearbyHubRecord,
 )
+from src.utils.cache import BoundedCache
 from src.utils.timezones import get_local_now
 
 logger = logging.getLogger(__name__)
 
-# In-memory cache for Flightradar24 dynamic airport lookups
-_AIRPORT_RESOLVE_CACHE: dict[str, Optional[AirportRecord]] = {}
+# Bounded in-memory cache for Flightradar24 dynamic airport lookups
+_AIRPORT_RESOLVE_CACHE: dict[str, Optional[AirportRecord]] = BoundedCache(maxsize=512)
 
 
 def resolve_airport(location: Optional[str]) -> Optional[AirportRecord]:
@@ -78,6 +79,8 @@ def resolve_airport(location: Optional[str]) -> Optional[AirportRecord]:
         cand = m_iata.group(1).lower()
         if cand in AIRPORT_DIRECTORY:
             return AIRPORT_DIRECTORY[cand]
+        if cand in _AIRPORT_RESOLVE_CACHE and _AIRPORT_RESOLVE_CACHE[cand] is not None:
+            return _AIRPORT_RESOLVE_CACHE[cand]
 
     # 3. Substring match against multi-word city keys (longest first)
     for key in sorted(AIRPORT_DIRECTORY.keys(), key=len, reverse=True):
@@ -107,8 +110,7 @@ def resolve_airport(location: Optional[str]) -> Optional[AirportRecord]:
                     city_name = label.split("(")[0].strip()
                     resolved = AirportRecord(iata_up, label, city_name, "")
                     _AIRPORT_RESOLVE_CACHE[cleaned] = resolved
-                    AIRPORT_DIRECTORY[cleaned] = resolved
-                    AIRPORT_DIRECTORY[iata_up.lower()] = resolved
+                    _AIRPORT_RESOLVE_CACHE[iata_up.lower()] = resolved
                     return resolved
         except Exception as e:
             logger.debug(f"FlightRadar24 airport search fallback failed for '{cleaned}': {e}")

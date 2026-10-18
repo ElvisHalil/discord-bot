@@ -21,6 +21,7 @@ from src.skills.flights.catalogs import (
     NEARBY_HUB_AIRPORTS,
     ORIGIN_INTERNATIONAL_GATEWAYS,
 )
+from src.utils.cache import BoundedCache
 from src.utils.timezones import get_local_now
 from src.utils.workers import submit_to_worker
 
@@ -35,9 +36,9 @@ class GoogleFlightsPriceAggregator(BaseFlightAggregator):
     """
 
     def __init__(self):
-        self._cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._cache: BoundedCache = BoundedCache(maxsize=128)
         self._cache_ttl = 300.0  # 5-minute TTL for identical route/date queries
-        self._horizon_cache: dict[str, tuple[float, Optional[dict[str, Any]]]] = {}
+        self._horizon_cache: BoundedCache = BoundedCache(maxsize=64)
         self._horizon_ttl = 3600.0  # 1-hour TTL for route schedule horizon discovery
 
     @staticmethod

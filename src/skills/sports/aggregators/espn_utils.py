@@ -8,20 +8,22 @@ from requests.adapters import HTTPAdapter
 
 from src.context import get_active_channel_id, set_active_channel_id
 from src.utils import timezones
+from src.utils.cache import BoundedCache
 from src.utils.domain_vocab import compile_phrase_stripper, compile_word_boundary_re
+from src.utils.http import ThreadLocalRequestsSession
 from src.utils.workers import map_in_workers
 
 logger = logging.getLogger(__name__)
 
-_SESSION = requests.Session()
-_ADAPTER = HTTPAdapter(pool_connections=24, pool_maxsize=24)
-_SESSION.mount("https://", _ADAPTER)
-_SESSION.mount("http://", _ADAPTER)
-_SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-})
+_SESSION = ThreadLocalRequestsSession(
+    pool_connections=24,
+    pool_maxsize=24,
+    headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    },
+)
 
-_CACHE: Dict[str, Tuple[float, Any]] = {}
+_CACHE: Dict[str, Tuple[float, Any]] = BoundedCache(maxsize=512)
 
 
 def clear_espn_cache() -> None:

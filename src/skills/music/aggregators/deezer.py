@@ -6,20 +6,19 @@ import requests
 from requests.adapters import HTTPAdapter
 from src.skills.music.aggregators.base import BaseMusicAggregator
 from src.skills.music.models import Track
+from src.utils.cache import BoundedCache
+from src.utils.http import ThreadLocalRequestsSession
 from src.utils.workers import map_in_workers
 
-_HTTP_SESSION = requests.Session()
-_adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20)
-_HTTP_SESSION.mount("https://", _adapter)
-_HTTP_SESSION.mount("http://", _adapter)
+_HTTP_SESSION = ThreadLocalRequestsSession(pool_connections=10, pool_maxsize=20)
 
 def _http_get(url: str, **kwargs):
     return _HTTP_SESSION.get(url, **kwargs)
 
 # 15-minute TTL cache for raw upstream Deezer lists (playlist searches, 40-track playlist pools, chart pools)
 # Random sampling still runs fresh on every call to preserve 100% track/artist diversity.
-_DEEZER_RAW_CACHE: dict[str, tuple[float, list]] = {}
-_DEEZER_TRACK_DETAIL_CACHE: dict[str, tuple[float, dict]] = {}
+_DEEZER_RAW_CACHE: dict[str, tuple[float, list]] = BoundedCache(maxsize=256)
+_DEEZER_TRACK_DETAIL_CACHE: dict[str, tuple[float, dict]] = BoundedCache(maxsize=512)
 _DEEZER_CACHE_TTL = 900.0
 
 def clear_deezer_cache() -> None:

@@ -39,7 +39,14 @@ from src.skills.sports.tracker import (
     SPORTS_TRACKER,
     skill_sports_tracker,
 )
-from src.utils import chunk_message, run_in_worker
+from src.utils.cache import BoundedCache, BoundedSet
+from src.utils.discord import chunk_message
+from src.utils.dispatcher import (
+    dispatch_tracker_command,
+    extract_song_card_target,
+    resolve_reaction_recommendation,
+)
+from src.utils.workers import run_in_worker
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
@@ -50,9 +57,9 @@ _TG_CHANNEL_MAP: Dict[int, int] = {}
 
 # Bounded cache of song cards sent on Telegram: (chat_id, message_id) -> text
 # Allows 👍 reactions on Telegram to look up the song card text without a fetch_message API.
-_SENT_SONG_CARDS: Dict[Tuple[int, int], str] = {}
-_HANDLED_TG_REACTIONS: Set[Tuple[int, int, int]] = set()
 _MAX_SONG_CARD_CACHE = 500
+_SENT_SONG_CARDS: BoundedCache[Tuple[int, int], str] = BoundedCache(maxsize=_MAX_SONG_CARD_CACHE)
+_HANDLED_TG_REACTIONS: BoundedSet[Tuple[int, int, int]] = BoundedSet(maxsize=2000)
 
 
 def is_telegram_enabled() -> bool:
@@ -205,8 +212,6 @@ async def send_telegram_message(channel_or_chat_id: int, text: str, token: Optio
         if res and res.get("ok") and isinstance(res.get("result"), dict):
             last_msg_id = res["result"].get("message_id")
             if "music.youtube.com/watch?v=" in chunk and last_msg_id is not None:
-                if len(_SENT_SONG_CARDS) >= _MAX_SONG_CARD_CACHE:
-                    _SENT_SONG_CARDS.clear()
                 _SENT_SONG_CARDS[(chat_id, int(last_msg_id))] = chunk
 
     return last_msg_id
@@ -317,72 +322,37 @@ async def _handle_telegram_reaction(
         return
 
     card_text = _SENT_SONG_CARDS.get((int(chat_id), int(message_id)))
-    if not card_text:
+    card_target = extract_song_card_target(card_text or "")
+    if not card_target:
         return
 
     reaction_key = (int(chat_id), int(message_id), int(user_id))
     if reaction_key in _HANDLED_TG_REACTIONS:
         return
-    if len(_HANDLED_TG_REACTIONS) >= 2000:
-        _HANDLED_TG_REACTIONS.clear()
     _HANDLED_TG_REACTIONS.add(reaction_key)
 
-    m_card_song = re.search(r"(?im)^\s*(?:\*\*)?(?:Song|Track):\*{0,2}\s*(.+)", card_text)
-    m_card_art = re.search(r"(?im)^\s*(?:\*\*)?Artist:\*{0,2}\s*(.+)", card_text)
-    if not (m_card_song and m_card_art and "music.youtube.com/" in card_text):
-        return
-
-    orig_title = m_card_song.group(1).strip()
-    orig_artist = m_card_art.group(1).strip()
+    orig_title = card_target["orig_title"]
+    orig_artist = card_target["orig_artist"]
     user_display = user.get("first_name") or user.get("username") or "User"
     user_tag = f"@{user['username']}" if user.get("username") else user_display
     internal_cid = to_tg_channel_id(int(chat_id))
 
     await run_in_worker(_tg_api_post, bot_token, "sendChatAction", {"chat_id": chat_id, "action": "typing"}, 10)
 
-    clean_title = re.sub(r"[\(\[\{].*?(?:official|video|audio|lyrics|visualizer|download|remastered|hd|4k|hq|mix).*?[\)\]\}]", "", orig_title, flags=re.IGNORECASE)
-    clean_title = re.sub(r"[\(\[\{](?:feat\.|ft\.).*?[\)\]\}]", "", clean_title, flags=re.IGNORECASE)
-    if " - " in clean_title:
-        parts = clean_title.split(" - ", 1)
-        orig_artist = parts[0].strip()
-        clean_title = parts[1].strip()
-    clean_title = re.sub(r"[\(\[\{].*?[\)\]\}]", "", clean_title).strip()
-    clean_title = re.sub(r"[-–—|/].*$", "", clean_title).strip() or orig_title
-    search_query = f"{clean_title} by {orig_artist}".strip() if orig_artist else clean_title
-
-    set_active_channel_id(internal_cid)
-    similar_res = await run_in_worker(tools.skill_music_discovery, similar_to=search_query)
-    verified_url = None
-    chosen_track = None
-    if "=== VERIFIED YOUTUBE MUSIC RESULT" in similar_res:
-        pre_block = similar_res.split("=== VERIFIED YOUTUBE MUSIC RESULT", 1)[1]
-        m_pre_song = re.search(r"(?m)^Song:\s*(.+)$", pre_block)
-        m_pre_art = re.search(r"(?m)^Artist:\s*(.+)$", pre_block)
-        m_pre_url = re.search(r"(?m)^Link:\s*(https:\/\/(?:music|www)\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})", pre_block)
-        if m_pre_url and m_pre_song and m_pre_art:
-            verified_url = m_pre_url.group(1).replace("www.youtube.com", "music.youtube.com")
-            chosen_track = f"{m_pre_song.group(1).strip()} by {m_pre_art.group(1).strip()}"
-
-    if not verified_url or not chosen_track:
-        similar_tracks = [
-            line[2:].strip()
-            for line in similar_res.split("\n")
-            if line.strip().startswith("- ") and clean_title.lower() not in line.lower()
-        ]
-        random.shuffle(similar_tracks)
-        for candidate in similar_tracks[:4]:
-            yt_output = await run_in_worker(tools.skill_youtube_search, candidate, max_results=1, is_music=True)
-            m_url = re.search(r"(https:\/\/(?:music|www)\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})", yt_output)
-            if m_url:
-                verified_url = m_url.group(1).replace("www.youtube.com", "music.youtube.com")
-                chosen_track = candidate
-                break
-
+    rec = await resolve_reaction_recommendation(
+        channel_id=internal_cid,
+        card_target=card_target,
+        music_discovery_fn=tools.skill_music_discovery,
+        youtube_search_fn=tools.skill_youtube_search,
+        allow_chart_fallback=False,
+        max_candidates=4,
+    )
+    verified_url = rec["verified_url"]
+    chosen_track = rec["chosen_track"]
+    vid = rec["vid"]
     if not verified_url or not chosen_track:
         return
 
-    m_vid = re.search(r"watch\?v=([0-9A-Za-z_-]{11})", verified_url)
-    vid = m_vid.group(1) if m_vid else None
     meta = await run_in_worker(get_music_metadata, vid, fallback_text=chosen_track)
     intro_text = f"{user_tag} Here is a song similar to **{orig_title}** by **{orig_artist}**:"
     final_reply = format_song_card(
@@ -518,46 +488,16 @@ async def handle_telegram_update(
         await send_telegram_message(internal_cid, "🧹 Memory and context wiped for this chat.", token=bot_token)
         return
 
-    if low_input.startswith("!trackflight "):
-        target_q = normalized_input[13:].strip()
-        set_active_channel_id(internal_cid)
-        res = await run_in_worker(skill_flight_tracker, action="start", query=target_q)
-        FLIGHT_TRACKER.ensure_loop_running()
-        await send_telegram_message(internal_cid, res, token=bot_token)
-        return
-
-    if low_input.startswith("!untrackflight"):
-        target_q = normalized_input[14:].strip()
-        set_active_channel_id(internal_cid)
-        res = await run_in_worker(skill_flight_tracker, action="stop", query=target_q)
-        await send_telegram_message(internal_cid, res, token=bot_token)
-        return
-
-    if low_input in ("!trackedflights", "!trackflight"):
-        set_active_channel_id(internal_cid)
-        res = await run_in_worker(skill_flight_tracker, action="list")
-        await send_telegram_message(internal_cid, res, token=bot_token)
-        return
-
-    if low_input.startswith("!track "):
-        target_q = normalized_input[7:].strip()
-        set_active_channel_id(internal_cid)
-        res = await run_in_worker(skill_sports_tracker, action="start", query=target_q)
-        SPORTS_TRACKER.ensure_loop_running()
-        await send_telegram_message(internal_cid, res, token=bot_token)
-        return
-
-    if low_input.startswith("!untrack"):
-        target_q = normalized_input[8:].strip()
-        set_active_channel_id(internal_cid)
-        res = await run_in_worker(skill_sports_tracker, action="stop", query=target_q)
-        await send_telegram_message(internal_cid, res, token=bot_token)
-        return
-
-    if low_input in ("!tracked", "!track"):
-        set_active_channel_id(internal_cid)
-        res = await run_in_worker(skill_sports_tracker, action="list")
-        await send_telegram_message(internal_cid, res, token=bot_token)
+    tracker_res = await dispatch_tracker_command(
+        text=normalized_input,
+        channel_id=internal_cid,
+        flight_tracker_fn=skill_flight_tracker,
+        flight_tracker_service=FLIGHT_TRACKER,
+        sports_tracker_fn=skill_sports_tracker,
+        sports_tracker_service=SPORTS_TRACKER,
+    )
+    if tracker_res is not None:
+        await send_telegram_message(internal_cid, tracker_res, token=bot_token)
         return
 
     # 3. In group chats, only respond when @mentioned or replied to

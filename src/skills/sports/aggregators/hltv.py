@@ -4,10 +4,11 @@ from typing import Optional
 from urllib.parse import quote_plus
 from src.skills.sports.aggregators.base import BaseSportsAggregator
 from src.skills.sports.catalogs import HLTV_STOPWORDS, HLTV_TEAM_ALIASES
+from src.utils.cache import BoundedCache
 from src.utils.http import fetch_soup
 from src.utils.workers import submit_to_worker
 
-_HLTV_CACHE: dict[str, tuple[float, object]] = {}
+_HLTV_CACHE: dict[str, tuple[float, object]] = BoundedCache(maxsize=128)
 _HLTV_CACHE_TTL = 600  # 10 minutes
 
 

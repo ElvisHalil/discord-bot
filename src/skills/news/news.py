@@ -31,6 +31,8 @@ from src.skills.news.catalogs import (
 from src.skills.news.enums import NewsTopic
 from src.skills.news.models import NewsEdition
 from src.skills.news.templates import HEADLINES_INSTRUCTIONS
+from src.utils.cache import BoundedCache
+from src.utils.http import decode_google_news_url as _http_decode_google_news_url
 from src.utils.workers import map_in_workers
 
 logger = logging.getLogger(__name__)
@@ -42,41 +44,12 @@ _UA = {
 
 MAX_HEADLINES = 8
 CACHE_TTL_SECONDS = 600
-_CACHE = {}
+_CACHE = BoundedCache(maxsize=128)
 
 
 def decode_google_news_url(url: str, timeout: float = 8.0) -> Optional[str]:
     """Resolve a news.google.com/rss/articles/... link to the publisher's URL, or None."""
-    try:
-        parsed = urlparse(url)
-        if parsed.hostname != "news.google.com" or "/articles/" not in parsed.path:
-            return None
-        article_id = parsed.path.rstrip("/").split("/")[-1]
-        page = requests.get(f"https://news.google.com/rss/articles/{article_id}", headers=_UA, timeout=timeout)
-        div = BeautifulSoup(page.text, "html.parser").select_one("c-wiz > div[jscontroller]")
-        if div is None or not div.get("data-n-a-sg") or not div.get("data-n-a-ts"):
-            return None
-        inner = [
-            "garturlreq",
-            [["X", "X", ["X", "X"], None, None, 1, 1, "US:en", None, 1, None, None, None, None, None, 0, 1],
-             "X", "X", 1, [1, 1, 1], 1, 1, None, 0, 0, None, 0],
-            article_id, int(div["data-n-a-ts"]), div["data-n-a-sg"],
-        ]
-        payload = [[["Fbv4je", json.dumps(inner), None, "generic"]]]
-        resp = requests.post(
-            "https://news.google.com/_/DotsSplashUi/data/batchexecute",
-            headers={**_UA, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
-            data=f"f.req={quote(json.dumps(payload))}",
-            timeout=timeout,
-        )
-        if resp.status_code != 200:
-            return None
-        data = json.loads(resp.text.split("\n\n")[1])[:-2]
-        decoded = json.loads(data[0][2])[1]
-        return decoded if isinstance(decoded, str) and decoded.startswith("http") else None
-    except Exception as e:
-        logger.debug(f"decode_google_news_url failed for {url}: {e}")
-        return None
+    return _http_decode_google_news_url(url)
 
 
 def _build_feed_url(region: str, topic: str):

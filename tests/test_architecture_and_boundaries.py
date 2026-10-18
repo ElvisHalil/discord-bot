@@ -156,7 +156,7 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
 
     def test_zero_mock_inspection_in_production_src(self):
         """Production code in src/ must never inspect unittest.mock attributes."""
-        forbidden_tokens = ("assert_called", "_mock_name", "_is_manager_mocked", "MagicMock")
+        forbidden_tokens = ("assert_called", "_mock_name", "_is_manager_mocked", "MagicMock", "side_effect")
         violations: list[str] = []
 
         for py_file in SRC_ROOT.rglob("*.py"):

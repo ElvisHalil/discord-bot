@@ -50,24 +50,38 @@ def evaluate_math(expression: str) -> str:
     except Exception as e:
         return f"Math error: {e}"
 
+MAX_MEMORIES = 200
+
+
 def save_memory(fact: str) -> str:
     """Save a permanent fact, preference, or rule about the user.
 
     Args:
         fact: One short, self-contained statement to remember about the user.
     """
+    fact_clean = (fact or "").strip()
+    if not fact_clean:
+        return "Memory is empty; nothing saved."
     mem_file = _get_active_memory_file()
-    print(f"💾 [Saving Memory to {mem_file}]: {fact}")
+    print(f"💾 [Saving Memory to {mem_file}]: {fact_clean}")
     with _MEMORY_LOCK:
         memories = []
         if os.path.exists(mem_file):
             try:
                 with open(mem_file, "r", encoding="utf-8") as f:
-                    memories = json.load(f)
+                    loaded = json.load(f)
+                if isinstance(loaded, list):
+                    memories = [m for m in loaded if isinstance(m, str)]
             except Exception:
                 memories = []
 
-        memories.append(fact)
+        # Deduplicate case-insensitively while moving re-saved facts to the newest position
+        fact_key = fact_clean.lower()
+        memories = [m for m in memories if m.strip().lower() != fact_key]
+        memories.append(fact_clean)
+        if len(memories) > MAX_MEMORIES:
+            memories = memories[-MAX_MEMORIES:]
+
         os.makedirs(os.path.dirname(mem_file) or ".", exist_ok=True)
         with open(mem_file, "w", encoding="utf-8") as f:
             json.dump(memories, f, indent=2)
@@ -82,8 +96,9 @@ def recall_memories() -> str:
             try:
                 with open(mem_file, "r", encoding="utf-8") as f:
                     memories = json.load(f)
-                if memories:
-                    return "Known facts about the user:\n" + "\n".join(f"- {m}" for m in memories)
+                if isinstance(memories, list) and memories:
+                    capped = memories[-MAX_MEMORIES:]
+                    return "Known facts about the user:\n" + "\n".join(f"- {m}" for m in capped)
             except Exception:
                 pass
     return "No memories saved yet."

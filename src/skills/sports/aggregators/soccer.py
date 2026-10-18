@@ -153,9 +153,7 @@ class SoccerAggregator(BaseSportsAggregator):
 
         # When no specific league or club was mentioned (e.g., "soccer matches this week"),
         # fetch across all major competitions in parallel!
-        se = getattr(fetch_json, "side_effect", None)
-        is_fixed_list_mock = se is not None and not callable(se)
-        if not explicit_league_or_club and not discovered_player and not is_fixed_list_mock:
+        if not explicit_league_or_club and not discovered_player:
             if is_past and "yesterday" not in q:
                 return self.get_multi_league_past_schedule_range(days_back=7, scope_label="RECENT MATCH RESULTS")
             elif is_month:

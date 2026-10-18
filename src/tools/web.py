@@ -31,11 +31,22 @@ BROWSER_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-VISITED_URLS = set()
+from src.utils.cache import BoundedCache, BoundedSet
+from src.utils.http import (
+    _ORIG_CFFI_GET,
+    _fetch_public,
+    _get_thread_session,
+    _is_private_or_local_host,
+    BlockedRedirectError,
+    decode_google_news_url,
+    fetch_url,
+)
+
+VISITED_URLS = BoundedSet(maxsize=1024)
 _TURN_VISITED_URLS: ContextVar[Optional[Set[str]]] = ContextVar("TURN_VISITED_URLS", default=None)
-URL_CACHE = {}
-SEARCH_CACHE = {}
-YOUTUBE_CACHE = {}
+URL_CACHE = BoundedCache(maxsize=256)
+SEARCH_CACHE = BoundedCache(maxsize=256)
+YOUTUBE_CACHE = BoundedCache(maxsize=256)
 
 
 def reset_turn_visited_urls() -> Set[str]:
@@ -73,13 +84,6 @@ _BLOCKED_PAGE_MESSAGE = (
 def _looks_blocked(text: str) -> bool:
     """True for short pages that are clearly a bot wall rather than real content."""
     return bool(text) and len(text) < 4000 and bool(_BOT_WALL.search(text))
-
-from src.utils.http import (
-    _is_private_or_local_host,
-    BlockedRedirectError,
-    _fetch_public,
-    fetch_url,
-)
 
 def _smart_truncate(text: str, max_length: int) -> str:
     """Truncate text cleanly at paragraph or sentence boundaries without slicing words in half."""
@@ -335,19 +339,20 @@ def read_website(url: str) -> str:
     if parsed.scheme not in ('http', 'https'):
         return f"❌ Error: Unsupported URL scheme '{parsed.scheme}'. Only http and https are supported."
 
+    # 2. SSRF / Localhost Protection (checked before and after any URL decoding)
+    if _is_private_or_local_host(parsed.hostname):
+        return "❌ Security Block: Access to localhost or private network addresses is not permitted."
+
     # Google News article links only redirect via JavaScript; resolve to the publisher URL.
     if parsed.hostname == "news.google.com" and "/articles/" in parsed.path:
-        from src.skills.news import decode_google_news_url
         decoded = decode_google_news_url(url)
         if not decoded:
             return "❌ Could not resolve this Google News link to the original article. Use `search_web` with the headline to find the article instead."
         print(f"🔗 [Google News]: Resolved to {decoded}")
         url = decoded
         parsed = urlparse.urlparse(url)
-
-    # 2. SSRF / Localhost Protection
-    if _is_private_or_local_host(parsed.hostname):
-        return "❌ Security Block: Access to localhost or private network addresses is not permitted."
+        if _is_private_or_local_host(parsed.hostname):
+            return "❌ Security Block: Access to localhost or private network addresses is not permitted."
 
     # 3. Session Cache / Loop Detection
     if url in URL_CACHE:
@@ -365,12 +370,19 @@ def read_website(url: str) -> str:
             "X-Return-Format": "markdown",
             "X-Timeout": "12",
         }
-        jina_resp = cffi_requests.get(
-            jina_url, 
-            headers=jina_headers,
-            impersonate="chrome", 
-            timeout=15
-        )
+        if cffi_requests.get is _ORIG_CFFI_GET:
+            jina_resp = _get_thread_session("chrome").get(
+                jina_url,
+                headers=jina_headers,
+                timeout=15,
+            )
+        else:
+            jina_resp = cffi_requests.get(
+                jina_url,
+                headers=jina_headers,
+                impersonate="chrome",
+                timeout=15,
+            )
         
         if jina_resp.status_code == 200:
             content = jina_resp.text.strip()

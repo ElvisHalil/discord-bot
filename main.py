@@ -13,8 +13,14 @@ from dotenv import load_dotenv
 from ollama import AsyncClient
 import src.registry as tools
 from src.utils import (
+    BoundedCache,
+    BoundedSet,
+    clear_http_caches,
+    dispatch_tracker_command,
     ensure_ollama_running,
+    extract_song_card_target,
     chunk_message,
+    resolve_reaction_recommendation,
     suppress_discord_embeds,
     run_in_worker,
     shutdown_worker_pool,
@@ -80,13 +86,13 @@ ollama_client = AsyncClient()
 
 # Global state
 chat_history = {}
-known_users = {}
+known_users = BoundedCache(maxsize=1024)
 active_channels = set()
 # One lock per channel so overlapping mentions don't interleave tool calls in a shared history.
 channel_locks = defaultdict(asyncio.Lock)
 # (message_id, user_id) pairs already handled by the 👍 recommender, to avoid duplicate runs.
-handled_reactions = set()
 MAX_HANDLED_REACTIONS = 2000
+handled_reactions = BoundedSet(maxsize=MAX_HANDLED_REACTIONS)
 
 _default_profile = os.getenv("DEFAULT_PROFILE", "").lower()
 if _default_profile in MODES:
@@ -111,6 +117,7 @@ def clear_tool_caches(channel_id: int = None):
         tools.URL_CACHE.clear()
         tools.SEARCH_CACHE.clear()
         tools.YOUTUBE_CACHE.clear()
+        clear_http_caches()
     try:
         from src.skills.youtube.engine.client import clear_youtube_caches
         from src.skills.music.playback.youtube_music import clear_resolved_music_cache
@@ -303,16 +310,12 @@ async def on_raw_reaction_add(payload):
         if message.author.id != client.user.id:
             return
             
-        m_card_song = re.search(r'(?im)^\s*(?:\*\*)?(?:Song|Track):\*{0,2}\s*(.+)', message.content)
-        m_card_art = re.search(r'(?im)^\s*(?:\*\*)?Artist:\*{0,2}\s*(.+)', message.content)
-
-        if m_card_song and m_card_art and "music.youtube.com/" in message.content:
+        card_target = extract_song_card_target(message.content)
+        if card_target:
             # Only recommend once per (message, user), even if they remove and re-add the reaction.
             reaction_key = (payload.message_id, payload.user_id)
             if reaction_key in handled_reactions:
                 return
-            if len(handled_reactions) >= MAX_HANDLED_REACTIONS:
-                handled_reactions.clear()
             handled_reactions.add(reaction_key)
 
             try:
@@ -322,81 +325,26 @@ async def on_raw_reaction_add(payload):
 
             print(f"👍 [Reaction Caught]: {user.name} liked a song. Finding a verified similar track...")
 
-            video_match = re.search(r'music\.youtube\.com\/watch\?v=([0-9A-Za-z_-]{11})', message.content)
-            if not video_match:
-                return
-
             async with channel.typing():
                 try:
-                    # 1. Extract track metadata directly from the verified song card
-                    orig_title = m_card_song.group(1).strip()
-                    orig_artist = m_card_art.group(1).strip()
-
-                    # Smart clean YouTube title and artist
-                    clean_title = re.sub(r'[\(\[\{].*?(?:official|video|audio|lyrics|visualizer|download|remastered|hd|4k|hq|mix).*?[\)\]\}]', '', orig_title, flags=re.IGNORECASE)
-                    clean_title = re.sub(r'[\(\[\{](?:feat\.|ft\.).*?[\)\]\}]', '', clean_title, flags=re.IGNORECASE)
-                    if " - " in clean_title:
-                        parts = clean_title.split(" - ", 1)
-                        orig_artist = parts[0].strip()
-                        clean_title = parts[1].strip()
-                    clean_title = re.sub(r'[\(\[\{].*?[\)\]\}]', '', clean_title).strip()
-                    clean_title = re.sub(r'[-–—|/].*$', '', clean_title).strip()
-                    if not clean_title:
-                        clean_title = orig_title
-
-                    search_query = f"{clean_title} by {orig_artist}".strip() if orig_artist else clean_title
+                    orig_title = card_target["orig_title"]
+                    orig_artist = card_target["orig_artist"]
+                    clean_title = card_target["clean_title"]
+                    orig_display = card_target["orig_display"]
                     print(f"🎵 [Reaction Target]: Cleaned '{clean_title}' by '{orig_artist}'")
 
-                    # 2. Get recommendations (and pre-resolved verified YouTube link) from skill_music_discovery
-                    set_active_channel_id(channel.id)
-                    similar_res = await run_in_worker(tools.skill_music_discovery, similar_to=search_query)
-                    is_unrelated_fallback = "NO DIRECT SIMILAR SONGS FOUND" in similar_res
-                    similar_tracks = []
-                    for line in similar_res.split("\n"):
-                        line = line.strip()
-                        if line.startswith("- "):
-                            track_name = line[2:].strip()
-                            if clean_title.lower() not in track_name.lower():
-                                similar_tracks.append(track_name)
-
-                    # Guaranteed fallback to general charts if empty
-                    if not similar_tracks:
-                        is_unrelated_fallback = True
-                        print("⚠️ [Reaction Fallback]: No similar tracks found, pulling general charts...")
-                        bp_res = await run_in_worker(tools.skill_music_discovery, genre=None)
-                        similar_res = bp_res
-                        for line in bp_res.split("\n"):
-                            line = line.strip()
-                            if line.startswith("- "):
-                                similar_tracks.append(line[2:].strip())
-
-                    # 3. Extract pre-resolved verified YouTube Music link if already resolved inside skill_music_discovery
-                    verified_url = None
-                    chosen_track = None
-                    if "=== VERIFIED YOUTUBE MUSIC RESULT" in similar_res:
-                        pre_block = similar_res.split("=== VERIFIED YOUTUBE MUSIC RESULT", 1)[1]
-                        m_pre_song = re.search(r'(?m)^Song:\s*(.+)$', pre_block)
-                        m_pre_art = re.search(r'(?m)^Artist:\s*(.+)$', pre_block)
-                        m_pre_url = re.search(r'(?m)^Link:\s*(https:\/\/(?:music|www)\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})', pre_block)
-                        if m_pre_url and m_pre_song and m_pre_art:
-                            cand_song = m_pre_song.group(1).strip()
-                            cand_art = m_pre_art.group(1).strip()
-                            if clean_title.lower() not in cand_song.lower():
-                                verified_url = m_pre_url.group(1).replace("www.youtube.com", "music.youtube.com")
-                                chosen_track = f"{cand_song} by {cand_art}"
-
-                    # Fallback candidate resolution loop if not pre-resolved
-                    if not verified_url or not chosen_track:
-                        random.shuffle(similar_tracks)
-                        for candidate in similar_tracks[:6]:
-                            yt_output = await run_in_worker(tools.skill_youtube_search, candidate, max_results=1, is_music=True)
-                            m_url = re.search(r'(https:\/\/music\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})', yt_output)
-                            if not m_url:
-                                m_url = re.search(r'(https:\/\/www\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})', yt_output)
-                            if m_url:
-                                verified_url = m_url.group(1).replace("www.youtube.com", "music.youtube.com")
-                                chosen_track = candidate
-                                break
+                    rec = await resolve_reaction_recommendation(
+                        channel_id=channel.id,
+                        card_target=card_target,
+                        music_discovery_fn=tools.skill_music_discovery,
+                        youtube_search_fn=tools.skill_youtube_search,
+                        allow_chart_fallback=True,
+                        max_candidates=6,
+                    )
+                    verified_url = rec["verified_url"]
+                    chosen_track = rec["chosen_track"]
+                    vid = rec["vid"]
+                    is_unrelated_fallback = rec["is_unrelated_fallback"]
 
                     user_tag = user.mention if user else f"<@{payload.user_id}>"
 
@@ -406,7 +354,6 @@ async def on_raw_reaction_add(payload):
 
                     # 4. Generate natural persona intro in parallel with metadata lookup
                     mode_config = MODES[current_mode]
-                    orig_display = f"'{orig_title}' by '{orig_artist}'" if orig_artist else f"'{orig_title}'"
                     if is_unrelated_fallback:
                         intro_prompt = (
                             f"User {user.display_name} reacted with 👍 to {orig_display}, "
@@ -440,9 +387,6 @@ async def on_raw_reaction_add(payload):
                         "num_ctx": 1024,
                         "num_predict": 96,
                     }
-
-                    m_vid = re.search(r'watch\?v=([0-9A-Za-z_-]{11})', verified_url)
-                    vid = m_vid.group(1) if m_vid else None
 
                     async def _generate_intro():
                         try:
@@ -800,54 +744,18 @@ async def on_message(message):
         await message.channel.send("🧹 Memory and context wiped for this channel.")
         return
 
-    # Direct Flight & Price Tracker Commands (!trackflight <flight/route>, !untrackflight [flight/route], !trackedflights)
-    if user_input.lower().startswith("!trackflight "):
+    # Direct Flight & Live Sports Tracker Commands (!trackflight, !untrackflight, !trackedflights, !track, !untrack, !tracked)
+    tracker_res = await dispatch_tracker_command(
+        text=user_input,
+        channel_id=message.channel.id,
+        flight_tracker_fn=skill_flight_tracker,
+        flight_tracker_service=FLIGHT_TRACKER,
+        sports_tracker_fn=skill_sports_tracker,
+        sports_tracker_service=SPORTS_TRACKER,
+    )
+    if tracker_res is not None:
         active_channels.add(message.channel.id)
-        target_q = user_input[13:].strip()
-        set_active_channel_id(message.channel.id)
-        res = await run_in_worker(skill_flight_tracker, action="track", query=target_q)
-        FLIGHT_TRACKER.ensure_loop_running()
-        await message.channel.send(res)
-        return
-
-    if user_input.lower().startswith("!untrackflight"):
-        active_channels.add(message.channel.id)
-        target_q = user_input[14:].strip()
-        set_active_channel_id(message.channel.id)
-        res = await run_in_worker(skill_flight_tracker, action="untrack", query=target_q)
-        await message.channel.send(res)
-        return
-
-    if user_input.lower() in ("!trackedflights", "!trackflight"):
-        active_channels.add(message.channel.id)
-        set_active_channel_id(message.channel.id)
-        res = await run_in_worker(skill_flight_tracker, action="list")
-        await message.channel.send(res)
-        return
-
-    # Direct Live Sports Tracker Commands (!track <team>, !untrack [team], !tracked)
-    if user_input.lower().startswith("!track "):
-        active_channels.add(message.channel.id)
-        target_q = user_input[7:].strip()
-        set_active_channel_id(message.channel.id)
-        res = await run_in_worker(skill_sports_tracker, action="start", query=target_q)
-        SPORTS_TRACKER.ensure_loop_running()
-        await message.channel.send(res)
-        return
-
-    if user_input.lower().startswith("!untrack"):
-        active_channels.add(message.channel.id)
-        target_q = user_input[8:].strip()
-        set_active_channel_id(message.channel.id)
-        res = await run_in_worker(skill_sports_tracker, action="stop", query=target_q)
-        await message.channel.send(res)
-        return
-
-    if user_input.lower() in ("!tracked", "!track"):
-        active_channels.add(message.channel.id)
-        set_active_channel_id(message.channel.id)
-        res = await run_in_worker(skill_sports_tracker, action="list")
-        await message.channel.send(res)
+        await message.channel.send(tracker_res)
         return
 
     is_mentioned = client.user in message.mentions
@@ -954,6 +862,10 @@ if __name__ == "__main__":
     finally:
         try:
             SPORTS_TRACKER.shutdown()
+        except Exception:
+            pass
+        try:
+            FLIGHT_TRACKER.shutdown()
         except Exception:
             pass
         shutdown_worker_pool()

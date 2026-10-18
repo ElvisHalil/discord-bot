@@ -16,10 +16,11 @@ from src.skills.music.catalogs import (
     EXPLICIT_MUSIC_CUE_WORDS as _EXPLICIT_MUSIC_CUE_WORDS,
 )
 from src.skills.music.models import PlayedSongRecord
+from src.utils.cache import BoundedCache
 from src.utils.domain_vocab import compile_word_boundary_re
 
 # Per-channel active song context: {channel_id: PlayedSongRecord}
-_CHANNEL_LAST_PLAYED_SONG: Dict[int, PlayedSongRecord] = {}
+_CHANNEL_LAST_PLAYED_SONG: Dict[int, PlayedSongRecord] = BoundedCache(maxsize=128)
 
 # Rolling session history of recently played/recommended tracks to prevent repeats across turns
 # Scoped per channel_id so one chat's music history never affects another chat.

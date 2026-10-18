@@ -730,11 +730,17 @@ class SportsTrackerService:
             return
         try:
             loop = asyncio.get_running_loop()
+            if self._tracker_task is None or self._tracker_task.done():
+                self._tracker_task = loop.create_task(self._run_loop())
+                print(f"📡 [Live Tracker]: Started background polling loop (Interval: {self.poll_interval}s, Active matches: {len(self.tracked_matches)}).")
         except RuntimeError:
-            return
-        if self._tracker_task is None or self._tracker_task.done():
-            self._tracker_task = loop.create_task(self._run_loop())
-            print(f"📡 [Live Tracker]: Started background polling loop (Interval: {self.poll_interval}s, Active matches: {len(self.tracked_matches)}).")
+            target_loop = get_bound_event_loop()
+            if target_loop and target_loop.is_running():
+                def _start():
+                    if self._tracker_task is None or self._tracker_task.done():
+                        self._tracker_task = target_loop.create_task(self._run_loop())
+                        print(f"📡 [Live Tracker]: Started background polling loop (Interval: {self.poll_interval}s, Active matches: {len(self.tracked_matches)}).")
+                target_loop.call_soon_threadsafe(_start)
 
     async def _run_loop(self) -> None:
         """Self-stopping polling loop: runs while tracked_matches is non-empty, then exits."""

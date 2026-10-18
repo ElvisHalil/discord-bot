@@ -564,7 +564,7 @@ class TestSkillSportsInfo(unittest.TestCase):
                 }]
             }]
         }
-        mock_fetch.side_effect = [cal, events, cal, events]
+        mock_fetch.side_effect = lambda url, **kw: events if "dates=" in url else cal
 
         # Calling with only query (sport omitted)
         res = skill_sports_info(query="what were previous matches and outcomes?")

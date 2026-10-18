@@ -1,20 +1,17 @@
 import logging
 import re
-import requests
-from requests.adapters import HTTPAdapter
 from src.skills.youtube.aggregators import (
     YouTubeAggregatorManager,
 )
 from src.skills.youtube.catalogs import UNPLAYABLE_EMBED_MARKERS
+from src.utils.cache import BoundedCache
+from src.utils.http import ThreadLocalRequestsSession
 from src.utils.workers import submit_to_worker
 
 logger = logging.getLogger(__name__)
 
-# Persistent HTTP session for connection pooling (reuses TCP/TLS handshakes across YouTube checks)
-_HTTP_SESSION = requests.Session()
-_adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20)
-_HTTP_SESSION.mount("https://", _adapter)
-_HTTP_SESSION.mount("http://", _adapter)
+# Thread-local persistent HTTP session for connection pooling (reuses TCP/TLS handshakes safely across worker threads)
+_HTTP_SESSION = ThreadLocalRequestsSession(pool_connections=10, pool_maxsize=20)
 
 
 def _http_get(url: str, **kwargs):
@@ -25,10 +22,18 @@ def _http_head(url: str, **kwargs):
     return _HTTP_SESSION.head(url, **kwargs)
 
 
-# In-memory caches to eliminate duplicate network requests across resolution & post-processing
-_OEMBED_CACHE: dict[str, dict] = {}
-_EMBEDDABLE_CACHE: dict[str, bool] = {}
-_SHORT_CACHE: dict[str, bool] = {}
+youtube_http_get = _http_get
+
+
+# Bounded in-memory caches to eliminate duplicate network requests across resolution & post-processing
+_OEMBED_CACHE: dict[str, dict] = BoundedCache(maxsize=512)
+_EMBEDDABLE_CACHE: dict[str, bool] = BoundedCache(maxsize=512)
+_SHORT_CACHE: dict[str, bool] = BoundedCache(maxsize=512)
+
+
+def get_cached_oembed(vid: str) -> dict | None:
+    """Return cached oEmbed metadata for a video ID if already verified in memory."""
+    return _OEMBED_CACHE.get(vid) if vid else None
 
 
 def clear_youtube_caches() -> None:

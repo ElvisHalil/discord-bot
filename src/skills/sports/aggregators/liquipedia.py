@@ -8,10 +8,11 @@ from src.skills.sports.catalogs import (
     LIQUIPEDIA_GENERIC_EVENT_QUERIES,
     LIQUIPEDIA_SLUG_STOPWORDS,
 )
+from src.utils.cache import BoundedCache
 from src.utils.http import fetch_json
 
 # 5-minute TTL cache for Liquipedia tournament & event lookups
-_LIQUIPEDIA_CACHE: dict[str, tuple[float, object]] = {}
+_LIQUIPEDIA_CACHE: dict[str, tuple[float, object]] = BoundedCache(maxsize=128)
 _LIQUIPEDIA_CACHE_TTL = 300.0
 
 

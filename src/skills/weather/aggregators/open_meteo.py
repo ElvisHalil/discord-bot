@@ -14,12 +14,13 @@ from typing import Dict, List, Optional
 from src.skills.weather.aggregators.base import BaseWeatherAggregator
 from src.skills.weather.catalogs import COMPASS_DIRECTIONS, WMO_WEATHER_CODES
 from src.skills.weather.models import DailyForecast, GeocodedLocation, HourlyForecast
+from src.utils.cache import BoundedCache
 from src.utils.http import fetch_json
 
 logger = logging.getLogger(__name__)
 
-# Permanent in-memory cache of resolved city coordinates (city coordinates do not change)
-_GEOCODE_CACHE: Dict[str, GeocodedLocation] = {}
+# Bounded in-memory cache of resolved city coordinates
+_GEOCODE_CACHE: Dict[str, GeocodedLocation] = BoundedCache(maxsize=512)
 
 
 def clear_geocode_cache() -> None:
