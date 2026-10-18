@@ -35,8 +35,8 @@ class WttrAggregator(BaseWeatherAggregator):
         except Exception as e:
             return f"Error fetching weather: {e}"
 
-    def get_forecast(self, city: str, days: int = 3) -> str:
-        """Fetch 3-day JSON forecast from wttr.in (?format=j1), falling back to compact format."""
+    def get_forecast(self, city: str, days: int = 3, hours: int = 12) -> str:
+        """Fetch 3-day JSON forecast (with 3-hour intervals) from wttr.in (?format=j1), falling back to compact format."""
         try:
             encoded_city = urllib.parse.quote((city or "").strip())
             data = fetch_json(
@@ -60,6 +60,31 @@ class WttrAggregator(BaseWeatherAggregator):
                     f"Humidity: {humidity}% | Wind: {wind_kmh} km/h {wind_dir}".strip()
                 ]
                 weather_days = data.get("weather") or []
+                forecast_hours = max(0, min(int(hours if hours is not None else 12), 48))
+                if weather_days and forecast_hours > 0:
+                    hourly_slots = []
+                    for day_obj in weather_days[:2]:
+                        d_str = day_obj.get("date", "")
+                        for h_entry in (day_obj.get("hourly") or []):
+                            hourly_slots.append((d_str, h_entry))
+                    max_slots = max(1, (forecast_hours + 2) // 3)
+                    selected_slots = hourly_slots[:max_slots]
+                    if selected_slots:
+                        lines.append("\n=== HOURLY FORECAST (wttr.in 3-hr intervals) ===")
+                        for d_str, h in selected_slots:
+                            raw_t = str(h.get("time", "0")).zfill(4)
+                            hh_mm = f"{raw_t[:2]}:{raw_t[2:]}"
+                            h_desc_list = h.get("weatherDesc") or [{}]
+                            h_desc = (h_desc_list[0].get("value", "") if h_desc_list else "") or desc
+                            h_tc = h.get("tempC", "N/A")
+                            h_tf = h.get("tempF", "N/A")
+                            h_rain = h.get("chanceofrain", 0)
+                            h_wind = h.get("windspeedKmph", "N/A")
+                            lines.append(
+                                f"- {d_str} {hh_mm}: {h_desc} | {h_tc}°C ({h_tf}°F) | "
+                                f"Rain Chance: {h_rain}% | Wind: {h_wind} km/h"
+                            )
+
                 if weather_days:
                     lines.append(f"\n=== {min(len(weather_days), max(1, days))}-DAY FORECAST (wttr.in) ===")
                     for day_obj in weather_days[: max(1, days)]:
@@ -81,3 +106,4 @@ class WttrAggregator(BaseWeatherAggregator):
         except Exception:
             pass
         return self.get_weather(city, days=days)
+

@@ -1739,9 +1739,122 @@ class TestMultiUserDiscordChannelConcurrency(unittest.IsolatedAsyncioTestCase):
         self.assertIn("=== CRITICAL INSTRUCTIONS ===", tool_msgs[0]["content"])
         self.assertGreater(len(tool_msgs[2]["content"]), 7000)
 
+    def test_weather_hourly_forecast_open_meteo_and_wttr(self):
+        from src.orchestrator import normalize_tool_args
+        from src.skills.weather.aggregators import OpenMeteoAggregator, WttrAggregator, clear_weather_cache
+        from src.skills.weather.weather import skill_weather_info
+
+        clear_weather_cache()
+        om_agg = OpenMeteoAggregator()
+        fake_geo = {
+            "results": [
+                {
+                    "name": "Edmonton",
+                    "latitude": 53.55,
+                    "longitude": -113.49,
+                    "admin1": "Alberta",
+                    "country": "Canada",
+                    "timezone": "America/Edmonton",
+                }
+            ]
+        }
+        fake_forecast = {
+            "timezone": "America/Edmonton",
+            "current": {
+                "time": "2026-10-18T22:15",
+                "temperature_2m": 3.0,
+                "apparent_temperature": -1.0,
+                "relative_humidity_2m": 78,
+                "precipitation": 0.2,
+                "weather_code": 61,
+                "wind_speed_10m": 18.0,
+                "wind_direction_10m": 315,
+                "wind_gusts_10m": 25.0,
+                "uv_index": 0.0,
+            },
+            "hourly": {
+                "time": [
+                    "2026-10-18T21:00",
+                    "2026-10-18T22:00",
+                    "2026-10-18T23:00",
+                    "2026-10-19T00:00",
+                    "2026-10-19T01:00",
+                ],
+                "weather_code": [3, 61, 71, 71, 2],
+                "temperature_2m": [4.5, 3.0, 1.0, -0.5, -1.5],
+                "apparent_temperature": [1.0, -1.0, -3.5, -4.8, -5.5],
+                "precipitation_probability": [20, 75, 85, 60, 10],
+                "precipitation": [0.0, 0.4, 1.2, 0.5, 0.0],
+                "wind_speed_10m": [12.0, 18.0, 22.0, 15.0, 10.0],
+                "wind_direction_10m": [270, 315, 0, 0, 45],
+                "uv_index": [0.0, 0.0, 0.0, 0.0, 0.0],
+            },
+            "daily": {
+                "time": ["2026-10-18", "2026-10-19"],
+                "weather_code": [61, 71],
+                "temperature_2m_max": [8.0, 2.0],
+                "temperature_2m_min": [1.0, -4.0],
+                "precipitation_probability_max": [75, 85],
+                "precipitation_sum": [1.5, 3.2],
+                "wind_speed_10m_max": [22.0, 24.0],
+                "uv_index_max": [2.0, 1.5],
+                "sunrise": ["2026-10-18T08:05", "2026-10-19T08:07"],
+                "sunset": ["2026-10-18T18:32", "2026-10-19T18:30"],
+            },
+        }
+
+        with patch("src.skills.weather.aggregators.open_meteo.fetch_json", side_effect=[fake_geo, fake_forecast]):
+            out = skill_weather_info("Edmonton", days=2, hours=3)
+
+        # Starts at 22:00 (matching current.time 22:15), skipping 21:00, and slices 3 hours across midnight
+        self.assertIn("=== NEXT 3-HOUR FORECAST ===", out)
+        self.assertNotIn("21:00", out)
+        self.assertIn("Sun 22:00 (10:00 PM): Slight rain | 3.0°C (37.4°F), Feels -1.0°C | Precip: 75% (0.4 mm) | Wind: 18.0 km/h NW", out)
+        self.assertIn("Sun 23:00 (11:00 PM): Slight snowfall | 1.0°C (33.8°F), Feels -3.5°C | Precip: 85% (1.2 mm) | Wind: 22.0 km/h N", out)
+        self.assertIn("Mon 00:00 (12:00 AM): Slight snowfall | -0.5°C (31.1°F), Feels -4.8°C | Precip: 60% (0.5 mm) | Wind: 15.0 km/h N", out)
+        self.assertNotIn("Mon 01:00", out)
+        self.assertIn("=== 2-DAY FORECAST ===", out)
+
+        # Verify wttr.in fallback also formats 3-hr interval hourly slots
+        wttr_agg = WttrAggregator()
+        fake_wttr_json = {
+            "current_condition": [
+                {
+                    "weatherDesc": [{"value": "Light Rain"}],
+                    "temp_C": "5",
+                    "temp_F": "41",
+                    "FeelsLikeC": "2",
+                    "humidity": "82",
+                    "windspeedKmph": "15",
+                    "winddir16Point": "NW",
+                }
+            ],
+            "weather": [
+                {
+                    "date": "2026-10-18",
+                    "maxtempC": "8",
+                    "mintempC": "1",
+                    "hourly": [
+                        {"time": "0", "tempC": "2", "tempF": "36", "chanceofrain": "10", "windspeedKmph": "10", "weatherDesc": [{"value": "Clear"}]},
+                        {"time": "300", "tempC": "4", "tempF": "39", "chanceofrain": "65", "windspeedKmph": "18", "weatherDesc": [{"value": "Light Rain"}]},
+                    ],
+                }
+            ],
+        }
+        with patch("src.skills.weather.aggregators.wttr.fetch_json", return_value=fake_wttr_json):
+            wttr_out = wttr_agg.get_forecast("Edmonton", days=1, hours=6)
+        self.assertIn("=== HOURLY FORECAST (wttr.in 3-hr intervals) ===", wttr_out)
+        self.assertIn("2026-10-18 03:00: Light Rain | 4°C (39°F) | Rain Chance: 65%", wttr_out)
+
+        # Verify argument alias normalization for hours
+        norm = normalize_tool_args("skill_weather_info", skill_weather_info, {"location": "Edmonton", "forecast_hours": "24"})
+        self.assertEqual(norm, {"city": "Edmonton", "hours": 24})
+        clear_weather_cache()
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

@@ -291,6 +291,7 @@ TOOL_ARG_ALIASES: Dict[str, Dict[str, str]] = {
     "skill_weather_info": {
         "location": "city", "place": "city", "town": "city", "region": "city", "q": "city", "query": "city",
         "forecast_days": "days", "num_days": "days", "horizon": "days",
+        "forecast_hours": "hours", "num_hours": "hours", "hourly_hours": "hours",
     },
     "skill_youtube_search": {
         "q": "query", "search_query": "query", "search": "query", "video": "query",

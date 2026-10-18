@@ -21,6 +21,20 @@ class GeocodedLocation(DictLikeMixin):
 
 
 @dataclass(slots=True)
+class HourlyForecast(DictLikeMixin):
+    """Single-hour weather forecast summary."""
+    time: str
+    condition: str
+    temp_c: float
+    feels_like_c: float
+    precip_prob_pct: int = 0
+    precip_mm: float = 0.0
+    wind_kmh: float = 0.0
+    wind_dir: str = ""
+    uv_index: float = 0.0
+
+
+@dataclass(slots=True)
 class DailyForecast(DictLikeMixin):
     """Single-day weather forecast summary."""
     date: str
@@ -41,3 +55,4 @@ class WeatherSnapshot(DictLikeMixin):
     city: str
     conditions: str
     provider: str = "open_meteo"
+

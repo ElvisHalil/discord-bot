@@ -13,7 +13,7 @@ from src.skills.weather.aggregators.open_meteo import OpenMeteoAggregator, clear
 from src.skills.weather.aggregators.wttr import WttrAggregator
 from src.utils.workers import map_in_workers
 
-_WEATHER_CACHE: Dict[Tuple[str, int], Tuple[float, str]] = {}
+_WEATHER_CACHE: Dict[Tuple[str, int, int], Tuple[float, str]] = {}
 WEATHER_CACHE_TTL_SECONDS = 600
 _MULTI_CITY_SPLIT_RE = re.compile(r"\s*(?:;|\band\b|\bvs\.?\b|\bversus\b|&|/)\s*", re.IGNORECASE)
 
@@ -45,17 +45,20 @@ class WeatherAggregatorManager:
                 unique_cities.append(p)
         return unique_cities[:4]
 
-    def _get_single_city_weather(self, clean_city: str, forecast_days: int) -> str:
-        cache_key = (clean_city.lower(), forecast_days)
+    def _get_single_city_weather(self, clean_city: str, forecast_days: int, forecast_hours: int = 12) -> str:
+        cache_key = (clean_city.lower(), forecast_days, forecast_hours)
         now = time.time()
 
         cached = _WEATHER_CACHE.get(cache_key)
         if cached and (now - cached[0]) < WEATHER_CACHE_TTL_SECONDS:
             return cached[1]
 
-        # 1. Primary: Open-Meteo (Current + up to 16-Day Forecast)
+        # 1. Primary: Open-Meteo (Current + Hourly + up to 16-Day Forecast)
         try:
-            report = self.open_meteo.get_weather(clean_city, days=forecast_days)
+            if forecast_hours == 12:
+                report = self.open_meteo.get_weather(clean_city, days=forecast_days)
+            else:
+                report = self.open_meteo.get_weather(clean_city, days=forecast_days, hours=forecast_hours)
         except Exception as exc:
             print(f"  └─ ⚠️ [Weather Manager]: Primary provider failed for '{clean_city}' ({exc}); using wttr.in fallback.")
             report = ""
@@ -64,8 +67,11 @@ class WeatherAggregatorManager:
             _WEATHER_CACHE[cache_key] = (now, report)
             return report
 
-        # 2. Fallback: wttr.in (3-Day JSON Forecast -> Compact 1-Liner)
-        fallback = self.wttr.get_forecast(clean_city, days=min(forecast_days, 3))
+        # 2. Fallback: wttr.in (3-Day JSON Forecast with 3-hr slots -> Compact 1-Liner)
+        if forecast_hours == 12:
+            fallback = self.wttr.get_forecast(clean_city, days=min(forecast_days, 3))
+        else:
+            fallback = self.wttr.get_forecast(clean_city, days=min(forecast_days, 3), hours=forecast_hours)
         if (
             fallback
             and not fallback.startswith("Error")
@@ -75,19 +81,21 @@ class WeatherAggregatorManager:
             _WEATHER_CACHE[cache_key] = (now, fallback)
         return fallback
 
-    def get_weather(self, city: str, days: int = 7) -> str:
-        """Fetch current conditions and multi-day forecast using Open-Meteo with wttr.in fallback.
+    def get_weather(self, city: str, days: int = 7, hours: int = 12) -> str:
+        """Fetch current conditions, hourly forecast, and multi-day forecast using Open-Meteo with wttr.in fallback.
         Automatically fans out across SUB_WORKER_POOL when multiple cities are requested."""
         clean_city = (city or "").strip()
         if not clean_city:
             return "Please specify a city name."
 
         forecast_days = max(1, min(int(days or 7), 16))
+        forecast_hours = max(0, min(int(hours if hours is not None else 12), 48))
         cities = self._split_cities(clean_city)
         reports = map_in_workers(
-            lambda c: self._get_single_city_weather(c, forecast_days),
+            lambda c: self._get_single_city_weather(c, forecast_days, forecast_hours),
             cities,
         )
         return "\n\n=============================================\n\n".join(r for r in reports if r)
+
 
 
