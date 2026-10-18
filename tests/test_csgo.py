@@ -369,5 +369,168 @@ class TestOdds(unittest.TestCase):
         self.assertEqual(norm.get("sport"), "cs2")
 
 
+class TestBo3AndKashrockLiveSeries(unittest.TestCase):
+    def setUp(self):
+        from src.skills.sports.aggregators.kashrock import clear_kashrock_cache
+        clear_kashrock_cache()
+
+    @patch.dict("os.environ", {"KASHROCK_API_KEY": "kr_test_key"}, clear=False)
+    @patch("src.skills.sports.aggregators.kashrock._get_session")
+    @patch("src.skills.sports.aggregators.kashrock.fetch_json")
+    def test_bo5_live_series_and_upcoming_schedule_with_quota_guard(self, mock_bo3_fetch, mock_kr_session):
+        from src.skills.sports.aggregators.kashrock import KashrockAggregator
+
+        # 1. Mock BO3.gg response with 3 live series (including Thunderpick BO5 Finals) + 1 upcoming match
+        mock_bo3_fetch.return_value = {
+            "results": [
+                {
+                    "id": 115219,
+                    "slug": "aurora-gaming-vs-betboom-team-18-10-2026",
+                    "status": "current",
+                    "bo_type": 5,
+                    "tier": "a",
+                    "start_date": "2026-10-18T15:00:00.000Z",
+                    "team1_score": 1,
+                    "team2_score": 1,
+                    "team1": {"id": 698, "name": "BetBoom Team", "rank": 22},
+                    "team2": {"id": 10841, "name": "Aurora Gaming", "rank": 8},
+                    "tournament": {"name": "Thunderpick World Championship 2026", "tier": "a", "prize": 850000},
+                    "stage": {"title": "Playoffs"},
+                    "games": [
+                        {
+                            "number": 1,
+                            "status": "finished",
+                            "map_name": "de_dust2",
+                            "winner_clan_name": "BetBoom Team",
+                            "loser_clan_name": "Aurora Gaming",
+                            "winner_clan_score": 13,
+                            "loser_clan_score": 6,
+                            "winner_team_clan": {"team": {"id": 698}},
+                        },
+                        {
+                            "number": 2,
+                            "status": "finished",
+                            "map_name": "de_ancient",
+                            "winner_clan_name": "Aurora Gaming",
+                            "loser_clan_name": "BetBoom Team",
+                            "winner_clan_score": 19,
+                            "loser_clan_score": 16,
+                            "winner_team_clan": {"team": {"id": 10841}},
+                        },
+                        {"number": 3, "status": "current", "map_name": "de_nuke"},
+                        {"number": 4, "status": "upcoming", "map_name": "de_mirage"},
+                        {"number": 5, "status": "upcoming", "map_name": "de_cache"},
+                    ],
+                    "streams": [{"stream_url": "https://twitch.tv/thunderpicktv", "language": "en"}],
+                    "bet_updates": {"team_1": {"coeff": 2.4}, "team_2": {"coeff": 1.52}},
+                },
+                {
+                    "id": 115220,
+                    "slug": "match-two",
+                    "status": "current",
+                    "bo_type": 3,
+                    "tier": "b",
+                    "team1_score": 1,
+                    "team2_score": 0,
+                    "team1": {"id": 1, "name": "SINNERS", "rank": 35},
+                    "team2": {"id": 2, "name": "Sangal", "rank": 40},
+                    "tournament": {"name": "CCT Europe", "tier": "b", "prize": 50000},
+                    "games": [{"number": 1, "status": "current", "map_name": "de_inferno"}],
+                },
+                {
+                    "id": 115221,
+                    "slug": "match-three",
+                    "status": "current",
+                    "bo_type": 3,
+                    "tier": "c",
+                    "team1_score": 0,
+                    "team2_score": 0,
+                    "team1": {"id": 3, "name": "B8", "rank": 45},
+                    "team2": {"id": 4, "name": "Monte", "rank": 50},
+                    "tournament": {"name": "RES Regional", "tier": "c", "prize": 25000},
+                    "games": [{"number": 1, "status": "current", "map_name": "de_anubis"}],
+                },
+                {
+                    "id": 115300,
+                    "slug": "vitality-vs-faze",
+                    "status": "upcoming",
+                    "bo_type": 3,
+                    "tier": "s",
+                    "start_date": "2026-10-18T19:30:00.000Z",
+                    "team1": {"id": 10, "name": "Team Vitality", "rank": 2},
+                    "team2": {"id": 11, "name": "FaZe Clan", "rank": 6},
+                    "tournament": {"name": "BLAST Premier", "tier": "s", "prize": 1000000},
+                    "bet_updates": {"team_1": {"coeff": 1.45}, "team_2": {"coeff": 2.65}},
+                },
+            ]
+        }
+
+        # 2. Mock KashRock /matches?status=live and /live/{id}/boxscore
+        boxscore_calls = []
+
+        def fake_kr_get(url, headers=None, timeout=12):
+            resp = MagicMock()
+            resp.status_code = 200
+            if "/matches?status=live" in url:
+                resp.json.return_value = {
+                    "matches": [
+                        {"kr_match_id": "115219", "team1": "BetBoom Team", "team2": "Aurora Gaming"},
+                        {"kr_match_id": "115220", "team1": "SINNERS", "team2": "Sangal"},
+                        {"kr_match_id": "115221", "team1": "B8", "team2": "Monte"},
+                    ]
+                }
+            elif "/live/115219/boxscore" in url:
+                boxscore_calls.append("115219")
+                resp.json.return_value = {
+                    "maps": [
+                        {
+                            "map_number": 3,
+                            "map_name": "de_nuke",
+                            "status": "live",
+                            "blue_score": 12,
+                            "red_score": 9,
+                            "players": [
+                                {"nickname": "Magnojez", "kills": 21, "deaths": 13, "adr": 92.4, "advanced_stats": {"rating": 1.42}},
+                                {"nickname": "Wicadia", "kills": 18, "deaths": 15, "adr": 84.1, "advanced_stats": {"rating": 1.19}},
+                            ],
+                        }
+                    ]
+                }
+            elif "/live/" in url and "/boxscore" in url:
+                boxscore_calls.append(url)
+                resp.json.return_value = {"maps": []}
+            else:
+                resp.json.return_value = {}
+            return resp
+
+        session_mock = MagicMock()
+        session_mock.get.side_effect = fake_kr_get
+        mock_kr_session.return_value = session_mock
+
+        agg = KashrockAggregator()
+        out = agg.get_live_scoreboards(match_query="thunderpick")
+
+        # Verify Quota Guard: at most 2 /live/{id}/boxscore calls even though 3 live matches exist
+        self.assertEqual(len(boxscore_calls), 2)
+        self.assertEqual(boxscore_calls[0], "115219")
+
+        # Verify BO5 header & context
+        self.assertIn("**BetBoom Team** (#22) **1 - 1** **Aurora Gaming** (#8) (Best of 5 | Thunderpick World Championship 2026 [A-Tier | $850,000 | Playoffs])", out)
+        # Verify all 5 maps in play order with completed scores, OT tag, live map rounds, and upcoming maps
+        self.assertIn("Map 1 (Dust2): ✅ **BetBoom Team 13-6 Aurora Gaming**", out)
+        self.assertIn("Map 2 (Ancient): ✅ **Aurora Gaming 19-16 BetBoom Team** (OT)", out)
+        self.assertIn("Map 3 (Nuke): 🔴 **LIVE (BetBoom Team 12-9 Aurora Gaming)**", out)
+        self.assertIn("Map 4 (Mirage): ⏳ Upcoming", out)
+        self.assertIn("Map 5 (Cache): ⏳ Upcoming", out)
+        # Verify live player boxscore leaders, odds, and streams
+        self.assertIn("Magnojez (21K/13D, 92.4 ADR, 1.42 Rtg)", out)
+        self.assertIn("BetBoom Team 2.4 vs Aurora Gaming 1.52", out)
+        self.assertIn("<https://twitch.tv/thunderpicktv> (EN)", out)
+        # Verify upcoming CS2 schedule
+        self.assertIn("=== UPCOMING CS2 MATCH SCHEDULE (BO3.gg) ===", out)
+        self.assertIn("**Team Vitality** (#2) vs **FaZe Clan** (#6) (Best of 3 — BLAST Premier)", out)
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -584,6 +584,273 @@ class TestSportsTrackerService(unittest.TestCase):
         self.assertEqual(a_score, "1")
         self.assertTrue(any("Ivan Miroshnichenko Goal" in t and "[Power Play]" in t for t in trigs))
 
+    def test_cs2_bo5_key_milestones_and_tracker_lifecycle(self):
+        from src.skills.sports.models import CsLiveSeries, CsMapResult
+        from src.skills.sports.tracker import (
+            extract_snapshot_from_cs_series,
+            resolve_live_or_next_event,
+        )
+
+        # 1. Start during Map 2 (Ancient) in a BO5 series (BetBoom 1 - 0 Aurora)
+        series_map2_live = CsLiveSeries(
+            match_id="115219",
+            slug="aurora-vs-betboom",
+            tournament="Thunderpick World Championship 2026",
+            tier="A",
+            stage="Playoffs",
+            bo_type=5,
+            status="current",
+            team1="BetBoom Team",
+            team2="Aurora Gaming",
+            team1_score=1,
+            team2_score=0,
+            active_map_name="Ancient",
+            active_map_number=2,
+            maps=[
+                CsMapResult(map_number=1, map_name="Dust2", status="finished", winner="BetBoom Team", loser="Aurora Gaming", winner_score=13, loser_score=6, team1_rounds=13, team2_rounds=6),
+                CsMapResult(map_number=2, map_name="Ancient", status="current", team1_rounds=10, team2_rounds=11),
+                CsMapResult(map_number=3, map_name="Nuke", status="upcoming"),
+                CsMapResult(map_number=4, map_name="Mirage", status="upcoming"),
+                CsMapResult(map_number=5, map_name="Cache", status="upcoming"),
+            ],
+        )
+
+        with patch(
+            "src.skills.sports.aggregators.kashrock.KashrockAggregator.get_live_and_upcoming_series",
+            return_value=([series_map2_live], []),
+        ):
+            info = resolve_live_or_next_event("track Aurora vs BetBoom", sport="cs2")
+            self.assertIsNotNone(info)
+            self.assertEqual(info["sport_path"], "esports")
+            self.assertEqual(info["league_code"], "cs2")
+            self.assertEqual(info["event_id"], "115219")
+
+        snap_initial = info["snapshot"]
+        tracked = TrackedMatch(
+            channel_id=12345,
+            sport_path="esports",
+            league_code="cs2",
+            league_name=info["league_name"],
+            event_id="115219",
+            home_team="BetBoom Team",
+            away_team="Aurora Gaming",
+            last_snapshot=snap_initial,
+        )
+
+        # 2. Map 2 finishes in OT (19-16 Aurora) and Map 3 (Nuke) starts at 0-0 -> Fires Map 2 Final + Map 3 Started
+        series_map3_start = CsLiveSeries(
+            match_id="115219",
+            slug="aurora-vs-betboom",
+            tournament="Thunderpick World Championship 2026",
+            bo_type=5,
+            status="current",
+            team1="BetBoom Team",
+            team2="Aurora Gaming",
+            team1_score=1,
+            team2_score=1,
+            active_map_name="Nuke",
+            active_map_number=3,
+            maps=[
+                CsMapResult(map_number=1, map_name="Dust2", status="finished", winner="BetBoom Team", loser="Aurora Gaming", winner_score=13, loser_score=6),
+                CsMapResult(map_number=2, map_name="Ancient", status="finished", winner="Aurora Gaming", loser="BetBoom Team", winner_score=19, loser_score=16),
+                CsMapResult(map_number=3, map_name="Nuke", status="current", team1_rounds=1, team2_rounds=0),
+                CsMapResult(map_number=4, map_name="Mirage", status="upcoming"),
+                CsMapResult(map_number=5, map_name="Cache", status="upcoming"),
+            ],
+        )
+        snap_m3_start = extract_snapshot_from_cs_series(series_map3_start)
+        triggers = diff_snapshots(tracked, snap_m3_start)
+        self.assertEqual(len(triggers), 2)
+        self.assertTrue(any("MAP 2 FINAL (Ancient)" in t and "Next Map: Nuke" in t for t in triggers))
+        self.assertTrue(any("MAP 3 STARTED (Nuke)" in t for t in triggers))
+        snap_m3_start.seen_event_ids |= tracked.last_snapshot.seen_event_ids
+        tracked.last_snapshot = snap_m3_start
+
+        # 3. Routine round 3 (2-1) -> Should NOT trigger spam (Key Milestones only!)
+        series_map3_r3 = CsLiveSeries(
+            match_id="115219",
+            slug="aurora-vs-betboom",
+            tournament="Thunderpick World Championship 2026",
+            bo_type=5,
+            status="current",
+            team1="BetBoom Team",
+            team2="Aurora Gaming",
+            team1_score=1,
+            team2_score=1,
+            active_map_name="Nuke",
+            active_map_number=3,
+            maps=[
+                CsMapResult(map_number=1, map_name="Dust2", status="finished", winner="BetBoom Team", loser="Aurora Gaming", winner_score=13, loser_score=6),
+                CsMapResult(map_number=2, map_name="Ancient", status="finished", winner="Aurora Gaming", loser="BetBoom Team", winner_score=19, loser_score=16),
+                CsMapResult(map_number=3, map_name="Nuke", status="current", team1_rounds=2, team2_rounds=1),
+            ],
+        )
+        snap_r3 = extract_snapshot_from_cs_series(series_map3_r3)
+        self.assertEqual(diff_snapshots(tracked, snap_r3), [])
+        snap_r3.seen_event_ids |= tracked.last_snapshot.seen_event_ids
+        tracked.last_snapshot = snap_r3
+
+        # 4. 5-Round Checkpoint at Round 5 (3-2) -> Triggers checkpoint update
+        series_map3_r5 = CsLiveSeries(
+            match_id="115219",
+            slug="aurora-vs-betboom",
+            tournament="Thunderpick World Championship 2026",
+            bo_type=5,
+            status="current",
+            team1="BetBoom Team",
+            team2="Aurora Gaming",
+            team1_score=1,
+            team2_score=1,
+            active_map_name="Nuke",
+            active_map_number=3,
+            maps=[
+                CsMapResult(map_number=1, map_name="Dust2", status="finished", winner="BetBoom Team", loser="Aurora Gaming", winner_score=13, loser_score=6),
+                CsMapResult(map_number=2, map_name="Ancient", status="finished", winner="Aurora Gaming", loser="BetBoom Team", winner_score=19, loser_score=16),
+                CsMapResult(map_number=3, map_name="Nuke", status="current", team1_rounds=3, team2_rounds=2),
+            ],
+        )
+        snap_r5 = extract_snapshot_from_cs_series(series_map3_r5)
+        triggers_r5 = diff_snapshots(tracked, snap_r5)
+        self.assertEqual(len(triggers_r5), 1)
+        self.assertIn("MAP 3 ROUND 5 (Nuke)", triggers_r5[0])
+        snap_r5.seen_event_ids |= tracked.last_snapshot.seen_event_ids
+        tracked.last_snapshot = snap_r5
+
+        # 5. MR12 Halftime at Round 12 (7-5) -> Triggers Map Halftime
+        series_map3_ht = CsLiveSeries(
+            match_id="115219",
+            slug="aurora-vs-betboom",
+            tournament="Thunderpick World Championship 2026",
+            bo_type=5,
+            status="current",
+            team1="BetBoom Team",
+            team2="Aurora Gaming",
+            team1_score=1,
+            team2_score=1,
+            active_map_name="Nuke",
+            active_map_number=3,
+            maps=[
+                CsMapResult(map_number=1, map_name="Dust2", status="finished", winner="BetBoom Team", loser="Aurora Gaming", winner_score=13, loser_score=6),
+                CsMapResult(map_number=2, map_name="Ancient", status="finished", winner="Aurora Gaming", loser="BetBoom Team", winner_score=19, loser_score=16),
+                CsMapResult(map_number=3, map_name="Nuke", status="current", team1_rounds=7, team2_rounds=5),
+            ],
+        )
+        snap_ht = extract_snapshot_from_cs_series(series_map3_ht)
+        triggers_ht = diff_snapshots(tracked, snap_ht)
+        self.assertEqual(len(triggers_ht), 1)
+        self.assertIn("MAP 3 HALFTIME (Nuke)", triggers_ht[0])
+        snap_ht.seen_event_ids |= tracked.last_snapshot.seen_event_ids
+        tracked.last_snapshot = snap_ht
+
+        # 6. Series finishes (Aurora wins 3-1) via SportsTrackerService.poll_once -> Fires Full-Time and self-stops!
+        series_final = CsLiveSeries(
+            match_id="115219",
+            slug="aurora-vs-betboom",
+            tournament="Thunderpick World Championship 2026",
+            bo_type=5,
+            status="finished",
+            team1="BetBoom Team",
+            team2="Aurora Gaming",
+            team1_score=1,
+            team2_score=3,
+            maps=[
+                CsMapResult(map_number=1, map_name="Dust2", status="finished", winner="BetBoom Team", loser="Aurora Gaming", winner_score=13, loser_score=6),
+                CsMapResult(map_number=2, map_name="Ancient", status="finished", winner="Aurora Gaming", loser="BetBoom Team", winner_score=19, loser_score=16),
+                CsMapResult(map_number=3, map_name="Nuke", status="finished", winner="Aurora Gaming", loser="BetBoom Team", winner_score=13, loser_score=10),
+                CsMapResult(map_number=4, map_name="Mirage", status="finished", winner="Aurora Gaming", loser="BetBoom Team", winner_score=13, loser_score=8),
+            ],
+        )
+
+        tracker = SportsTrackerService(poll_interval=1)
+        cs_notifications = []
+
+        async def fake_cs_notify(match, snapshot, trigs):
+            cs_notifications.append((match.event_id, snapshot.home_score, snapshot.away_score, trigs))
+
+        tracker.set_notify_callback(fake_cs_notify)
+        tracker.tracked_matches[(12345, "115219")] = tracked
+
+        with patch(
+            "src.skills.sports.aggregators.kashrock.KashrockAggregator.get_series_for_tracker",
+            return_value=series_final,
+        ):
+            asyncio.run(tracker.poll_once())
+
+        # Match should be auto-removed after series completion
+        self.assertEqual(len(tracker.tracked_matches), 0)
+        self.assertEqual(len(cs_notifications), 1)
+        self.assertEqual(cs_notifications[0][1], "1")
+        self.assertEqual(cs_notifications[0][2], "3")
+        self.assertTrue(any("FULL-TIME / FINAL WHISTLE" in t for t in cs_notifications[0][3]))
+
+    def test_cs2_bo3_sweep_and_decider_handling(self):
+        from src.skills.sports.models import CsLiveSeries, CsMapResult
+        from src.skills.sports.tracker import extract_snapshot_from_cs_series
+
+        # 1. Standard BO3 series live on Map 2 (Vitality leads 1-0 over FaZe)
+        bo3_live = CsLiveSeries(
+            match_id="2001",
+            slug="vitality-vs-faze",
+            tournament="BLAST Premier",
+            bo_type=3,
+            status="current",
+            team1="Team Vitality",
+            team2="FaZe Clan",
+            team1_score=1,
+            team2_score=0,
+            active_map_name="Mirage",
+            active_map_number=2,
+            maps=[
+                CsMapResult(map_number=1, map_name="Inferno", status="finished", winner="Team Vitality", loser="FaZe Clan", winner_score=13, loser_score=9),
+                CsMapResult(map_number=2, map_name="Mirage", status="current", team1_rounds=11, team2_rounds=8),
+                CsMapResult(map_number=3, map_name="Anubis", status="upcoming"),
+            ],
+        )
+        snap_live = extract_snapshot_from_cs_series(bo3_live)
+        self.assertFalse(snap_live.is_finished)
+        self.assertIn("BO3 • Map 2 (Mirage: Team Vitality 11-8 FaZe Clan)", snap_live.status_detail)
+        self.assertIn("Map 3 (Anubis): Upcoming", snap_live.stats_summary)
+
+        tracked = TrackedMatch(
+            channel_id=12345,
+            sport_path="esports",
+            league_code="cs2",
+            league_name="BLAST Premier (CS2 BO3)",
+            event_id="2001",
+            home_team="Team Vitality",
+            away_team="FaZe Clan",
+            last_snapshot=snap_live,
+        )
+
+        # 2. Vitality wins Map 2 for a 2-0 BO3 sweep -> Series is immediately finished (2 == maps_to_win for BO3),
+        #    and unplayed Map 3 (Anubis) is NOT listed as "Next Map" or "Upcoming" in Final Stats!
+        bo3_sweep = CsLiveSeries(
+            match_id="2001",
+            slug="vitality-vs-faze",
+            tournament="BLAST Premier",
+            bo_type=3,
+            status="current",  # even before BO3.gg flips status to 'finished', 2-0 in BO3 completes it
+            team1="Team Vitality",
+            team2="FaZe Clan",
+            team1_score=2,
+            team2_score=0,
+            maps=[
+                CsMapResult(map_number=1, map_name="Inferno", status="finished", winner="Team Vitality", loser="FaZe Clan", winner_score=13, loser_score=9),
+                CsMapResult(map_number=2, map_name="Mirage", status="finished", winner="Team Vitality", loser="FaZe Clan", winner_score=13, loser_score=8),
+                CsMapResult(map_number=3, map_name="Anubis", status="upcoming"),
+            ],
+        )
+        snap_sweep = extract_snapshot_from_cs_series(bo3_sweep)
+        self.assertTrue(snap_sweep.is_finished)
+        self.assertEqual(snap_sweep.status_detail, "Final (BO3)")
+        self.assertNotIn("Anubis", snap_sweep.stats_summary)
+
+        triggers = diff_snapshots(tracked, snap_sweep)
+        self.assertTrue(any("MAP 2 FINAL (Mirage)" in t and "Next Map" not in t for t in triggers))
+        self.assertTrue(any("FULL-TIME / FINAL WHISTLE (Final (BO3))" in t for t in triggers))
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

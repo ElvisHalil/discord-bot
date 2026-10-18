@@ -59,7 +59,7 @@ def skill_sports_esports(
       - 'event_info': Gets detailed info about a specific event, including CURRENT MATCHES and full TEAM ROSTERS (requires event_page).
       - 'rankings': Gets the current world team rankings from HLTV, including team rosters.
       - 'player_stats': Gets stats for a specific player (requires player_url).
-      - 'live_streams': Checks if ESLCS, BLASTPremier, or thunderpickesports is currently streaming a live match on YouTube.
+      - 'live_streams': Checks live in-game CS2 series scoreboards (BO1/BO3/BO5 map scores, active map round scores, player boxscores) and live YouTube streams.
       - 'odds': Gets live betting odds, moneylines, and win probabilities for a matchup (pass matchup or event_page).
       - 'all': Fetches 'tournaments', 'rankings', and 'live_streams'.
 
@@ -67,7 +67,7 @@ def skill_sports_esports(
         query_type: One of 'tournaments', 'event_info', 'rankings', 'player_stats', 'live_streams', 'odds', 'all' (default).
         event_page: Liquipedia event page, required for query_type='event_info'.
         player_url: Player profile URL, required for query_type='player_stats'.
-        matchup: Team matchup for betting odds (e.g. 'Falcons vs Ninjas in Pyjamas'), used for query_type='odds'.
+        matchup: Team matchup for live scoreboards or betting odds (e.g. 'FURIA vs BetBoom', 'Falcons vs Ninjas in Pyjamas').
     """
     print(f"🎮 [Executing CS Esports Skill] Type: {query_type}, Matchup: {matchup}")
     output = "=== COUNTER-STRIKE ESPORTS DATA ===\n\n"
@@ -80,7 +80,7 @@ def skill_sports_esports(
         q_type = CsQueryType.PLAYER_STATS
     elif any(w in q_type for w in ("event", "roster", "lineup", "group", "bracket", "table")) or ("player" in q_type and not player_url):
         q_type = CsQueryType.EVENT_INFO
-    elif any(w in q_type for w in ("live", "stream", "broadcast")):
+    elif any(w in q_type for w in ("live", "stream", "broadcast", "score", "scores")):
         q_type = CsQueryType.LIVE_STREAMS
     elif any(w in q_type for w in ("tourn", "schedule", "calendar", "match", "matches", "time", "today", "tomorrow", "upcoming", "next")):
         q_type = CsQueryType.TOURNAMENTS
@@ -94,8 +94,13 @@ def skill_sports_esports(
         else:
             q_type = CsQueryType.ALL
 
+    live_target = matchup or event_page
     if q_type == CsQueryType.ALL:
-        fut_esl = submit_to_worker(_esl_aggregator.get_live_matches)
+        fut_esl = (
+            submit_to_worker(_esl_aggregator.get_live_matches, live_target)
+            if live_target
+            else submit_to_worker(_esl_aggregator.get_live_matches)
+        )
         if event_page:
             fut_tourn = submit_to_worker(_liquipedia_aggregator.get_s_tier_tournaments, False)
         else:
@@ -107,9 +112,14 @@ def skill_sports_esports(
         else:
             output += fut_esl.result() + fut_tourn.result() + fut_rank.result()
     else:
-        # 1. LIVE STREAMS
+        # 1. LIVE STREAMS & LIVE CS2 SCOREBOARDS
         if q_type == CsQueryType.LIVE_STREAMS:
-            output += _esl_aggregator.get_live_matches()
+            output += (
+                _esl_aggregator.get_live_matches(live_target)
+                if live_target
+                else _esl_aggregator.get_live_matches()
+            )
+
 
         # 2. TOURNAMENTS (auto-includes active/next event details unless a specific event_page is requested below)
         if q_type == CsQueryType.TOURNAMENTS:

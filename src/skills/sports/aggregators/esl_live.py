@@ -1,19 +1,38 @@
 import os
+from typing import Optional
 import requests
 from src.skills.sports.aggregators.base import BaseSportsAggregator
 from src.skills.sports.catalogs import ESPORTS_STREAM_CHANNELS
+from src.utils.workers import submit_to_worker
+
 
 class EslLiveAggregator(BaseSportsAggregator):
-    """Aggregator that checks ESLCS, BLASTPremier, and thunderpickesports channels for live CS matches via YouTube Data API."""
+    """Aggregator that checks ESLCS, BLASTPremier, and thunderpickesports channels for live CS matches via YouTube Data API,
+    plus live BO1/BO3/BO5 CS2 scoreboards from BO3.gg and KashRock."""
 
     CHANNEL_ID = ESPORTS_STREAM_CHANNELS[0].channel_id
     CHANNELS = ESPORTS_STREAM_CHANNELS
 
-    def get_live_matches(self) -> str:
-        """Checks if ESLCS, BLASTPremier, or thunderpickesports are currently streaming a live Counter-Strike match on YouTube."""
-        print("  └─ 🔴 [CS Live]: Checking ESLCS, BLASTPremier, and thunderpickesports YouTube for live matches...")
+    def get_live_matches(self, match_query: Optional[str] = None) -> str:
+        """Checks if ESLCS, BLASTPremier, or thunderpickesports are currently streaming a live Counter-Strike match on YouTube
+        and fetches live in-game CS2 series scoreboards."""
+        print("  └─ 🔴 [CS Live]: Checking live CS2 scoreboards and ESL/BLAST/Thunderpick streams...")
+
+        def _fetch_kr_live() -> str:
+            try:
+                from src.skills.sports.aggregators.kashrock import KashrockAggregator
+                kr = KashrockAggregator()
+                return kr.get_live_scoreboards(match_query) if match_query else kr.get_live_scoreboards()
+            except Exception:
+                return ""
+
+        kr_fut = submit_to_worker(_fetch_kr_live)
+
         api_key = os.getenv("YOUTUBE_API_KEY")
         if not api_key:
+            kr_live = kr_fut.result()
+            if kr_live:
+                return f"[LIVE CS2 STREAMS & SCOREBOARDS]\n{kr_live.strip()}\n\n"
             return "[LIVE STREAMS]\nError: YOUTUBE_API_KEY is missing.\n\n"
 
         url = "https://www.googleapis.com/youtube/v3/search"
@@ -45,7 +64,8 @@ class EslLiveAggregator(BaseSportsAggregator):
             except Exception as e:
                 errors.append(e)
 
-        if errors and len(errors) == len(self.CHANNELS):
+        kr_live = kr_fut.result()
+        if errors and len(errors) == len(self.CHANNELS) and not kr_live:
             return f"[LIVE STREAMS]\nError fetching live streams: {errors[0]}\n\n"
 
         output = "[LIVE CS2 STREAMS]\n"
@@ -59,13 +79,9 @@ class EslLiveAggregator(BaseSportsAggregator):
                     f"  Link: {stream['link']}\n"
                 )
 
-        try:
-            from src.skills.sports.aggregators.kashrock import KashrockAggregator
-            kr_live = KashrockAggregator().get_live_scoreboards()
-            if kr_live:
-                output += "\n" + kr_live.strip() + "\n"
-        except Exception:
-            pass
+        if kr_live:
+            output += "\n" + kr_live.strip() + "\n"
 
         return output + "\n"
+
 

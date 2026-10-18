@@ -32,6 +32,11 @@ from src.skills.sports.aggregators.espn_utils import (
     record_channel_last_match_query,
     resolve_espn_team,
 )
+from src.skills.sports.aggregators.kashrock import (
+    KashrockAggregator,
+    _format_iso_start_time,
+    _team_match_key,
+)
 from src.skills.sports.aggregators.soccer import SoccerAggregator
 from src.skills.sports.aggregators.universal_espn import UniversalEspnAggregator
 from src.skills.sports.enums import (
@@ -39,6 +44,7 @@ from src.skills.sports.enums import (
     TrackerAction,
 )
 from src.skills.sports.models import (
+    CsLiveSeries,
     MatchSnapshot,
     TrackedMatch,
 )
@@ -214,6 +220,227 @@ def extract_snapshot_from_summary(
     )
 
 
+def extract_snapshot_from_cs_series(series: CsLiveSeries) -> MatchSnapshot:
+    """
+    Build a normalized MatchSnapshot from a Counter-Strike 2 CsLiveSeries with Key-Milestone
+    notable_events (Map Start, Halftime at 12 rounds, Overtime at 12-12+, 5-round checkpoints,
+    and Map Completion with series score & next map).
+    """
+    bo_type = max(1, int(series.bo_type or 3))
+    maps_to_win = (bo_type // 2) + 1
+    t1_score = int(series.team1_score or 0)
+    t2_score = int(series.team2_score or 0)
+
+    is_done = (
+        series.status == "finished"
+        or t1_score >= maps_to_win
+        or t2_score >= maps_to_win
+    )
+    if is_done:
+        state = MatchState.POST
+        completed = True
+        status_name = "STATUS_FINAL"
+    elif series.status == "current":
+        state = MatchState.IN
+        completed = False
+        status_name = "STATUS_IN_PROGRESS"
+    else:
+        state = MatchState.PRE
+        completed = False
+        status_name = "STATUS_SCHEDULED"
+
+    notable_events: List[Tuple[str, str]] = []
+    seen_ids: Set[str] = set()
+    map_stat_parts: List[str] = []
+
+    active_t1_r = 0
+    active_t2_r = 0
+    active_map_name = series.active_map_name
+    active_map_num = series.active_map_number
+
+    sorted_maps = sorted(series.maps or [], key=lambda m: m.map_number)
+    for idx, mp in enumerate(sorted_maps):
+        m_num = mp.map_number
+        m_name = mp.map_name or f"Map {m_num}"
+        if mp.status == "finished" and (mp.winner_score or mp.loser_score):
+            ot_tag = " (OT)" if (mp.winner_score + mp.loser_score) > 24 else ""
+            map_stat_parts.append(
+                f"Map {m_num} ({m_name}): {mp.winner} {mp.winner_score}-{mp.loser_score} {mp.loser}{ot_tag}"
+            )
+            next_map_str = ""
+            if idx + 1 < len(sorted_maps) and not is_done:
+                next_mp = sorted_maps[idx + 1]
+                if next_mp.map_name and next_mp.map_name != "TBD":
+                    next_map_str = f" | Next Map: {next_mp.map_name}"
+            ev_id = f"cs_map_done_{m_num}"
+            ev_desc = (
+                f"🗺️ **MAP {m_num} FINAL ({m_name})**: **{mp.winner}** wins "
+                f"**{mp.winner_score}-{mp.loser_score}**{ot_tag}!{next_map_str}"
+            )
+            seen_ids.add(ev_id)
+            notable_events.append((ev_id, ev_desc))
+        elif mp.status == "current":
+            if not active_map_name:
+                active_map_name = m_name
+            if not active_map_num:
+                active_map_num = m_num
+            active_t1_r = mp.team1_rounds
+            active_t2_r = mp.team2_rounds
+            if active_t1_r or active_t2_r:
+                map_stat_parts.append(
+                    f"Map {m_num} ({m_name}): LIVE ({series.team1} {active_t1_r}-{active_t2_r} {series.team2})"
+                )
+            else:
+                map_stat_parts.append(f"Map {m_num} ({m_name}): LIVE")
+        elif not is_done:
+            map_stat_parts.append(f"Map {m_num} ({m_name}): Upcoming")
+
+    # Emit key milestones for the active map
+    if state == MatchState.IN and active_map_num and active_map_name:
+        start_id = f"cs_map_start_{active_map_num}"
+        start_desc = f"▶️ **MAP {active_map_num} STARTED ({active_map_name})**: **{series.team1}** vs **{series.team2}** is now live!"
+        seen_ids.add(start_id)
+        notable_events.append((start_id, start_desc))
+
+        total_r = active_t1_r + active_t2_r
+        if total_r > 0:
+            # MR12 Halftime at Round 12
+            if total_r == 12:
+                ht_id = f"cs_map_{active_map_num}_halftime"
+                ht_desc = (
+                    f"⏸️ **MAP {active_map_num} HALFTIME ({active_map_name})**: "
+                    f"**{series.team1}** {active_t1_r} - {active_t2_r} **{series.team2}**"
+                )
+                seen_ids.add(ht_id)
+                notable_events.append((ht_id, ht_desc))
+            # Overtime reached (12-12, 15-15, 18-18, etc.)
+            elif active_t1_r >= 12 and active_t2_r >= 12 and total_r >= 24 and (total_r - 24) % 6 == 0:
+                ot_id = f"cs_map_{active_map_num}_ot_{total_r}"
+                ot_desc = (
+                    f"🔥 **MAP {active_map_num} OVERTIME ({active_map_name})**: "
+                    f"**{series.team1}** {active_t1_r} - {active_t2_r} **{series.team2}**!"
+                )
+                seen_ids.add(ot_id)
+                notable_events.append((ot_id, ot_desc))
+            # 5-round key checkpoints (Rounds 5, 10, 17, 22)
+            elif total_r in (5, 10, 17, 22):
+                cp_id = f"cs_map_{active_map_num}_checkpoint_{total_r}"
+                cp_desc = (
+                    f"🎯 **MAP {active_map_num} ROUND {total_r} ({active_map_name})**: "
+                    f"**{series.team1}** {active_t1_r} - {active_t2_r} **{series.team2}**"
+                )
+                seen_ids.add(cp_id)
+                notable_events.append((cp_id, cp_desc))
+
+    if is_done:
+        status_detail = f"Final (BO{bo_type})"
+    elif state == MatchState.PRE:
+        status_detail = f"Scheduled (BO{bo_type}) — {_format_iso_start_time(series.start_date)}"
+    else:
+        if active_map_name:
+            if active_t1_r or active_t2_r:
+                status_detail = (
+                    f"BO{bo_type} • Map {active_map_num} ({active_map_name}: "
+                    f"{series.team1} {active_t1_r}-{active_t2_r} {series.team2})"
+                )
+            else:
+                status_detail = f"BO{bo_type} • Map {active_map_num} ({active_map_name} - Live)"
+        else:
+            status_detail = f"BO{bo_type} • Between Maps (Series {t1_score}-{t2_score})"
+
+    stat_sections: List[str] = []
+    if map_stat_parts:
+        stat_sections.append(" | ".join(map_stat_parts))
+    if series.top_players:
+        stat_sections.append("Leaders: " + ", ".join(series.top_players[:4]))
+
+    period = active_map_num or (t1_score + t2_score + (0 if is_done else 1))
+    return MatchSnapshot(
+        state=state,
+        completed=completed,
+        status_name=status_name,
+        status_detail=status_detail,
+        period=period,
+        home_team=series.team1,
+        away_team=series.team2,
+        home_score=str(t1_score),
+        away_score=str(t2_score),
+        notable_events=notable_events,
+        seen_event_ids=seen_ids,
+        stats_summary=" || ".join(stat_sections),
+    )
+
+
+_CS2_TRACKER_KEYWORDS = frozenset({
+    "cs", "cs2", "csgo", "counter-strike", "counterstrike", "esports", "hltv", "bo3", "bo5",
+    "thunderpick", "iem", "esl", "blast", "pgl", "faze", "navi", "vitality", "g2", "spirit",
+    "mouz", "aurora", "betboom", "mongolz", "astralis", "furia", "heroic", "falcons", "fnatic",
+    "mibr", "pain", "imperial", "3dmax", "gamerlegion", "saw", "ence", "flyquest", "b8",
+    "monte", "ecstatic", "sashi", "nemiga", "parivision", "sinners", "sangal", "9z", "legacy",
+    "m80", "nrg", "tyloo", "lynn",
+})
+
+
+def _is_cs2_tracking_query(target: str, sport_clean: str) -> bool:
+    """Return True if the tracking request targets Counter-Strike 2 / Esports."""
+    if sport_clean in ("cs", "cs2", "csgo", "counter-strike", "counter strike", "esports", "hltv", "bo3"):
+        return True
+    t_low = (target or "").lower()
+    if any(phrase in t_low for phrase in ("counter-strike", "counter strike", "natus vincere", "eternal fire", "virtus.pro", "virtus pro", "the mongolz", "passion ua", "red canids", "lynn vision")):
+        return True
+    tokens = set(re.findall(r"[a-z0-9]+", t_low))
+    return bool(tokens & _CS2_TRACKER_KEYWORDS)
+
+
+def resolve_cs2_live_or_next_event(target: str) -> Optional[Dict[str, Any]]:
+    """
+    Resolve a CS2 team, tournament, or matchup query into a trackable event dict
+    backed by BO3.gg and KashRock.
+    """
+    agg = KashrockAggregator()
+    live_list, upcoming_list = agg.get_live_and_upcoming_series(
+        match_query=target,
+        include_live_boxscore=True,
+    )
+    all_series = live_list + upcoming_list
+    if not all_series:
+        return None
+
+    stop_words = {
+        "cs", "cs2", "csgo", "counter", "strike", "esports", "live", "match", "game",
+        "series", "bo1", "bo3", "bo5", "the", "vs", "v", "finals", "final",
+    }
+    q_tokens = [
+        t for t in re.findall(r"[a-z0-9]+", (target or "").lower())
+        if len(t) >= 2 and t not in stop_words
+    ]
+
+    chosen: Optional[CsLiveSeries] = None
+    if q_tokens:
+        for s in all_series:
+            haystack = f"{s.team1} {s.team2} {s.tournament} {s.stage} {s.slug}".lower()
+            if any(tok in haystack for tok in q_tokens):
+                chosen = s
+                break
+    elif live_list:
+        chosen = live_list[0]
+
+    if not chosen:
+        return None
+
+    snapshot = extract_snapshot_from_cs_series(chosen)
+    league_label = f"{chosen.tournament} (CS2 BO{chosen.bo_type})" if chosen.tournament else f"CS2 (BO{chosen.bo_type})"
+    return {
+        "sport_path": "esports",
+        "league_code": "cs2",
+        "league_name": league_label,
+        "event_id": str(chosen.match_id or chosen.slug),
+        "home_team": snapshot.home_team,
+        "away_team": snapshot.away_team,
+        "snapshot": snapshot,
+    }
+
+
 def diff_snapshots(tracked: TrackedMatch, curr: MatchSnapshot) -> List[str]:
     """
     Compare previous MatchSnapshot against current MatchSnapshot and return a list
@@ -229,7 +456,7 @@ def diff_snapshots(tracked: TrackedMatch, curr: MatchSnapshot) -> List[str]:
             f"(Score: {curr.home_team} {curr.home_score} - {curr.away_score} {curr.away_team}, {curr.status_detail})"
         )
 
-    # 2. New notable keyEvents / scoringPlays (Goals, Red Cards, Touchdowns, etc.)
+    # 2. New notable keyEvents / scoringPlays (Goals, Red Cards, Touchdowns, CS2 Milestones, etc.)
     new_event_descs = [
         desc for ev_id, desc in curr.notable_events if ev_id not in prev.seen_event_ids
     ]
@@ -256,11 +483,13 @@ def diff_snapshots(tracked: TrackedMatch, curr: MatchSnapshot) -> List[str]:
         except ValueError:
             pass
     else:
-        # For Soccer, NHL, NFL, MLB, etc., announce every goal, red card, and score change!
+        # For Soccer, NHL, NFL, MLB, CS2, etc., announce every notable event and score change!
         if new_event_descs:
             for d in new_event_descs:
                 triggers.append(
-                    f"{d} — Score: **{curr.home_team}** {curr.home_score} - {curr.away_score} **{curr.away_team}** ({curr.status_detail})"
+                    f"{d} — Series/Game Score: **{curr.home_team}** {curr.home_score} - {curr.away_score} **{curr.away_team}** ({curr.status_detail})"
+                    if tracked.sport_path == "esports"
+                    else f"{d} — Score: **{curr.home_team}** {curr.home_score} - {curr.away_score} **{curr.away_team}** ({curr.status_detail})"
                 )
         elif score_changed:
             triggers.append(
@@ -300,7 +529,7 @@ def resolve_live_or_next_event(
     sport: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Resolve a team or matchup query into a trackable ESPN event dict:
+    Resolve a team or matchup query into a trackable ESPN or CS2 event dict:
     {
         'sport_path': str,
         'league_code': str,
@@ -315,6 +544,14 @@ def resolve_live_or_next_event(
     if not target:
         return None
     sport_clean = (sport or "").lower().strip()
+
+    if _is_cs2_tracking_query(target, sport_clean):
+        cs_info = resolve_cs2_live_or_next_event(target)
+        if cs_info:
+            return cs_info
+        if sport_clean in ("cs", "cs2", "csgo", "counter-strike", "counter strike", "esports", "hltv", "bo3"):
+            return None
+
     sport_hint = None
 
     club_league = None
@@ -520,7 +757,7 @@ class SportsTrackerService:
         """Poll all currently tracked matches once in parallel, fire notifications on changes, and prune finished games."""
         now = time.time()
         items = list(self.tracked_matches.items())
-        active_items: List[Tuple[Tuple[int, str], TrackedMatch, str]] = []
+        active_items: List[Tuple[Tuple[int, str], TrackedMatch]] = []
 
         for key, match in items:
             # 1. Check 4-hour safety timeout
@@ -528,34 +765,56 @@ class SportsTrackerService:
                 print(f"⏱️ [Live Tracker]: Match {match.home_team} vs {match.away_team} exceeded 4-hour safety limit; auto-stopping.")
                 self.tracked_matches.pop(key, None)
                 continue
-            summary_url = (
-                f"https://site.api.espn.com/apis/site/v2/sports/{match.sport_path}/"
-                f"{match.league_code}/summary?event={match.event_id}"
-            )
-            active_items.append((key, match, summary_url))
+            active_items.append((key, match))
 
         if not active_items:
             return
 
-        # 2. Fetch fresh ESPN summaries concurrently across all tracked matches via shared worker pool
+        def _fetch_match_payload(m: TrackedMatch) -> Any:
+            if m.sport_path == "esports":
+                return KashrockAggregator().get_series_for_tracker(m.event_id, m.home_team, m.away_team)
+            summary_url = (
+                f"https://site.api.espn.com/apis/site/v2/sports/{m.sport_path}/"
+                f"{m.league_code}/summary?event={m.event_id}"
+            )
+            return fetch_json(summary_url, timeout=8)
+
+        # 2. Fetch fresh ESPN summaries or CS2 series concurrently across all tracked matches via shared worker pool
         responses = await asyncio.gather(
-            *(run_in_worker(fetch_json, url, timeout=8) for _, _, url in active_items),
+            *(
+                run_in_worker(
+                    fetch_json,
+                    f"https://site.api.espn.com/apis/site/v2/sports/{match.sport_path}/{match.league_code}/summary?event={match.event_id}",
+                    timeout=8,
+                )
+                if match.sport_path != "esports"
+                else run_in_worker(_fetch_match_payload, match)
+                for _, match in active_items
+            ),
             return_exceptions=True,
         )
 
-        for (key, match, _), summary_data in zip(active_items, responses):
-            if isinstance(summary_data, Exception):
-                print(f"  └─ ⚠️ [Live Tracker Poll Error ({match.home_team} vs {match.away_team})]: {summary_data}")
+        for (key, match), payload in zip(active_items, responses):
+            if isinstance(payload, Exception):
+                print(f"  └─ ⚠️ [Live Tracker Poll Error ({match.home_team} vs {match.away_team})]: {payload}")
                 continue
-            if not summary_data or not isinstance(summary_data, dict):
+            if not payload:
                 continue
 
-            curr_snapshot = extract_snapshot_from_summary(summary_data)
+            if match.sport_path == "esports":
+                if not isinstance(payload, CsLiveSeries):
+                    continue
+                curr_snapshot = extract_snapshot_from_cs_series(payload)
+            else:
+                if not isinstance(payload, dict):
+                    continue
+                curr_snapshot = extract_snapshot_from_summary(payload)
+
             print(
                 f"🔄 [Live Tracker Poll]: {match.home_team} {curr_snapshot.home_score} - "
                 f"{curr_snapshot.away_score} {match.away_team} ({curr_snapshot.status_detail}) [{match.league_name}]"
             )
-            # Carry forward all previously seen event IDs so we never re-alert old goals/cards
+            # Carry forward all previously seen event IDs so we never re-alert old goals/cards/milestones
             merged_seen = set(match.last_snapshot.seen_event_ids) | set(curr_snapshot.seen_event_ids)
 
             triggers = diff_snapshots(match, curr_snapshot)
@@ -604,7 +863,7 @@ class SportsTrackerService:
         if not info:
             return (
                 f"⚠️ Could not find an active or upcoming match for '{query}'. "
-                "Please specify the team or matchup name (e.g. 'Real Madrid', 'Arsenal', 'Lakers')."
+                "Please specify the team or matchup name (e.g. 'Real Madrid', 'Arsenal', 'Lakers', 'Aurora vs BetBoom')."
             )
 
         snap: MatchSnapshot = info["snapshot"]
@@ -638,7 +897,7 @@ class SportsTrackerService:
             )
             if snap.notable_events:
                 ev_lines = "\n".join(f"  - {desc}" for _, desc in snap.notable_events)
-                extra_details += f"\n• **Goals / Scoring Plays So Far:**\n{ev_lines}"
+                extra_details += f"\n• **Goals / Key Milestones So Far:**\n{ev_lines}"
             if snap.stats_summary:
                 extra_details += f"\n• **Live Match Stats:** {snap.stats_summary}"
         else:
@@ -649,7 +908,7 @@ class SportsTrackerService:
             f"• **Match:** {snap.home_team} vs {snap.away_team} ({info['league_name']})\n"
             f"• **Current Status:** {status_badge}"
             f"{extra_details}\n"
-            f"• **Tracking Rules:** Polling every {self.poll_interval}s for kickoff, goals/score changes, red cards, halftime/period breaks, and full-time. "
+            f"• **Tracking Rules:** Polling every {self.poll_interval}s for kickoff, goals/score changes, red cards, halftime/period breaks, CS2 map/round milestones, and full-time. "
             f"The tracker will remain active while the game is in play and will automatically stop once Full-Time (FT) is reached."
             f"{llm_instruction}"
         )
@@ -682,23 +941,37 @@ class SportsTrackerService:
         if not matches:
             return "ℹ️ No live matches are currently being tracked in this channel."
 
-        req_list = [
-            (
-                f"https://site.api.espn.com/apis/site/v2/sports/{m.sport_path}/{m.league_code}/summary?event={m.event_id}",
-                None,
-            )
-            for m in matches
-        ]
-        summaries = cached_espn_get_many(req_list, ttl=15)
+        espn_matches = [m for m in matches if m.sport_path != "esports"]
+        espn_summaries: Dict[str, Any] = {}
+        if espn_matches:
+            req_list = [
+                (
+                    f"https://site.api.espn.com/apis/site/v2/sports/{m.sport_path}/{m.league_code}/summary?event={m.event_id}",
+                    None,
+                )
+                for m in espn_matches
+            ]
+            raw_summaries = cached_espn_get_many(req_list, ttl=15)
+            for m, s_data in zip(espn_matches, raw_summaries):
+                espn_summaries[m.event_id] = s_data
 
         lines = ["📡 **ACTIVELY TRACKED MATCHES IN THIS CHANNEL:**"]
-        for m, summary_data in zip(matches, summaries):
+        for m in matches:
             s = m.last_snapshot
-            if summary_data and summary_data.get("header"):
+            if m.sport_path == "esports":
                 try:
-                    s = extract_snapshot_from_summary(summary_data)
+                    cs_series = KashrockAggregator().get_series_for_tracker(m.event_id, m.home_team, m.away_team)
+                    if cs_series is not None:
+                        s = extract_snapshot_from_cs_series(cs_series)
                 except Exception as e:
-                    logger.debug("Failed to extract snapshot in list_tracked: %s", e)
+                    logger.debug("Failed to extract CS2 snapshot in list_tracked: %s", e)
+            else:
+                summary_data = espn_summaries.get(m.event_id)
+                if summary_data and summary_data.get("header"):
+                    try:
+                        s = extract_snapshot_from_summary(summary_data)
+                    except Exception as e:
+                        logger.debug("Failed to extract snapshot in list_tracked: %s", e)
             lines.append(
                 f"• **{m.home_team} {s.home_score} - {s.away_score} {m.away_team}** "
                 f"({m.league_name}) — Status: `{s.status_detail}`"
@@ -715,7 +988,8 @@ def skill_sports_tracker(
     sport: Optional[str] = None,
 ) -> str:
     """
-    Start, stop, or list live background tracking for any sports match (Soccer, NBA, NHL, NFL, MLB, etc.).
+    Start, stop, or list live background tracking for any sports or Counter-Strike 2 (CS2) match
+    (Soccer, NBA, NHL, NFL, MLB, CS2 Esports, etc.).
     When started, the bot automatically monitors the live game in the background and posts updates
     in the Discord channel whenever the score changes, a red card occurs, halftime is reached,
     or the match finishes (and automatically stops tracking once the match is over).

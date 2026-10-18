@@ -120,3 +120,48 @@ class TrackedMatch(DictLikeMixin):
     created_at: float = field(default_factory=time.time)
     last_notified_score_diff: int = 0
 
+
+@dataclass(slots=True)
+class CsMapResult(DictLikeMixin):
+    """Represents a single map within a CS2 BO1/BO3/BO5 series."""
+
+    map_number: int
+    map_name: str
+    status: str = "upcoming"  # 'finished', 'current', 'upcoming'
+    winner: str = ""
+    loser: str = ""
+    winner_score: int = 0
+    loser_score: int = 0
+    team1_rounds: int = 0
+    team2_rounds: int = 0
+
+
+@dataclass(slots=True)
+class CsLiveSeries(DictLikeMixin):
+    """Normalized state of a live or upcoming Counter-Strike 2 series (BO1/BO3/BO5)."""
+
+    match_id: str
+    slug: str
+    tournament: str
+    tier: str = ""
+    stage: str = ""
+    prize_pool: int = 0
+    bo_type: int = 3
+    status: str = "current"  # 'current' or 'upcoming' or 'finished'
+    start_date: str = ""
+    team1: str = "Team 1"
+    team2: str = "Team 2"
+    team1_score: int = 0
+    team2_score: int = 0
+    team1_rank: int = 0
+    team2_rank: int = 0
+    kr_game_id: str = ""
+    maps: List[CsMapResult] = field(default_factory=list)
+    active_map_name: str = ""
+    active_map_number: int = 0
+    live_round_score: str = ""
+    top_players: List[str] = field(default_factory=list)
+    streams: List[str] = field(default_factory=list)
+    odds_summary: str = ""
+
+
