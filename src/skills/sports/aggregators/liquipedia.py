@@ -295,7 +295,33 @@ class LiquipediaAggregator(BaseSportsAggregator):
             else:
                 matchup_str = f"**{team1}** {upper_txt} **{team2}**{fmt_suffix}"
 
-            matches.append((sort_ts, f"- [{stage_label}] {time_display}: {matchup_str}"))
+            # Extract map-by-map scores from .brkts-popup-body-grid-row if present
+            map_summaries: list[str] = []
+            for row in popup.select(".brkts-popup-body-grid-row"):
+                map_link = row.select_one("a[title]")
+                if not map_link:
+                    continue
+                m_name = map_link.get_text(" ", strip=True)
+                if not m_name:
+                    continue
+                main_scores = [
+                    s.get_text(strip=True)
+                    for s in row.select(".brkts-popup-body-detailed-scores-main-score")
+                    if s.get_text(strip=True).isdigit()
+                ]
+                if len(main_scores) >= 2:
+                    s1, s2 = int(main_scores[0]), int(main_scores[1])
+                    if s1 > s2:
+                        map_summaries.append(f"{m_name}: {team1} {s1}-{s2}")
+                    elif s2 > s1:
+                        map_summaries.append(f"{m_name}: {team2} {s2}-{s1}")
+                    else:
+                        map_summaries.append(f"{m_name}: {s1}-{s2}")
+                else:
+                    map_summaries.append(f"{m_name}: Upcoming")
+
+            maps_suffix = f" [Maps: {' | '.join(map_summaries)}]" if map_summaries else ""
+            matches.append((sort_ts, f"- [{stage_label}] {time_display}: {matchup_str}{maps_suffix}"))
 
         # Fallback to .match-info ticker if no .brkts-popup elements exist on the page
         if not matches:

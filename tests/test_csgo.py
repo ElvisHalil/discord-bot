@@ -522,15 +522,24 @@ class TestBo3AndKashrockLiveSeries(unittest.TestCase):
         self.assertIn("Map 3 (Nuke): 🔴 **LIVE (BetBoom Team 12-9 Aurora Gaming)**", out)
         self.assertIn("Map 4 (Mirage): ⏳ Upcoming", out)
         self.assertIn("Map 5 (Cache): ⏳ Upcoming", out)
-        # Verify live player boxscore leaders, odds, and streams
+        # Verify live player boxscore leaders and streams (without unsolicited betting odds noise)
         self.assertIn("Magnojez (21K/13D, 92.4 ADR, 1.42 Rtg)", out)
-        self.assertIn("BetBoom Team 2.4 vs Aurora Gaming 1.52", out)
+        self.assertNotIn("Live Series Odds:", out)
         self.assertIn("<https://twitch.tv/thunderpicktv> (EN)", out)
         # Verify upcoming CS2 schedule
         self.assertIn("=== UPCOMING CS2 MATCH SCHEDULE (BO3.gg) ===", out)
         self.assertIn("**Team Vitality** (#2) vs **FaZe Clan** (#6) (Best of 3 — BLAST Premier)", out)
 
+    @patch("src.skills.sports.sports._odds_aggregator.get_odds")
+    @patch("src.skills.sports.sports._esl_aggregator.get_live_matches", return_value="LIVE SCOREBOARD")
+    def test_live_matchup_does_not_fetch_betting_odds(self, mock_live, mock_odds):
+        out = skill_sports_esports(query_type="live_streams", matchup="FURIA vs BetBoom")
+        mock_live.assert_called_once_with("FURIA vs BetBoom")
+        mock_odds.assert_not_called()
+        self.assertIn("LIVE SCOREBOARD", out)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

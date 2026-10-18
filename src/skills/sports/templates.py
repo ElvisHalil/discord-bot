@@ -35,7 +35,7 @@ def build_cs_llm_instructions() -> str:
     """Build concise LLM instructions for Counter-Strike esports responses."""
     return (
         "=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-        "1. Synthesize a cohesive overview highlighting the next S-Tier tournament (`[Name](<https://liquipedia.net/...>)`), exact match times from `MATCH SCHEDULE & RESULTS (Exact Times)`, recent champions, and top HLTV rankings; DO NOT create a prominent empty section if no matches are live.\n"
+        "1. If `LIVE IN-GAME CS2 SCOREBOARDS` is present, report the live series status FIRST and CONFIDENTLY (series score, Best-of-N format, completed map winners/scores, and the currently active or next map). Synthesize a cohesive overview highlighting the next S-Tier tournament (`[Name](<https://liquipedia.net/...>)`), exact match times from `MATCH SCHEDULE & RESULTS (Exact Times)`, recent champions, and top HLTV rankings; DO NOT create a prominent empty section if no matches are live.\n"
         "2. NEVER output pseudo-links (`<event_page:...>`) or raw Unix epoch tags (`<t:...:t>`).\n"
         "3. Only list active teams from `PARTICIPATING TEAMS`; list player rosters only when requested.\n"
         "4. For player stats, report K/D, ADR, KPR/DPR, HS%, Opening Kills/Rd, and HLTV Rating 3.0 (`0-100` role scores are percentiles).\n"

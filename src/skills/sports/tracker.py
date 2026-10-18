@@ -262,21 +262,27 @@ def extract_snapshot_from_cs_series(series: CsLiveSeries) -> MatchSnapshot:
     for idx, mp in enumerate(sorted_maps):
         m_num = mp.map_number
         m_name = mp.map_name or f"Map {m_num}"
-        if mp.status == "finished" and (mp.winner_score or mp.loser_score):
-            ot_tag = " (OT)" if (mp.winner_score + mp.loser_score) > 24 else ""
-            map_stat_parts.append(
-                f"Map {m_num} ({m_name}): {mp.winner} {mp.winner_score}-{mp.loser_score} {mp.loser}{ot_tag}"
-            )
+        if mp.status == "finished" and (mp.winner_score or mp.loser_score or mp.winner):
             next_map_str = ""
             if idx + 1 < len(sorted_maps) and not is_done:
                 next_mp = sorted_maps[idx + 1]
                 if next_mp.map_name and next_mp.map_name != "TBD":
                     next_map_str = f" | Next Map: {next_mp.map_name}"
             ev_id = f"cs_map_done_{m_num}"
-            ev_desc = (
-                f"🗺️ **MAP {m_num} FINAL ({m_name})**: **{mp.winner}** wins "
-                f"**{mp.winner_score}-{mp.loser_score}**{ot_tag}!{next_map_str}"
-            )
+            if mp.winner_score or mp.loser_score:
+                ot_tag = " (OT)" if (mp.winner_score + mp.loser_score) > 24 else ""
+                map_stat_parts.append(
+                    f"Map {m_num} ({m_name}): {mp.winner} {mp.winner_score}-{mp.loser_score} {mp.loser}{ot_tag}"
+                )
+                ev_desc = (
+                    f"🗺️ **MAP {m_num} FINAL ({m_name})**: **{mp.winner}** wins "
+                    f"**{mp.winner_score}-{mp.loser_score}**{ot_tag}!{next_map_str}"
+                )
+            else:
+                map_stat_parts.append(f"Map {m_num} ({m_name}): {mp.winner} Won")
+                ev_desc = (
+                    f"🗺️ **MAP {m_num} FINAL ({m_name})**: **{mp.winner}** wins Map {m_num}!{next_map_str}"
+                )
             seen_ids.add(ev_id)
             notable_events.append((ev_id, ev_desc))
         elif mp.status == "current":

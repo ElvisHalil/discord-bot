@@ -74,13 +74,13 @@ def skill_sports_esports(
 
     # Normalize query_type to prevent empty data when models pass natural language
     q_type = (query_type or CsQueryType.ALL).lower().strip()
-    if any(w in q_type for w in ("odd", "bet", "moneyline", "payout", "win", "prop", "line")):
+    if any(w in q_type for w in ("odd", "bet", "moneyline", "payout", "prop", "props")):
         q_type = CsQueryType.ODDS
     elif any(w in q_type for w in ("stat", "rating", "kdr", "kd")) or q_type == CsQueryType.PLAYER_STATS or player_url:
         q_type = CsQueryType.PLAYER_STATS
     elif any(w in q_type for w in ("event", "roster", "lineup", "group", "bracket", "table")) or ("player" in q_type and not player_url):
         q_type = CsQueryType.EVENT_INFO
-    elif any(w in q_type for w in ("live", "stream", "broadcast", "score", "scores")):
+    elif any(w in q_type for w in ("live", "stream", "broadcast", "score", "scores", "status", "current", "now", "going")):
         q_type = CsQueryType.LIVE_STREAMS
     elif any(w in q_type for w in ("tourn", "schedule", "calendar", "match", "matches", "time", "today", "tomorrow", "upcoming", "next")):
         q_type = CsQueryType.TOURNAMENTS
@@ -88,7 +88,7 @@ def skill_sports_esports(
         q_type = CsQueryType.RANKINGS
     elif q_type not in tuple(CsQueryType):
         if any(team in q_type for team in _odds_aggregator.CS_TEAMS):
-            q_type = CsQueryType.ODDS
+            q_type = CsQueryType.LIVE_STREAMS
             if not matchup:
                 matchup = query_type
         else:
@@ -141,8 +141,8 @@ def skill_sports_esports(
         stats_target = player_url or matchup or event_page or (query_type if q_type != (query_type or "").lower().strip() else None)
         output += _hltv_aggregator.get_player_stats(stats_target)
 
-    # 6. BETTING ODDS / TEAM MATCHUP
-    if q_type in (CsQueryType.ODDS, "betting") or (matchup and q_type not in (CsQueryType.PLAYER_STATS, CsQueryType.EVENT_INFO)):
+    # 6. BETTING ODDS (only when explicitly requested via q_type == 'odds')
+    if q_type in (CsQueryType.ODDS, "betting"):
         target = matchup or event_page or player_url or "Falcons vs Ninjas in Pyjamas"
         output += _odds_aggregator.get_odds(target, sport="cs2")
 
@@ -338,7 +338,7 @@ def skill_sports_info(
             return skill_sports_esports(query_type="event_info", event_page=named_event or (target_q if target_q not in ("schedule", "") else None))
         elif any(k in q_str for k in ("rank", "top", "leader", "standings")) and not any(k in q_str for k in ("tourn", "schedule", "match", "matches")):
             return skill_sports_esports(query_type="rankings")
-        elif any(k in q_str for k in ("live", "stream", "broadcast")):
+        elif any(k in q_str for k in ("live", "stream", "broadcast", "score", "scores", "status", "going", "current", "winning")):
             return skill_sports_esports(query_type="live_streams")
         elif re.search(r'\b(?:tourn\w*|schedule|next|upcoming|events?|match|matches|time|today|tomorrow|when|playing|plays)\b|\bplay\b(?!\s+(?:a|an|some|me|music|song|track))', q_str):
             return skill_sports_esports(query_type="tournaments", event_page=named_event)

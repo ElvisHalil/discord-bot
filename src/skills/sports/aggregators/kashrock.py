@@ -437,12 +437,32 @@ class KashrockAggregator(BaseSportsAggregator):
                 )
             )
 
+        # Infer missing winner on a just-finished map if series score accounts for it
+        finished_maps = [mp for mp in maps if mp.status == "finished"]
+        missing_winner_maps = [mp for mp in finished_maps if not mp.winner]
+        if len(missing_winner_maps) == 1 and len(finished_maps) == (t1_score + t2_score):
+            known_t1 = sum(1 for mp in finished_maps if mp.winner and _team_match_key(mp.winner) == _team_match_key(t1_name))
+            known_t2 = sum(1 for mp in finished_maps if mp.winner and _team_match_key(mp.winner) == _team_match_key(t2_name))
+            target_mp = missing_winner_maps[0]
+            if t1_score == known_t1 + 1 and t2_score == known_t2:
+                target_mp.winner, target_mp.loser = t1_name, t2_name
+            elif t2_score == known_t2 + 1 and t1_score == known_t1:
+                target_mp.winner, target_mp.loser = t2_name, t1_name
+
+        raw_streams = sorted(
+            item.get("streams") or [],
+            key=lambda s: (not bool(s.get("official")), -(int(s.get("viewers_number") or 0))),
+        )
         streams: list[str] = []
-        for s in (item.get("streams") or [])[:3]:
-            s_url = str(s.get("stream_url") or s.get("url") or "").strip()
+        seen_urls: set[str] = set()
+        for s in raw_streams:
+            s_url = str(s.get("raw_url") or s.get("stream_url") or s.get("url") or "").strip()
             s_lang = str(s.get("language") or "en").upper()
-            if s_url and s_url not in streams:
+            if s_url and s_url not in seen_urls:
+                seen_urls.add(s_url)
                 streams.append(f"<{s_url}> ({s_lang})")
+            if len(streams) >= 3:
+                break
 
         odds_summary = ""
         bet_upd = item.get("bet_updates") or {}
@@ -634,8 +654,20 @@ class KashrockAggregator(BaseSportsAggregator):
                             existing.team1_rank = kr_series.team1_rank
                         if kr_series.team2_rank and not existing.team2_rank:
                             existing.team2_rank = kr_series.team2_rank
-                        if kr_series.maps and not existing.maps:
-                            existing.maps = kr_series.maps
+                        if kr_series.maps:
+                            if not existing.maps:
+                                existing.maps = kr_series.maps
+                            else:
+                                kr_by_num = {m.map_number: m for m in kr_series.maps}
+                                for emp in existing.maps:
+                                    kmp = kr_by_num.get(emp.map_number)
+                                    if kmp:
+                                        if not emp.winner and kmp.winner:
+                                            emp.winner = kmp.winner
+                                            emp.loser = kmp.loser
+                                        if not emp.winner_score and kmp.winner_score:
+                                            emp.winner_score = kmp.winner_score
+                                            emp.loser_score = kmp.loser_score
                     else:
                         live_by_pair[pair_key] = kr_series
                         live_list.append(kr_series)
@@ -687,11 +719,20 @@ class KashrockAggregator(BaseSportsAggregator):
         meta_parts = [p for p in (tier_tag, prize_tag, s.stage if s.stage and s.stage != s.tournament else "") if p]
         meta_str = f" [{' | '.join(meta_parts)}]" if meta_parts else ""
 
+        next_up_map: Optional[CsMapResult] = None
+        if not s.active_map_name and s.maps and (s.team1_score or s.team2_score):
+            for mp in s.maps:
+                if mp.status == "upcoming":
+                    next_up_map = mp
+                    break
+
         active_badge = ""
         if s.live_round_score:
             active_badge = f" — 🔴 LIVE ({s.live_round_score})"
         elif s.active_map_name:
             active_badge = f" — 🔴 LIVE on Map {s.active_map_number}: **{s.active_map_name}**"
+        elif next_up_map:
+            active_badge = f" — 🔴 LIVE (Between Maps — Next Map: Map {next_up_map.map_number} **{next_up_map.map_name}**)"
         elif s.active_map_number:
             active_badge = f" — Map #{s.active_map_number} in progress"
 
@@ -703,11 +744,18 @@ class KashrockAggregator(BaseSportsAggregator):
         if s.maps:
             map_chunks: list[str] = []
             for mp in s.maps:
-                if mp.status == "finished" and (mp.winner_score or mp.loser_score):
-                    ot_tag = " (OT)" if (mp.winner_score + mp.loser_score) > 24 else ""
-                    map_chunks.append(
-                        f"Map {mp.map_number} ({mp.map_name}): ✅ **{mp.winner} {mp.winner_score}-{mp.loser_score} {mp.loser}**{ot_tag}"
-                    )
+                if mp.status == "finished":
+                    if mp.winner_score or mp.loser_score:
+                        ot_tag = " (OT)" if (mp.winner_score + mp.loser_score) > 24 else ""
+                        map_chunks.append(
+                            f"Map {mp.map_number} ({mp.map_name}): ✅ **{mp.winner} {mp.winner_score}-{mp.loser_score} {mp.loser}**{ot_tag}"
+                        )
+                    elif mp.winner:
+                        map_chunks.append(
+                            f"Map {mp.map_number} ({mp.map_name}): ✅ **{mp.winner} Won**"
+                        )
+                    else:
+                        map_chunks.append(f"Map {mp.map_number} ({mp.map_name}): ✅ **Completed**")
                 elif mp.status == "current":
                     if mp.team1_rounds or mp.team2_rounds:
                         map_chunks.append(
@@ -715,14 +763,14 @@ class KashrockAggregator(BaseSportsAggregator):
                         )
                     else:
                         map_chunks.append(f"Map {mp.map_number} ({mp.map_name}): 🔴 **LIVE (In Progress)**")
+                elif next_up_map and mp.map_number == next_up_map.map_number:
+                    map_chunks.append(f"Map {mp.map_number} ({mp.map_name}): ⏭️ **Up Next / Starting Now**")
                 else:
                     map_chunks.append(f"Map {mp.map_number} ({mp.map_name}): ⏳ Upcoming")
             lines.append("  • **Series Maps:** " + " | ".join(map_chunks))
 
         if s.top_players:
             lines.append("  • **Live Map Leaders:** " + " | ".join(s.top_players))
-        if s.odds_summary:
-            lines.append(f"  • **Live Series Odds:** {s.odds_summary}")
         if s.streams:
             lines.append("  • **Official Streams:** " + " , ".join(s.streams))
 
@@ -799,10 +847,9 @@ class KashrockAggregator(BaseSportsAggregator):
                 t1_rk = f" (#{u.team1_rank})" if u.team1_rank else ""
                 t2_rk = f" (#{u.team2_rank})" if u.team2_rank else ""
                 start_str = _format_iso_start_time(u.start_date)
-                odds_part = f" | Odds: {u.odds_summary}" if u.odds_summary else ""
                 up_lines.append(
                     f"- [{start_str}] **{u.team1}**{t1_rk} vs **{u.team2}**{t2_rk} "
-                    f"(Best of {u.bo_type} — {u.tournament}){odds_part}"
+                    f"(Best of {u.bo_type} — {u.tournament})"
                 )
             out_sections.append("\n".join(up_lines))
 
