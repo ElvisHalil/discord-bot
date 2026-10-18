@@ -216,6 +216,7 @@ HLTV_TEAM_ALIASES: Dict[str, str] = {
     "fnatic": "fnatic",
     "9z": "9z",
     "betboom": "betboom",
+    "bet boom": "betboom",
     "parivision": "parivision",
     "fut": "fut",
 }
@@ -348,7 +349,7 @@ CS_TEAMS: Tuple[str, ...] = (
     "falcons", "team falcons", "nip", "ninjas in pyjamas", "spirit", "team spirit",
     "vitality", "team vitality", "mouz", "mousesports", "furia", "faze", "g2",
     "navi", "natus vincere", "astralis", "complexity", "mongolz", "heroic",
-    "eternal fire", "virtus.pro", "9z", "aurora", "betboom", "parivision",
+    "eternal fire", "virtus.pro", "9z", "aurora", "betboom", "bet boom", "parivision",
     "thunderpick", "blast", "pgl", "iem", "esl", "cs", "cs2", "csgo",
 )
 
@@ -357,6 +358,7 @@ CS_KEYWORDS: frozenset[str] = frozenset({
     "falcons", "nip", "ninjas in pyjamas", "vitality", "spirit", "team spirit",
     "navi", "natus vincere", "furia", "mouz", "faze", "g2", "virtus.pro",
     "astralis", "complexity", "the mongolz", "mongolz", "heroic", "eternal fire",
+    "betboom", "bet boom", "aurora", "parivision", "9z", "legacy",
     "thunderpick", "thunderpicks", "blast", "pgl", "iem", "esl",
 })
 

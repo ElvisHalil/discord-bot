@@ -67,8 +67,10 @@ def _format_iso_start_time(iso_str: str) -> str:
 
 
 def _team_match_key(name: str) -> str:
-    """Normalize team name for cross-provider matching (e.g. 'BetBoom Team' -> 'betboom')."""
-    low = re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
+    """Normalize team name for cross-provider matching (e.g. 'BetBoom Team' -> 'betboom', 'QUINTESSÊNCIA' -> 'quintessencia')."""
+    import unicodedata
+    ascii_str = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode("ascii")
+    low = re.sub(r"[^a-z0-9]+", " ", ascii_str.lower()).strip()
     tokens = [t for t in low.split() if t not in ("team", "esports", "gaming", "clan", "club")]
     return " ".join(tokens) if tokens else low
 
@@ -732,7 +734,10 @@ class KashrockAggregator(BaseSportsAggregator):
         elif s.active_map_name:
             active_badge = f" — 🔴 LIVE on Map {s.active_map_number}: **{s.active_map_name}**"
         elif next_up_map:
-            active_badge = f" — 🔴 LIVE (Between Maps — Next Map: Map {next_up_map.map_number} **{next_up_map.map_name}**)"
+            active_badge = (
+                f" — 🔴 LIVE on Map {next_up_map.map_number}: **{next_up_map.map_name}** "
+                f"(In Progress / Starting Now — live round feed unavailable, updates on map completion)"
+            )
         elif s.active_map_number:
             active_badge = f" — Map #{s.active_map_number} in progress"
 
@@ -764,7 +769,9 @@ class KashrockAggregator(BaseSportsAggregator):
                     else:
                         map_chunks.append(f"Map {mp.map_number} ({mp.map_name}): 🔴 **LIVE (In Progress)**")
                 elif next_up_map and mp.map_number == next_up_map.map_number:
-                    map_chunks.append(f"Map {mp.map_number} ({mp.map_name}): ⏭️ **Up Next / Starting Now**")
+                    map_chunks.append(
+                        f"Map {mp.map_number} ({mp.map_name}): 🔴 **Current Map (Underway / Starting Now)**"
+                    )
                 else:
                     map_chunks.append(f"Map {mp.map_number} ({mp.map_name}): ⏳ Upcoming")
             lines.append("  • **Series Maps:** " + " | ".join(map_chunks))
@@ -819,6 +826,8 @@ class KashrockAggregator(BaseSportsAggregator):
         """
         Fetches currently active CS2 live series (with BO1/BO3/BO5 map breakdowns, completed map scores,
         active map status, and live player boxscores) plus upcoming scheduled matches today.
+        When a specific team or tournament is queried and matches a live series, filters out unrelated
+        lower-tier live matches so the LLM stays focused on the requested match.
         """
         live_list, upcoming_list = self.get_live_and_upcoming_series(
             match_query=match_query,
@@ -827,7 +836,36 @@ class KashrockAggregator(BaseSportsAggregator):
         if not live_list and not upcoming_list:
             return ""
 
-        top_series = live_list[0] if live_list else upcoming_list[0]
+        norm_query = re.sub(r"\bbet\s+boom\b", "betboom", (match_query or "").lower())
+        q_tokens = [
+            t for t in re.findall(r"[a-z0-9]+", norm_query)
+            if len(t) >= 3
+            and not t.isdigit()
+            and t not in (
+                "cs2", "csgo", "counter", "strike", "esports", "live", "match", "matches",
+                "game", "games", "score", "scores", "status", "current", "now", "going",
+                "the", "and", "for", "whats", "what", "how", "hows", "final", "finals",
+                "stream", "streams", "broadcast", "today", "schedule", "play", "playing",
+                "world", "championship", "series", "season", "qualifier", "playoffs",
+                "stage", "group", "open", "masters", "team", "gaming", "club", "clan",
+            )
+        ]
+        matched_live: list[CsLiveSeries] = []
+        has_team_hit = False
+        if q_tokens and live_list:
+            for s in live_list:
+                team_haystack = f"{s.team1} {s.team2} {s.slug}".lower()
+                full_haystack = f"{team_haystack} {s.tournament} {s.stage}".lower()
+                if any(
+                    tok in full_haystack or (len(tok) >= 5 and tok.endswith("s") and tok[:-1] in full_haystack)
+                    for tok in q_tokens
+                ):
+                    matched_live.append(s)
+                    if any(tok in team_haystack for tok in q_tokens):
+                        has_team_hit = True
+
+        display_live = matched_live if matched_live else live_list[:5]
+        top_series = display_live[0] if display_live else upcoming_list[0]
         try:
             from src.skills.sports.aggregators.espn_utils import record_channel_last_match_query
             record_channel_last_match_query(f"{top_series.team1} vs {top_series.team2}", sport="esports")
@@ -835,13 +873,14 @@ class KashrockAggregator(BaseSportsAggregator):
             pass
 
         out_sections: list[str] = []
-        if live_list:
+        if display_live:
             lines = ["=== LIVE IN-GAME CS2 SCOREBOARDS (BO3.gg & KashRock API) ==="]
-            for s in live_list[:5]:
+            for s in display_live:
                 lines.append(self._format_series_block(s))
             out_sections.append("\n".join(lines))
 
-        if upcoming_list:
+        # Omit generic upcoming lower-tier matches when the user asked about a specific live team matchup
+        if upcoming_list and not has_team_hit:
             up_lines = ["=== UPCOMING CS2 MATCH SCHEDULE (BO3.gg) ==="]
             for u in upcoming_list[:5]:
                 t1_rk = f" (#{u.team1_rank})" if u.team1_rank else ""

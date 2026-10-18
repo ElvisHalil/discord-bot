@@ -56,8 +56,9 @@ _NON_SPORTS_TRACK_RE = compile_word_boundary_re(NON_SPORTS_TRACK_PHRASES)
 
 def _extract_subject_entities(text: str) -> str:
     """Strip generic sports intent and follow-up filler words to isolate team/player/league names."""
+    norm_text = re.sub(r"\bbet\s+boom\b", "betboom", text or "", flags=re.IGNORECASE)
     return " ".join(
-        w for w in re.findall(r"[A-Za-z0-9À-ÿ'.-]+", text or "")
+        w for w in re.findall(r"[A-Za-z0-9À-ÿ'.-]+", norm_text)
         if w.lower().strip("'.-") not in _INTENT_WORDS_TO_STRIP
     ).strip()
 

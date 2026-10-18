@@ -35,11 +35,12 @@ def build_cs_llm_instructions() -> str:
     """Build concise LLM instructions for Counter-Strike esports responses."""
     return (
         "=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-        "1. If `LIVE IN-GAME CS2 SCOREBOARDS` is present, report the live series status FIRST and CONFIDENTLY (series score, Best-of-N format, completed map winners/scores, and the currently active or next map). Synthesize a cohesive overview highlighting the next S-Tier tournament (`[Name](<https://liquipedia.net/...>)`), exact match times from `MATCH SCHEDULE & RESULTS (Exact Times)`, recent champions, and top HLTV rankings; DO NOT create a prominent empty section if no matches are live.\n"
-        "2. NEVER output pseudo-links (`<event_page:...>`) or raw Unix epoch tags (`<t:...:t>`).\n"
-        "3. Only list active teams from `PARTICIPATING TEAMS`; list player rosters only when requested.\n"
-        "4. For player stats, report K/D, ADR, KPR/DPR, HS%, Opening Kills/Rd, and HLTV Rating 3.0 (`0-100` role scores are percentiles).\n"
-        "5. For live YouTube streams, place the raw YouTube URL on its own blank line.\n"
+        "1. If `LIVE IN-GAME CS2 SCOREBOARDS` is present, report the live series status FIRST and CONFIDENTLY: state the series score, Best-of-N format, completed map winners/scores, which map is currently being played (and which map is the decider if needed), and official stream links. When the user asks about a specific live match or final, stay focused on that match and do NOT pad the reply with unrelated past tournament champions or lower-tier tomorrow schedules.\n"
+        "2. For general tournament/scene overview requests, highlight the active or next S-Tier tournament (`[Name](<https://liquipedia.net/...>)`), exact match times from `MATCH SCHEDULE & RESULTS (Exact Times)`, recent champions, and top HLTV rankings; DO NOT create a prominent empty section if no matches are live.\n"
+        "3. NEVER output pseudo-links (`<event_page:...>`) or raw Unix epoch tags (`<t:...:t>`).\n"
+        "4. Only list active teams from `PARTICIPATING TEAMS`; list player rosters only when requested.\n"
+        "5. For player stats, report K/D, ADR, KPR/DPR, HS%, Opening Kills/Rd, and HLTV Rating 3.0 (`0-100` role scores are percentiles).\n"
+        "6. For live YouTube streams, place the raw YouTube URL on its own blank line.\n"
     )
 
 

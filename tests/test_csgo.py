@@ -533,10 +533,18 @@ class TestBo3AndKashrockLiveSeries(unittest.TestCase):
     @patch("src.skills.sports.sports._odds_aggregator.get_odds")
     @patch("src.skills.sports.sports._esl_aggregator.get_live_matches", return_value="LIVE SCOREBOARD")
     def test_live_matchup_does_not_fetch_betting_odds(self, mock_live, mock_odds):
+        from src.skills.sports.sports import skill_sports_info
+
         out = skill_sports_esports(query_type="live_streams", matchup="FURIA vs BetBoom")
         mock_live.assert_called_once_with("FURIA vs BetBoom")
         mock_odds.assert_not_called()
         self.assertIn("LIVE SCOREBOARD", out)
+
+        mock_live.reset_mock()
+        out2 = skill_sports_info(sport="cs", query="status on furia vs bet boom game")
+        mock_odds.assert_not_called()
+        mock_live.assert_called_once()
+        self.assertIn("LIVE SCOREBOARD", out2)
 
 
 if __name__ == "__main__":

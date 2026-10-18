@@ -74,7 +74,8 @@ def skill_sports_esports(
 
     # Normalize query_type to prevent empty data when models pass natural language
     q_type = (query_type or CsQueryType.ALL).lower().strip()
-    if any(w in q_type for w in ("odd", "bet", "moneyline", "payout", "prop", "props")):
+    q_type_no_team = re.sub(r"\bbet\s*boom\b", "bbteam", q_type, flags=re.IGNORECASE)
+    if re.search(r"\b(?:odds?|bets?|betting|moneyline|payout|props?)\b", q_type_no_team):
         q_type = CsQueryType.ODDS
     elif any(w in q_type for w in ("stat", "rating", "kdr", "kd")) or q_type == CsQueryType.PLAYER_STATS or player_url:
         q_type = CsQueryType.PLAYER_STATS
@@ -101,25 +102,31 @@ def skill_sports_esports(
             if live_target
             else submit_to_worker(_esl_aggregator.get_live_matches)
         )
-        if event_page:
+        if matchup and not event_page:
+            esl_res = fut_esl.result()
+            if "LIVE IN-GAME CS2 SCOREBOARDS" in esl_res:
+                output += esl_res
+            else:
+                fut_tourn = submit_to_worker(_liquipedia_aggregator.get_s_tier_tournaments)
+                fut_rank = submit_to_worker(_hltv_aggregator.get_rankings, 7)
+                output += esl_res + fut_tourn.result() + fut_rank.result()
+        elif event_page:
             fut_tourn = submit_to_worker(_liquipedia_aggregator.get_s_tier_tournaments, False)
-        else:
-            fut_tourn = submit_to_worker(_liquipedia_aggregator.get_s_tier_tournaments)
-        fut_rank = submit_to_worker(_hltv_aggregator.get_rankings, 7)
-        if event_page:
+            fut_rank = submit_to_worker(_hltv_aggregator.get_rankings, 7)
             fut_ev = submit_to_worker(_liquipedia_aggregator.get_event_info, event_page)
             output += fut_esl.result() + fut_tourn.result() + fut_rank.result() + fut_ev.result()
         else:
+            fut_tourn = submit_to_worker(_liquipedia_aggregator.get_s_tier_tournaments)
+            fut_rank = submit_to_worker(_hltv_aggregator.get_rankings, 7)
             output += fut_esl.result() + fut_tourn.result() + fut_rank.result()
     else:
-        # 1. LIVE STREAMS & LIVE CS2 SCOREBOARDS
-        if q_type == CsQueryType.LIVE_STREAMS:
+        # 1. LIVE STREAMS & LIVE CS2 SCOREBOARDS (included for live_streams, tournaments, and event_info so live finals/matches are never missed)
+        if q_type in (CsQueryType.LIVE_STREAMS, CsQueryType.TOURNAMENTS, CsQueryType.EVENT_INFO):
             output += (
                 _esl_aggregator.get_live_matches(live_target)
                 if live_target
                 else _esl_aggregator.get_live_matches()
             )
-
 
         # 2. TOURNAMENTS (auto-includes active/next event details unless a specific event_page is requested below)
         if q_type == CsQueryType.TOURNAMENTS:
@@ -258,7 +265,8 @@ def skill_sports_info(
                 if not sport_raw and last_s:
                     sport_raw = last_s
 
-    has_odds_kw = bool(re.search(r'\b(?:odds?|bet|bets|betting|moneyline)\b', combined)) or sport_raw.lower() in ("odds", "betting")
+    combined_no_team_bet = re.sub(r'\bbet\s*boom\b', 'bbteam', combined, flags=re.IGNORECASE)
+    has_odds_kw = bool(re.search(r'\b(?:odds?|bet|bets|betting|moneyline)\b', combined_no_team_bet)) or sport_raw.lower() in ("odds", "betting")
     wants_games_and_odds = has_odds_kw and bool(
         re.search(
             r'\b(?:games?|matches|schedule|fixtures?|scores?|playing)\b.*\b(?:and|with|plus|also|&)\b.*\b(?:odds?|betting|lines?)\b|'
@@ -339,6 +347,16 @@ def skill_sports_info(
         elif any(k in q_str for k in ("rank", "top", "leader", "standings")) and not any(k in q_str for k in ("tourn", "schedule", "match", "matches")):
             return skill_sports_esports(query_type="rankings")
         elif any(k in q_str for k in ("live", "stream", "broadcast", "score", "scores", "status", "going", "current", "winning")):
+            wants_match_status = any(k in q_str for k in ("score", "scores", "status", "going", "current", "winning", "final", "finals")) or " vs " in q_str
+            if wants_match_status:
+                is_team_or_event = bool(named_event) or " vs " in q_str or any(
+                    bool(re.search(rf'\b{re.escape(t)}\b', q_str)) for t in _odds_aggregator.CS_TEAMS
+                )
+                return skill_sports_esports(
+                    query_type="live_streams",
+                    event_page=named_event,
+                    matchup=target_q if is_team_or_event else None,
+                )
             return skill_sports_esports(query_type="live_streams")
         elif re.search(r'\b(?:tourn\w*|schedule|next|upcoming|events?|match|matches|time|today|tomorrow|when|playing|plays)\b|\bplay\b(?!\s+(?:a|an|some|me|music|song|track))', q_str):
             return skill_sports_esports(query_type="tournaments", event_page=named_event)
