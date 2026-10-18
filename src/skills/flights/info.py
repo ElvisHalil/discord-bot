@@ -1,13 +1,12 @@
-from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from src.skills.flights.aggregators import GoogleFlightsPriceAggregator, LiveFlightStatusAggregator
 from src.skills.flights.airports import extract_flight_numbers, parse_route_from_query
 from src.utils.timezones import get_local_now
+from src.utils.workers import submit_to_worker
 
 _price_aggregator = GoogleFlightsPriceAggregator()
 _status_aggregator = LiveFlightStatusAggregator()
-_FLIGHT_EXECUTOR = ThreadPoolExecutor(max_workers=6, thread_name_prefix="flights_worker")
 
 
 def skill_flight_info(
@@ -62,11 +61,11 @@ def skill_flight_info(
 
     tasks = []
     for fc in flight_codes[:4]:
-        tasks.append(_FLIGHT_EXECUTOR.submit(_status_aggregator.get_flight_status, fc))
+        tasks.append(submit_to_worker(_status_aggregator.get_flight_status, fc))
 
     if not flight_codes or origin or destination:
         tasks.append(
-            _FLIGHT_EXECUTOR.submit(
+            submit_to_worker(
                 _price_aggregator.search_prices,
                 query=q_raw,
                 origin=origin,

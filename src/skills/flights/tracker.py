@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from src.skills.flights.aggregators import GoogleFlightsPriceAggregator, LiveFlightStatusAggregator
 from src.skills.flights.airports import extract_flight_numbers, parse_route_from_query
 from src.skills.sports.live_tracker import get_active_channel_id
+from src.utils.workers import run_in_worker
 
 PRICE_WATCH_FILE = os.path.join("data", "flight_price_watches.json")
 FLIGHT_SAFETY_TIMEOUT_SECONDS = 16 * 3600  # 16 hours for ultra-long-haul flights
@@ -349,7 +350,7 @@ class FlightTrackerManager:
                     if (now - flight.last_polled_at) < self.flight_poll_interval:
                         continue
                     try:
-                        snap = await asyncio.to_thread(self._status_agg.fetch_flight_snapshot, flight.flight_number)
+                        snap = await run_in_worker(self._status_agg.fetch_flight_snapshot, flight.flight_number)
                         if not snap:
                             flight.last_polled_at = now
                             continue
@@ -371,7 +372,7 @@ class FlightTrackerManager:
                     if (now - watch.last_polled_at) < self.price_poll_interval:
                         continue
                     try:
-                        fare_data = await asyncio.to_thread(
+                        fare_data = await run_in_worker(
                             self._fetch_watch_fare_data,
                             watch.origin_code,
                             watch.dest_code,

@@ -749,6 +749,20 @@ def _extract_all_dates_from_text(text: str, now: datetime) -> list[str]:
         except ValueError:
             pass
 
+    for m in re.finditer(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({month_pattern})\.?(?:,?\s*(20\d{{2}}))?\b", text, re.IGNORECASE):
+        d = int(m.group(1))
+        mo = _MONTH_MAP[m.group(2).lower()]
+        yr = int(m.group(3)) if m.group(3) else now.year
+        try:
+            cand = datetime(yr, mo, d)
+            if not m.group(3) and cand.date() < now.date():
+                cand = datetime(yr + 1, mo, d)
+            iso_s = cand.strftime("%Y-%m-%d")
+            if all(iso_s != existing for _, existing in found):
+                found.append((m.start(), iso_s))
+        except ValueError:
+            pass
+
     found.sort(key=lambda x: x[0])
     return [dt_s for _, dt_s in found]
 
@@ -1111,7 +1125,7 @@ def parse_route_from_query(
     explicit_relax_stops = bool(re.search(r"\b(?:any\s+stops?|all\s+flights?)\b", q_low))
     if max_stops_arg is not None and int(max_stops_arg) in (0, 1, 2):
         max_stops: Optional[int] = int(max_stops_arg)
-    elif re.search(r"\b(?:nonstop|non-stop|direct)\b", q_low):
+    elif re.search(r"\b(?:nonstop|non-stop|direct|0[\s\-]?stops?|zero[\s\-]?stops?|no[\s\-]?stops?)\b", q_low):
         max_stops = 0
     elif re.search(r"\b(?:1[\s\-]?stops?|one[\s\-]?stops?|single[\s\-]?stops?|1[\s\-]?layover|single[\s\-]?layover)\b", q_low):
         max_stops = 1
@@ -1182,7 +1196,9 @@ def parse_route_from_query(
         cabin = "business"
     elif "premium economy" in q_low or "premium-economy" in q_low:
         cabin = "premium-economy"
-    elif is_constraint_only_followup and prev_state:
+    elif re.search(r"\beconomy\b", q_low):
+        cabin = "economy"
+    elif prev_state and not route_changed:
         cabin = prev_state.cabin
     else:
         cabin = "economy"
@@ -1196,6 +1212,8 @@ def parse_route_from_query(
         currency = "GBP"
     elif re.search(r"\b(?:cad|canadian)\b", q_low):
         currency = "CAD"
+    elif prev_state and not route_changed and prev_state.currency:
+        currency = prev_state.currency
     elif (orig_resolved and orig_resolved[3] == "Canada") or (dest_resolved and dest_resolved[3] == "Canada"):
         currency = "CAD"
     else:
@@ -1230,7 +1248,7 @@ def parse_route_from_query(
     return_flex_label = (
         ret_month_window[2]
         if ret_month_window
-        else (f"{trip_days}-Day Stay (sample return {ret_date})" if (trip_days and ret_date) else None)
+        else (f"~{trip_days}-Day Stay" if (trip_days and ret_date) else None)
     )
 
     return {

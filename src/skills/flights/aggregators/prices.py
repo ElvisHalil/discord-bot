@@ -1,5 +1,4 @@
 import calendar
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import json
 import re
@@ -19,8 +18,9 @@ from src.skills.flights.airports import (
     resolve_airport,
 )
 from src.utils.timezones import get_local_now
+from src.utils.workers import SUB_WORKER_POOL, submit_to_worker
 
-_PROBE_EXECUTOR = ThreadPoolExecutor(max_workers=14, thread_name_prefix="gf_probe")
+_PROBE_EXECUTOR = SUB_WORKER_POOL
 
 
 class GoogleFlightsPriceAggregator:
@@ -844,7 +844,7 @@ class GoogleFlightsPriceAggregator:
             return []
 
         futs = {
-            dt_s: _PROBE_EXECUTOR.submit(
+            dt_s: submit_to_worker(
                 self.fetch_structured_fares,
                 origin_code,
                 dest_code,
@@ -893,7 +893,7 @@ class GoogleFlightsPriceAggregator:
         coarse_offsets = [90, 150, 180, 210, 270, 325]
         coarse_dates = {off: (today + timedelta(days=off)).strftime("%Y-%m-%d") for off in coarse_offsets}
         futs = {
-            off: _PROBE_EXECUTOR.submit(
+            off: submit_to_worker(
                 self.fetch_structured_fares,
                 origin_code,
                 dest_code,
@@ -941,7 +941,7 @@ class GoogleFlightsPriceAggregator:
             fine_offsets = [off for off in range(best_off + step, upper_bound, step)]
             if fine_offsets:
                 fine_futs = {
-                    off: _PROBE_EXECUTOR.submit(
+                    off: submit_to_worker(
                         self.fetch_structured_fares,
                         origin_code,
                         dest_code,
@@ -963,7 +963,7 @@ class GoogleFlightsPriceAggregator:
             next_empty = min([off for off in (coarse_offsets + fine_offsets) if off > best_off], default=best_off)
             if 1 < (next_empty - best_off) <= 6:
                 day_futs = {
-                    off: _PROBE_EXECUTOR.submit(
+                    off: submit_to_worker(
                         self.fetch_structured_fares,
                         origin_code,
                         dest_code,
@@ -1030,7 +1030,7 @@ class GoogleFlightsPriceAggregator:
 
         probe_futs: dict[tuple[str, str], Any] = {}
         for hub_code, _hub_name, _hub_city in gateways[:2]:
-            probe_futs[(hub_code, "leg1")] = _PROBE_EXECUTOR.submit(
+            probe_futs[(hub_code, "leg1")] = submit_to_worker(
                 self.fetch_structured_fares,
                 orig_code,
                 hub_code,
@@ -1040,7 +1040,7 @@ class GoogleFlightsPriceAggregator:
                 currency,
                 None,
             )
-            probe_futs[(hub_code, "leg1_rt")] = _PROBE_EXECUTOR.submit(
+            probe_futs[(hub_code, "leg1_rt")] = submit_to_worker(
                 self.fetch_structured_fares,
                 orig_code,
                 hub_code,
@@ -1050,7 +1050,7 @@ class GoogleFlightsPriceAggregator:
                 currency,
                 0,
             )
-            probe_futs[(hub_code, "leg2_next")] = _PROBE_EXECUTOR.submit(
+            probe_futs[(hub_code, "leg2_next")] = submit_to_worker(
                 self.fetch_structured_fares,
                 hub_code,
                 dest_code,
@@ -1060,7 +1060,7 @@ class GoogleFlightsPriceAggregator:
                 currency,
                 None,
             )
-            probe_futs[(hub_code, "leg2_same")] = _PROBE_EXECUTOR.submit(
+            probe_futs[(hub_code, "leg2_same")] = submit_to_worker(
                 self.fetch_structured_fares,
                 hub_code,
                 dest_code,
@@ -1071,7 +1071,7 @@ class GoogleFlightsPriceAggregator:
                 None,
             )
             if ret_date_s:
-                probe_futs[(hub_code, "ret_leg2")] = _PROBE_EXECUTOR.submit(
+                probe_futs[(hub_code, "ret_leg2")] = submit_to_worker(
                     self.fetch_structured_fares,
                     hub_code,
                     orig_code,
@@ -1081,7 +1081,7 @@ class GoogleFlightsPriceAggregator:
                     currency,
                     None,
                 )
-                probe_futs[(hub_code, "ret_leg1")] = _PROBE_EXECUTOR.submit(
+                probe_futs[(hub_code, "ret_leg1")] = submit_to_worker(
                     self.fetch_structured_fares,
                     dest_code,
                     hub_code,
@@ -1485,7 +1485,7 @@ class GoogleFlightsPriceAggregator:
                 scan_pairs = selected_pairs
 
         futs = {
-            (dep_s, ret_s): _PROBE_EXECUTOR.submit(
+            (dep_s, ret_s): submit_to_worker(
                 self.fetch_structured_fares,
                 orig_code,
                 dest_code,
@@ -1997,7 +1997,7 @@ class GoogleFlightsPriceAggregator:
         # 1. If a round-trip was requested, fetch BOTH the outbound leg (orig -> dest on dep_date)
         #    and the return leg (dest -> orig on ret_date) in parallel!
         if ret_date:
-            ow_out_fut = _PROBE_EXECUTOR.submit(
+            ow_out_fut = submit_to_worker(
                 self.fetch_structured_fares,
                 orig_code,
                 dest_code,
@@ -2008,7 +2008,7 @@ class GoogleFlightsPriceAggregator:
                 max_stops,
                 sort_preference,
             )
-            ow_ret_fut = _PROBE_EXECUTOR.submit(
+            ow_ret_fut = submit_to_worker(
                 self.fetch_structured_fares,
                 dest_code,
                 orig_code,
@@ -2073,7 +2073,7 @@ class GoogleFlightsPriceAggregator:
         # 2. Outbound date itself returned 0 flights: probe the route's latest published schedule date
         #    AND check nearby major hub airport on the exact requested date in parallel!
         hub = NEARBY_HUB_AIRPORTS.get(orig_code)
-        horizon_fut = _PROBE_EXECUTOR.submit(
+        horizon_fut = submit_to_worker(
             self.find_latest_available_date,
             orig_code,
             dest_code,
@@ -2086,7 +2086,7 @@ class GoogleFlightsPriceAggregator:
         if hub and hub[0] != dest_code:
             hub_code, hub_city = hub
             if ret_date:
-                hub_rt_fut = _PROBE_EXECUTOR.submit(
+                hub_rt_fut = submit_to_worker(
                     self.fetch_structured_fares,
                     hub_code,
                     dest_code,
@@ -2097,7 +2097,7 @@ class GoogleFlightsPriceAggregator:
                     max_stops,
                     sort_preference,
                 )
-            hub_ow_fut = _PROBE_EXECUTOR.submit(
+            hub_ow_fut = submit_to_worker(
                 self.fetch_structured_fares,
                 hub_code,
                 dest_code,

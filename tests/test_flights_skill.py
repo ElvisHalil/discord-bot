@@ -1363,6 +1363,216 @@ class TestFlightsSkill(unittest.TestCase):
         self.assertEqual(decoded_after["max_stops"], 1)
         self.assertEqual(decoded_after["currency"], "CAD")
 
+    def test_comprehensive_flight_query_option_combinations(self):
+        from src.orchestrator import _decode_google_flights_tfs, sanitize_agent_reply
+        from src.skills.flights.airports import clear_channel_flight_state
+
+        set_active_channel_id(950)
+        clear_channel_flight_state(950)
+
+        # 1. Combinatorial matrix of stateless single-turn queries across cabins, currencies, stops, sort modes, and date formats
+        matrix_cases = [
+            {
+                "q": "cheapest premium economy flights to Paris from Montreal 15 Nov 2026 to 25 Nov 2026 in euros with 1 stop",
+                "orig": "YUL",
+                "dest": "CDG",
+                "date": "2026-11-15",
+                "ret": "2026-11-25",
+                "trip": "round-trip",
+                "cabin": "premium-economy",
+                "curr": "EUR",
+                "stops": 1,
+                "sort": "cheapest",
+                "flex": False,
+            },
+            {
+                "q": "fastest first class flight from London to New York on 2026-12-10 one way in GBP zero stops",
+                "orig": "LHR",
+                "dest": "JFK",
+                "date": "2026-12-10",
+                "ret": None,
+                "trip": "one-way",
+                "cabin": "first",
+                "curr": "GBP",
+                "stops": 0,
+                "sort": "shortest",
+                "flex": False,
+            },
+            {
+                "q": "best business class flights from Vancouver to Tokyo leaving Nov 15, 2026 for 10 days in USD up to 2 stops",
+                "orig": "YVR",
+                "dest": "HND",
+                "date": "2026-11-15",
+                "ret": "2026-11-25",
+                "trip": "round-trip",
+                "cabin": "business",
+                "curr": "USD",
+                "stops": 2,
+                "sort": "best",
+                "flex": False,
+            },
+            {
+                "q": "flights from Calgary to Cancun Nov 15 to 22, 2026 in CAD nonstop",
+                "orig": "YYC",
+                "dest": "CUN",
+                "date": "2026-11-15",
+                "ret": "2026-11-22",
+                "trip": "round-trip",
+                "cabin": "economy",
+                "curr": "CAD",
+                "stops": 0,
+                "sort": "best",
+                "flex": False,
+            },
+            {
+                "q": "best flights from Toronto to Lisbon in March 2027 for 2 weeks with 1 stop",
+                "orig": "YYZ",
+                "dest": "LIS",
+                "date": "2027-03-09",
+                "ret": "2027-03-23",
+                "trip": "round-trip",
+                "cabin": "economy",
+                "curr": "CAD",
+                "stops": 1,
+                "sort": "best",
+                "flex": True,
+            },
+        ]
+
+        for idx, case in enumerate(matrix_cases):
+            with self.subTest(case_idx=idx, query=case["q"]):
+                clear_channel_flight_state(950)
+                parsed = parse_route_from_query(case["q"])
+                self.assertEqual(parsed["origin"][0], case["orig"])
+                self.assertEqual(parsed["destination"][0], case["dest"])
+                self.assertEqual(parsed["date"], case["date"])
+                self.assertEqual(parsed["return_date"], case["ret"])
+                self.assertEqual(parsed["trip_type"], case["trip"])
+                self.assertEqual(parsed["cabin"], case["cabin"])
+                self.assertEqual(parsed["currency"], case["curr"])
+                self.assertEqual(parsed["max_stops"], case["stops"])
+                self.assertEqual(parsed["sort_preference"], case["sort"])
+                self.assertEqual(parsed["wants_flexible_scan"], case["flex"])
+                if parsed.get("return_flex_label"):
+                    self.assertNotIn("sample", parsed["return_flex_label"].lower())
+
+        # 2. Multi-turn conversational state progression: Business + EUR + 1-stop -> Date follow-up -> Relax to Economy + Any stops -> Switch to One-Way
+        clear_channel_flight_state(950)
+        t1 = parse_route_from_query("business class flights from Edmonton to Zagreb from May 2027 to August 2027 in EUR 1 stop only")
+        self.assertEqual((t1["cabin"], t1["currency"], t1["max_stops"], t1["trip_type"]), ("business", "EUR", 1, "round-trip"))
+
+        # Follow-up changing return month preserves business, EUR, and max_stops=1
+        t2 = parse_route_from_query("what about returning in September 2027")
+        self.assertEqual((t2["cabin"], t2["currency"], t2["max_stops"], t2["trip_type"]), ("business", "EUR", 1, "round-trip"))
+        self.assertEqual(t2["flex_label"], "May 2027 – September 2027")
+
+        # Follow-up relaxing cabin to economy and stops to any stops while keeping EUR and May-September 2027
+        t3 = parse_route_from_query("show economy with any stops")
+        self.assertEqual((t3["cabin"], t3["currency"], t3["max_stops"], t3["trip_type"]), ("economy", "EUR", None, "round-trip"))
+        self.assertEqual(t3["flex_label"], "May 2027 – September 2027")
+
+        # Follow-up switching to one-way on a specific date clears return_date
+        t4 = parse_route_from_query("actually just one way on May 12, 2027 in CAD")
+        self.assertEqual((t4["date"], t4["return_date"], t4["trip_type"], t4["currency"]), ("2027-05-12", None, "one-way", "CAD"))
+
+        # 3. Verify multi-link reply synchronization when 2 different date options each have their own Google Flights link
+        url_wrong_1 = GoogleFlightsPriceAggregator.build_google_flights_url("YEG", "ZAG", "2027-05-01", "2027-08-01", currency="CAD", max_stops=1)
+        url_wrong_2 = GoogleFlightsPriceAggregator.build_google_flights_url("YEG", "ZAG", "2027-05-01", "2027-08-01", currency="CAD", max_stops=1)
+        multi_option_reply = (
+            "1. **Option 1 (Mon, 2027-05-03 ↔ Tue, 2027-08-03)** — **$1705 CAD Round-Trip** ([Google Flights: 2027-05-01 to 2027-08-01](<" + url_wrong_1 + ">))\n"
+            "2. **Option 2 (Tue, 2027-05-11 ↔ Tue, 2027-08-17)** — **$1745 CAD Round-Trip** ([Google Flights: 2027-05-01 to 2027-08-01](<" + url_wrong_2 + ">))"
+        )
+        synced_multi = sanitize_agent_reply(multi_option_reply)
+        synced_lines = synced_multi.splitlines()
+        d1 = _decode_google_flights_tfs(synced_lines[0])
+        d2 = _decode_google_flights_tfs(synced_lines[1])
+        self.assertEqual(d1["url_dates"], ["2027-05-03", "2027-08-03"])
+        self.assertEqual(d2["url_dates"], ["2027-05-11", "2027-08-17"])
+        self.assertIn("[Google Flights: 2027-05-03 to 2027-08-03]", synced_lines[0])
+        self.assertIn("[Google Flights: 2027-05-11 to 2027-08-17]", synced_lines[1])
+
+    def test_flight_worker_pool_concurrency_and_contextvar_isolation(self):
+        import asyncio
+        import threading
+        from src.skills.flights.airports import clear_channel_flight_state, get_channel_flight_state
+        from src.skills.flights.info import _price_aggregator
+        from src.skills.sports.live_tracker import get_active_channel_id
+        from src.utils.workers import run_in_worker
+
+        clear_channel_flight_state(801)
+        clear_channel_flight_state(802)
+
+        observed_subworker_threads: list[tuple[int, str, bool]] = []
+        lock = threading.Lock()
+
+        def fake_fetch(origin_code, dest_code, date, return_date=None, cabin="economy", currency="CAD", max_stops=None, *args, **kwargs):
+            cur_t = threading.current_thread()
+            with lock:
+                observed_subworker_threads.append((get_active_channel_id(), cur_t.name, cur_t.daemon))
+            opt = {
+                "price": 1705 if origin_code == "YEG" else 920,
+                "currency": currency,
+                "airlines": "KLM" if origin_code == "YEG" else "WestJet",
+                "stops": 1 if origin_code == "YEG" else 0,
+                "stops_label": "1 stop (AMS)" if origin_code == "YEG" else "Nonstop",
+                "from_code": origin_code,
+                "to_code": dest_code,
+                "departure_time": "5:35 PM",
+                "arrival_time": "1:15 PM (+1d)",
+                "duration_mins": 700,
+                "duration_str": "11h 40m",
+                "flight_mins": 630,
+                "aircraft": "Airbus A330",
+            }
+            return {
+                "origin": origin_code,
+                "destination": dest_code,
+                "date": date,
+                "return_date": return_date,
+                "trip_type": "round-trip" if return_date else "one-way",
+                "cabin": cabin,
+                "currency": currency,
+                "booking_url": GoogleFlightsPriceAggregator.build_google_flights_url(origin_code, dest_code, date, return_date, cabin, currency, max_stops),
+                "lowest_overall": opt,
+                "lowest_reasonable": opt,
+                "best_overall": opt,
+                "fastest_overall": opt,
+                "lowest_nonstop": opt if opt["stops"] == 0 else None,
+                "options": [opt],
+            }
+
+        async def _run_concurrent_channel_queries():
+            async def _channel_turn(ch_id: int, q: str):
+                set_active_channel_id(ch_id)
+                out = await run_in_worker(skill_flight_info, query=q)
+                st = get_channel_flight_state(ch_id)
+                return out, st
+
+            with patch.object(_price_aggregator, "fetch_structured_fares", side_effect=fake_fetch):
+                r801, r802 = await asyncio.gather(
+                    _channel_turn(801, "best flights Edmonton to Zagreb Leaving May 2027 returning August 2027 1 stop only"),
+                    _channel_turn(802, "business class flights from Calgary to Tokyo Nov 15, 2026 to Nov 25, 2026 in USD nonstop"),
+                )
+            return r801, r802
+
+        (out_801, state_801), (out_802, state_802) = asyncio.run(_run_concurrent_channel_queries())
+
+        # 1. Verify both channels got their own isolated results and isolated FlightSearchState
+        self.assertIn("EDMONTON (YEG) <-> ZAGREB (ZAG)", out_801)
+        self.assertIn("$1705 CAD Round-Trip", out_801)
+        self.assertEqual((state_801.origin[0], state_801.destination[0], state_801.max_stops, state_801.currency), ("YEG", "ZAG", 1, "CAD"))
+
+        self.assertIn("CALGARY (YYC) -> TOKYO (HND)", out_802)
+        self.assertIn("$920 USD Round-Trip", out_802)
+        self.assertEqual((state_802.origin[0], state_802.destination[0], state_802.max_stops, state_802.cabin, state_802.currency), ("YYC", "HND", 0, "business", "USD"))
+
+        # 2. Verify all inner sub-worker probes ran on BotSubWorker daemon threads and preserved ACTIVE_CHANNEL_ID
+        self.assertTrue(len(observed_subworker_threads) >= 20)
+        self.assertTrue(all(is_daemon for _, _, is_daemon in observed_subworker_threads))
+        self.assertTrue(all(t_name.startswith("BotSubWorker") for _, t_name, _ in observed_subworker_threads))
+        seen_channels = {ch for ch, _, _ in observed_subworker_threads}
+        self.assertEqual(seen_channels, {801, 802})
+
 
 if __name__ == "__main__":
     unittest.main()
