@@ -20,10 +20,17 @@ from src.skills.flights.tracker import (
     TrackedFlight,
     TrackedPriceWatch,
 )
-from src.skills.sports.live_tracker import set_active_channel_id
+from src.context import get_active_channel_id, set_active_channel_id
 
 
 class TestFlightsSkill(unittest.TestCase):
+    def setUp(self):
+        self._html_patcher = patch("src.skills.flights.aggregators.prices.fetch_flights_html", return_value="")
+        self._html_patcher.start()
+
+    def tearDown(self):
+        self._html_patcher.stop()
+
     def test_airport_and_route_parsing(self):
         # 1. Airport & city resolution
         yyc = resolve_airport("Calgary")
@@ -1496,7 +1503,6 @@ class TestFlightsSkill(unittest.TestCase):
         import threading
         from src.skills.flights.airports import clear_channel_flight_state, get_channel_flight_state
         from src.skills.flights.info import _price_aggregator
-        from src.skills.sports.live_tracker import get_active_channel_id
         from src.utils.workers import run_in_worker
 
         clear_channel_flight_state(801)

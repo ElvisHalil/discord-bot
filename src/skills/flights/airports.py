@@ -1,391 +1,45 @@
 import calendar
-from dataclasses import dataclass
 from datetime import datetime, timedelta
+import logging
 import re
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
+from src.context import get_active_channel_id
+from src.skills.flights.catalogs import (
+    AIRLINE_CODES,
+    AIRPORT_DIRECTORY,
+    MONTH_MAP as _MONTH_MAP,
+    NEARBY_HUB_AIRPORTS,
+    NON_FLIGHT_NUMBER_PREFIXES,
+    NON_LOCATION_STOPWORDS as _NON_LOCATION_WORDS,
+    ORIGIN_INTERNATIONAL_GATEWAYS,
+    WEEKDAY_MAP as _WEEKDAY_MAP,
+)
+from src.skills.flights.enums import (
+    CabinClass,
+    FlightTrackerAction,
+    SortPreference,
+    TripType,
+)
+from src.skills.flights.models import (
+    AirportRecord,
+    FlightSearchState,
+    GatewayAirportRecord,
+    NearbyHubRecord,
+)
 from src.utils.timezones import get_local_now
 
-
-# Comprehensive fast lookup of major airports & cities -> (IATA, Airport Name, City, Country)
-AIRPORT_DIRECTORY: dict[str, Tuple[str, str, str, str]] = {
-    # Canada
-    "yyc": ("YYC", "Calgary International Airport", "Calgary", "Canada"),
-    "calgary": ("YYC", "Calgary International Airport", "Calgary", "Canada"),
-    "yeg": ("YEG", "Edmonton International Airport", "Edmonton", "Canada"),
-    "edmonton": ("YEG", "Edmonton International Airport", "Edmonton", "Canada"),
-    "yvr": ("YVR", "Vancouver International Airport", "Vancouver", "Canada"),
-    "vancouver": ("YVR", "Vancouver International Airport", "Vancouver", "Canada"),
-    "yyz": ("YYZ", "Toronto Pearson International Airport", "Toronto", "Canada"),
-    "toronto": ("YYZ", "Toronto Pearson International Airport", "Toronto", "Canada"),
-    "ytz": ("YTZ", "Billy Bishop Toronto City Airport", "Toronto", "Canada"),
-    "yul": ("YUL", "Montréal-Pierre Elliott Trudeau International Airport", "Montreal", "Canada"),
-    "montreal": ("YUL", "Montréal-Pierre Elliott Trudeau International Airport", "Montreal", "Canada"),
-    "yow": ("YOW", "Ottawa Macdonald-Cartier International Airport", "Ottawa", "Canada"),
-    "ottawa": ("YOW", "Ottawa Macdonald-Cartier International Airport", "Ottawa", "Canada"),
-    "ywg": ("YWG", "Winnipeg Richardson International Airport", "Winnipeg", "Canada"),
-    "winnipeg": ("YWG", "Winnipeg Richardson International Airport", "Winnipeg", "Canada"),
-    "yhz": ("YHZ", "Halifax Stanfield International Airport", "Halifax", "Canada"),
-    "halifax": ("YHZ", "Halifax Stanfield International Airport", "Halifax", "Canada"),
-    "yqb": ("YQB", "Québec City Jean Lesage International Airport", "Quebec City", "Canada"),
-    "quebec": ("YQB", "Québec City Jean Lesage International Airport", "Quebec City", "Canada"),
-    "quebec city": ("YQB", "Québec City Jean Lesage International Airport", "Quebec City", "Canada"),
-    "yyj": ("YYJ", "Victoria International Airport", "Victoria", "Canada"),
-    "victoria": ("YYJ", "Victoria International Airport", "Victoria", "Canada"),
-    "ylw": ("YLW", "Kelowna International Airport", "Kelowna", "Canada"),
-    "kelowna": ("YLW", "Kelowna International Airport", "Kelowna", "Canada"),
-    "yxe": ("YXE", "Saskatoon John G. Diefenbaker International Airport", "Saskatoon", "Canada"),
-    "saskatoon": ("YXE", "Saskatoon John G. Diefenbaker International Airport", "Saskatoon", "Canada"),
-    "yqr": ("YQR", "Regina International Airport", "Regina", "Canada"),
-    "regina": ("YQR", "Regina International Airport", "Regina", "Canada"),
-    "yyt": ("YYT", "St. John's International Airport", "St. John's", "Canada"),
-    # United States
-    "jfk": ("JFK", "John F. Kennedy International Airport", "New York", "USA"),
-    "new york": ("JFK", "John F. Kennedy International Airport", "New York", "USA"),
-    "nyc": ("JFK", "John F. Kennedy International Airport", "New York", "USA"),
-    "lga": ("LGA", "LaGuardia Airport", "New York", "USA"),
-    "ewr": ("EWR", "Newark Liberty International Airport", "Newark", "USA"),
-    "newark": ("EWR", "Newark Liberty International Airport", "Newark", "USA"),
-    "lax": ("LAX", "Los Angeles International Airport", "Los Angeles", "USA"),
-    "los angeles": ("LAX", "Los Angeles International Airport", "Los Angeles", "USA"),
-    "la": ("LAX", "Los Angeles International Airport", "Los Angeles", "USA"),
-    "sfo": ("SFO", "San Francisco International Airport", "San Francisco", "USA"),
-    "san francisco": ("SFO", "San Francisco International Airport", "San Francisco", "USA"),
-    "ord": ("ORD", "Chicago O'Hare International Airport", "Chicago", "USA"),
-    "chicago": ("ORD", "Chicago O'Hare International Airport", "Chicago", "USA"),
-    "mdw": ("MDW", "Chicago Midway International Airport", "Chicago", "USA"),
-    "mia": ("MIA", "Miami International Airport", "Miami", "USA"),
-    "miami": ("MIA", "Miami International Airport", "Miami", "USA"),
-    "fll": ("FLL", "Fort Lauderdale-Hollywood International Airport", "Fort Lauderdale", "USA"),
-    "fort lauderdale": ("FLL", "Fort Lauderdale-Hollywood International Airport", "Fort Lauderdale", "USA"),
-    "mco": ("MCO", "Orlando International Airport", "Orlando", "USA"),
-    "orlando": ("MCO", "Orlando International Airport", "Orlando", "USA"),
-    "las": ("LAS", "Harry Reid International Airport", "Las Vegas", "USA"),
-    "las vegas": ("LAS", "Harry Reid International Airport", "Las Vegas", "USA"),
-    "vegas": ("LAS", "Harry Reid International Airport", "Las Vegas", "USA"),
-    "sea": ("SEA", "Seattle-Tacoma International Airport", "Seattle", "USA"),
-    "seattle": ("SEA", "Seattle-Tacoma International Airport", "Seattle", "USA"),
-    "dfw": ("DFW", "Dallas/Fort Worth International Airport", "Dallas", "USA"),
-    "dallas": ("DFW", "Dallas/Fort Worth International Airport", "Dallas", "USA"),
-    "iah": ("IAH", "George Bush Intercontinental Airport", "Houston", "USA"),
-    "houston": ("IAH", "George Bush Intercontinental Airport", "Houston", "USA"),
-    "atl": ("ATL", "Hartsfield-Jackson Atlanta International Airport", "Atlanta", "USA"),
-    "atlanta": ("ATL", "Hartsfield-Jackson Atlanta International Airport", "Atlanta", "USA"),
-    "den": ("DEN", "Denver International Airport", "Denver", "USA"),
-    "denver": ("DEN", "Denver International Airport", "Denver", "USA"),
-    "bos": ("BOS", "Boston Logan International Airport", "Boston", "USA"),
-    "boston": ("BOS", "Boston Logan International Airport", "Boston", "USA"),
-    "iad": ("IAD", "Washington Dulles International Airport", "Washington D.C.", "USA"),
-    "dca": ("DCA", "Ronald Reagan Washington National Airport", "Washington D.C.", "USA"),
-    "washington": ("IAD", "Washington Dulles International Airport", "Washington D.C.", "USA"),
-    "phx": ("PHX", "Phoenix Sky Harbor International Airport", "Phoenix", "USA"),
-    "phoenix": ("PHX", "Phoenix Sky Harbor International Airport", "Phoenix", "USA"),
-    "san": ("SAN", "San Diego International Airport", "San Diego", "USA"),
-    "san diego": ("SAN", "San Diego International Airport", "San Diego", "USA"),
-    "msp": ("MSP", "Minneapolis-Saint Paul International Airport", "Minneapolis", "USA"),
-    "minneapolis": ("MSP", "Minneapolis-Saint Paul International Airport", "Minneapolis", "USA"),
-    "dtw": ("DTW", "Detroit Metropolitan Wayne County Airport", "Detroit", "USA"),
-    "detroit": ("DTW", "Detroit Metropolitan Wayne County Airport", "Detroit", "USA"),
-    "phl": ("PHL", "Philadelphia International Airport", "Philadelphia", "USA"),
-    "philadelphia": ("PHL", "Philadelphia International Airport", "Philadelphia", "USA"),
-    "clt": ("CLT", "Charlotte Douglas International Airport", "Charlotte", "USA"),
-    "charlotte": ("CLT", "Charlotte Douglas International Airport", "Charlotte", "USA"),
-    "slc": ("SLC", "Salt Lake City International Airport", "Salt Lake City", "USA"),
-    "salt lake city": ("SLC", "Salt Lake City International Airport", "Salt Lake City", "USA"),
-    "hnl": ("HNL", "Daniel K. Inouye International Airport", "Honolulu", "USA"),
-    "honolulu": ("HNL", "Daniel K. Inouye International Airport", "Honolulu", "USA"),
-    "hawaii": ("HNL", "Daniel K. Inouye International Airport", "Honolulu", "USA"),
-    "ogg": ("OGG", "Kahului Airport", "Maui", "USA"),
-    "maui": ("OGG", "Kahului Airport", "Maui", "USA"),
-    "aus": ("AUS", "Austin-Bergstrom International Airport", "Austin", "USA"),
-    "austin": ("AUS", "Austin-Bergstrom International Airport", "Austin", "USA"),
-    "bna": ("BNA", "Nashville International Airport", "Nashville", "USA"),
-    "nashville": ("BNA", "Nashville International Airport", "Nashville", "USA"),
-    "pdx": ("PDX", "Portland International Airport", "Portland", "USA"),
-    "portland": ("PDX", "Portland International Airport", "Portland", "USA"),
-    # Europe & Balkans
-    "lhr": ("LHR", "London Heathrow Airport", "London", "UK"),
-    "london": ("LHR", "London Heathrow Airport", "London", "UK"),
-    "heathrow": ("LHR", "London Heathrow Airport", "London", "UK"),
-    "lgw": ("LGW", "London Gatwick Airport", "London", "UK"),
-    "gatwick": ("LGW", "London Gatwick Airport", "London", "UK"),
-    "cdg": ("CDG", "Paris Charles de Gaulle Airport", "Paris", "France"),
-    "paris": ("CDG", "Paris Charles de Gaulle Airport", "Paris", "France"),
-    "ory": ("ORY", "Paris Orly Airport", "Paris", "France"),
-    "nce": ("NCE", "Nice Côte d'Azur Airport", "Nice", "France"),
-    "nice": ("NCE", "Nice Côte d'Azur Airport", "Nice", "France"),
-    "lys": ("LYS", "Lyon–Saint-Exupéry Airport", "Lyon", "France"),
-    "lyon": ("LYS", "Lyon–Saint-Exupéry Airport", "Lyon", "France"),
-    "fra": ("FRA", "Frankfurt Airport", "Frankfurt", "Germany"),
-    "frankfurt": ("FRA", "Frankfurt Airport", "Frankfurt", "Germany"),
-    "muc": ("MUC", "Munich Airport", "Munich", "Germany"),
-    "munich": ("MUC", "Munich Airport", "Munich", "Germany"),
-    "ber": ("BER", "Berlin Brandenburg Airport", "Berlin", "Germany"),
-    "berlin": ("BER", "Berlin Brandenburg Airport", "Berlin", "Germany"),
-    "ams": ("AMS", "Amsterdam Airport Schiphol", "Amsterdam", "Netherlands"),
-    "amsterdam": ("AMS", "Amsterdam Airport Schiphol", "Amsterdam", "Netherlands"),
-    "bru": ("BRU", "Brussels Airport", "Brussels", "Belgium"),
-    "brussels": ("BRU", "Brussels Airport", "Brussels", "Belgium"),
-    "mad": ("MAD", "Adolfo Suárez Madrid–Barajas Airport", "Madrid", "Spain"),
-    "madrid": ("MAD", "Adolfo Suárez Madrid–Barajas Airport", "Madrid", "Spain"),
-    "bcn": ("BCN", "Josep Tarradellas Barcelona–El Prat Airport", "Barcelona", "Spain"),
-    "barcelona": ("BCN", "Josep Tarradellas Barcelona–El Prat Airport", "Barcelona", "Spain"),
-    "agp": ("AGP", "Málaga-Costa del Sol Airport", "Malaga", "Spain"),
-    "malaga": ("AGP", "Málaga-Costa del Sol Airport", "Malaga", "Spain"),
-    "pmi": ("PMI", "Palma de Mallorca Airport", "Palma", "Spain"),
-    "fco": ("FCO", "Rome Fiumicino Airport", "Rome", "Italy"),
-    "rome": ("FCO", "Rome Fiumicino Airport", "Rome", "Italy"),
-    "mxp": ("MXP", "Milan Malpensa Airport", "Milan", "Italy"),
-    "milan": ("MXP", "Milan Malpensa Airport", "Milan", "Italy"),
-    "vce": ("VCE", "Venice Marco Polo Airport", "Venice", "Italy"),
-    "venice": ("VCE", "Venice Marco Polo Airport", "Venice", "Italy"),
-    "nap": ("NAP", "Naples International Airport", "Naples", "Italy"),
-    "naples": ("NAP", "Naples International Airport", "Naples", "Italy"),
-    "zrh": ("ZRH", "Zurich Airport", "Zurich", "Switzerland"),
-    "zurich": ("ZRH", "Zurich Airport", "Zurich", "Switzerland"),
-    "gva": ("GVA", "Geneva Airport", "Geneva", "Switzerland"),
-    "geneva": ("GVA", "Geneva Airport", "Geneva", "Switzerland"),
-    "vie": ("VIE", "Vienna International Airport", "Vienna", "Austria"),
-    "vienna": ("VIE", "Vienna International Airport", "Vienna", "Austria"),
-    "dub": ("DUB", "Dublin Airport", "Dublin", "Ireland"),
-    "dublin": ("DUB", "Dublin Airport", "Dublin", "Ireland"),
-    "lis": ("LIS", "Humberto Delgado Airport", "Lisbon", "Portugal"),
-    "lisbon": ("LIS", "Humberto Delgado Airport", "Lisbon", "Portugal"),
-    "opo": ("OPO", "Francisco Sá Carneiro Airport", "Porto", "Portugal"),
-    "porto": ("OPO", "Francisco Sá Carneiro Airport", "Porto", "Portugal"),
-    "ath": ("ATH", "Athens International Airport", "Athens", "Greece"),
-    "athens": ("ATH", "Athens International Airport", "Athens", "Greece"),
-    "ist": ("IST", "Istanbul Airport", "Istanbul", "Turkey"),
-    "istanbul": ("IST", "Istanbul Airport", "Istanbul", "Turkey"),
-    "saw": ("SAW", "Istanbul Sabiha Gökçen International Airport", "Istanbul", "Turkey"),
-    "cph": ("CPH", "Copenhagen Airport", "Copenhagen", "Denmark"),
-    "copenhagen": ("CPH", "Copenhagen Airport", "Copenhagen", "Denmark"),
-    "arn": ("ARN", "Stockholm Arlanda Airport", "Stockholm", "Sweden"),
-    "stockholm": ("ARN", "Stockholm Arlanda Airport", "Stockholm", "Sweden"),
-    "osl": ("OSL", "Oslo Airport", "Oslo", "Norway"),
-    "oslo": ("OSL", "Oslo Airport", "Oslo", "Norway"),
-    "hel": ("HEL", "Helsinki-Vantaa Airport", "Helsinki", "Finland"),
-    "helsinki": ("HEL", "Helsinki-Vantaa Airport", "Helsinki", "Finland"),
-    "waw": ("WAW", "Warsaw Chopin Airport", "Warsaw", "Poland"),
-    "warsaw": ("WAW", "Warsaw Chopin Airport", "Warsaw", "Poland"),
-    "prg": ("PRG", "Václav Havel Airport Prague", "Prague", "Czechia"),
-    "prague": ("PRG", "Václav Havel Airport Prague", "Prague", "Czechia"),
-    "bud": ("BUD", "Budapest Ferenc Liszt International Airport", "Budapest", "Hungary"),
-    "budapest": ("BUD", "Budapest Ferenc Liszt International Airport", "Budapest", "Hungary"),
-    "zag": ("ZAG", "Franjo Tuđman Airport Zagreb", "Zagreb", "Croatia"),
-    "zagreb": ("ZAG", "Franjo Tuđman Airport Zagreb", "Zagreb", "Croatia"),
-    "spu": ("SPU", "Split Airport", "Split", "Croatia"),
-    "split": ("SPU", "Split Airport", "Split", "Croatia"),
-    "dbv": ("DBV", "Dubrovnik Airport", "Dubrovnik", "Croatia"),
-    "dubrovnik": ("DBV", "Dubrovnik Airport", "Dubrovnik", "Croatia"),
-    "zad": ("ZAD", "Zadar Airport", "Zadar", "Croatia"),
-    "zadar": ("ZAD", "Zadar Airport", "Zadar", "Croatia"),
-    "puy": ("PUY", "Pula Airport", "Pula", "Croatia"),
-    "pula": ("PUY", "Pula Airport", "Pula", "Croatia"),
-    "sjj": ("SJJ", "Sarajevo International Airport", "Sarajevo", "Bosnia and Herzegovina"),
-    "sarajevo": ("SJJ", "Sarajevo International Airport", "Sarajevo", "Bosnia and Herzegovina"),
-    "tzl": ("TZL", "Tuzla International Airport", "Tuzla", "Bosnia and Herzegovina"),
-    "tuzla": ("TZL", "Tuzla International Airport", "Tuzla", "Bosnia and Herzegovina"),
-    "bnx": ("BNX", "Banja Luka International Airport", "Banja Luka", "Bosnia and Herzegovina"),
-    "banja luka": ("BNX", "Banja Luka International Airport", "Banja Luka", "Bosnia and Herzegovina"),
-    "omo": ("OMO", "Mostar International Airport", "Mostar", "Bosnia and Herzegovina"),
-    "mostar": ("OMO", "Mostar International Airport", "Mostar", "Bosnia and Herzegovina"),
-    "beg": ("BEG", "Belgrade Nikola Tesla Airport", "Belgrade", "Serbia"),
-    "belgrade": ("BEG", "Belgrade Nikola Tesla Airport", "Belgrade", "Serbia"),
-    "beograd": ("BEG", "Belgrade Nikola Tesla Airport", "Belgrade", "Serbia"),
-    "lju": ("LJU", "Ljubljana Jože Pučnik Airport", "Ljubljana", "Slovenia"),
-    "ljubljana": ("LJU", "Ljubljana Jože Pučnik Airport", "Ljubljana", "Slovenia"),
-    "tgd": ("TGD", "Podgorica Airport", "Podgorica", "Montenegro"),
-    "podgorica": ("TGD", "Podgorica Airport", "Podgorica", "Montenegro"),
-    "tiv": ("TIV", "Tivat Airport", "Tivat", "Montenegro"),
-    "tivat": ("TIV", "Tivat Airport", "Tivat", "Montenegro"),
-    "skp": ("SKP", "Skopje International Airport", "Skopje", "North Macedonia"),
-    "skopje": ("SKP", "Skopje International Airport", "Skopje", "North Macedonia"),
-    "tia": ("TIA", "Tirana International Airport Nënë Tereza", "Tirana", "Albania"),
-    "tirana": ("TIA", "Tirana International Airport Nënë Tereza", "Tirana", "Albania"),
-    "prn": ("PRN", "Pristina International Airport", "Pristina", "Kosovo"),
-    "pristina": ("PRN", "Pristina International Airport", "Pristina", "Kosovo"),
-    "otp": ("OTP", "Bucharest Henri Coandă International Airport", "Bucharest", "Romania"),
-    "bucharest": ("OTP", "Bucharest Henri Coandă International Airport", "Bucharest", "Romania"),
-    "sof": ("SOF", "Sofia Airport", "Sofia", "Bulgaria"),
-    "sofia": ("SOF", "Sofia Airport", "Sofia", "Bulgaria"),
-    "dus": ("DUS", "Düsseldorf Airport", "Düsseldorf", "Germany"),
-    "dusseldorf": ("DUS", "Düsseldorf Airport", "Düsseldorf", "Germany"),
-    "duesseldorf": ("DUS", "Düsseldorf Airport", "Düsseldorf", "Germany"),
-    "düsseldorf": ("DUS", "Düsseldorf Airport", "Düsseldorf", "Germany"),
-    "ber": ("BER", "Berlin Brandenburg Airport", "Berlin", "Germany"),
-    "berlin": ("BER", "Berlin Brandenburg Airport", "Berlin", "Germany"),
-    "ham": ("HAM", "Hamburg Airport", "Hamburg", "Germany"),
-    "hamburg": ("HAM", "Hamburg Airport", "Hamburg", "Germany"),
-    "str": ("STR", "Stuttgart Airport", "Stuttgart", "Germany"),
-    "stuttgart": ("STR", "Stuttgart Airport", "Stuttgart", "Germany"),
-    "cgn": ("CGN", "Cologne Bonn Airport", "Cologne", "Germany"),
-    "cologne": ("CGN", "Cologne Bonn Airport", "Cologne", "Germany"),
-    "haj": ("HAJ", "Hannover Airport", "Hannover", "Germany"),
-    "hannover": ("HAJ", "Hannover Airport", "Hannover", "Germany"),
-    "nue": ("NUE", "Nuremberg Airport", "Nuremberg", "Germany"),
-    "nuremberg": ("NUE", "Nuremberg Airport", "Nuremberg", "Germany"),
-    "prg": ("PRG", "Václav Havel Airport Prague", "Prague", "Czechia"),
-    "prague": ("PRG", "Václav Havel Airport Prague", "Prague", "Czechia"),
-    "bud": ("BUD", "Budapest Ferenc Liszt International Airport", "Budapest", "Hungary"),
-    "budapest": ("BUD", "Budapest Ferenc Liszt International Airport", "Budapest", "Hungary"),
-    "krk": ("KRK", "John Paul II International Airport Kraków-Balice", "Krakow", "Poland"),
-    "krakow": ("KRK", "John Paul II International Airport Kraków-Balice", "Krakow", "Poland"),
-    "edi": ("EDI", "Edinburgh Airport", "Edinburgh", "UK"),
-    "edinburgh": ("EDI", "Edinburgh Airport", "Edinburgh", "UK"),
-    "man": ("MAN", "Manchester Airport", "Manchester", "UK"),
-    "manchester": ("MAN", "Manchester Airport", "Manchester", "UK"),
-    "kef": ("KEF", "Keflavík International Airport", "Reykjavik", "Iceland"),
-    "iceland": ("KEF", "Keflavík International Airport", "Reykjavik", "Iceland"),
-    "reykjavik": ("KEF", "Keflavík International Airport", "Reykjavik", "Iceland"),
-    # Asia, Middle East & Oceania
-    "nrt": ("NRT", "Narita International Airport", "Tokyo", "Japan"),
-    "hnd": ("HND", "Tokyo Haneda Airport", "Tokyo", "Japan"),
-    "tokyo": ("HND", "Tokyo Haneda Airport", "Tokyo", "Japan"),
-    "kix": ("KIX", "Kansai International Airport", "Osaka", "Japan"),
-    "osaka": ("KIX", "Kansai International Airport", "Osaka", "Japan"),
-    "icn": ("ICN", "Incheon International Airport", "Seoul", "South Korea"),
-    "seoul": ("ICN", "Incheon International Airport", "Seoul", "South Korea"),
-    "hkg": ("HKG", "Hong Kong International Airport", "Hong Kong", "Hong Kong"),
-    "hong kong": ("HKG", "Hong Kong International Airport", "Hong Kong", "Hong Kong"),
-    "tpe": ("TPE", "Taiwan Taoyuan International Airport", "Taipei", "Taiwan"),
-    "taipei": ("TPE", "Taiwan Taoyuan International Airport", "Taipei", "Taiwan"),
-    "sin": ("SIN", "Singapore Changi Airport", "Singapore", "Singapore"),
-    "singapore": ("SIN", "Singapore Changi Airport", "Singapore", "Singapore"),
-    "bkk": ("BKK", "Suvarnabhumi Airport", "Bangkok", "Thailand"),
-    "bangkok": ("BKK", "Suvarnabhumi Airport", "Bangkok", "Thailand"),
-    "mnl": ("MNL", "Ninoy Aquino International Airport", "Manila", "Philippines"),
-    "manila": ("MNL", "Ninoy Aquino International Airport", "Manila", "Philippines"),
-    "del": ("DEL", "Indira Gandhi International Airport", "New Delhi", "India"),
-    "delhi": ("DEL", "Indira Gandhi International Airport", "New Delhi", "India"),
-    "new delhi": ("DEL", "Indira Gandhi International Airport", "New Delhi", "India"),
-    "bom": ("BOM", "Chhatrapati Shivaji Maharaj International Airport", "Mumbai", "India"),
-    "mumbai": ("BOM", "Chhatrapati Shivaji Maharaj International Airport", "Mumbai", "India"),
-    "dxb": ("DXB", "Dubai International Airport", "Dubai", "UAE"),
-    "dubai": ("DXB", "Dubai International Airport", "Dubai", "UAE"),
-    "auh": ("AUH", "Zayed International Airport", "Abu Dhabi", "UAE"),
-    "abu dhabi": ("AUH", "Zayed International Airport", "Abu Dhabi", "UAE"),
-    "doh": ("DOH", "Hamad International Airport", "Doha", "Qatar"),
-    "doha": ("DOH", "Hamad International Airport", "Doha", "Qatar"),
-    "syd": ("SYD", "Sydney Kingsford Smith Airport", "Sydney", "Australia"),
-    "sydney": ("SYD", "Sydney Kingsford Smith Airport", "Sydney", "Australia"),
-    "mel": ("MEL", "Melbourne Airport", "Melbourne", "Australia"),
-    "melbourne": ("MEL", "Melbourne Airport", "Melbourne", "Australia"),
-    "akl": ("AKL", "Auckland Airport", "Auckland", "New Zealand"),
-    "auckland": ("AKL", "Auckland Airport", "Auckland", "New Zealand"),
-    # Mexico, Caribbean & South America
-    "mex": ("MEX", "Mexico City International Airport", "Mexico City", "Mexico"),
-    "mexico city": ("MEX", "Mexico City International Airport", "Mexico City", "Mexico"),
-    "cun": ("CUN", "Cancún International Airport", "Cancun", "Mexico"),
-    "cancun": ("CUN", "Cancún International Airport", "Cancun", "Mexico"),
-    "pvr": ("PVR", "Licenciado Gustavo Díaz Ordaz International Airport", "Puerto Vallarta", "Mexico"),
-    "puerto vallarta": ("PVR", "Licenciado Gustavo Díaz Ordaz International Airport", "Puerto Vallarta", "Mexico"),
-    "sjd": ("SJD", "Los Cabos International Airport", "Cabo San Lucas", "Mexico"),
-    "cabo": ("SJD", "Los Cabos International Airport", "Cabo San Lucas", "Mexico"),
-    "los cabos": ("SJD", "Los Cabos International Airport", "Cabo San Lucas", "Mexico"),
-    "gru": ("GRU", "São Paulo/Guarulhos International Airport", "Sao Paulo", "Brazil"),
-    "sao paulo": ("GRU", "São Paulo/Guarulhos International Airport", "Sao Paulo", "Brazil"),
-    "gig": ("GIG", "Rio de Janeiro/Galeão International Airport", "Rio de Janeiro", "Brazil"),
-    "rio": ("GIG", "Rio de Janeiro/Galeão International Airport", "Rio de Janeiro", "Brazil"),
-    "bog": ("BOG", "El Dorado International Airport", "Bogota", "Colombia"),
-    "bogota": ("BOG", "El Dorado International Airport", "Bogota", "Colombia"),
-    "eze": ("EZE", "Ministro Pistarini International Airport", "Buenos Aires", "Argentina"),
-    "buenos aires": ("EZE", "Ministro Pistarini International Airport", "Buenos Aires", "Argentina"),
-}
-
-# Nearby major international hub alternatives when a secondary airport has no published long-range schedules
-NEARBY_HUB_AIRPORTS: dict[str, Tuple[str, str]] = {
-    "YEG": ("YYC", "Calgary"),
-    "YYJ": ("YVR", "Vancouver"),
-    "YLW": ("YVR", "Vancouver"),
-    "YXE": ("YYC", "Calgary"),
-    "YQR": ("YYC", "Calgary"),
-    "YOW": ("YUL", "Montreal"),
-    "YQB": ("YUL", "Montreal"),
-    "YTZ": ("YYZ", "Toronto Pearson"),
-    "DUS": ("FRA", "Frankfurt"),
-    "CGN": ("FRA", "Frankfurt"),
-    "STR": ("FRA", "Frankfurt"),
-    "SJJ": ("ZAG", "Zagreb"),
-    "TZL": ("BEG", "Belgrade"),
-    "BNX": ("ZAG", "Zagreb"),
-    "SPU": ("ZAG", "Zagreb"),
-    "DBV": ("ZAG", "Zagreb"),
-    "ZAD": ("ZAG", "Zagreb"),
-    "LJU": ("ZAG", "Zagreb"),
-}
-
-# Primary nonstop international gateway hubs from major origins (for 1-stop schedule verification >6 months out)
-ORIGIN_INTERNATIONAL_GATEWAYS: dict[str, list[Tuple[str, str, str]]] = {
-    "YEG": [
-        ("AMS", "Amsterdam Airport Schiphol", "Amsterdam"),
-        ("FRA", "Frankfurt Airport", "Frankfurt"),
-    ],
-    "YYC": [
-        ("AMS", "Amsterdam Airport Schiphol", "Amsterdam"),
-        ("LHR", "London Heathrow Airport", "London"),
-        ("FRA", "Frankfurt Airport", "Frankfurt"),
-        ("CDG", "Charles de Gaulle Airport", "Paris"),
-        ("FCO", "Leonardo da Vinci–Fiumicino Airport", "Rome"),
-        ("NRT", "Narita International Airport", "Tokyo"),
-    ],
-    "YVR": [
-        ("FRA", "Frankfurt Airport", "Frankfurt"),
-        ("LHR", "London Heathrow Airport", "London"),
-        ("CDG", "Charles de Gaulle Airport", "Paris"),
-        ("AMS", "Amsterdam Airport Schiphol", "Amsterdam"),
-        ("ZRH", "Zurich Airport", "Zurich"),
-        ("MUC", "Munich Airport", "Munich"),
-        ("HND", "Tokyo Haneda Airport", "Tokyo"),
-    ],
-    "YYZ": [
-        ("AMS", "Amsterdam Airport Schiphol", "Amsterdam"),
-        ("FRA", "Frankfurt Airport", "Frankfurt"),
-        ("LHR", "London Heathrow Airport", "London"),
-        ("CDG", "Charles de Gaulle Airport", "Paris"),
-        ("VIE", "Vienna International Airport", "Vienna"),
-        ("MUC", "Munich Airport", "Munich"),
-        ("ZRH", "Zurich Airport", "Zurich"),
-    ],
-    "YUL": [
-        ("CDG", "Charles de Gaulle Airport", "Paris"),
-        ("AMS", "Amsterdam Airport Schiphol", "Amsterdam"),
-        ("FRA", "Frankfurt Airport", "Frankfurt"),
-        ("LHR", "London Heathrow Airport", "London"),
-        ("VIE", "Vienna International Airport", "Vienna"),
-        ("ZRH", "Zurich Airport", "Zurich"),
-    ],
-}
-
+logger = logging.getLogger(__name__)
 
 # In-memory cache for Flightradar24 dynamic airport lookups
-_AIRPORT_RESOLVE_CACHE: dict[str, Optional[Tuple[str, str, str, str]]] = {}
-
-
-@dataclass
-class FlightSearchState:
-    """Per-channel conversational state for multi-turn flight queries."""
-    origin: Optional[Tuple[str, str, str, str]] = None
-    destination: Optional[Tuple[str, str, str, str]] = None
-    dep_date: Optional[str] = None
-    ret_date: Optional[str] = None
-    dep_month_window: Optional[Tuple[str, str, str]] = None
-    ret_month_window: Optional[Tuple[str, str, str]] = None
-    trip_type: str = "one-way"  # "one-way" or "round-trip"
-    max_stops: Optional[int] = None
-    sort_preference: str = "best"
-    trip_days: Optional[int] = None
-    cabin: str = "economy"
-    currency: str = "CAD"
-
+_AIRPORT_RESOLVE_CACHE: dict[str, Optional[AirportRecord]] = {}
 
 _CHANNEL_FLIGHT_STATE: Dict[int, FlightSearchState] = {}
-_CHANNEL_LAST_ROUTE: Dict[int, Tuple[Tuple[str, str, str, str], Tuple[str, str, str, str]]] = {}
+_CHANNEL_LAST_ROUTE: Dict[int, Tuple[Union[AirportRecord, Tuple[str, str, str, str]], Union[AirportRecord, Tuple[str, str, str, str]]]] = {}
 _CHANNEL_LAST_WINDOW: Dict[int, dict] = {}
 
 
 def _resolve_cid(channel_id: Optional[int] = None) -> int:
-    from src.skills.sports.live_tracker import get_active_channel_id
     return channel_id if channel_id is not None else (get_active_channel_id() or 0)
 
 
@@ -413,8 +67,8 @@ def clear_channel_flight_state(channel_id: Optional[int] = None) -> None:
 
 
 def record_channel_last_route(
-    origin_info: Tuple[str, str, str, str],
-    dest_info: Tuple[str, str, str, str],
+    origin_info: Union[AirportRecord, Tuple[str, str, str, str]],
+    dest_info: Union[AirportRecord, Tuple[str, str, str, str]],
     channel_id: Optional[int] = None,
 ) -> None:
     cid = _resolve_cid(channel_id)
@@ -429,7 +83,7 @@ def record_channel_last_route(
 
 def get_channel_last_route(
     channel_id: Optional[int] = None,
-) -> Optional[Tuple[Tuple[str, str, str, str], Tuple[str, str, str, str]]]:
+) -> Optional[Tuple[Union[AirportRecord, Tuple[str, str, str, str]], Union[AirportRecord, Tuple[str, str, str, str]]]]:
     cid = _resolve_cid(channel_id)
     st = _CHANNEL_FLIGHT_STATE.get(cid)
     if st and st.origin and st.destination:
@@ -452,62 +106,10 @@ def get_channel_last_window(
     return _CHANNEL_LAST_WINDOW.get(cid)
 
 
-
-
-# Known commercial airline IATA/ICAO prefixes for flight-number identification
-AIRLINE_CODES = {
-    "AC", "ACA", "WS", "WJA", "PD", "POE", "F8", "FLE", "TS", "TSC",
-    "UA", "UAL", "AA", "AAL", "DL", "DAL", "WN", "SWA", "AS", "ASA", "B6", "JBU", "NK", "NKS", "F9", "FFT",
-    "BA", "BAW", "VS", "VIR", "LH", "DLH", "AF", "AFR", "KL", "KLM", "IB", "IBE", "AZ", "ITY", "LX", "SWR",
-    "OS", "AUA", "EI", "EIN", "SK", "SAS", "AY", "FIN", "TP", "TAP", "TK", "THY", "LO", "LOT", "OU", "CTN",
-    "EK", "UAE", "QR", "QTR", "EY", "ETD", "SQ", "SIA", "CX", "CPA", "JL", "JAL", "NH", "ANA",
-    "KE", "KAL", "OZ", "AAR", "BR", "EVA", "CI", "CAL", "QF", "QFA", "NZ", "ANZ", "AM", "AMX", "LA", "LAN",
-}
-
-_MONTH_MAP = {
-    "jan": 1, "january": 1,
-    "feb": 2, "february": 2,
-    "mar": 3, "march": 3,
-    "apr": 4, "april": 4,
-    "may": 5,
-    "jun": 6, "june": 6,
-    "jul": 7, "july": 7,
-    "aug": 8, "august": 8,
-    "sep": 9, "sept": 9, "september": 9,
-    "oct": 10, "october": 10,
-    "nov": 11, "november": 11,
-    "dec": 12, "december": 12,
-}
-
-_WEEKDAY_MAP = {
-    "monday": 0, "mon": 0,
-    "tuesday": 1, "tue": 1, "tues": 1,
-    "wednesday": 2, "wed": 2,
-    "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
-    "friday": 4, "fri": 4,
-    "saturday": 5, "sat": 5,
-    "sunday": 6, "sun": 6,
-}
-
-
-_NON_LOCATION_WORDS = (
-    set(_MONTH_MAP.keys())
-    | set(_WEEKDAY_MAP.keys())
-    | {
-        "trip", "planning", "plan", "year", "years", "month", "months", "week", "weeks",
-        "day", "days", "today", "tomorrow", "tonight", "weekend", "next", "this", "during",
-        "those", "these", "what", "when", "where", "which", "who", "how", "why", "best",
-        "good", "price", "prices", "fare", "fares", "stop", "stops", "single", "only",
-        "any", "all", "get", "find", "show", "give", "can", "you", "me", "my", "our",
-        "the", "and", "for", "from", "to", "in", "on", "at", "by", "with", "about",
-    }
-)
-
-
-def resolve_airport(location: Optional[str]) -> Optional[Tuple[str, str, str, str]]:
+def resolve_airport(location: Optional[str]) -> Optional[AirportRecord]:
     """
-    Resolves a city name, airport name, or 3-letter IATA code into
-    (IATA_CODE, Airport_Name, City, Country).
+    Resolves a city name, airport name, or 3-letter IATA code into an
+    AirportRecord(iata, name, city, country).
     Falls back to cached Flightradar24 search for unlisted regional airports.
     """
     if not location:
@@ -547,7 +149,7 @@ def resolve_airport(location: Optional[str]) -> Optional[Tuple[str, str, str, st
     # 4. If it's an exact 3-letter uppercase code not in our static dict, accept it (never lowercase English words)
     if re.fullmatch(r"[a-zA-Z]{3}", cleaned) and cleaned not in _NON_LOCATION_WORDS and location.strip().isupper():
         code_up = cleaned.upper()
-        info = (code_up, f"{code_up} Airport", code_up, "")
+        info = AirportRecord(code_up, f"{code_up} Airport", code_up, "")
         _AIRPORT_RESOLVE_CACHE[cleaned] = info
         return info
 
@@ -565,13 +167,13 @@ def resolve_airport(location: Optional[str]) -> Optional[Tuple[str, str, str, st
                     iata_up = str(iata).upper()
                     label = ap.get("label") or f"{iata_up} Airport"
                     city_name = label.split("(")[0].strip()
-                    resolved = (iata_up, label, city_name, "")
+                    resolved = AirportRecord(iata_up, label, city_name, "")
                     _AIRPORT_RESOLVE_CACHE[cleaned] = resolved
                     AIRPORT_DIRECTORY[cleaned] = resolved
                     AIRPORT_DIRECTORY[iata_up.lower()] = resolved
                     return resolved
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"FlightRadar24 airport search fallback failed for '{cleaned}': {e}")
 
     _AIRPORT_RESOLVE_CACHE[cleaned] = None
     return None
@@ -585,22 +187,11 @@ def extract_flight_numbers(text: str) -> list[str]:
     if not text:
         return []
     found: list[str] = []
-    non_flight_words = (
-        set(_MONTH_MAP.keys())
-        | _NON_LOCATION_WORDS
-        | {
-            "in", "to", "on", "at", "by", "of", "or", "bo", "cs", "f1", "pm", "am",
-            "for", "max", "min", "top", "day", "way", "out", "via", "any", "all",
-            "one", "two", "six", "per", "leg", "hub", "get", "see", "can", "you",
-            "the", "and", "not", "are", "was", "has", "had", "but", "now", "new",
-            "old", "low", "avg", "est", "cad", "usd", "eur", "gbp",
-        }
-    )
     for m in re.finditer(r"\b([A-Za-z]{2,3}|[A-Za-z]\d|\d[A-Za-z])[\s\-]?(\d{1,4})\b", text):
         raw_prefix = m.group(1)
         prefix = raw_prefix.upper()
         digits = m.group(2)
-        if prefix.lower() in non_flight_words:
+        if prefix.lower() in NON_FLIGHT_NUMBER_PREFIXES:
             continue
         trailing = text[m.end() :]
         if re.match(
@@ -1100,16 +691,16 @@ def parse_route_from_query(
     )
 
     # Detect sort preference ('shortest', 'cheapest', or 'best')
-    if sort_by_arg and sort_by_arg.lower() in ("shortest", "cheapest", "best"):
+    if sort_by_arg and sort_by_arg.lower() in (SortPreference.SHORTEST, SortPreference.CHEAPEST, SortPreference.BEST):
         sort_preference = sort_by_arg.lower()
     elif re.search(r"\b(?:shortest|fastest|quickest|least\s+travel\s+time|minimum\s+layover)\b", q_low):
-        sort_preference = "shortest"
+        sort_preference = SortPreference.SHORTEST
     elif re.search(r"\b(?:cheapest|lowest\s+price|lowest\s+fare|budget)\b", q_low) and not re.search(r"\bbest\b", q_low):
-        sort_preference = "cheapest"
+        sort_preference = SortPreference.CHEAPEST
     elif is_constraint_only_followup and prev_state:
         sort_preference = prev_state.sort_preference
     else:
-        sort_preference = "best"
+        sort_preference = SortPreference.BEST
 
     # Detect direct/nonstop schedule discovery intent
     wants_direct_schedule = bool(
@@ -1149,10 +740,10 @@ def parse_route_from_query(
     if trip_days and not is_explicit_one_way and not ret_date and dep_date:
         try:
             ret_date = (datetime.strptime(dep_date, "%Y-%m-%d").date() + timedelta(days=trip_days)).strftime("%Y-%m-%d")
-        except Exception:
+        except ValueError:
             pass
 
-    trip_type = "round-trip" if (ret_date or ret_month_window or (trip_days and not is_explicit_one_way)) else "one-way"
+    trip_type = TripType.ROUND_TRIP if (ret_date or ret_month_window or (trip_days and not is_explicit_one_way)) else TripType.ONE_WAY
 
     wants_flexible_scan = bool(
         not wants_latest_horizon
@@ -1161,7 +752,7 @@ def parse_route_from_query(
             or ret_month_window is not None
             or (has_flex_phrase and defaulted_date)
             or (wants_direct_schedule and defaulted_date)
-            or (sort_preference == "shortest" and defaulted_date)
+            or (sort_preference == SortPreference.SHORTEST and defaulted_date)
             or (max_stops is not None and is_window_followup)
             or (trip_days is not None and defaulted_date)
         )
@@ -1191,17 +782,17 @@ def parse_route_from_query(
 
     # Cabin class detection
     if "first class" in q_low:
-        cabin = "first"
+        cabin = CabinClass.FIRST
     elif "business" in q_low:
-        cabin = "business"
+        cabin = CabinClass.BUSINESS
     elif "premium economy" in q_low or "premium-economy" in q_low:
-        cabin = "premium-economy"
+        cabin = CabinClass.PREMIUM_ECONOMY
     elif re.search(r"\beconomy\b", q_low):
-        cabin = "economy"
+        cabin = CabinClass.ECONOMY
     elif prev_state and not route_changed:
         cabin = prev_state.cabin
     else:
-        cabin = "economy"
+        cabin = CabinClass.ECONOMY
 
     # Currency detection (default CAD for Canadian airports, else USD unless specified)
     if re.search(r"\b(?:usd|us\s*dollars?)\b", q_low):
@@ -1308,7 +899,7 @@ def detect_missed_flight_tool_call(
     if re.search(r"\b(?:track|watch|alert|untrack|stop\s+tracking)\b", q_low) and re.search(
         r"\b(?:flights?|airfare|prices?|fares?)\b", q_low
     ):
-        return ("skill_track_flight", {"action": "track", "query": latest_user_text})
+        return ("skill_track_flight", {"action": FlightTrackerAction.TRACK, "query": latest_user_text})
 
     month_pattern = "|".join(_MONTH_MAP.keys())
     has_flight_kw = bool(

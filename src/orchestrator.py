@@ -14,11 +14,15 @@ for convenience:
 - Music spectrum shift context: `src.skills.music.spectrum`
 """
 
+import base64
+import datetime
 import inspect
+import logging
 import re
 import types
 import typing
 
+from src.skills.flights.aggregators.prices import GoogleFlightsPriceAggregator
 from src.skills.flights.airports import (
     detect_missed_flight_tool_call,
 )
@@ -31,6 +35,11 @@ from src.skills.sports.context import (
     detect_missed_sports_tool_call,
     enrich_sports_tool_args,
 )
+from src.utils.domain_vocab import (
+    EPHEMERAL_SPORTS_TOOLS as _EPHEMERAL_SPORTS_TOOLS,
+    MONTH_MAP_SYNC as _MONTH_MAP_SYNC,
+    TOOL_ARG_ALIASES,
+)
 from src.utils.timezones import (
     build_reference_clock,
     enrich_tool_output_with_time_context,
@@ -38,110 +47,7 @@ from src.utils.timezones import (
     resolve_configured_timezone,
 )
 
-# ---------------------------------------------------------------------------
-# Tool argument normalization
-# ---------------------------------------------------------------------------
-
-# Small models sometimes call tools with a synonym for the real parameter
-# name (e.g. search_web(q=...) or read_website(link=...)). We remap those here,
-# BEFORE filtering against the function signature. Doing it in the tool
-# signature via **kwargs does not work: Ollama advertises `kwargs` to the model
-# as a required parameter, and the signature filter drops the aliases anyway.
-TOOL_ARG_ALIASES = {
-    "search_web": {
-        "q": "query", "search_query": "query", "keywords": "query",
-        "keyword": "query", "prompt": "query", "text": "query", "search": "query",
-    },
-    "read_website": {
-        "link": "url", "website": "url", "target_url": "url", "uri": "url",
-        "site": "url", "href": "url", "page": "url",
-    },
-    "read_youtube_video": {
-        "link": "url", "video_url": "url", "video": "url", "uri": "url",
-        "href": "url", "video_id": "url", "id": "url",
-    },
-    "skill_top_headlines": {
-        "country": "region", "location": "region", "place": "region", "nation": "region",
-        "category": "topic", "section": "topic",
-    },
-    "get_top_headlines": {
-        "country": "region", "location": "region", "place": "region", "nation": "region",
-        "category": "topic", "section": "topic",
-    },
-    "skill_top_music": {
-        "artist_name": "artist", "band": "artist", "creator": "artist",
-        "style": "genre", "vibe": "mood", "energy": "mood", "feel": "mood",
-        "seed": "similar_to", "song": "similar_to", "track": "similar_to",
-        "direction": "shift", "notch": "shift", "scale": "shift", "tempo": "shift", "intensity": "shift",
-    },
-    "skill_csgo_esports": {
-        "type": "query_type", "category": "query_type", "query": "query_type", "mode": "query_type",
-        "event": "event_page", "page": "event_page", "tournament": "event_page",
-        "player": "player_url", "player_name": "player_url", "name": "player_url", "target": "player_url",
-        "team": "matchup", "matchup": "matchup", "match": "matchup", "teams": "matchup",
-    },
-    "skill_betting_odds": {
-        "matchup": "query", "match": "query", "game": "query", "event": "query", "teams": "query",
-        "category": "sport", "league": "sport",
-    },
-    "skill_sports_info": {
-        "league": "sport", "category": "sport", "type": "sport", "sport_type": "sport",
-        "sport_name": "sport", "discipline": "sport", "competition": "sport",
-        "club": "team", "franchise": "team", "squad": "team", "teams": "team",
-        "competitor": "team", "side": "team", "organization": "team",
-        "athlete": "player", "player_name": "player", "fighter": "player", "driver": "player", "golfer": "player",
-        "q": "query", "text": "query", "prompt": "query", "search": "query", "question": "query",
-        "matchup": "query", "match": "query", "matches": "query", "filter": "query",
-        "outcomes": "query", "outcome": "query",
-    },
-    "skill_track_live_game": {
-        "team": "query", "club": "query", "match": "query", "matchup": "query",
-        "game": "query", "event": "query", "target": "query", "q": "query",
-        "command": "action", "mode": "action", "type": "action",
-        "league": "sport", "category": "sport",
-    },
-    "skill_weather_reporter": {
-        "location": "city", "place": "city", "town": "city", "region": "city", "q": "city", "query": "city",
-    },
-    "skill_youtube_searcher": {
-        "q": "query", "search_query": "query", "search": "query", "video": "query",
-        "song": "query", "track": "query", "title": "query",
-        "limit": "max_results", "count": "max_results", "music": "is_music",
-    },
-    "skill_audio_intelligence": {
-        "song": "track", "query": "track", "q": "track", "title": "track", "seed": "track",
-        "mode": "action", "type": "action", "bpm": "target_bpm", "tempo": "target_bpm",
-    },
-    "skill_flight_info": {
-        "q": "query", "route": "query", "search": "query",
-        "from": "origin", "from_airport": "origin", "departure": "origin", "dep": "origin", "source": "origin",
-        "to": "destination", "to_airport": "destination", "arrival": "destination", "dest": "destination", "arr": "destination",
-        "departure_date": "date", "dep_date": "date", "when": "date",
-        "ret_date": "return_date", "return": "return_date",
-        "flight": "flight_number", "callsign": "flight_number", "code": "flight_number", "tail": "flight_number",
-        "seat": "cabin", "class": "cabin", "cabin_class": "cabin",
-        "curr": "currency",
-        "stops": "max_stops", "num_stops": "max_stops", "stop_limit": "max_stops",
-        "sort": "sort_by", "sort_preference": "sort_by", "order": "sort_by",
-        "trip": "trip_type", "type": "trip_type",
-    },
-    "skill_track_flight": {
-        "mode": "action", "command": "action", "cmd": "action",
-        "q": "query", "flight": "query", "flight_number": "query", "callsign": "query", "route": "query",
-        "from": "origin", "from_airport": "origin", "departure": "origin",
-        "to": "destination", "to_airport": "destination", "arrival": "destination", "dest": "destination",
-        "departure_date": "date", "dep_date": "date",
-        "ret_date": "return_date", "return": "return_date",
-        "price": "target_price", "max_price": "target_price", "threshold": "target_price",
-    },
-    "evaluate_math": {
-        "math": "expression", "expr": "expression", "equation": "expression",
-        "formula": "expression", "query": "expression", "q": "expression",
-    },
-    "save_memory": {
-        "memory": "fact", "note": "fact", "info": "fact", "text": "fact", "content": "fact",
-    },
-}
+logger = logging.getLogger(__name__)
 
 
 def _base_type(annotation):
@@ -251,7 +157,6 @@ def enrich_flight_tool_args(args: dict, history: list) -> dict:
 # ---------------------------------------------------------------------------
 
 OLD_TOOL_OUTPUT_CHARS = 800
-_EPHEMERAL_SPORTS_TOOLS = {"skill_sports_info", "skill_track_live_game", "skill_betting_odds"}
 
 
 def _role(msg):
@@ -416,14 +321,14 @@ def _convert_latex_tokens(fragment: str) -> str:
 
 
 def _normalize_discord_latex(text: str) -> str:
-    """Strip inline LaTeX math wrappers ($...$) and LaTeX commands (\rightarrow, \to, \sim, \text{...})
+    r"""Strip inline LaTeX math wrappers ($...$) and LaTeX commands (\rightarrow, \to, \sim, \text{...})
     that Discord cannot render, without touching normal currency dollar amounts ($1,328)."""
     if not text or ('$' not in text and '\\' not in text):
         return text
 
     def _replace_math_span(m: re.Match) -> str:
         inner = m.group(1)
-        # Only unwrap $...$ if it contains LaTeX commands or wraps an uppercase airport/route token (e.g. $YEG$)
+        # Only unwrap $...$ if it contains LaTeX commands or wraps an uppercase airport/route token (e.g. $JFK$)
         if (
             '\\' in inner
             or re.fullmatch(r'\s*[A-Z]{3}(?:\s*(?:→|->|-)\s*[A-Z]{3})?\s*', inner)
@@ -447,21 +352,6 @@ def _normalize_discord_latex(text: str) -> str:
     out = re.sub(r'~[ \t]+\$', '~$', out)
     return out
 
-
-_MONTH_MAP_SYNC = {
-    "jan": 1, "january": 1,
-    "feb": 2, "february": 2,
-    "mar": 3, "march": 3,
-    "apr": 4, "april": 4,
-    "may": 5,
-    "jun": 6, "june": 6,
-    "jul": 7, "july": 7,
-    "aug": 8, "august": 8,
-    "sep": 9, "sept": 9, "september": 9,
-    "oct": 10, "october": 10,
-    "nov": 11, "november": 11,
-    "dec": 12, "december": 12,
-}
 
 _PROSE_DATE_TOKEN_RE = re.compile(
     r"\b(?P<iso>20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b"
@@ -503,15 +393,13 @@ def _extract_prose_dates(fragment: str, default_year: typing.Optional[int] = Non
             dt_iso = datetime.date(yr, month_num, int(d_str)).strftime("%Y-%m-%d")
             if dt_iso not in results:
                 results.append(dt_iso)
-        except Exception:
+        except ValueError:
             continue
     return results
 
 
 def _decode_google_flights_tfs(url: str) -> typing.Optional[dict[str, typing.Any]]:
     """Decode a Google Flights ?tfs= URL into origin, destination, encoded dates, max_stops, and currency."""
-    import base64
-
     m_tfs = re.search(r"[?&]tfs=([^&#\s>]+)", url)
     if not m_tfs:
         return None
@@ -519,7 +407,8 @@ def _decode_google_flights_tfs(url: str) -> typing.Optional[dict[str, typing.Any
     try:
         padded = tfs_b64 + "=" * (-len(tfs_b64) % 4)
         raw = base64.urlsafe_b64decode(padded)
-    except Exception:
+    except (ValueError, TypeError) as e:
+        logger.debug(f"Failed to base64 decode Google Flights tfs parameter: {e}")
         return None
     legs = re.findall(rb"j\x05\x12\x03([A-Z]{3})r\x05\x12\x03([A-Z]{3})", raw)
     if not legs:
@@ -587,7 +476,6 @@ def _sync_google_flights_links_with_reply_dates(text: str) -> str:
         primary_dates = collected
 
     total_gf_links = len(all_links)
-    from src.skills.flights.aggregators.prices import GoogleFlightsPriceAggregator
 
     new_lines: list[str] = []
     for idx, line in enumerate(lines):
@@ -638,7 +526,8 @@ def _sync_google_flights_links_with_reply_dates(text: str) -> str:
                     currency=info["currency"],
                     max_stops=info["max_stops"],
                 )
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to rebuild Google Flights URL in reply sync: {e}")
                 return m.group(0)
 
             label = m.group("label")

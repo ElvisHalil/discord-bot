@@ -1,16 +1,13 @@
 import os
 import requests
 from src.skills.sports.aggregators.base import BaseSportsAggregator
+from src.skills.sports.catalogs import ESPORTS_STREAM_CHANNELS
 
 class EslLiveAggregator(BaseSportsAggregator):
     """Aggregator that checks ESLCS, BLASTPremier, and thunderpickesports channels for live CS matches via YouTube Data API."""
 
-    CHANNEL_ID = "UCPq2ETz4aAGo2Z-8JisDPIA"
-    CHANNELS = (
-        ("ESL Counter-Strike", "ESLCS", "UCPq2ETz4aAGo2Z-8JisDPIA"),
-        ("BLAST Premier", "BLASTPremier", "UC9k--dE_UE0Faxzgb_DDkYQ"),
-        ("Thunderpick Esports", "thunderpickesports", "UCDs5D1luLRP2oo3lk71MaCA"),
-    )
+    CHANNEL_ID = ESPORTS_STREAM_CHANNELS[0].channel_id
+    CHANNELS = ESPORTS_STREAM_CHANNELS
 
     def get_live_matches(self) -> str:
         """Checks if ESLCS, BLASTPremier, or thunderpickesports are currently streaming a live Counter-Strike match on YouTube."""

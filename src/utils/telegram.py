@@ -13,7 +13,15 @@ from typing import Any, Dict, Optional, Set, Tuple
 import requests
 
 import src.registry as tools
-from src.config import MODES
+try:
+    from src.config import MODES
+except ImportError:
+    import importlib.util as _importlib_util
+    from pathlib import Path as _Path
+    _spec = _importlib_util.spec_from_file_location("src.config", _Path(__file__).resolve().parent.parent / "config.example.py")
+    _mod = _importlib_util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    MODES = _mod.MODES
 from src.orchestrator import (
     apply_auto_ping,
     extract_reply_context,
@@ -21,10 +29,14 @@ from src.orchestrator import (
     sanitize_agent_reply,
     trim_history,
 )
+from src.context import set_active_channel_id
+from src.skills.flights import (
+    FLIGHT_TRACKER,
+    skill_track_flight,
+)
 from src.skills.music.utils import format_song_card, get_music_metadata, standardize_song_reply
 from src.skills.sports.live_tracker import (
     LIVE_TRACKER,
-     set_active_channel_id,
     skill_track_live_game,
 )
 from src.utils import chunk_message, run_in_worker
@@ -152,7 +164,7 @@ def _normalize_command(text: str, bot_username: str = "") -> str:
             return stripped
         cmd_part = cmd_base
     cmd_low = cmd_part.lower()
-    if cmd_low in ("reset", "mode", "track", "untrack", "tracked"):
+    if cmd_low in ("reset", "mode", "track", "untrack", "tracked", "trackflight", "untrackflight", "trackedflights"):
         rest = f" {parts[1]}" if len(parts) > 1 else ""
         return f"!{cmd_low}{rest}"
     return stripped
@@ -504,6 +516,27 @@ async def handle_telegram_update(
         elif hasattr(main_mod, "reset_channel_memory"):
             main_mod.reset_channel_memory(internal_cid)
         await send_telegram_message(internal_cid, "🧹 Memory and context wiped for this chat.", token=bot_token)
+        return
+
+    if low_input.startswith("!trackflight "):
+        target_q = normalized_input[13:].strip()
+        set_active_channel_id(internal_cid)
+        res = await run_in_worker(skill_track_flight, action="start", query=target_q)
+        FLIGHT_TRACKER.ensure_loop_running()
+        await send_telegram_message(internal_cid, res, token=bot_token)
+        return
+
+    if low_input.startswith("!untrackflight"):
+        target_q = normalized_input[14:].strip()
+        set_active_channel_id(internal_cid)
+        res = await run_in_worker(skill_track_flight, action="stop", query=target_q)
+        await send_telegram_message(internal_cid, res, token=bot_token)
+        return
+
+    if low_input in ("!trackedflights", "!trackflight"):
+        set_active_channel_id(internal_cid)
+        res = await run_in_worker(skill_track_flight, action="list")
+        await send_telegram_message(internal_cid, res, token=bot_token)
         return
 
     if low_input.startswith("!track "):

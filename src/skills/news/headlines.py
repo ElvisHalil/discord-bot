@@ -12,45 +12,32 @@ That endpoint is undocumented: if it fails we keep the Google link (it still ope
 fine in a browser).
 """
 
-import json
-import time
-import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor
 from email.utils import parsedate_to_datetime
+import json
+import logging
+import time
 from typing import Optional
 from urllib.parse import quote, quote_plus, urlparse
+import xml.etree.ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
+from src.skills.news.catalogs import (
+    GENERIC_TOPICS as _GENERIC_TOPICS,
+    GLOBAL_REGIONS as _GLOBAL_REGIONS,
+    NEWS_EDITIONS as _EDITIONS,
+    NEWS_TOPICS_MAP as _TOPICS,
+)
+from src.skills.news.enums import NewsTopic
+from src.skills.news.models import NewsEdition
+from src.skills.news.templates import HEADLINES_INSTRUCTIONS
+from src.utils.workers import map_in_workers
+
+logger = logging.getLogger(__name__)
 
 _UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-}
-
-# Countries with an English Google News edition: region alias -> (hl, gl)
-_EDITIONS = {
-    "us": ("en-US", "US"), "usa": ("en-US", "US"), "united states": ("en-US", "US"), "america": ("en-US", "US"),
-    "canada": ("en-CA", "CA"), "ca": ("en-CA", "CA"),
-    "uk": ("en-GB", "GB"), "united kingdom": ("en-GB", "GB"), "britain": ("en-GB", "GB"),
-    "great britain": ("en-GB", "GB"), "england": ("en-GB", "GB"),
-    "australia": ("en-AU", "AU"), "india": ("en-IN", "IN"), "ireland": ("en-IE", "IE"),
-    "new zealand": ("en-NZ", "NZ"), "south africa": ("en-ZA", "ZA"), "singapore": ("en-SG", "SG"),
-}
-_GLOBAL_REGIONS = {"world", "global", "international", "worldwide"}
-
-# Google News section topics
-_TOPICS = {
-    "world": "WORLD", "international": "WORLD", "nation": "NATION", "national": "NATION",
-    "business": "BUSINESS", "economy": "BUSINESS", "finance": "BUSINESS",
-    "technology": "TECHNOLOGY", "tech": "TECHNOLOGY",
-    "entertainment": "ENTERTAINMENT", "sports": "SPORTS", "sport": "SPORTS",
-    "science": "SCIENCE", "health": "HEALTH",
-}
-# Topic values that just mean "the main headlines" when a region is given.
-_GENERIC_TOPICS = {
-    "world", "international", "global", "news", "general", "top", "top stories", "top news",
-    "headlines", "top headlines", "latest", "breaking", "all", "nation", "national", "politics",
 }
 
 MAX_HEADLINES = 8
@@ -87,7 +74,8 @@ def decode_google_news_url(url: str, timeout: float = 8.0) -> Optional[str]:
         data = json.loads(resp.text.split("\n\n")[1])[:-2]
         decoded = json.loads(data[0][2])[1]
         return decoded if isinstance(decoded, str) and decoded.startswith("http") else None
-    except Exception:
+    except Exception as e:
+        logger.debug(f"decode_google_news_url failed for {url}: {e}")
         return None
 
 
@@ -124,7 +112,7 @@ def _build_feed_url(region: str, topic: str):
 def _format_date(pub: str) -> str:
     try:
         return parsedate_to_datetime(pub).strftime("%b %d, %Y %H:%M UTC")
-    except Exception:
+    except (ValueError, TypeError):
         return pub or ""
 
 
@@ -172,7 +160,6 @@ def skill_top_headlines(region: Optional[str] = None, topic: Optional[str] = Non
         })
 
     # Resolve publisher URLs in parallel via shared worker pool so read_website can open them later.
-    from src.utils.workers import map_in_workers
     decoded = map_in_workers(lambda s: decode_google_news_url(s["link"]), stories)
 
     output = f"=== TOP HEADLINES: {label} (Google News) ===\n"
@@ -180,13 +167,7 @@ def skill_top_headlines(region: Optional[str] = None, topic: Optional[str] = Non
         meta = " | ".join(p for p in (story["source"], story["date"]) if p)
         output += f"{i}. {story['title']} [{meta}]\nURL: {real_url or story['link']}\n\n"
 
-    output += (
-        "--- RESPONSE FORMATTING INSTRUCTIONS FOR YOU (THE LLM) ---\n"
-        "• Bold heading for this region/topic, then one bullet per story: - **Headline** — one-sentence summary. [Source Name](<URL>)\n"
-        "• Only headlines are listed above, not article text: keep summaries to what the headline says. "
-        "To expand on a story, call `read_website` on its URL first.\n"
-        "• Copy each URL exactly and keep it inside <> so Discord shows no preview card. No second list or raw link dump."
-    )
+    output += HEADLINES_INSTRUCTIONS
 
     _CACHE[feed_url] = (time.time(), output)
     return output

@@ -22,79 +22,22 @@ from src.skills.sports.aggregators.espn_utils import (
     espn_search_auto_discover,
     parse_athlete_overview,
 )
+from src.skills.sports.catalogs import (
+    CLUB_LEAGUE_HINTS as _CLUB_LEAGUE_HINTS,
+    SOCCER_LEAGUES as _SOCCER_LEAGUES,
+    SOCCER_MULTI_LEAGUE_KEYS as _SOCCER_MULTI_LEAGUE_KEYS,
+)
 from src.utils.http import fetch_json
 
 
 class SoccerAggregator(BaseSportsAggregator):
     """Aggregator for Soccer matches, live scoreboards, cards, stats, lineups, rosters, and standings."""
 
-    LEAGUES = {
-        "epl": {
-            "code": "eng.1",
-            "name": "English Premier League",
-            "aliases": ["epl", "premier league", "premier", "english premier league", "england"]
-        },
-        "ucl": {
-            "code": "uefa.champions",
-            "name": "UEFA Champions League",
-            "aliases": ["ucl", "champions league", "champions", "european cup"]
-        },
-        "uel": {
-            "code": "uefa.europa",
-            "name": "UEFA Europa League",
-            "aliases": ["uel", "europa league", "europa"]
-        },
-        "laliga": {
-            "code": "esp.1",
-            "name": "Spanish La Liga",
-            "aliases": ["laliga", "la liga", "spanish league", "spain", "primera division"]
-        },
-        "seriea": {
-            "code": "ita.1",
-            "name": "Italian Serie A",
-            "aliases": ["seriea", "serie a", "italian league", "italy", "calcio"]
-        },
-        "bundesliga": {
-            "code": "ger.1",
-            "name": "German Bundesliga",
-            "aliases": ["bundesliga", "german league", "germany"]
-        },
-        "mls": {
-            "code": "usa.1",
-            "name": "Major League Soccer (MLS)",
-            "aliases": ["mls", "major league soccer", "usa soccer"]
-        },
-        "ligue1": {
-            "code": "fra.1",
-            "name": "French Ligue 1",
-            "aliases": ["ligue1", "ligue 1", "french league", "france"]
-        }
-    }
-
-    # Famous club aliases to league codes
-    CLUB_LEAGUE_HINTS = {
-        "arsenal": "epl", "chelsea": "epl", "liverpool": "epl", "manchester city": "epl",
-        "man city": "epl", "manchester united": "epl", "man utd": "epl", "tottenham": "epl",
-        "spurs": "epl", "aston villa": "epl", "villa": "epl", "newcastle": "epl", "leeds": "epl",
-        "brighton": "epl", "west ham": "epl", "wolves": "epl", "wolverhampton": "epl",
-        "fulham": "epl", "brentford": "epl", "crystal palace": "epl", "palace": "epl", "everton": "epl",
-        "bournemouth": "epl", "nottingham": "epl", "forest": "epl", "sunderland": "epl",
-        "burnley": "epl", "leicester": "epl",
-        "real madrid": "laliga", "madrid": "laliga", "barcelona": "laliga", "barca": "laliga", "atletico": "laliga",
-        "sevilla": "laliga", "real sociedad": "laliga", "sociedad": "laliga", "villarreal": "laliga", "betis": "laliga",
-        "athletic bilbao": "laliga", "bilbao": "laliga", "valencia": "laliga", "girona": "laliga",
-        "bayern": "bundesliga", "munich": "bundesliga", "dortmund": "bundesliga", "leverkusen": "bundesliga",
-        "leipzig": "bundesliga", "frankfurt": "bundesliga", "stuttgart": "bundesliga",
-        "inter": "seriea", "milan": "seriea", "juventus": "seriea", "juve": "seriea",
-        "napoli": "seriea", "roma": "seriea", "lazio": "seriea", "atalanta": "seriea", "fiorentina": "seriea",
-        "psg": "ligue1", "paris": "ligue1", "marseille": "ligue1", "lyon": "ligue1", "monaco": "ligue1",
-        "inter miami": "mls", "la galaxy": "mls", "lafc": "mls"
-    }
-
+    LEAGUES = _SOCCER_LEAGUES
+    CLUB_LEAGUE_HINTS = _CLUB_LEAGUE_HINTS
     SCOREBOARD_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
     STANDINGS_BASE = "https://site.api.espn.com/apis/v2/sports/soccer"
-
-    MULTI_LEAGUE_KEYS = ("ucl", "uel", "epl", "laliga", "seriea", "bundesliga", "ligue1", "mls")
+    MULTI_LEAGUE_KEYS = _SOCCER_MULTI_LEAGUE_KEYS
 
     def get_info(self, query: str = "") -> str:
         """Smart entry point for soccer queries: standings, lineups/summaries, injuries, player stats, rosters, and schedules."""

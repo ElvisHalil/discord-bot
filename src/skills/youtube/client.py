@@ -1,9 +1,12 @@
+import logging
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor
 import requests
 from requests.adapters import HTTPAdapter
 from ddgs import DDGS
+from src.utils.workers import submit_to_worker
+
+logger = logging.getLogger(__name__)
 
 # Persistent HTTP session for connection pooling (reuses TCP/TLS handshakes across YouTube checks)
 _HTTP_SESSION = requests.Session()
@@ -11,33 +14,27 @@ _adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20)
 _HTTP_SESSION.mount("https://", _adapter)
 _HTTP_SESSION.mount("http://", _adapter)
 
-_VERIFY_POOL = ThreadPoolExecutor(max_workers=6)
 
 def _http_get(url: str, **kwargs):
-    if hasattr(requests.get, "assert_called"):
-        return requests.get(url, **kwargs)
     return _HTTP_SESSION.get(url, **kwargs)
 
+
 def _http_head(url: str, **kwargs):
-    if hasattr(requests.head, "assert_called"):
-        return requests.head(url, **kwargs)
     return _HTTP_SESSION.head(url, **kwargs)
+
 
 # In-memory caches to eliminate duplicate network requests across resolution & post-processing
 _OEMBED_CACHE: dict[str, dict] = {}
 _EMBEDDABLE_CACHE: dict[str, bool] = {}
 _SHORT_CACHE: dict[str, bool] = {}
 
+
 def clear_youtube_caches() -> None:
     """Clears in-memory YouTube verification and oEmbed caches."""
     _OEMBED_CACHE.clear()
     _EMBEDDABLE_CACHE.clear()
     _SHORT_CACHE.clear()
-    try:
-        from src.skills.music.playback.youtube_music import clear_resolved_music_cache
-        clear_resolved_music_cache()
-    except Exception:
-        pass
+
 
 def verify_embeddable(vid: str) -> bool:
     """
@@ -50,11 +47,8 @@ def verify_embeddable(vid: str) -> bool:
     """
     if not vid or not re.match(r'^[0-9A-Za-z_-]{11}$', vid):
         return False
-    is_mocked = hasattr(requests.get, "assert_called")
-    if not is_mocked and vid in _EMBEDDABLE_CACHE:
+    if vid in _EMBEDDABLE_CACHE:
         return _EMBEDDABLE_CACHE[vid]
-    if _EMBEDDABLE_CACHE.get(vid) is True:
-        return True
     try:
         oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json"
         embed_url = f"https://www.youtube.com/embed/{vid}?origin=https://discord.com&widget_referrer=https://discord.com"
@@ -65,11 +59,12 @@ def verify_embeddable(vid: str) -> bool:
 
         need_oembed = vid not in _OEMBED_CACHE
 
-        if need_oembed and not is_mocked:
+        if need_oembed:
             # Fire oEmbed and embed-page requests concurrently over persistent keep-alive pool
-            fut_oembed = _VERIFY_POOL.submit(_http_get, oembed_url, timeout=3)
-            fut_embed = _VERIFY_POOL.submit(_http_get, embed_url, headers=embed_headers, timeout=3)
+            fut_oembed = submit_to_worker(_http_get, oembed_url, timeout=3)
+            fut_embed = submit_to_worker(_http_get, embed_url, headers=embed_headers, timeout=3)
             oembed_res = fut_oembed.result()
+            embed_res = fut_embed.result()
             if oembed_res.status_code != 200:
                 print(f"⚠️ [YouTube]: Skipping {vid} because oEmbed status is {oembed_res.status_code} (not embeddable).")
                 _EMBEDDABLE_CACHE[vid] = False
@@ -85,34 +80,13 @@ def verify_embeddable(vid: str) -> bool:
                     # Auto-generated YouTube Music '- Topic' art tracks are never YouTube Shorts
                     if " - Topic" in author_name:
                         _SHORT_CACHE[vid] = False
-            except Exception:
-                pass
-            embed_res = fut_embed.result()
+            except (ValueError, TypeError, KeyError) as e:
+                logger.debug(f"YouTube oEmbed JSON parse skipped for {vid}: {e}")
         else:
-            if need_oembed:
-                oembed_res = _http_get(oembed_url, timeout=3)
-                if oembed_res.status_code != 200:
-                    print(f"⚠️ [YouTube]: Skipping {vid} because oEmbed status is {oembed_res.status_code} (not embeddable).")
-                    if not is_mocked:
-                        _EMBEDDABLE_CACHE[vid] = False
-                    return False
-                try:
-                    data = oembed_res.json()
-                    if isinstance(data, dict) and data.get("title"):
-                        author_name = data.get("author_name", "")
-                        _OEMBED_CACHE[vid] = {
-                            "title": data.get("title", ""),
-                            "author": author_name
-                        }
-                        if " - Topic" in author_name:
-                            _SHORT_CACHE[vid] = False
-                except Exception:
-                    pass
             embed_res = _http_get(embed_url, headers=embed_headers, timeout=3)
 
         if embed_res.status_code != 200:
-            if not is_mocked:
-                _EMBEDDABLE_CACHE[vid] = False
+            _EMBEDDABLE_CACHE[vid] = False
             return False
 
         embed_text = embed_res.text
@@ -130,8 +104,7 @@ def verify_embeddable(vid: str) -> bool:
         )
         if any(marker in embed_text for marker in unplayable_markers):
             print(f"⚠️ [YouTube]: Skipping {vid} because embed page indicated unplayable/disabled on Discord.")
-            if not is_mocked:
-                _EMBEDDABLE_CACHE[vid] = False
+            _EMBEDDABLE_CACHE[vid] = False
             return False
 
         _EMBEDDABLE_CACHE[vid] = True
@@ -139,6 +112,7 @@ def verify_embeddable(vid: str) -> bool:
     except Exception as e:
         print(f"⚠️ [YouTube]: Verification failed for {vid}: {e}")
         return False
+
 
 def get_video_oembed(vid: str) -> dict:
     """Fetches video title and channel author via YouTube oEmbed (using in-memory cache when available)."""
@@ -160,9 +134,10 @@ def get_video_oembed(vid: str) -> dict:
                     if " - Topic" in author_name:
                         _SHORT_CACHE[vid] = False
                 return entry
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"get_video_oembed failed for {vid}: {e}")
     return {"title": "", "author": ""}
+
 
 def is_youtube_short(vid: str, href: str = "", title: str = "") -> bool:
     """Detects if a YouTube video is a Short via URL structure, title tags, or HTTP redirect check."""
@@ -193,8 +168,8 @@ def is_youtube_short(vid: str, href: str = "", title: str = "") -> bool:
         if vid:
             _SHORT_CACHE[vid] = is_short
         return is_short
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"is_youtube_short HEAD check failed for {vid}: {e}")
     return False
 
 from src.skills.youtube.aggregators import (

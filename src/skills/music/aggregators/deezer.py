@@ -2,11 +2,11 @@ import re
 import time
 import random
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
 import requests
 from requests.adapters import HTTPAdapter
 from src.skills.music.aggregators.base import BaseMusicAggregator
 from src.skills.music.models import Track
+from src.utils.workers import map_in_workers
 
 _HTTP_SESSION = requests.Session()
 _adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20)
@@ -14,8 +14,6 @@ _HTTP_SESSION.mount("https://", _adapter)
 _HTTP_SESSION.mount("http://", _adapter)
 
 def _http_get(url: str, **kwargs):
-    if hasattr(requests.get, "assert_called"):
-        return requests.get(url, **kwargs)
     return _HTTP_SESSION.get(url, **kwargs)
 
 # 15-minute TTL cache for raw upstream Deezer lists (playlist searches, 40-track playlist pools, chart pools)
@@ -29,15 +27,14 @@ def clear_deezer_cache() -> None:
     _DEEZER_TRACK_DETAIL_CACHE.clear()
 
 def _get_cached_deezer_data(cache_key: str, url: str) -> list:
-    is_mocked = hasattr(requests.get, "assert_called")
     now = time.monotonic()
-    if not is_mocked and cache_key in _DEEZER_RAW_CACHE:
+    if cache_key in _DEEZER_RAW_CACHE:
         ts, cached_list = _DEEZER_RAW_CACHE[cache_key]
         if now - ts < _DEEZER_CACHE_TTL:
             return cached_list
     r = _http_get(url, timeout=5)
     data = r.json().get("data", [])
-    if not is_mocked and isinstance(data, list) and data:
+    if isinstance(data, list) and data:
         _DEEZER_RAW_CACHE[cache_key] = (now, data)
     return data if isinstance(data, list) else []
 
@@ -49,7 +46,6 @@ class DeezerAggregator(BaseMusicAggregator):
         Resolve a track's single-track Deezer metadata (/track/{id}), returning:
         {'id': int, 'title': str, 'artist': str, 'album': str, 'preview': str, 'bpm': float, 'gain': float}
         """
-        is_mocked = hasattr(requests.get, "assert_called")
         now = time.monotonic()
         clean_title = (title or "").strip()
         clean_artist = (artist or "").strip()
@@ -57,7 +53,7 @@ class DeezerAggregator(BaseMusicAggregator):
             clean_artist = ""
 
         cache_key = f"id:{deezer_id}" if deezer_id else f"q:{clean_title.lower()}|{clean_artist.lower()}"
-        if not is_mocked and cache_key in _DEEZER_TRACK_DETAIL_CACHE:
+        if cache_key in _DEEZER_TRACK_DETAIL_CACHE:
             ts, cached_detail = _DEEZER_TRACK_DETAIL_CACHE[cache_key]
             if now - ts < _DEEZER_CACHE_TTL:
                 return dict(cached_detail)
@@ -161,9 +157,8 @@ class DeezerAggregator(BaseMusicAggregator):
         except Exception:
             pass
 
-        if not is_mocked:
-            _DEEZER_TRACK_DETAIL_CACHE[cache_key] = (now, dict(detail))
-            _DEEZER_TRACK_DETAIL_CACHE[f"id:{resolved_id}"] = (now, dict(detail))
+        _DEEZER_TRACK_DETAIL_CACHE[cache_key] = (now, dict(detail))
+        _DEEZER_TRACK_DETAIL_CACHE[f"id:{resolved_id}"] = (now, dict(detail))
         return detail
 
     def get_similar(self, query: str) -> list[Track]:
@@ -239,9 +234,8 @@ class DeezerAggregator(BaseMusicAggregator):
                         pass
                     return rel_tracks
 
-                with ThreadPoolExecutor(max_workers=min(6, len(related_artists))) as pool:
-                    for rel_list in pool.map(_fetch_rel_artist_top, related_artists):
-                        similar_tracks.extend(rel_list)
+                for rel_list in map_in_workers(_fetch_rel_artist_top, related_artists):
+                    similar_tracks.extend(rel_list)
             else:
                 r_top = _http_get(f"https://api.deezer.com/artist/{artist_id}/top?limit=10", timeout=5)
                 top = r_top.json()
@@ -318,11 +312,10 @@ class DeezerAggregator(BaseMusicAggregator):
                             pl_titles.append(t_name)
                         pooled_tracks.extend(t_list)
                     elif selected_pls:
-                        with ThreadPoolExecutor(max_workers=min(4, len(selected_pls))) as pool:
-                            for t_name, t_list in pool.map(_fetch_pl_tracks, selected_pls):
-                                if t_name:
-                                    pl_titles.append(t_name)
-                                pooled_tracks.extend(t_list)
+                        for t_name, t_list in map_in_workers(_fetch_pl_tracks, selected_pls):
+                            if t_name:
+                                pl_titles.append(t_name)
+                            pooled_tracks.extend(t_list)
 
                     if pooled_tracks:
                         random.shuffle(pooled_tracks)

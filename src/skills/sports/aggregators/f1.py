@@ -6,9 +6,9 @@ and driver/constructor standings from ESPN's official public API.
 
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
-from concurrent.futures import ThreadPoolExecutor
 from src.skills.sports.aggregators.base import BaseSportsAggregator
 from src.utils.http import fetch_json
+from src.utils.workers import submit_to_worker
 
 
 class F1Aggregator(BaseSportsAggregator):
@@ -100,12 +100,12 @@ class F1Aggregator(BaseSportsAggregator):
             output_lines.append(header)
 
             if selected_races:
-                # Fetch details for selected races concurrently
+                # Fetch details for selected races concurrently via shared worker pool
                 def _fetch_r(r):
                     return r, self._fetch_race_details_for_date(r["date_param"])
 
-                with ThreadPoolExecutor(max_workers=min(len(selected_races), 6)) as executor:
-                    race_details_list = list(executor.map(_fetch_r, selected_races))
+                futures = [submit_to_worker(_fetch_r, r) for r in selected_races]
+                race_details_list = [f.result() for f in futures]
 
                 for idx, (r, det) in enumerate(race_details_list, 1):
                     output_lines.append(f"{idx}. {r['label']}")

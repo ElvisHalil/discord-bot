@@ -1,16 +1,28 @@
 import re
 from typing import Optional
-from datetime import datetime
+
 from src.skills.sports.aggregators import (
     F1Aggregator,
-    SoccerAggregator,
-    NbaAggregator,
     HockeyAggregator,
+    NbaAggregator,
     OddsAggregator,
+    SoccerAggregator,
     UniversalEspnAggregator,
 )
-from src.skills.sports.aggregators.espn_utils import espn_search_auto_discover
+from src.skills.sports.aggregators.espn_utils import (
+    SPORTS_EXECUTOR,
+    espn_search_auto_discover,
+)
 from src.skills.sports.csgo import skill_csgo_esports
+from src.skills.sports.live_tracker import (
+    get_channel_last_match_query,
+    skill_track_live_game,
+)
+from src.skills.sports.catalogs import CS_KEYWORDS
+from src.skills.sports.enums import SportId, TrackerAction
+from src.skills.sports.templates import build_sports_llm_instructions
+from src.utils.domain_vocab import has_non_sports_track_signal
+from src.utils.timezones import get_local_now
 
 _f1_aggregator = F1Aggregator()
 _soccer_aggregator = SoccerAggregator()
@@ -19,13 +31,10 @@ _hockey_aggregator = HockeyAggregator()
 _odds_aggregator = OddsAggregator()
 _universal_aggregator = UniversalEspnAggregator()
 
-CS_KEYWORDS = {
-    "cs", "cs2", "csgo", "counter-strike", "counter strike", "esports", "e-sports",
-    "falcons", "nip", "ninjas in pyjamas", "vitality", "spirit", "team spirit",
-    "navi", "natus vincere", "furia", "mouz", "faze", "g2", "virtus.pro",
-    "astralis", "complexity", "the mongolz", "mongolz", "heroic", "eternal fire",
-    "thunderpick", "thunderpicks", "blast", "pgl", "iem", "esl"
-}
+_TECH_RE = re.compile(
+    r'\b(?:gemini|opus|claude|chatgpt|gpt-[0-9a-z]+|deepseek|qwen|llama|llms?|benchmarks?|antigravity|coding|python|javascript|nvidia|rtx|intel|amd)\b',
+    re.IGNORECASE,
+)
 
 
 def skill_sports_info(
@@ -71,15 +80,11 @@ def skill_sports_info(
     parts = [p for p in (sport_raw, team_raw, player_raw, query_raw) if p]
     combined = " ".join(parts).strip().lower()
     if not combined:
-        sport_raw = "soccer"
+        sport_raw = SportId.SOCCER
         query_raw = "schedule"
         combined = "soccer schedule"
 
     # Explicit guardrail: Reject AI models, tech, coding, and non-sports queries mistakenly routed here
-    _TECH_RE = re.compile(
-        r'\b(?:gemini|opus|claude|chatgpt|gpt-[0-9a-z]+|deepseek|qwen|llama|llms?|benchmarks?|antigravity|coding|python|javascript|nvidia|rtx|intel|amd)\b',
-        re.IGNORECASE,
-    )
     if _TECH_RE.search(combined):
         has_valid_sport_signal = (
             sport_raw.lower() in ("soccer", "epl", "ucl", "laliga", "seriea", "bundesliga", "ligue1", "mls", "nba", "nhl", "nfl", "mlb", "ufc", "f1", "cs", "cs2", "odds")
@@ -97,17 +102,14 @@ def skill_sports_info(
         combined = re.sub(r"\s{2,}", " ", combined).strip()
 
     # 0. Live Match Tracking Check (if LLM calls skill_sports_info instead of skill_track_live_game)
-    from src.skills.sports.context import _NON_SPORTS_TRACK_RE
     if re.search(r'\b(?:untrack|stop\s+tracking)\b', combined):
-        from src.skills.sports.live_tracker import skill_track_live_game
-        return skill_track_live_game(action="stop", query=team_raw or query_raw or combined, sport=sport_raw)
+        return skill_track_live_game(action=TrackerAction.STOP, query=team_raw or query_raw or combined, sport=sport_raw)
     if (
         re.search(r'\b(?:track|tracking)\b', combined)
         and not re.search(r'\b(?:track\s+and\s+field|race\s+track|soundtrack)\b', combined)
-        and not _NON_SPORTS_TRACK_RE.search(combined)
+        and not has_non_sports_track_signal(combined)
     ):
-        from src.skills.sports.live_tracker import skill_track_live_game
-        return skill_track_live_game(action="start", query=team_raw or query_raw or combined, sport=sport_raw)
+        return skill_track_live_game(action=TrackerAction.START, query=team_raw or query_raw or combined, sport=sport_raw)
 
     # 0b. If query is a generic follow-up about "the game" / "last goal" / "how's it going" with no team entity,
     # inherit the channel's last inspected or actively tracked match.
@@ -124,7 +126,6 @@ def skill_sports_info(
             )
         )
         if not has_known_entity and is_generic_match_followup:
-            from src.skills.sports.live_tracker import get_channel_last_match_query
             last_q, last_s = get_channel_last_match_query()
             if last_q and last_q.lower() not in combined:
                 combined = f"{last_q.lower()} {combined}".strip()
@@ -285,27 +286,26 @@ def skill_sports_info(
 
     matched_tasks: list[tuple[str, object, str]] = []
     if is_cs:
-        matched_tasks.append(("cs", _run_cs, "Present the Counter-Strike tournament/match details clearly."))
+        matched_tasks.append((SportId.CS, _run_cs, "Present the Counter-Strike tournament/match details clearly."))
     if is_f1:
-        matched_tasks.append(("f1", _f1_aggregator.get_info, "Review the Formula 1 schedule/standings and inform the user. Remind them session times are in UTC."))
+        matched_tasks.append((SportId.F1, _f1_aggregator.get_info, "Review the Formula 1 schedule/standings and inform the user. Remind them session times are in UTC."))
     if is_nba:
-        matched_tasks.append(("nba", _nba_aggregator.get_info, "Present the NBA games, leaders, injuries, rosters, or standings clearly. Include scores, status, and quarter linescores if available."))
+        matched_tasks.append((SportId.NBA, _nba_aggregator.get_info, "Present the NBA games, leaders, injuries, rosters, or standings clearly. Include scores, status, and quarter linescores if available."))
     if is_nhl:
-        matched_tasks.append(("nhl", _hockey_aggregator.get_info, "Present the NHL games, leaders, injuries, rosters, or standings clearly. Include scores, status, and period linescores if available."))
+        matched_tasks.append((SportId.NHL, _hockey_aggregator.get_info, "Present the NHL games, leaders, injuries, rosters, or standings clearly. Include scores, status, and period linescores if available."))
     if is_other_us_sport:
         matched_tasks.append((sport_raw or "espn", _universal_aggregator.get_info, "Present the sports scores, schedules, rosters, player stats, injuries, or standings clearly."))
     if is_explicit_soccer:
-        matched_tasks.append(("soccer", _soccer_aggregator.get_info, "Present the soccer matches, scores, goal scorers, cards, possession/shots stats, lineups, rosters, injuries, or standings clearly."))
+        matched_tasks.append((SportId.SOCCER, _soccer_aggregator.get_info, "Present the soccer matches, scores, goal scorers, cards, possession/shots stats, lineups, rosters, injuries, or standings clearly."))
 
     if len(matched_tasks) == 1:
         only_sport, only_fn, guidance = matched_tasks[0]
-        if only_sport == "cs" and not wants_games_and_odds:
+        if only_sport == SportId.CS and not wants_games_and_odds:
             return only_fn(combined)
         sport_raw = only_sport
         q_arg = _scope_query_for_sport(combined, only_sport) if wants_games_and_odds else combined
         data = only_fn(q_arg)
     elif len(matched_tasks) >= 2:
-        from src.skills.sports.aggregators.espn_utils import SPORTS_EXECUTOR
         sport_raw = ", ".join(t[0] for t in matched_tasks)
         guidance = "Present all requested sports sections clearly under separate headings so every sport the user asked for is covered."
 
@@ -322,16 +322,16 @@ def skill_sports_info(
         if disc:
             d_sport = disc.get("sport", "")
             d_league = disc.get("league", "")
-            if d_sport == "soccer":
-                sport_raw = "soccer"
+            if d_sport == SportId.SOCCER:
+                sport_raw = SportId.SOCCER
                 data = _soccer_aggregator.get_info(combined)
                 guidance = "Present the soccer matches, scores, goal scorers, cards, possession/shots stats, lineups, rosters, injuries, or standings clearly."
-            elif d_sport == "basketball" and d_league == "nba":
-                sport_raw = "nba"
+            elif d_sport == "basketball" and d_league == SportId.NBA:
+                sport_raw = SportId.NBA
                 data = _nba_aggregator.get_info(combined)
                 guidance = "Present the NBA games, leaders, injuries, rosters, or standings clearly."
-            elif d_sport == "hockey" and d_league == "nhl":
-                sport_raw = "nhl"
+            elif d_sport == "hockey" and d_league == SportId.NHL:
+                sport_raw = SportId.NHL
                 data = _hockey_aggregator.get_info(combined)
                 guidance = "Present the NHL games, leaders, injuries, rosters, or standings clearly."
             else:
@@ -339,11 +339,11 @@ def skill_sports_info(
                 data = _universal_aggregator.get_info(combined)
                 guidance = "Present the sports scores, schedules, rosters, player stats, injuries, or standings clearly."
         elif (
-            sport_raw.lower() in ("sports", "sport", "general", "all") or
+            sport_raw.lower() in (SportId.SPORTS, "sport", "general", "all") or
             (sport_raw.lower() == "" and any(k in combined for k in general_match_keywords)) or
             bool(re.search(r'\b(?:sports?)\b', combined))
         ):
-            sport_raw = "soccer"
+            sport_raw = SportId.SOCCER
             data = _soccer_aggregator.get_info(combined)
             guidance = "Present the soccer matches, scores, goal scorers, cards, possession/shots stats, lineups, rosters, injuries, or standings clearly."
         else:
@@ -357,13 +357,13 @@ def skill_sports_info(
         if len(matched_tasks) >= 2:
             odds_parts = []
             for sp_key, _, _ in matched_tasks:
-                odds_sp = "cs2" if sp_key == "cs" else sp_key
+                odds_sp = "cs2" if sp_key == SportId.CS else sp_key
                 sec = _odds_aggregator.get_odds(_scope_query_for_sport(combined, sp_key), sport=odds_sp)
                 if sec and sec.strip():
                     odds_parts.append(sec.strip())
             odds_section = "\n\n".join(odds_parts)
         else:
-            odds_sp = "cs2" if sport_raw == "cs" else sport_raw
+            odds_sp = "cs2" if sport_raw == SportId.CS else sport_raw
             odds_section = _odds_aggregator.get_odds(combined, sport=odds_sp)
         if odds_section:
             data = f"{data.strip()}\n\n=== 🎲 BETTING ODDS (DECIMAL FORMAT) ===\n{odds_section.strip()}\n"
@@ -371,15 +371,9 @@ def skill_sports_info(
 
     print(f"🏟️ [Executing Sports Info Skill] Sport: {sport_raw}, Query: {combined}")
 
-    from src.utils.timezones import get_local_now
     now = get_local_now()
     today_str = now.strftime("%A, %B %d, %Y")
 
     output = f"📅 CURRENT REFERENCE DATE: {today_str}\n\n" + data
-    output += "\n=== CRITICAL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-    output += f"1. TODAY'S DATE: {today_str}. All relative dates ('today', 'tomorrow', 'yesterday', 'this week', 'next week') MUST anchor on this date.\n"
-    output += "2. ALWAYS use the exact day of the week and date specified in the data—when a pre-converted local date/time is shown in parentheses (e.g. 'Tomorrow Sat Oct 17 8:00 PM MDT'), ALWAYS present that local date and time to the user rather than the raw UTC midnight date. NEVER guess, extrapolate, or alter calendar days of the week.\n"
-    output += "3. If a match is marked 🔴 LIVE NOW / CURRENTLY PLAYING RIGHT NOW / LIVE MATCH IN PROGRESS, ALWAYS report that live match first (including its current score, minute clock, goal scorers, and match stats) before mentioning future fixtures.\n"
-    output += "4. NEVER claim a live match (marked 🔴 LIVE NOW / IN PROGRESS) has 'ended', 'concluded', 'finished', or 'sealed victory'. A minute clock like (55') or (74') is the CURRENT LIVE MINUTE of an ongoing 90-minute match, NOT a final whistle! Ignore any older scores or minutes from earlier messages in the conversation.\n"
-    output += f"5. {guidance} Keep your response formatted cleanly with bold headers, bullet points, and concise details.\n"
+    output += build_sports_llm_instructions(today_str, guidance)
     return output

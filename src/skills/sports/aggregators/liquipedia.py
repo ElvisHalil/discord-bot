@@ -4,6 +4,10 @@ from datetime import datetime, timezone
 from typing import Optional
 from bs4 import BeautifulSoup
 from src.skills.sports.aggregators.base import BaseSportsAggregator
+from src.skills.sports.catalogs import (
+    LIQUIPEDIA_GENERIC_EVENT_QUERIES,
+    LIQUIPEDIA_SLUG_STOPWORDS,
+)
 from src.utils.http import fetch_json
 
 # 5-minute TTL cache for Liquipedia tournament & event lookups
@@ -16,18 +20,14 @@ def clear_liquipedia_cache() -> None:
     _LIQUIPEDIA_CACHE.clear()
 
 
-def _is_fetch_mocked() -> bool:
-    return hasattr(fetch_json, "assert_called")
-
-
 def _cached_fetch_json(url: str, timeout: int = 15) -> dict:
     now = time.monotonic()
-    if not _is_fetch_mocked() and url in _LIQUIPEDIA_CACHE:
+    if url in _LIQUIPEDIA_CACHE:
         ts, cached_data = _LIQUIPEDIA_CACHE[url]
         if now - ts < _LIQUIPEDIA_CACHE_TTL and isinstance(cached_data, dict):
             return cached_data
     data = fetch_json(url, timeout=timeout)
-    if not _is_fetch_mocked() and isinstance(data, dict) and "parse" in data:
+    if isinstance(data, dict) and "parse" in data:
         _LIQUIPEDIA_CACHE[url] = (now, data)
     return data
 
@@ -105,11 +105,11 @@ class LiquipediaAggregator(BaseSportsAggregator):
             return q if q else None
 
         q_low = q.lower()
-        if not q_low or q_low in ("current", "next", "upcoming", "today", "tomorrow", "schedule", "matches", "all", "tournaments", "event_info"):
+        if not q_low or q_low in LIQUIPEDIA_GENERIC_EVENT_QUERIES:
             return self._known_events[0].get("slug")
 
         # Match against known tournament names or slugs
-        raw_tokens = [w for w in re.findall(r'[a-z0-9]+', q_low) if len(w) >= 3 and w not in ("the", "cs2", "schedule", "matches", "today", "time", "tournament", "event", "table", "standings", "teams", "roster", "rosters")]
+        raw_tokens = [w for w in re.findall(r'[a-z0-9]+', q_low) if len(w) >= 3 and w not in LIQUIPEDIA_SLUG_STOPWORDS]
         q_tokens = [w[:-1] if (len(w) > 4 and w.endswith("s")) else w for w in raw_tokens]
         for ev in self._known_events:
             ev_text = f"{ev.get('name', '')} {ev.get('slug', '')} {ev.get('location', '')}".lower()

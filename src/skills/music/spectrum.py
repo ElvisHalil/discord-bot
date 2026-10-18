@@ -9,217 +9,41 @@ is playing or its genre cannot be identified.
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-TEMPO_AXIS: Tuple[str, str, str] = ("slow", "mid", "fast")
-INTENSITY_AXIS: Tuple[str, str, str] = ("soft", "mid", "hard")
+from src.context import get_active_channel_id
+from src.skills.music.catalogs import (
+    BROAD_GENRE_TO_ZONE,
+    COORDS_BY_ZONE,
+    DEFAULT_CENTER_ZONE,
+    EXPLICIT_MUSIC_CUE_WORDS as _EXPLICIT_MUSIC_CUE_WORDS,
+    FASTER_PHRASES as _FASTER_PHRASES,
+    HARDER_PHRASES as _HARDER_PHRASES,
+    INTENSITY_AXIS,
+    SLOWER_PHRASES as _SLOWER_PHRASES,
+    SOFTER_PHRASES as _SOFTER_PHRASES,
+    SPECTRUM_CHART,
+    TEMPO_AXIS,
+    ZONE_BY_COORDS,
+    ZONE_BY_NAME,
+)
+from src.skills.music.enums import (
+    IntensityLevel,
+    SpectrumZoneId,
+    TempoLevel,
+)
+from src.skills.music.models import (
+    PlayedSongRecord,
+    SpectrumZone,
+)
+from src.utils.domain_vocab import compile_word_boundary_re, has_non_music_domain_signal
 
-SPECTRUM_CHART: List[Dict[str, Any]] = [
-    {
-        "ui_zone": "slow_soft",
-        "tempo": "slow",
-        "intensity": "soft",
-        "mainstream_tags": ["ambient", "downtempo", "modern classical", "chillout"],
-        "deep_cut_tags": ["space ambient", "lowercase", "tape loops", "drone"],
-        "intersection_modifiers": ["sleep", "relax", "piano", "minimalist"],
-    },
-    {
-        "ui_zone": "mid_soft",
-        "tempo": "mid",
-        "intensity": "soft",
-        "mainstream_tags": ["rnb", "neo-soul", "indie folk", "soft pop"],
-        "deep_cut_tags": ["sophisti-pop", "bossanova", "quiet storm", "freak folk"],
-        "intersection_modifiers": ["warm", "mellow", "intimate", "acoustic"],
-    },
-    {
-        "ui_zone": "fast_soft",
-        "tempo": "fast",
-        "intensity": "soft",
-        "mainstream_tags": ["liquid dnb", "dream pop", "shoegaze", "minimal techno"],
-        "deep_cut_tags": ["microhouse", "ambient techno", "ethereal wave"],
-        "intersection_modifiers": ["hypnotic", "floating", "atmospheric"],
-    },
-    {
-        "ui_zone": "slow_mid",
-        "tempo": "slow",
-        "intensity": "mid",
-        "mainstream_tags": ["trip-hop", "slowcore", "blues rock", "sadcore"],
-        "deep_cut_tags": ["dark jazz", "desert rock", "dub", "slow motion"],
-        "intersection_modifiers": ["melancholic", "moody", "groove"],
-    },
-    {
-        "ui_zone": "mid_mid",
-        "tempo": "mid",
-        "intensity": "mid",
-        "mainstream_tags": ["indie pop", "alt-rock", "synthpop", "pop"],
-        "deep_cut_tags": ["jangle pop", "twee pop", "vaporwave", "city pop"],
-        "intersection_modifiers": ["catchy", "upbeat", "radio"],
-    },
-    {
-        "ui_zone": "fast_mid",
-        "tempo": "fast",
-        "intensity": "mid",
-        "mainstream_tags": ["house", "nu-disco", "pop-punk", "electropop"],
-        "deep_cut_tags": ["hyperpop", "bubblegum bass", "eurobeat", "happy hardcore"],
-        "intersection_modifiers": ["dance", "party", "energetic"],
-    },
-    {
-        "ui_zone": "slow_hard",
-        "tempo": "slow",
-        "intensity": "hard",
-        "mainstream_tags": ["doom metal", "stoner rock", "industrial", "sludge"],
-        "deep_cut_tags": ["drone metal", "death doom", "power electronics"],
-        "intersection_modifiers": ["heavy", "dark", "brutal", "oppressive"],
-    },
-    {
-        "ui_zone": "mid_hard",
-        "tempo": "mid",
-        "intensity": "hard",
-        "mainstream_tags": ["grunge", "hard rock", "metalcore", "post-hardcore"],
-        "deep_cut_tags": ["noise rock", "ebm", "industrial metal", "mathcore"],
-        "intersection_modifiers": ["angry", "distorted", "raw", "aggressive"],
-    },
-    {
-        "ui_zone": "fast_hard",
-        "tempo": "fast",
-        "intensity": "hard",
-        "mainstream_tags": ["thrash metal", "drum and bass", "hardcore punk"],
-        "deep_cut_tags": ["breakcore", "grindcore", "gabber", "hardstyle"],
-        "intersection_modifiers": ["fast", "intense", "chaos", "frenzy"],
-    },
-]
-
-DEFAULT_CENTER_ZONE = "mid_mid"
-
-ZONE_BY_NAME: Dict[str, Dict[str, Any]] = {z["ui_zone"]: z for z in SPECTRUM_CHART}
-COORDS_BY_ZONE: Dict[str, Tuple[int, int]] = {
-    z["ui_zone"]: (TEMPO_AXIS.index(z["tempo"]), INTENSITY_AXIS.index(z["intensity"]))
-    for z in SPECTRUM_CHART
-}
-ZONE_BY_COORDS: Dict[Tuple[int, int], Dict[str, Any]] = {
-    coords: ZONE_BY_NAME[name] for name, coords in COORDS_BY_ZONE.items()
-}
-
-# Broad parent genre synonyms mapped onto the 9 spectrum cells so common labels from
-# iTunes / Deezer / Last.fm (e.g. "Hip-Hop/Rap", "Techno", "Heavy Metal", "Jazz") resolve cleanly.
-BROAD_GENRE_TO_ZONE: Dict[str, str] = {
-    # slow_soft
-    "classical": "slow_soft",
-    "new age": "slow_soft",
-    "meditation": "slow_soft",
-    "soundtrack": "slow_soft",
-    "instrumental": "slow_soft",
-    "lofi": "slow_soft",
-    "lo-fi": "slow_soft",
-    "lo-fi beats": "slow_soft",
-    # mid_soft
-    "r&b": "mid_soft",
-    "r&b/soul": "mid_soft",
-    "soul": "mid_soft",
-    "folk": "mid_soft",
-    "acoustic": "mid_soft",
-    "singer-songwriter": "mid_soft",
-    "singer/songwriter": "mid_soft",
-    "bossa nova": "mid_soft",
-    "jazz": "mid_soft",
-    "soft rock": "mid_soft",
-    "country": "mid_soft",
-    "easy listening": "mid_soft",
-    # fast_soft
-    "liquid funk": "fast_soft",
-    "liquid drum and bass": "fast_soft",
-    "intelligent drum and bass": "fast_soft",
-    "chillstep": "fast_soft",
-    "deep house": "fast_soft",
-    "melodic techno": "fast_soft",
-    "melodic house": "fast_soft",
-    "progressive house": "fast_soft",
-    # slow_mid
-    "trip hop": "slow_mid",
-    "blues": "slow_mid",
-    "reggae": "slow_mid",
-    "roots reggae": "slow_mid",
-    "boom bap": "slow_mid",
-    "g-funk": "slow_mid",
-    "west coast hip hop": "slow_mid",
-    "psychedelic rock": "slow_mid",
-    # mid_mid
-    "alternative rock": "mid_mid",
-    "alternative": "mid_mid",
-    "indie rock": "mid_mid",
-    "indie": "mid_mid",
-    "rock": "mid_mid",
-    "classic rock": "mid_mid",
-    "synthwave": "mid_mid",
-    "retrowave": "mid_mid",
-    "new wave": "mid_mid",
-    "hip-hop/rap": "mid_mid",
-    "hip-hop": "mid_mid",
-    "hip hop": "mid_mid",
-    "rap": "mid_mid",
-    "funk": "mid_mid",
-    # fast_mid
-    "dance": "fast_mid",
-    "edm": "fast_mid",
-    "electronic": "fast_mid",
-    "electronica": "fast_mid",
-    "techno": "fast_mid",
-    "tech house": "fast_mid",
-    "trance": "fast_mid",
-    "disco": "fast_mid",
-    "electro": "fast_mid",
-    "uk garage": "fast_mid",
-    "pop punk": "fast_mid",
-    "ska": "fast_mid",
-    # slow_hard
-    "sludge metal": "slow_hard",
-    "stoner metal": "slow_hard",
-    "dark electro": "slow_hard",
-    "dark ambient": "slow_hard",
-    "phonk": "slow_hard",
-    "doom": "slow_hard",
-    # mid_hard
-    "metal": "mid_hard",
-    "heavy metal": "mid_hard",
-    "alternative metal": "mid_hard",
-    "nu metal": "mid_hard",
-    "progressive metal": "mid_hard",
-    "deathcore": "mid_hard",
-    "trap": "mid_hard",
-    "drill": "mid_hard",
-    "gangsta rap": "mid_hard",
-    "dubstep": "mid_hard",
-    "bass house": "mid_hard",
-    "punk rock": "mid_hard",
-    "punk": "mid_hard",
-    # fast_hard
-    "dnb": "fast_hard",
-    "drum & bass": "fast_hard",
-    "neurofunk": "fast_hard",
-    "jump up": "fast_hard",
-    "jungle": "fast_hard",
-    "hard techno": "fast_hard",
-    "schranz": "fast_hard",
-    "industrial techno": "fast_hard",
-    "speed metal": "fast_hard",
-    "death metal": "fast_hard",
-    "black metal": "fast_hard",
-    "power metal": "fast_hard",
-    "thrash": "fast_hard",
-    "hardcore": "fast_hard",
-}
-
-
-# Per-channel active song context: {channel_id: {"song": str, "artist": str, "genre": Optional[str], "ui_zone": Optional[str]}}
-_CHANNEL_LAST_PLAYED_SONG: Dict[int, Dict[str, Optional[str]]] = {}
+# Per-channel active song context: {channel_id: PlayedSongRecord}
+_CHANNEL_LAST_PLAYED_SONG: Dict[int, PlayedSongRecord] = {}
 
 
 def _get_channel_id(channel_id: Optional[int] = None) -> int:
     if channel_id is not None:
         return channel_id
-    try:
-        from src.skills.sports.live_tracker import get_active_channel_id
-        return get_active_channel_id()
-    except Exception:
-        return 0
+    return get_active_channel_id()
 
 
 def _norm_token(text: str) -> str:
@@ -246,40 +70,40 @@ def record_channel_played_song(
         return
 
     cid = _get_channel_id(channel_id)
-    prev = _CHANNEL_LAST_PLAYED_SONG.get(cid) or {}
+    prev = _CHANNEL_LAST_PLAYED_SONG.get(cid)
     norm_s = _norm_token(s_clean)
     norm_alt = _norm_token(alt_clean or "")
-    prev_s = _norm_token(prev.get("song") or "")
-    prev_alt = _norm_token(prev.get("alt_song") or "")
-    same_track = (
-        norm_s in (prev_s, prev_alt) or (norm_alt and norm_alt in (prev_s, prev_alt))
-    ) and _norm_token(prev.get("artist") or "") == _norm_token(a_clean)
+    prev_s = _norm_token(prev.song if prev else "")
+    prev_alt = _norm_token(prev.alt_song if prev and prev.alt_song else "")
+    same_track = bool(
+        prev
+        and (norm_s in (prev_s, prev_alt) or (norm_alt and norm_alt in (prev_s, prev_alt)))
+        and _norm_token(prev.artist) == _norm_token(a_clean)
+    )
 
-    eff_genre = (genre or "").strip() or (prev.get("genre") if same_track else None)
-    eff_zone = ui_zone or (prev.get("ui_zone") if same_track else None)
+    eff_genre = (genre or "").strip() or (prev.genre if same_track and prev else None)
+    eff_zone = ui_zone or (prev.ui_zone if same_track and prev else None)
     if not eff_zone and eff_genre:
         eff_zone = classify_genre_to_zone(eff_genre)
 
-    entry = {
-        "song": s_clean,
-        "alt_song": alt_clean or (prev.get("alt_song") if same_track else None),
-        "artist": a_clean,
-        "genre": eff_genre,
-        "ui_zone": eff_zone,
-        "bpm": bpm if bpm is not None else (prev.get("bpm") if same_track else None),
-        "speed_score": speed_score if speed_score is not None else (prev.get("speed_score") if same_track else None),
-        "intensity_score": intensity_score if intensity_score is not None else (prev.get("intensity_score") if same_track else None),
-        "gain_db": gain_db if gain_db is not None else (prev.get("gain_db") if same_track else None),
-    }
+    entry = PlayedSongRecord(
+        song=s_clean,
+        alt_song=alt_clean or (prev.alt_song if same_track and prev else None),
+        artist=a_clean,
+        genre=eff_genre,
+        ui_zone=eff_zone,
+        bpm=bpm if bpm is not None else (prev.bpm if same_track and prev else None),
+        speed_score=speed_score if speed_score is not None else (prev.speed_score if same_track and prev else None),
+        intensity_score=intensity_score if intensity_score is not None else (prev.intensity_score if same_track and prev else None),
+        gain_db=gain_db if gain_db is not None else (prev.gain_db if same_track and prev else None),
+    )
     _CHANNEL_LAST_PLAYED_SONG[cid] = entry
 
 
-def get_channel_last_played_song(channel_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+def get_channel_last_played_song(channel_id: Optional[int] = None) -> Optional[PlayedSongRecord]:
     """Retrieve the most recently served song in a specific channel."""
     cid = _get_channel_id(channel_id)
-    if cid in _CHANNEL_LAST_PLAYED_SONG:
-        return dict(_CHANNEL_LAST_PLAYED_SONG[cid])
-    return None
+    return _CHANNEL_LAST_PLAYED_SONG.get(cid)
 
 
 def clear_channel_played_songs(channel_id: Optional[int] = None) -> None:
@@ -308,8 +132,8 @@ def classify_genre_to_zone(genre_or_tags: Union[str, List[str], None]) -> Option
     # Build ordered tag -> ui_zone pairs (longest phrase first to avoid 'dnb' shadowing 'liquid dnb')
     chart_tag_pairs: List[Tuple[str, str]] = []
     for zone in SPECTRUM_CHART:
-        z_name = zone["ui_zone"]
-        for tag in zone["mainstream_tags"] + zone["deep_cut_tags"]:
+        z_name = str(zone.ui_zone)
+        for tag in zone.mainstream_tags + zone.deep_cut_tags:
             chart_tag_pairs.append((tag.lower(), z_name))
     chart_tag_pairs.sort(key=lambda x: len(x[0]), reverse=True)
 
@@ -340,9 +164,9 @@ def classify_genre_to_zone(genre_or_tags: Union[str, List[str], None]) -> Option
     # Pass 4: Match against intersection_modifiers if present
     for cand in cleaned_candidates:
         for zone in SPECTRUM_CHART:
-            for mod in zone["intersection_modifiers"]:
+            for mod in zone.intersection_modifiers:
                 if re.search(rf"\b{re.escape(mod.lower())}\b", cand):
-                    return zone["ui_zone"]
+                    return str(zone.ui_zone)
 
     return None
 
@@ -351,25 +175,10 @@ def classify_genre_to_zone(genre_or_tags: Union[str, List[str], None]) -> Option
 # Conversational Disambiguation & Shift Parsing
 # ---------------------------------------------------------------------------
 
-# Non-music domain terms that must NEVER be treated as a music spectrum shift
-_NON_MUSIC_DOMAIN_RE = re.compile(
-    r"\b(?:"
-    r"gpu|gpus|cpu|cpus|ram|vram|fps|hz|mhz|ghz|rtx|gtx|radeon|nvidia|amd|intel|apple|m[1-4]|"
-    r"pc|laptop|phone|iphone|android|wifi|internet|download|upload|ping|latency|server|browser|"
-    r"python|javascript|typescript|rust|c\+\+|java|golang|sql|code|coding|script|compiler|algorithm|"
-    r"llm|llms|model|models|qwen|gemma|llama|claude|gpt|chatgpt|gemini|benchmark|benchmarks|tokens?|"
-    r"f1|formula\s*1|tire|tires|tyre|tyres|compound|compounds|lap|laps|pit\s*stop|qualifying|verstappen|hamilton|leclerc|norris|"
-    r"soccer|football|nba|nhl|nfl|mlb|ufc|ucl|epl|laliga|match|matches|fixture|fixtures|schedule|standings|roster|score|goal|goals|"
-    r"exam|exams|test|tests|homework|class|school|job|work|salary|tax|taxes|price|prices|stock|crypto|"
-    r"boss|level|levels|quest|difficulty|hitbox|nerf|buff|patch"
-    r")\b",
-    re.IGNORECASE,
-)
-
 # Comparative question / factual comparison patterns ("faster than", "why is X slower", "is it harder to")
 _COMPARATIVE_QUESTION_RE = re.compile(
     r"(?:"
-    r"\b(?:faster|slower|harder|softer|heavier|lighter)\s+(?:than|to|for|at|on|in\s+the)\b|"
+    r"\b(?:faster|slower|harder|softer|heavier|lighter)\s+(?:than|to|for|at|on|in\s+the|route|flight|layover|option|connection)\b|"
     r"\b(?:faster|slower|harder|softer|heavier|lighter|tougher|rougher)\s+(?:day|week|month|year|time|shift|workday|morning|night|life)\b|"
     r"\b(?:why|how\s+come|which\s+one|who)\s+(?:is|are|was|were|runs?|goes?)\b.*\b(?:faster|slower|harder|softer)\b|"
     r"^\s*(?:is|are|was|were|do|does|did|can|could|would|should)\s+(?:it|this|that|they|he|she)\b.*\b(?:faster|slower|harder|softer)\b|"
@@ -379,40 +188,20 @@ _COMPARATIVE_QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 
-_EXPLICIT_MUSIC_CUE_RE = re.compile(
-    r"\b(?:"
-    r"play|song|songs|track|tracks|music|tune|tunes|vibe|vibes|beat|beats|bpm|tempo|"
-    r"genre|queue|spin|jam|jams|melody|sound|sounds|listen|listening|something|somethin|anything|"
-    r"notch|dial"
-    r")\b",
-    re.IGNORECASE,
-)
-
-_HARDER_RE = re.compile(
-    r"\b(?:harder|heavier|more\s+intense|more\s+aggressive|more\s+brutal|up\s+a\s+notch|turn\s+it\s+up|crank\s+it\s+up|too\s+soft)\b",
-    re.IGNORECASE,
-)
-_SOFTER_RE = re.compile(
-    r"\b(?:softer|lighter|gentler|mellower|calmer|more\s+chill|less\s+intense|less\s+heavy|less\s+aggressive|down\s+a\s+notch|take\s+it\s+down|tone\s+it\s+down|too\s+hard|too\s+heavy|too\s+loud)\b",
-    re.IGNORECASE,
-)
-_FASTER_RE = re.compile(
-    r"\b(?:faster|quicker|speed\s+it\s+up|speed\s+up|higher\s+tempo|more\s+upbeat|higher\s+bpm|pick\s+up\s+the\s+pace|too\s+slow)\b",
-    re.IGNORECASE,
-)
-_SLOWER_RE = re.compile(
-    r"\b(?:slower|slow\s+it\s+down|slow\s+down|lower\s+tempo|lower\s+bpm|bring\s+the\s+tempo\s+down|too\s+fast)\b",
-    re.IGNORECASE,
-)
+_EXPLICIT_MUSIC_CUE_RE = compile_word_boundary_re(_EXPLICIT_MUSIC_CUE_WORDS)
+_HARDER_RE = compile_word_boundary_re(_HARDER_PHRASES)
+_SOFTER_RE = compile_word_boundary_re(_SOFTER_PHRASES)
+_FASTER_RE = compile_word_boundary_re(_FASTER_PHRASES)
+_SLOWER_RE = compile_word_boundary_re(_SLOWER_PHRASES)
 
 
 def has_non_music_domain_context(text: str) -> bool:
-    """Return True if the text contains non-music domain keywords or comparative factual questions."""
+    """Return True if the text contains non-music domain keywords (tech, sports, flights, weather, finance) or comparative factual questions."""
     if not text:
         return False
     # Strip any [Replying to song card: ...] wrapper before checking domain keywords
     cleaned = re.sub(r"\[Replying to song card:.*?\]", "", text, flags=re.IGNORECASE).strip()
-    if _NON_MUSIC_DOMAIN_RE.search(cleaned):
+    if has_non_music_domain_signal(cleaned):
         return True
     if _COMPARATIVE_QUESTION_RE.search(cleaned):
         return True

@@ -520,6 +520,10 @@ class TestSkillSportsInfo(unittest.TestCase):
     @patch("src.skills.sports.aggregators.hltv.fetch_soup")
     @patch("src.skills.sports.aggregators.esl_live.EslLiveAggregator.get_live_matches")
     def test_cs_routing_via_sports_info(self, mock_esl, mock_hltv, mock_liqui):
+        from src.skills.sports.aggregators.hltv import clear_hltv_cache
+        from src.skills.sports.aggregators.liquipedia import clear_liquipedia_cache
+        clear_hltv_cache()
+        clear_liquipedia_cache()
         mock_esl.return_value = "No active streams"
         mock_liqui.return_value = {"parse": {"text": {"*": "<div>S-Tier</div>"}}}
         mock_hltv.return_value = MagicMock(select=MagicMock(return_value=[]))
@@ -527,9 +531,10 @@ class TestSkillSportsInfo(unittest.TestCase):
         res = skill_sports_info("cs", "whats happening in cs")
         self.assertIn("COUNTER-STRIKE ESPORTS DATA", res)
 
+    @patch("src.skills.sports.aggregators.kashrock.KashrockAggregator.is_configured", return_value=False)
     @patch("src.skills.sports.aggregators.odds.fetch_soup")
     @patch("src.tools.web.search_web")
-    def test_cs_odds_with_stake_simulation(self, mock_search, mock_soup):
+    def test_cs_odds_with_stake_simulation(self, mock_search, mock_soup, _mock_kr):
         mock_search.return_value = "https://www.hltv.org/betting/analytics/123/falcons-vs-ninjas-in-pyjamas-thunderpick-world-championship-2026"
         mock_page = MagicMock()
         mock_page.title.get_text.return_value = "Falcons vs Ninjas in Pyjamas odds and prediction | HLTV.org"

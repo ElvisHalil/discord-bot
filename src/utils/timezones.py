@@ -5,31 +5,63 @@ Handles BOT_TIMEZONE env resolution, US/EU Daylight Saving Time calculations,
 multi-zone reference clocks, and compact inline timestamp enrichment on tool outputs.
 """
 
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone, tzinfo
 import os
 import re
-from datetime import date, datetime, timedelta, timezone, tzinfo
+from typing import Any, Iterator, Tuple, Union
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
     ZoneInfo = None  # type: ignore
 
-_FIXED_TZ_MAP: dict[str, tuple[int, int, str]] = {
-    "UTC": (0, 0, "UTC"),
-    "GMT": (0, 0, "GMT"),
-    "Z": (0, 0, "UTC"),
-    "BST": (1, 0, "BST"),
-    "CET": (1, 0, "CET"),
-    "CEST": (2, 0, "CEST"),
-    "EET": (2, 0, "EET"),
-    "EEST": (3, 0, "EEST"),
-    "EDT": (-4, 0, "EDT"),
-    "EST": (-5, 0, "EST"),
-    "CDT": (-5, 0, "CDT"),
-    "CST": (-6, 0, "CST"),
-    "MDT": (-6, 0, "MDT"),
-    "MST": (-7, 0, "MST"),
-    "PDT": (-7, 0, "PDT"),
-    "PST": (-8, 0, "PST"),
+
+@dataclass(slots=True, frozen=True)
+class FixedTimezoneSpec:
+    """Typed fixed-offset timezone specification supporting attribute and tuple-unpacking access."""
+    hours: int
+    minutes: int
+    label: str
+
+    def as_tuple(self) -> Tuple[int, int, str]:
+        return (self.hours, self.minutes, self.label)
+
+    def __iter__(self) -> Iterator[Union[int, str]]:
+        yield self.hours
+        yield self.minutes
+        yield self.label
+
+    def __getitem__(self, index: Union[int, slice]) -> Any:
+        return self.as_tuple()[index]
+
+    def __len__(self) -> int:
+        return 3
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, FixedTimezoneSpec):
+            return self.as_tuple() == other.as_tuple()
+        if isinstance(other, tuple):
+            return self.as_tuple() == other
+        return False
+
+
+_FIXED_TZ_MAP: dict[str, FixedTimezoneSpec] = {
+    "UTC": FixedTimezoneSpec(0, 0, "UTC"),
+    "GMT": FixedTimezoneSpec(0, 0, "GMT"),
+    "Z": FixedTimezoneSpec(0, 0, "UTC"),
+    "BST": FixedTimezoneSpec(1, 0, "BST"),
+    "CET": FixedTimezoneSpec(1, 0, "CET"),
+    "CEST": FixedTimezoneSpec(2, 0, "CEST"),
+    "EET": FixedTimezoneSpec(2, 0, "EET"),
+    "EEST": FixedTimezoneSpec(3, 0, "EEST"),
+    "EDT": FixedTimezoneSpec(-4, 0, "EDT"),
+    "EST": FixedTimezoneSpec(-5, 0, "EST"),
+    "CDT": FixedTimezoneSpec(-5, 0, "CDT"),
+    "CST": FixedTimezoneSpec(-6, 0, "CST"),
+    "MDT": FixedTimezoneSpec(-6, 0, "MDT"),
+    "MST": FixedTimezoneSpec(-7, 0, "MST"),
+    "PDT": FixedTimezoneSpec(-7, 0, "PDT"),
+    "PST": FixedTimezoneSpec(-8, 0, "PST"),
 }
 
 _WINDOWS_TZ_ABBR_MAP: dict[str, str] = {
@@ -61,6 +93,21 @@ _MONTH_NUMS: dict[str, int] = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }
+
+_ET_IANA_ZONES: frozenset[str] = frozenset({"america/new_york", "america/toronto", "america/detroit", "us/eastern"})
+_CT_IANA_ZONES: frozenset[str] = frozenset({"america/chicago", "america/winnipeg", "us/central"})
+_MT_IANA_ZONES: frozenset[str] = frozenset({"america/edmonton", "america/denver", "america/calgary", "us/mountain"})
+_AZ_IANA_ZONES: frozenset[str] = frozenset({"america/phoenix", "us/arizona"})
+_PT_IANA_ZONES: frozenset[str] = frozenset({"america/los_angeles", "america/vancouver", "us/pacific"})
+_CET_IANA_ZONES: frozenset[str] = frozenset({
+    "europe/berlin", "europe/paris", "europe/sarajevo", "europe/zagreb", "europe/belgrade",
+    "europe/vienna", "europe/rome", "europe/madrid", "europe/amsterdam", "europe/warsaw",
+    "europe/stockholm", "europe/zurich", "europe/prague", "europe/budapest", "europe/brussels",
+})
+_UK_IANA_ZONES: frozenset[str] = frozenset({"europe/london", "europe/dublin"})
+_EET_IANA_ZONES: frozenset[str] = frozenset({
+    "europe/athens", "europe/bucharest", "europe/helsinki", "europe/kyiv", "europe/sofia",
+})
 
 
 def _nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> date:
@@ -119,8 +166,8 @@ def _resolve_tz_token(tz_str: str, ref_utc: datetime | None = None) -> tzinfo | 
 
     # 1. Fixed abbreviation table
     if up in _FIXED_TZ_MAP:
-        h, m, label = _FIXED_TZ_MAP[up]
-        return timezone(timedelta(hours=h, minutes=m), label)
+        spec = _FIXED_TZ_MAP[up]
+        return timezone(timedelta(hours=spec.hours, minutes=spec.minutes), spec.label)
 
     # 2. UTC±HH[:MM] or GMT±HH[:MM]
     m_off = re.match(r'^(?:UTC|GMT)\s*([+-])\s*(\d{1,2})(?::(\d{2}))?$', up)
@@ -136,25 +183,21 @@ def _resolve_tz_token(tz_str: str, ref_utc: datetime | None = None) -> tzinfo | 
     us_dst = _is_us_dst(ref)
     eu_dst = _is_eu_dst(ref)
 
-    if up == "ET" or low in ("america/new_york", "america/toronto", "america/detroit", "us/eastern"):
+    if up == "ET" or low in _ET_IANA_ZONES:
         return timezone(timedelta(hours=-4 if us_dst else -5), "EDT" if us_dst else "EST")
-    if up == "CT" or low in ("america/chicago", "america/winnipeg", "us/central"):
+    if up == "CT" or low in _CT_IANA_ZONES:
         return timezone(timedelta(hours=-5 if us_dst else -6), "CDT" if us_dst else "CST")
-    if up == "MT" or low in ("america/edmonton", "america/denver", "america/calgary", "us/mountain"):
+    if up == "MT" or low in _MT_IANA_ZONES:
         return timezone(timedelta(hours=-6 if us_dst else -7), "MDT" if us_dst else "MST")
-    if low in ("america/phoenix", "us/arizona"):
+    if low in _AZ_IANA_ZONES:
         return timezone(timedelta(hours=-7), "MST")
-    if up == "PT" or low in ("america/los_angeles", "america/vancouver", "us/pacific"):
+    if up == "PT" or low in _PT_IANA_ZONES:
         return timezone(timedelta(hours=-7 if us_dst else -8), "PDT" if us_dst else "PST")
-    if up in ("CE", "CET/CEST", "EUROPE") or low in (
-        "europe/berlin", "europe/paris", "europe/sarajevo", "europe/zagreb", "europe/belgrade",
-        "europe/vienna", "europe/rome", "europe/madrid", "europe/amsterdam", "europe/warsaw",
-        "europe/stockholm", "europe/zurich", "europe/prague", "europe/budapest", "europe/brussels",
-    ):
+    if up in ("CE", "CET/CEST", "EUROPE") or low in _CET_IANA_ZONES:
         return timezone(timedelta(hours=2 if eu_dst else 1), "CEST" if eu_dst else "CET")
-    if up == "UK" or low in ("europe/london", "europe/dublin"):
+    if up == "UK" or low in _UK_IANA_ZONES:
         return timezone(timedelta(hours=1 if eu_dst else 0), "BST" if eu_dst else "GMT")
-    if low in ("europe/athens", "europe/bucharest", "europe/helsinki", "europe/kyiv", "europe/sofia"):
+    if low in _EET_IANA_ZONES:
         return timezone(timedelta(hours=3 if eu_dst else 2), "EEST" if eu_dst else "EET")
 
     # 4. Try standard library ZoneInfo if available on the host OS

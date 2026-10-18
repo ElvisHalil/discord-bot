@@ -8,8 +8,18 @@ from src.skills.music.playback.youtube_music import (
     get_blocked_official_info,
 )
 from src.skills.music.templates import SONG_TEMPLATE
+from src.skills.music.top_music import skill_top_music
 
 MAX_YOUTUBE_RESULTS = 5
+
+VIDEO_RESULTS_TEMPLATE = (
+    "=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
+    "Present the video(s) to the user.\n"
+    "1. Paste the raw standard YouTube video link (https://www.youtube.com/watch?v=...) on its own blank line so Discord embeds the media player.\n"
+    "2. Do NOT wrap the URL in markdown `[Title](link)` or `<>` brackets, and do NOT use `music.youtube.com` in video mode.\n"
+    "3. If searching for a single video, present ONLY the best single link."
+)
+
 
 def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music: Optional[bool] = False) -> str:
     """
@@ -52,7 +62,6 @@ def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music:
             if (" by " not in query.lower() and " - " not in query.lower()) and (
                 clean_q_low.lower() in BARE_RANDOM_SONG or generic_m or clean_q_low.lower() in KNOWN_BARE_GENRES
             ):
-                from src.skills.music.top_music import skill_top_music
                 if clean_q_low.lower() in BARE_RANDOM_SONG or (generic_m and generic_m.group(1).strip().lower() in BARE_RANDOM_SONG):
                     print(f"🔄 [YouTube Search Skill]: Redirecting generic song request '{query}' -> skill_top_music().")
                     return skill_top_music()
@@ -124,19 +133,11 @@ def skill_youtube_searcher(query: str, max_results: Optional[int] = 1, is_music:
             chan_str = f"\n   Channel: {r['channel']}" if r.get('channel') else ""
             formatted_results += f"{i+1}. Title: {r['title']}{chan_str}\n   Link: {r['url']}\n\n"
 
-        instruction_text = """=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===
-Present the video(s) to the user.
-CRITICAL INSTRUCTION FOR DISCORD EMBEDS: To ensure a full media player is embedded directly in Discord, you MUST paste the raw standard YouTube video link (https://www.youtube.com/watch?v=...) on its own blank line. 
-Do NOT wrap the link in markdown (like `[Title](link)`) or `<>` brackets, as that prevents Discord from creating the player embed. It MUST be a bare URL on a new line.
-IMPORTANT: In video mode, you MUST use the standard YouTube domain (https://www.youtube.com/watch?v=...). Do NOT output a music.youtube.com link in video mode!
-IMPORTANT: Do NOT output ANY markdown links like `[YouTube](...)` or `[Channel](...)` anywhere in your response. Only the raw URL.
-If you searched for a specific song or video, present ONLY the best single link.
-"""
         return f"""
 === YOUTUBE VIDEO RESULTS ===
 {formatted_results}
 
-{instruction_text}
+{VIDEO_RESULTS_TEMPLATE}
 """
 
     except Exception as e:

@@ -1,9 +1,17 @@
+import logging
+import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 from requests.adapters import HTTPAdapter
+
+from src.context import get_active_channel_id, set_active_channel_id
+from src.utils import timezones
+from src.utils.domain_vocab import compile_phrase_stripper, compile_word_boundary_re
+from src.utils.workers import SUB_WORKER_POOL, map_in_workers
+
+logger = logging.getLogger(__name__)
 
 _SESSION = requests.Session()
 _ADAPTER = HTTPAdapter(pool_connections=24, pool_maxsize=24)
@@ -12,8 +20,6 @@ _SESSION.mount("http://", _ADAPTER)
 _SESSION.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 })
-
-from src.utils.workers import SUB_WORKER_POOL, map_in_workers
 
 SPORTS_EXECUTOR = SUB_WORKER_POOL
 _CACHE: Dict[str, Tuple[float, Any]] = {}
@@ -43,7 +49,8 @@ def cached_espn_get(url: str, params: Optional[Dict[str, Any]] = None, ttl: int 
         if isinstance(data, dict):
             _CACHE[cache_key] = (now, data)
             return data
-    except Exception:
+    except Exception as e:
+        logger.debug(f"ESPN GET failed for {url}: {e}")
         return None
     return None
 
@@ -52,12 +59,12 @@ def cached_espn_get_many(
     requests_list: List[Tuple[str, Optional[Dict[str, Any]]]],
     ttl: int = 20,
 ) -> List[Optional[Dict[str, Any]]]:
-    """Fetch multiple ESPN endpoints concurrently (falls back to sequential when cached_espn_get is mocked in unit tests)."""
+    """Fetch multiple ESPN endpoints concurrently via the shared worker pool."""
     if not requests_list:
         return []
-    is_mock = hasattr(cached_espn_get, "assert_called") or "MagicMock" in str(type(cached_espn_get))
-    if is_mock or len(requests_list) == 1:
-        return [cached_espn_get(u, params=p, ttl=ttl) for u, p in requests_list]
+    if len(requests_list) == 1:
+        u, p = requests_list[0]
+        return [cached_espn_get(u, params=p, ttl=ttl)]
     return map_in_workers(lambda r: cached_espn_get(r[0], params=r[1], ttl=ttl), requests_list)
 
 
@@ -67,12 +74,9 @@ def parallel_fetch_json(
     timeout: float = 6.0,
     ttl: int = 20,
 ) -> List[Any]:
-    """Fetch multiple JSON URLs concurrently with optional short TTL caching (falls back to sequential when fetch_fn is mocked)."""
+    """Fetch multiple JSON URLs concurrently with optional short TTL caching."""
     if not urls:
         return []
-    is_mock = hasattr(fetch_fn, "assert_called") or "MagicMock" in str(type(fetch_fn))
-    if is_mock:
-        return [fetch_fn(u, timeout=timeout) for u in urls]
 
     def _get_one(u: str) -> Any:
         now = time.time()
@@ -85,7 +89,8 @@ def parallel_fetch_json(
             if val is not None and ttl > 0:
                 _CACHE[u] = (now, val)
             return val
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Parallel JSON fetch failed for {u}: {e}")
             return {}
 
     if len(urls) == 1:
@@ -112,79 +117,69 @@ def format_espn_iso_date(date_raw: str) -> str:
     if not date_raw:
         return "TBD"
     try:
-        from src.utils.timezones import resolve_configured_timezone, _short_tz_abbr
         dt_utc = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
         if dt_utc.tzinfo is None:
             dt_utc = dt_utc.replace(tzinfo=timezone.utc)
-        local_tz = resolve_configured_timezone(ref_utc=dt_utc)
+        local_tz = timezones.resolve_configured_timezone(ref_utc=dt_utc)
         dt_local = dt_utc.astimezone(local_tz)
-        tz_abbr = _short_tz_abbr(dt_local)
+        tz_abbr = timezones._short_tz_abbr(dt_local)
         clock_str = dt_local.strftime("%I:%M %p").lstrip("0")
         return f"{dt_local.strftime('%a, %b %d, %Y')} at {clock_str} {tz_abbr}"
     except ValueError:
         return date_raw
 
 
-TEAM_ALIASES: Dict[str, str] = {
-    # Soccer
-    "man city": "manchester city",
-    "mancheser city": "manchester city",
-    "man utd": "manchester united",
-    "man united": "manchester united",
-    "spurs": "tottenham hotspur",
-    "tottenham": "tottenham hotspur",
-    "wolves": "wolverhampton wanderers",
-    "newcastle": "newcastle united",
-    "west ham": "west ham united",
-    "brighton": "brighton & hove albion",
-    "nottingham": "nottingham forest",
-    "forest": "nottingham forest",
-    "leeds": "leeds united",
-    "psg": "paris saint-germain",
-    "inter": "internazionale",
-    "inter milan": "internazionale",
-    "ac milan": "milan",
-    "atletico": "atlético madrid",
-    "atletico madrid": "atlético madrid",
-    "athletic bilbao": "athletic club",
-    "bayern": "bayern munich",
-    "munich": "bayern munich",
-    "leverkusen": "bayer leverkusen",
-    "dortmund": "borussia dortmund",
-    "frankfurt": "eintracht frankfurt",
-    "barca": "barcelona",
-    "real": "real madrid",
-    "madrid": "real madrid",
-    "sociedad": "real sociedad",
-    "villa": "aston villa",
-    "palace": "crystal palace",
-    # NBA
-    "sixers": "philadelphia 76ers",
-    "76ers": "philadelphia 76ers",
-    "mavs": "dallas mavericks",
-    "timberwolves": "minnesota timberwolves",
-    "blazers": "portland trail blazers",
-    "knicks": "new york knicks",
-    "dubs": "golden state warriors",
-    "cavs": "cleveland cavaliers",
-    "clips": "la clippers",
-    "clippers": "la clippers",
-    "lakers": "los angeles lakers",
-    "pels": "new orleans pelicans",
-    "thunder": "oklahoma city thunder",
-    "okc": "oklahoma city thunder",
-    # NHL
-    "habs": "montreal canadiens",
-    "leafs": "toronto maple leafs",
-    "bolts": "tampa bay lightning",
-    "pens": "pittsburgh penguins",
-    "caps": "washington capitals",
-    "avs": "colorado avalanche",
-    "golden knights": "vegas golden knights",
-    "knights": "vegas golden knights",
-    "red wings": "detroit red wings",
-    "blue jackets": "columbus blue jackets",
-}
+from src.skills.sports.catalogs import (
+    ESPN_TEAM_ALIASES as TEAM_ALIASES,
+    TRACKING_STRIP_PHRASES,
+    TRACKING_STRIP_WORDS,
+)
+
+_CHANNEL_LAST_MATCH_QUERY: Dict[int, Tuple[str, Optional[str]]] = {}
+
+_TRACKING_PHRASE_STRIPPER_RE = compile_phrase_stripper(TRACKING_STRIP_PHRASES)
+_TRACKING_WORD_STRIPPER_RE = compile_word_boundary_re(TRACKING_STRIP_WORDS)
+
+
+def _clean_tracking_query(query: str) -> str:
+    """Strip tracking/conversational/pronoun filler words and expand short club/team aliases."""
+    clean = (query or "").lower().strip()
+    clean = _TRACKING_PHRASE_STRIPPER_RE.sub(" ", clean)
+    clean = _TRACKING_WORD_STRIPPER_RE.sub(" ", clean)
+    clean = re.sub(r"[^\w\s]", " ", clean)
+    clean = " ".join(clean.split()).strip()
+    if not clean:
+        return ""
+
+    if clean in TEAM_ALIASES:
+        return TEAM_ALIASES[clean]
+    tokens = clean.split()
+    expanded = []
+    for t in tokens:
+        alias_val = TEAM_ALIASES.get(t, t)
+        if alias_val != t and alias_val in clean:
+            expanded.append(t)
+        else:
+            expanded.append(alias_val)
+    return " ".join(expanded)
+
+
+def record_channel_last_match_query(query: str, sport: Optional[str] = None, channel_id: Optional[int] = None) -> None:
+    """Record the most recently discussed team or matchup in a channel."""
+    cleaned = _clean_tracking_query(query)
+    if not cleaned:
+        return
+    cid = channel_id if channel_id is not None else get_active_channel_id()
+    _CHANNEL_LAST_MATCH_QUERY[cid] = (query.strip(), sport)
+
+
+def clear_channel_last_match_query(channel_id: Optional[int] = None) -> None:
+    """Clear per-channel last match query state (for one channel if channel_id is given, else all)."""
+    if channel_id is not None:
+        _CHANNEL_LAST_MATCH_QUERY.pop(channel_id, None)
+    else:
+        _CHANNEL_LAST_MATCH_QUERY.clear()
+        set_active_channel_id(None)
 
 
 def get_espn_teams(sport_path: str, league_code: str) -> List[Dict[str, Any]]:
@@ -337,8 +332,7 @@ def parse_team_schedule(
     # Always sort chronologically (oldest -> newest) so [-max_past:] are the latest results and [:max_future] are next up
     events.sort(key=lambda e: e.get("date", ""))
 
-    from src.utils.timezones import get_local_now
-    local_now = get_local_now()
+    local_now = timezones.get_local_now()
     local_tz = local_now.tzinfo or timezone.utc
     local_today_date = local_now.date()
     now_utc_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -373,28 +367,26 @@ def parse_team_schedule(
         elif state == "in":
             live_lines.append(f"• 🔴 **LIVE NOW ({detail})**: **{h_name}** {h_score} - {a_score} **{a_name}**{comp_tag}")
             try:
-                from src.skills.sports.live_tracker import record_channel_last_match_query
                 record_channel_last_match_query(f"{h_name} vs {a_name}", sport=sport_path)
                 recorded_live = True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to record live match query in parse_team_schedule: {e}")
         else:
             is_today = raw_date.startswith(now_utc_date)
             if not is_today and raw_date:
                 try:
                     ev_dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).astimezone(local_tz)
                     is_today = (ev_dt.date() == local_today_date)
-                except Exception:
+                except ValueError:
                     pass
             today_prefix = "🔥 **TODAY — " if is_today else "**"
             future_lines.append(f"• {today_prefix}{date_str}**: **{a_name}** @ **{h_name}**{comp_tag}")
 
     if not recorded_live and team_name:
         try:
-            from src.skills.sports.live_tracker import record_channel_last_match_query
             record_channel_last_match_query(team_name, sport=sport_path)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to record team match query in parse_team_schedule: {e}")
 
     out = f"=== 📅 {team_name.upper()} TEAM SCHEDULE & RESULTS (ALL COMPETITIONS) ===\n"
     if live_lines:
@@ -691,10 +683,9 @@ def parse_match_summary(sport_path: str, league_code: str, event_id: str) -> str
         status_det = status_type.get("detail") or status_type.get("shortDetail") or ""
 
         try:
-            from src.skills.sports.live_tracker import record_channel_last_match_query
             record_channel_last_match_query(f"{h_name} vs {a_name}", sport=sport_path)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to record live match query in parse_match_summary: {e}")
 
         if state == "in" and not completed:
             out_sections.append(
@@ -922,8 +913,7 @@ def clean_entity_search_query(query: str) -> str:
     """Extract likely team, player, or league entity keywords from a natural-language sports query."""
     if not query:
         return ""
-    import re as _re
-    tokens = _re.findall(r"[A-Za-z0-9À-ÿ'.-]+", query)
+    tokens = re.findall(r"[A-Za-z0-9À-ÿ'.-]+", query)
     kept = [t for t in tokens if t.lower().strip("'.-") not in _SEARCH_STOPWORDS and len(t) >= 2]
     cleaned = " ".join(kept).strip()
     # Expand known short aliases if the cleaned query matches one
@@ -956,7 +946,6 @@ def espn_search_auto_discover(query: str, sport_hint: Optional[str] = None) -> O
     if not data or not data.get("results"):
         return None
 
-    import re as _re
     DEFAULT_SPORT_LEAGUE = {
         "football": "nfl",
         "baseball": "mlb",
@@ -982,8 +971,8 @@ def espn_search_auto_discover(query: str, sport_hint: Optional[str] = None) -> O
             return None
         league = (item.get("defaultLeagueSlug") or DEFAULT_SPORT_LEAGUE.get(sport, "")).lower().strip()
         uid = item.get("uid") or ""
-        m_t = _re.search(r"t:(\d+)", uid)
-        m_a = _re.search(r"a:(\d+)", uid)
+        m_t = re.search(r"t:(\d+)", uid)
+        m_a = re.search(r"a:(\d+)", uid)
         team_id = m_t.group(1) if m_t else (str(item.get("id")) if g_type == "team" and str(item.get("id", "")).isdigit() else None)
         athlete_id = m_a.group(1) if m_a else (str(item.get("id")) if g_type == "player" and str(item.get("id", "")).isdigit() else None)
         return {

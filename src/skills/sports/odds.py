@@ -1,10 +1,13 @@
 from typing import Optional
+
 from src.skills.sports.aggregators.odds import OddsAggregator
+from src.skills.sports.enums import SportId
+from src.skills.sports.templates import build_odds_llm_instructions
 
 _odds_aggregator = OddsAggregator()
 
 
-def skill_betting_odds(query: str, sport: Optional[str] = "sports") -> str:
+def skill_betting_odds(query: str, sport: Optional[str] = SportId.SPORTS) -> str:
     """
     Fetch current match betting odds, decimal payout multipliers, and implied win probabilities for sports, F1, and esports.
 
@@ -14,12 +17,4 @@ def skill_betting_odds(query: str, sport: Optional[str] = "sports") -> str:
     """
     print(f"🎲 [Executing Betting Odds Skill] Matchup: '{query}' (Sport: '{sport}')")
     odds_data = _odds_aggregator.get_odds(query, sport=sport)
-
-    output = odds_data
-    output += "=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-    output += "1. Always present odds in clean **Decimal Odds** format (e.g. `2.50`, meaning a 2.5x total return on your wager) alongside their implied win probabilities (`~40.0%`).\n"
-    output += "2. Do NOT convert to or output American moneyline odds (`+150` / `-200`) unless the user explicitly asked for American odds.\n"
-    output += "3. Clearly identify the favorite and each contender's best available decimal odds using the clean bullet layout above.\n"
-    output += "4. NEVER invent fake URLs or hallucinate betting links. Only link sources provided in the data above.\n"
-    output += "5. If no odds are posted yet, explain that lines haven't opened without making excuses or mentioning tools.\n"
-    return output
+    return odds_data + build_odds_llm_instructions()

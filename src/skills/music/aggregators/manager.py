@@ -1,19 +1,30 @@
+import logging
 import random
 from typing import Dict, Optional
+
 from src.skills.music.aggregators.base import BaseMusicAggregator
-from src.skills.music.aggregators.lastfm import LastFmAggregator
-from src.skills.music.aggregators.deezer import DeezerAggregator
-from src.skills.music.aggregators.freqblog import FreqBlogAggregator
 from src.skills.music.aggregators.beatport import BeatportAggregator
 from src.skills.music.aggregators.charts import ChartsAggregator
-from src.skills.music.models import Track
-from src.skills.music.utils import is_recently_played, parse_song_meta, _norm_track_token, MUSIC_METADATA_CACHE
-from src.skills.music.moods import (
-    STANDALONE_MOOD_PROFILES,
+from src.skills.music.aggregators.deezer import DeezerAggregator
+from src.skills.music.aggregators.freqblog import FreqBlogAggregator
+from src.skills.music.aggregators.lastfm import LastFmAggregator
+from src.skills.music.catalogs import (
     GENRE_CANONICAL_MAP,
     GENRE_MOOD_MATRIX,
-    parse_mood_and_genre,
+    STANDALONE_MOOD_PROFILES,
 )
+from src.skills.music.enums import MusicProvider
+from src.skills.music.models import Track
+from src.skills.music.moods import parse_mood_and_genre
+from src.skills.music.utils import (
+    MUSIC_METADATA_CACHE,
+    _norm_track_token,
+    is_recently_played,
+    parse_song_meta,
+)
+
+logger = logging.getLogger(__name__)
+
 
 class MusicAggregatorManager:
     """
@@ -23,11 +34,11 @@ class MusicAggregatorManager:
 
     def __init__(self):
         self.aggregators: Dict[str, BaseMusicAggregator] = {
-            "lastfm": LastFmAggregator(),
-            "deezer": DeezerAggregator(),
-            "freqblog": FreqBlogAggregator(),
-            "beatport": BeatportAggregator(),
-            "charts": ChartsAggregator(),
+            MusicProvider.LASTFM: LastFmAggregator(),
+            MusicProvider.DEEZER: DeezerAggregator(),
+            MusicProvider.FREQBLOG: FreqBlogAggregator(),
+            MusicProvider.BEATPORT: BeatportAggregator(),
+            MusicProvider.CHARTS: ChartsAggregator(),
         }
 
     def register_aggregator(self, name: str, aggregator: BaseMusicAggregator):
@@ -196,8 +207,8 @@ class MusicAggregatorManager:
                     t_name = (t.get("name") or "").lower().strip()
                     if t_name in GENRE_CANONICAL_MAP:
                         return GENRE_CANONICAL_MAP[t_name]
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Last.fm artist.gettoptags failed for %r: %s", artist_name, e)
         return None
 
     def get_mood_tracks(self, mood: str, genre: str = None, similar_to: str = None) -> list[Track]:
@@ -261,8 +272,8 @@ class MusicAggregatorManager:
             for fut in futures:
                 try:
                     all_tracks.extend(fut.result() or [])
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Mood track worker failed: %s", e)
 
         random.shuffle(all_tracks)
         return self._filter_and_deduplicate(all_tracks, exclude_query=similar_to)
@@ -283,15 +294,15 @@ class MusicAggregatorManager:
             for fut in futures:
                 try:
                     all_tracks.extend(fut.result() or [])
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Chart provider worker failed: %s", e)
 
         # Safety net if Last.fm API key is missing and no other provider returned tracks
         if not all_tracks and self.aggregators.get("deezer"):
             try:
                 all_tracks.extend(self.aggregators["deezer"].get_charts(genre=parsed_genre) or [])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Deezer fallback chart fetch failed: %s", e)
 
         return self._filter_and_deduplicate(all_tracks)
 
@@ -323,8 +334,8 @@ class MusicAggregatorManager:
                     lfm_tracks = res
                 else:
                     dz_tracks = res
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Artist track provider %s failed for %r: %s", name, artist, e)
         elif len(tasks) >= 2:
             futs = {name: submit_to_worker(fn, artist) for name, fn in tasks}
             for name, fut in futs.items():
@@ -334,8 +345,8 @@ class MusicAggregatorManager:
                         lfm_tracks = res
                     else:
                         dz_tracks = res
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Artist track worker %s failed for %r: %s", name, artist, e)
 
         # Map Deezer album titles by normalized track title so Last.fm tracks get Album metadata when available
         album_by_title = {}
@@ -403,8 +414,8 @@ class MusicAggregatorManager:
                         t_name = (tg.get("name") or "").strip()
                         if t_name:
                             collected_tags.append(t_name)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Last.fm track.gettoptags failed for %r by %r: %s", song, artist, e)
 
             if not collected_tags:
                 try:
@@ -416,8 +427,8 @@ class MusicAggregatorManager:
                         t_name = (tg.get("name") or "").strip()
                         if t_name:
                             collected_tags.append(t_name)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Last.fm artist.gettoptags failed for %r: %s", artist, e)
 
             for tg in collected_tags:
                 z = classify_genre_to_zone(tg)
@@ -426,18 +437,14 @@ class MusicAggregatorManager:
 
         # 4. Acoustic DSP fallback: analyze the 30s Deezer preview MP3 to determine true speed/intensity zone
         deezer = self.aggregators.get("deezer")
-        is_mocked = (
-            (lastfm and hasattr(getattr(lastfm, "_call", None), "assert_called"))
-            or (deezer and hasattr(getattr(deezer, "get_charts", None), "assert_called"))
-        )
-        if not is_mocked and song and song.lower() not in ("unknown track", "unknown"):
+        if song and song.lower() not in ("unknown track", "unknown"):
             try:
                 from src.skills.music.audio_analyzer import get_track_acoustic_profile
                 prof = get_track_acoustic_profile(song, artist, deezer_agg=deezer)
                 if prof and prof.get("ui_zone"):
                     return known_genre or "Acoustic DSP", prof["ui_zone"]
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Acoustic DSP zone fallback failed for %r by %r: %s", song, artist, e)
 
         return known_genre, None
 
@@ -463,8 +470,6 @@ class MusicAggregatorManager:
         intensity_lvl = target_zone.get("intensity", "mid")
 
         if prefer_deep_cuts:
-            # At boundary: use deep_cut_tags exclusively so slower mainstream tags (e.g. 120 BPM house/dream pop)
-            # never dilute boundary 'faster' shifts.
             active_tags = random.sample(deep_cuts, min(4, len(deep_cuts))) if deep_cuts else list(mainstream[:3])
         else:
             chosen_main = random.sample(mainstream, min(3, len(mainstream)))
@@ -507,16 +512,13 @@ class MusicAggregatorManager:
                 tasks.append((lastfm.get_charts, tag, tag.title()))
         if deezer:
             for idx, tag in enumerate(active_tags[:4]):
-                # Optionally pair one Deezer playlist query with an intersection modifier when pushing boundaries
                 if prefer_deep_cuts and idx == 0 and modifiers:
                     mod = random.choice(modifiers)
                     tasks.append((deezer.get_charts, f"{tag} {mod}", tag.title()))
                 else:
                     tasks.append((deezer.get_charts, tag, tag.title()))
 
-            # Also blend in related artist/genre tracks from the current seed song so it doesn't abruptly jump genres
-            is_dz_mocked = hasattr(getattr(deezer, "get_charts", None), "assert_called") or hasattr(getattr(deezer, "get_similar", None), "assert_called")
-            if exclude_query and not is_dz_mocked and hasattr(deezer, "get_similar"):
+            if exclude_query and hasattr(deezer, "get_similar"):
                 sim_label = (seed_genre or active_tags[0]).title()
                 tasks.append((deezer.get_similar, exclude_query, sim_label))
 
@@ -530,8 +532,8 @@ class MusicAggregatorManager:
                         if not trk.genre:
                             trk.genre = tag_label
                         all_tracks.append(trk)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Spectrum shift worker failed for tag %r: %s", tag_label, e)
 
         random.shuffle(all_tracks)
         return self._filter_and_deduplicate(all_tracks, exclude_query=exclude_query)

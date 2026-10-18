@@ -2,13 +2,13 @@ import os
 import re
 import time
 import random
-from concurrent.futures import ThreadPoolExecutor
 import requests
 from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
 from src.skills.music.aggregators.base import BaseMusicAggregator
 from src.skills.music.models import Track
 from src.skills.music.utils import parse_song_meta
+from src.utils.workers import map_in_workers, submit_to_worker
 
 load_dotenv()
 
@@ -18,8 +18,6 @@ _HTTP_SESSION.mount("https://", _adapter)
 _HTTP_SESSION.mount("http://", _adapter)
 
 def _http_get(url: str, **kwargs):
-    if hasattr(requests.get, "assert_called"):
-        return requests.get(url, **kwargs)
     return _HTTP_SESSION.get(url, **kwargs)
 
 _LASTFM_RAW_CACHE: dict[str, tuple[float, dict]] = {}
@@ -44,10 +42,9 @@ class LastFmAggregator(BaseMusicAggregator):
         key = self.api_key or os.getenv("LASTFM_API_KEY")
         if not key:
             return {}
-        is_mocked = hasattr(requests.get, "assert_called")
         cache_key = f"{method}:" + "&".join(f"{k}={v}" for k, v in sorted((params or {}).items()))
         now = time.monotonic()
-        if not is_mocked and cache_key in _LASTFM_RAW_CACHE:
+        if cache_key in _LASTFM_RAW_CACHE:
             ts, cached_data = _LASTFM_RAW_CACHE[cache_key]
             if now - ts < _LASTFM_CACHE_TTL:
                 return cached_data
@@ -62,7 +59,7 @@ class LastFmAggregator(BaseMusicAggregator):
             r = _http_get(self.BASE_URL, params=p, timeout=5, headers={"User-Agent": "DiscordMusicBot/1.0"})
             if r.status_code == 200:
                 data = r.json()
-                if not is_mocked and isinstance(data, dict) and data:
+                if isinstance(data, dict) and data:
                     _LASTFM_RAW_CACHE[cache_key] = (now, data)
                 return data
             else:
@@ -183,9 +180,8 @@ class LastFmAggregator(BaseMusicAggregator):
                     ))
             return local_tracks
 
-        with ThreadPoolExecutor(max_workers=min(6, len(rel_names))) as pool:
-            for art_tracks in pool.map(_fetch_artist_top, rel_names):
-                tracks.extend(art_tracks)
+        for art_tracks in map_in_workers(_fetch_artist_top, rel_names):
+            tracks.extend(art_tracks)
         return tracks
 
     def get_similar(self, query: str) -> list[Track]:
@@ -322,11 +318,10 @@ class LastFmAggregator(BaseMusicAggregator):
             tag = genre.lower().strip()
             print(f"  └─ 📻 [Last.fm]: Fetching top tracks & verified genre artists for tag '{tag}'...")
 
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                f_tracks = pool.submit(self._call, "tag.gettoptracks", {"tag": tag, "limit": 50, "page": 1})
-                f_artists = pool.submit(self._call, "tag.gettopartists", {"tag": tag, "limit": 50})
-                res = f_tracks.result()
-                art_res = f_artists.result()
+            f_tracks = submit_to_worker(self._call, "tag.gettoptracks", {"tag": tag, "limit": 50, "page": 1})
+            f_artists = submit_to_worker(self._call, "tag.gettopartists", {"tag": tag, "limit": 50})
+            res = f_tracks.result()
+            art_res = f_artists.result()
 
             raw = res.get("tracks", {}).get("track", [])
             if isinstance(raw, dict):
@@ -437,11 +432,12 @@ class LastFmAggregator(BaseMusicAggregator):
             artist_high_tags: dict[str, set[str]] = {}
             tag_counter = Counter()
             if all_cand_artist_names:
-                with ThreadPoolExecutor(max_workers=min(10, len(all_cand_artist_names))) as pool:
-                    for clean_a, high_set in pool.map(_fetch_high_tags, all_cand_artist_names):
-                        artist_high_tags[clean_a] = high_set
-                        for h in high_set:
-                            tag_counter[h] += 1
+                futs = [submit_to_worker(_fetch_high_tags, a) for a in all_cand_artist_names]
+                for fut in futs:
+                    clean_a, high_set = fut.result()
+                    artist_high_tags[clean_a] = high_set
+                    for h in high_set:
+                        tag_counter[h] += 1
 
             dominant_tag = tag_counter.most_common(1)[0][0] if tag_counter else tag
 
@@ -512,11 +508,10 @@ class LastFmAggregator(BaseMusicAggregator):
                 return None
 
             if verified_step_b_artists:
-                with ThreadPoolExecutor(max_workers=min(6, len(verified_step_b_artists))) as pool:
-                    for trk in pool.map(_fetch_tag_artist_top, verified_step_b_artists):
-                        if trk:
-                            artist_seen.add(trk.artist.lower().strip())
-                            tracks.append(trk)
+                for trk in map_in_workers(_fetch_tag_artist_top, verified_step_b_artists):
+                    if trk:
+                        artist_seen.add(trk.artist.lower().strip())
+                        tracks.append(trk)
         else:
             print("  └─ 📻 [Last.fm]: Fetching global top chart tracks...")
             res = self._call("chart.gettoptracks", {"limit": 50})

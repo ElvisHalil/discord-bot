@@ -5,8 +5,23 @@ Handles pronoun/demonstrative match follow-up enrichment ('track this game',
 'hows the game going', 'who scored last goal') and turn-0 missed sports tool detection.
 """
 
+import logging
 import re
 import typing
+
+from src.skills.sports.live_tracker import get_channel_last_match_query
+from src.skills.sports.catalogs import (
+    GENERIC_SINGLE_WORD_QUERIES as _GENERIC_SINGLE_WORD_QUERIES,
+    SPORTS_INTENT_STOPWORDS as _INTENT_WORDS_TO_STRIP,
+)
+from src.skills.sports.enums import TrackerAction
+from src.utils.domain_vocab import (
+    NON_SPORTS_TRACK_PHRASES,
+    compile_word_boundary_re,
+    has_non_sports_track_signal,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def extract_raw_user_text(msg) -> str:
@@ -23,22 +38,6 @@ def extract_raw_user_text(msg) -> str:
     return m.group(1).strip() if m else text
 
 
-_INTENT_WORDS_TO_STRIP = {
-    "roster", "squad", "schedule", "fixtures", "fixture", "standings", "table",
-    "rank", "points", "injuries", "injured", "injury", "lineup", "lineups",
-    "starting", "xi", "formation", "stats", "statistics", "stat", "scores",
-    "score", "results", "result", "yesterday", "tomorrow", "today", "play",
-    "playing", "played", "next", "previous", "past", "recent", "upcoming",
-    "whats", "what", "is", "are", "the", "this", "that", "it", "its", "their",
-    "they", "them", "his", "her", "status", "of", "game", "games", "match", "matches",
-    "hows", "how", "going", "who", "scored", "last", "goal", "goals", "time", "minute",
-    "still", "live", "not", "over", "currently", "on", "right", "now",
-    "track", "tracking", "tracked", "untrack", "stop", "start", "monitor", "follow",
-    "odds", "odd", "bet", "betting", "moneyline", "spread", "line", "lines",
-    "check", "get", "both", "these", "those",
-    "please", "can", "you", "for", "me", "in", "at",
-}
-
 _FOLLOWUP_MATCH_PATTERN = re.compile(
     r"\b(?:"
     r"their|they|them|his|her|its|that\s+team|same\s+team|"
@@ -52,12 +51,7 @@ _FOLLOWUP_MATCH_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-_NON_SPORTS_TRACK_RE = re.compile(
-    r"\b(?:soundtrack|backing\s+track|diss\s+track|title\s+track|bonus\s+track|"
-    r"similar\s+track|next\s+track|previous\s+track|play\s+track|song|album|artist|"
-    r"spotify|youtube|package|parcel|order|shipment|flight|reacted\s+with)\b",
-    re.IGNORECASE,
-)
+_NON_SPORTS_TRACK_RE = compile_word_boundary_re(NON_SPORTS_TRACK_PHRASES)
 
 
 def _extract_subject_entities(text: str) -> str:
@@ -95,10 +89,6 @@ _SPORTS_SUBVIEW_RE = re.compile(
     r"scores?|results?|live|status|yesterday|tomorrow|today|schedule|fixtures?|next|upcoming|odds?|betting)\b",
     re.IGNORECASE,
 )
-
-_GENERIC_SINGLE_WORD_QUERIES = {
-    "", "schedule", "games", "game", "matches", "match", "scores", "score", "status", "info", "upcoming", "next"
-}
 
 _CS_WORD_RE = re.compile(
     r"\b(?:cs2?|csgo|counter-strike|counter\s+strike|esports|spirit|vitality|navi|natus\s+vincere|faze|mouz|g2|astralis|mongolz|furia|eternal\s+fire|blast|iem|pgl|esl|hltv)\b",
@@ -218,12 +208,12 @@ def detect_explicit_tracker_intent(user_text: str) -> typing.Optional[typing.Tup
         return None
     q = extract_raw_user_text({"content": user_text}).strip()
     q_low = q.lower()
-    if not q_low or _NON_SPORTS_TRACK_RE.search(q_low):
+    if not q_low or has_non_sports_track_signal(q):
         return None
 
     m_stop = re.search(r"\b(?:untrack|stop\s+tracking|cancel\s+tracking|end\s+tracking)\b(?:\s+(.*))?", q_low)
     if m_stop:
-        return ("stop", (m_stop.group(1) or "").strip(" ?.!,"))
+        return (TrackerAction.STOP, (m_stop.group(1) or "").strip(" ?.!,"))
 
     if re.search(
         r"\b(?:what\s+(?:games?|matches?)\s+are\s+(?:you|we)\s+tracking|"
@@ -231,7 +221,7 @@ def detect_explicit_tracker_intent(user_text: str) -> typing.Optional[typing.Tup
         r"list\s+tracked|are\s+you\s+tracking\s+(?:any|the|this))\b",
         q_low,
     ):
-        return ("list", "")
+        return (TrackerAction.LIST, "")
 
     m_start = re.match(
         r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|yo\s+|hey\s+)?"
@@ -239,14 +229,14 @@ def detect_explicit_tracker_intent(user_text: str) -> typing.Optional[typing.Tup
         q_low,
     )
     if m_start:
-        return ("start", m_start.group(1).strip())
+        return (TrackerAction.START, m_start.group(1).strip())
 
     m_mid = re.search(
         r"\b(?:track\s+(?:this|that|the)\s+(?:game|match)|start\s+tracking\s+(?:this|that|the)\s+(?:game|match))\b",
         q_low,
     )
     if m_mid:
-        return ("start", m_mid.group(0).strip())
+        return (TrackerAction.START, m_mid.group(0).strip())
 
     return None
 
@@ -293,12 +283,12 @@ def detect_missed_sports_tool_call(
     if tracker_intent is not None:
         action, target_q = tracker_intent
         args = {"action": action, "query": target_q}
-        if action == "start":
+        if action == TrackerAction.START:
             args = enrich_sports_tool_args(args, history)
         return ("skill_track_live_game", args)
 
     # 2. Live sports status / score / match follow-up when channel already has sports context
-    if _NON_SPORTS_TRACK_RE.search(q_low) or q_low.startswith("!"):
+    if has_non_sports_track_signal(latest_user) or q_low.startswith("!"):
         return None
 
     has_prior_sports_turn = any(
@@ -309,10 +299,9 @@ def detect_missed_sports_tool_call(
     )
     last_match_q = ""
     try:
-        from src.skills.sports.live_tracker import get_channel_last_match_query
         last_match_q, _ = get_channel_last_match_query(active_channel_id)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to read last_match_q in detect_missed_sports_tool_call: %s", e)
 
     if has_prior_sports_turn or last_match_q:
         if _LIVE_MATCH_FOLLOWUP_RE.search(q_low):

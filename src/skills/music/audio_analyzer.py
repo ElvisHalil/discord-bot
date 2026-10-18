@@ -26,6 +26,7 @@ gemma4:e4b's native mel-spectrogram audio encoder (gemma4a) in Ollama:
 from __future__ import annotations
 
 import base64
+import logging
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -36,6 +37,8 @@ import requests
 
 from src.skills.music.models import Track
 from src.skills.music.utils import _norm_track_token
+
+logger = logging.getLogger(__name__)
 
 # Session cache for analyzed tracks: { "norm_title|norm_artist": dict }
 AUDIO_FEATURE_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -293,10 +296,6 @@ def get_track_acoustic_profile(
     if not clean_title:
         return None
 
-    # Skip live network calls when requests.get is mocked in unit tests
-    if hasattr(requests.get, "assert_called"):
-        return None
-
     c_key = _cache_key(clean_title, clean_artist)
     now = time.monotonic()
     if c_key in AUDIO_FEATURE_CACHE:
@@ -322,8 +321,8 @@ def get_track_acoustic_profile(
             r = requests.get(mp3_url, timeout=5)
             if r.status_code == 200 and r.content:
                 mp3_bytes = r.content
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("MP3 preview fetch failed for %r: %s", mp3_url, e)
 
     if not mp3_bytes and detail is None:
         return None
@@ -352,7 +351,7 @@ def rank_candidates_by_acoustic_shift(
     Analyze up to `max_analyze` candidate tracks in parallel via the worker pool and rank them
     by how well they satisfy the requested (d_tempo, d_intensity) shift relative to `anchor_profile`.
     """
-    if not candidates or hasattr(requests.get, "assert_called"):
+    if not candidates:
         return candidates
 
     from src.utils.workers import submit_to_worker
@@ -405,8 +404,8 @@ def rank_candidates_by_acoustic_shift(
         prof = None
         try:
             prof = fut.result(timeout=6)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Acoustic profile worker failed for %r: %s", trk.title, e)
 
         if prof:
             trk.bpm = prof.get("bpm")
@@ -500,16 +499,14 @@ def listen_with_gemma_audio(
     Use gemma4:e4b's native mel-spectrogram audio encoder (`gemma4a`) in Ollama (`think=False`)
     to listen to the 30-second MP3 preview and describe its instruments, vocals, and mood/vibe.
     """
-    if hasattr(requests.post, "assert_called") or hasattr(requests.get, "assert_called"):
-        return None
-
     audio_bytes = mp3_bytes
     if not audio_bytes and preview_url:
         try:
             r = requests.get(preview_url, timeout=5)
             if r.status_code == 200:
                 audio_bytes = r.content
-        except Exception:
+        except Exception as e:
+            logger.debug("Gemma audio preview fetch failed for %r: %s", preview_url, e)
             return None
 
     if not audio_bytes:
@@ -569,5 +566,6 @@ def listen_with_gemma_audio(
             "vocals": vocals or "Detected in mix",
             "vibe": vibe or content.splitlines()[-1].strip(),
         }
-    except Exception:
+    except Exception as e:
+        logger.debug("Gemma audio inference failed for %r: %s", song, e)
         return None

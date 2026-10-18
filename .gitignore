@@ -1,8 +1,10 @@
-# Environment Variables & Secrets
+# Environment Variables, Secrets & Local Persona Config
 .env
 .env.*
 *.env
 !.env.example
+src/config.py
+!src/config.example.py
 
 # Python Bytecode, Compiles & Cache
 __pycache__/

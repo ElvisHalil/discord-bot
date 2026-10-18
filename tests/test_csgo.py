@@ -35,6 +35,8 @@ MOCK_LIQUIPEDIA_HTML = """
 class TestLiquipediaAggregator(unittest.TestCase):
 
     def setUp(self):
+        from src.skills.sports.aggregators.liquipedia import clear_liquipedia_cache
+        clear_liquipedia_cache()
         self.agg = LiquipediaAggregator()
 
     @patch("src.skills.sports.aggregators.liquipedia.fetch_json")
@@ -180,10 +182,12 @@ class TestCsgoSkill(unittest.TestCase):
         mock_csgo.assert_called_once_with(query_type="player_stats", player_url="whats falcons player current stats")
         self.assertEqual(res, "CS PLAYER STATS DATA")
 
+    @patch("src.skills.sports.aggregators.kashrock.KashrockAggregator.is_configured", return_value=False)
     @patch("src.skills.sports.aggregators.hltv.fetch_soup")
-    def test_hltv_aggregator_resolves_team_player_stats(self, mock_fetch_soup):
+    def test_hltv_aggregator_resolves_team_player_stats(self, mock_fetch_soup, _mock_kr):
         from bs4 import BeautifulSoup
-        from src.skills.sports.aggregators.hltv import HltvAggregator
+        from src.skills.sports.aggregators.hltv import HltvAggregator, clear_hltv_cache
+        clear_hltv_cache()
 
         rankings_html = """
         <div class="ranked-team">
@@ -324,8 +328,9 @@ class TestCsgoSkill(unittest.TestCase):
 
 class TestOdds(unittest.TestCase):
 
+    @patch("src.skills.sports.aggregators.kashrock.KashrockAggregator.is_configured", return_value=False)
     @patch("src.skills.sports.aggregators.odds.fetch_soup")
-    def test_odds_aggregator_hltv_parsing(self, mock_soup):
+    def test_odds_aggregator_hltv_parsing(self, mock_soup, _mock_kr):
         from src.skills.sports.aggregators.odds import OddsAggregator, decimal_to_american, implied_probability
         from bs4 import BeautifulSoup
 

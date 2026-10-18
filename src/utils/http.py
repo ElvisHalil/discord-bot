@@ -99,20 +99,9 @@ def _fetch_public(
     if headers:
         req_headers.update(headers)
 
-    is_mock = (
-        hasattr(cffi_requests.get, "assert_called")
-        or "MagicMock" in str(type(cffi_requests.get))
-        or hasattr(cffi_requests.head, "assert_called")
-        or "MagicMock" in str(type(cffi_requests.head))
-    )
-    sess = None if is_mock else _get_thread_session(impersonate)
-
     current = url
     for _ in range(MAX_REDIRECTS + 1):
-        if sess is not None:
-            func = sess.head if method.upper() == "HEAD" else sess.get
-        else:
-            func = cffi_requests.head if method.upper() == "HEAD" else cffi_requests.get
+        func = cffi_requests.head if method.upper() == "HEAD" else cffi_requests.get
         response = func(
             current,
             allow_redirects=False,

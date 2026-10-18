@@ -196,9 +196,11 @@ class TestSkillTopMusicSpectrumIntegration(unittest.TestCase):
     def setUp(self):
         clear_channel_played_songs()
 
+    @patch("src.skills.music.audio_analyzer.rank_candidates_by_acoustic_shift", side_effect=lambda pool, **kw: pool)
+    @patch("src.skills.music.audio_analyzer.get_track_acoustic_profile", return_value=None)
     @patch("src.skills.music.top_music._pre_resolve_top_candidate", return_value="")
     @patch("src.skills.music.top_music.manager")
-    def test_chained_notches_from_playing_song(self, mock_manager, _mock_pre):
+    def test_chained_notches_from_playing_song(self, mock_manager, _mock_pre, _mock_prof, _mock_rank):
         # 1. Simulate a song card being formatted in the channel ("Holocene" by "Bon Iver", Indie Folk -> mid_soft)
         format_song_card(
             song="Holocene",
@@ -218,7 +220,7 @@ class TestSkillTopMusicSpectrumIntegration(unittest.TestCase):
             return (known_genre, z)
 
         mock_manager.resolve_track_genre_and_zone.side_effect = fake_resolve
-        mock_manager.get_spectrum_tracks.side_effect = lambda target_zone, prefer_deep_cuts=False, exclude_query=None: [
+        mock_manager.get_spectrum_tracks.side_effect = lambda target_zone, prefer_deep_cuts=False, exclude_query=None, **kw: [
             Track(
                 title=f"Track in {target_zone['ui_zone']}",
                 artist=f"Artist {target_zone['ui_zone']}",
@@ -248,9 +250,11 @@ class TestSkillTopMusicSpectrumIntegration(unittest.TestCase):
         _, kwargs = mock_manager.get_spectrum_tracks.call_args
         self.assertTrue(kwargs.get("prefer_deep_cuts"))
 
+    @patch("src.skills.music.audio_analyzer.rank_candidates_by_acoustic_shift", side_effect=lambda pool, **kw: pool)
+    @patch("src.skills.music.audio_analyzer.get_track_acoustic_profile", return_value=None)
     @patch("src.skills.music.top_music._pre_resolve_top_candidate", return_value="")
     @patch("src.skills.music.top_music.manager")
-    def test_default_center_start_when_no_song_playing(self, mock_manager, _mock_pre):
+    def test_default_center_start_when_no_song_playing(self, mock_manager, _mock_pre, _mock_prof, _mock_rank):
         mock_manager.resolve_track_genre_and_zone.return_value = (None, None)
         mock_manager.get_spectrum_tracks.return_value = [
             Track(title=" Neon Drive ", artist="Kavinsky", source="Deezer", genre="Synthwave")

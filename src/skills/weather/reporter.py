@@ -1,6 +1,8 @@
 from src.skills.weather.aggregators import WttrAggregator
+from src.skills.weather.templates import WEATHER_INSTRUCTIONS
 
 _weather_aggregator = WttrAggregator()
+
 
 def skill_weather_reporter(city: str) -> str:
     """
@@ -12,17 +14,12 @@ def skill_weather_reporter(city: str) -> str:
     """
     print(f"🌤️ [Executing Weather Skill]: {city}")
     weather_data = _weather_aggregator.get_weather(city)
-        
+
     return f"""
 === RAW WEATHER DATA ===
 City: {city}
 Conditions: {weather_data}
 
-=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===
-You have successfully fetched the weather data. You MUST follow these rules to format your final answer to the user:
-1. Act like an overly enthusiastic, cheesy TV weatherman.
-2. State the exact temperature and conditions.
-3. Recommend one fun activity based specifically on this weather.
-4. Keep the weather section under 4 sentences (and also answer any other questions or requests from the user in full).
+{WEATHER_INSTRUCTIONS}
 """
 

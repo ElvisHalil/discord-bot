@@ -7,54 +7,50 @@ self-terminates once all tracked matches are over or hit the 4-hour safety timeo
 """
 
 import asyncio
-from contextvars import ContextVar
-from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import logging
 import re
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
+from src.context import (
+    ACTIVE_CHANNEL_ID,
+    bind_event_loop,
+    bind_tracker_event_loop,
+    get_active_channel_id,
+    get_bound_event_loop,
+    set_active_channel_id,
+)
+from src.utils.domain_vocab import has_non_sports_track_signal
 from src.skills.sports.aggregators.espn_utils import (
+    _CHANNEL_LAST_MATCH_QUERY,
     TEAM_ALIASES,
+    _clean_tracking_query,
+    cached_espn_get_many,
+    clear_channel_last_match_query,
     espn_search_auto_discover,
     extract_score_str,
+    record_channel_last_match_query,
     resolve_espn_team,
 )
+from src.skills.sports.aggregators.soccer import SoccerAggregator
+from src.skills.sports.aggregators.universal_espn import UniversalEspnAggregator
+from src.skills.sports.enums import (
+    MatchState,
+    TrackerAction,
+)
+from src.skills.sports.models import (
+    MatchSnapshot,
+    TrackedMatch,
+)
+from src.skills.sports.templates import build_live_tracker_instructions
 from src.utils.http import fetch_json
+from src.utils.workers import run_in_worker
 
-# Context variable set by main.py so LLM tool calls know which Discord channel invoked them
-ACTIVE_CHANNEL_ID: ContextVar[Optional[int]] = ContextVar("ACTIVE_CHANNEL_ID", default=None)
-_FALLBACK_CHANNEL_ID: Optional[int] = None
-# Per-channel memory of the last match/team inspected so "track this game" / "track the game" resolves automatically
-_CHANNEL_LAST_MATCH_QUERY: Dict[int, Tuple[str, Optional[str]]] = {}
+logger = logging.getLogger(__name__)
 
 SAFETY_TIMEOUT_SECONDS: int = 4 * 3600  # 4-hour maximum lifetime per tracked match
 DEFAULT_POLL_INTERVAL_SECONDS: int = 25
-
-
-def set_active_channel_id(channel_id: Optional[int]) -> None:
-    """Set the active channel ID for the current turn/thread."""
-    global _FALLBACK_CHANNEL_ID
-    ACTIVE_CHANNEL_ID.set(channel_id)
-    _FALLBACK_CHANNEL_ID = channel_id
-
-
-def get_active_channel_id() -> int:
-    """Retrieve the active channel ID (defaults to 0 in standalone unit tests)."""
-    cid = ACTIVE_CHANNEL_ID.get()
-    if cid is not None:
-        return cid
-    if _FALLBACK_CHANNEL_ID is not None:
-        return _FALLBACK_CHANNEL_ID
-    return 0
-
-
-def record_channel_last_match_query(query: str, sport: Optional[str] = None, channel_id: Optional[int] = None) -> None:
-    """Record the most recently discussed team or matchup in a channel."""
-    cleaned = _clean_tracking_query(query)
-    if not cleaned:
-        return
-    cid = channel_id if channel_id is not None else get_active_channel_id()
-    _CHANNEL_LAST_MATCH_QUERY[cid] = (query.strip(), sport)
 
 
 def get_channel_last_match_query(channel_id: Optional[int] = None) -> Tuple[str, Optional[str]]:
@@ -66,114 +62,6 @@ def get_channel_last_match_query(channel_id: Optional[int] = None) -> Tuple[str,
         if t_cid == cid:
             return (f"{m.home_team} vs {m.away_team}", m.sport_path)
     return ("", None)
-
-
-def clear_channel_last_match_query(channel_id: Optional[int] = None) -> None:
-    """Clear per-channel last match query state (for one channel if channel_id is given, else all)."""
-    if channel_id is not None:
-        _CHANNEL_LAST_MATCH_QUERY.pop(channel_id, None)
-    else:
-        _CHANNEL_LAST_MATCH_QUERY.clear()
-        set_active_channel_id(None)
-
-
-@dataclass
-class MatchSnapshot:
-    """Normalized state of a live or upcoming sports event at a single point in time."""
-    state: str = "pre"  # 'pre', 'in', 'post'
-    completed: bool = False
-    status_name: str = ""  # e.g. 'STATUS_IN_PROGRESS', 'STATUS_HALFTIME', 'STATUS_FINAL'
-    status_detail: str = "Scheduled"  # e.g. "33'", "HT", "Q2 04:12", "FT"
-    period: int = 0
-    home_team: str = "Home"
-    away_team: str = "Away"
-    home_score: str = "0"
-    away_score: str = "0"
-    notable_events: List[Tuple[str, str]] = field(default_factory=list)  # [(event_id, description)]
-    seen_event_ids: Set[str] = field(default_factory=set)
-    stats_summary: str = ""
-
-    @property
-    def is_halftime(self) -> bool:
-        det_upper = (self.status_detail or "").strip().upper()
-        name_upper = (self.status_name or "").strip().upper()
-        return (
-            "HALFTIME" in name_upper
-            or det_upper in ("HT", "HALFTIME", "HALF TIME", "HALF")
-            or "HALFTIME" in det_upper
-        )
-
-    @property
-    def is_period_end(self) -> bool:
-        det_upper = (self.status_detail or "").strip().upper()
-        name_upper = (self.status_name or "").strip().upper()
-        return "END_PERIOD" in name_upper or det_upper.startswith("END OF ")
-
-    @property
-    def is_finished(self) -> bool:
-        name_upper = (self.status_name or "").strip().upper()
-        return (
-            self.state == "post"
-            or self.completed
-            or name_upper in ("STATUS_FINAL", "STATUS_FULL_TIME", "STATUS_FINAL_AET", "STATUS_FINAL_PEN")
-        )
-
-    @property
-    def is_aborted(self) -> bool:
-        name_upper = (self.status_name or "").strip().upper()
-        return any(k in name_upper for k in ("POSTPONED", "CANCELED", "CANCELLED", "ABANDONED", "SUSPENDED"))
-
-
-@dataclass
-class TrackedMatch:
-    """Represents a live or upcoming match being actively monitored for a Discord channel."""
-    channel_id: int
-    sport_path: str
-    league_code: str
-    league_name: str
-    event_id: str
-    home_team: str
-    away_team: str
-    last_snapshot: MatchSnapshot
-    created_at: float = field(default_factory=time.time)
-    last_notified_score_diff: int = 0  # Used for high-scoring basketball swing throttling
-
-
-def _clean_tracking_query(query: str) -> str:
-    """Strip tracking/conversational/pronoun filler words and expand short club/team aliases."""
-    clean = (query or "").lower().strip()
-    for phrase in (
-        "can you track", "please track", "start tracking", "stop tracking",
-        "keep me updated on", "keep me posted on", "let me know when",
-        "live updates for", "live updates on", "track the", "watch the",
-        "monitor the", "follow the", "right now", "currently playing",
-        "this game", "that game", "the game", "this match", "that match", "the match",
-    ):
-        clean = re.sub(rf'\b{re.escape(phrase)}\b', ' ', clean, flags=re.IGNORECASE)
-    for word in (
-        "track", "tracking", "untrack", "watch", "monitor", "follow",
-        "live", "updates", "update", "score", "scores", "game", "games", "match", "matches",
-        "current", "currently", "playing", "today", "tonight", "next",
-        "the", "this", "that", "it", "same", "again", "now", "right",
-        "for", "on", "in", "please", "me", "us",
-    ):
-        clean = re.sub(rf'\b{re.escape(word)}\b', ' ', clean, flags=re.IGNORECASE)
-    clean = re.sub(r'[^\w\s]', ' ', clean)
-    clean = ' '.join(clean.split()).strip()
-    if not clean:
-        return ""
-
-    if clean in TEAM_ALIASES:
-        return TEAM_ALIASES[clean]
-    tokens = clean.split()
-    expanded = []
-    for t in tokens:
-        alias_val = TEAM_ALIASES.get(t, t)
-        if alias_val != t and alias_val in clean:
-            expanded.append(t)
-        else:
-            expanded.append(alias_val)
-    return " ".join(expanded)
 
 
 def extract_snapshot_from_summary(
@@ -424,10 +312,6 @@ def resolve_live_or_next_event(
         'snapshot': MatchSnapshot,
     }
     """
-    from datetime import datetime, timezone
-    from src.skills.sports.aggregators.soccer import SoccerAggregator
-    from src.skills.sports.aggregators.universal_espn import UniversalEspnAggregator
-
     target = _clean_tracking_query(query)
     if not target:
         return None
@@ -510,7 +394,7 @@ def resolve_live_or_next_event(
                     if eid and eid not in seen_ev_ids:
                         seen_ev_ids.add(eid)
                         events.append(ev)
-                if any((e.get("competitions") or [{}])[0].get("status", {}).get("type", {}).get("state") == "in" for e in events):
+                if any((e.get("competitions") or [{}])[0].get("status", {}).get("type", {}).get("state") == MatchState.IN for e in events):
                     break
         else:
             sched_data = fetch_json(
@@ -534,13 +418,13 @@ def resolve_live_or_next_event(
     for ev in events:
         comp = (ev.get("competitions") or [{}])[0]
         st = comp.get("status", {}).get("type", {}).get("state", "")
-        if st == "in":
+        if st == MatchState.IN:
             chosen_ev = ev
             break
     if not chosen_ev:
         pre_events = [
             ev for ev in events
-            if (ev.get("competitions") or [{}])[0].get("status", {}).get("type", {}).get("state", "") == "pre"
+            if (ev.get("competitions") or [{}])[0].get("status", {}).get("type", {}).get("state", "") == MatchState.PRE
         ]
         if pre_events:
             pre_events.sort(key=lambda e: e.get("date", "9999"))
@@ -560,7 +444,8 @@ def resolve_live_or_next_event(
     summary_url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{ev_league_slug}/summary?event={ev_id}"
     try:
         summary_data = fetch_json(summary_url, timeout=8) or {}
-    except Exception:
+    except Exception as e:
+        logger.debug("Summary fetch failed for %s: %s", summary_url, e)
         summary_data = {}
 
     snapshot = extract_snapshot_from_summary(summary_data, fallback_event=chosen_ev)
@@ -653,9 +538,9 @@ class LiveSportsTracker:
         if not active_items:
             return
 
-        # 2. Fetch fresh ESPN summaries concurrently across all tracked matches
+        # 2. Fetch fresh ESPN summaries concurrently across all tracked matches via shared worker pool
         responses = await asyncio.gather(
-            *(asyncio.to_thread(fetch_json, url, timeout=8) for _, _, url in active_items),
+            *(run_in_worker(fetch_json, url, timeout=8) for _, _, url in active_items),
             return_exceptions=True,
         )
 
@@ -701,6 +586,11 @@ class LiveSportsTracker:
         sport: Optional[str] = None,
     ) -> str:
         """Resolve and register a match for live tracking in channel_id."""
+        if query and has_non_sports_track_signal(query):
+            return (
+                f"⚠️ '{query}' appears to be a flight, music, or package tracking request rather than a sports game. "
+                "For commercial flights or route prices, use `skill_flights_info(action='track', ...)`."
+            )
         effective_query = query
         effective_sport = sport
         if not _clean_tracking_query(effective_query):
@@ -742,7 +632,7 @@ class LiveSportsTracker:
         self.ensure_loop_running()
 
         extra_details = ""
-        if snap.state == "in":
+        if snap.state == MatchState.IN:
             status_badge = (
                 f"🔴 LIVE IN PROGRESS RIGHT NOW (Current Match Clock: {snap.status_detail} — ONGOING, NOT FINISHED) — "
                 f"Live Score: **{snap.home_team} {snap.home_score} - {snap.away_score} {snap.away_team}**"
@@ -752,21 +642,9 @@ class LiveSportsTracker:
                 extra_details += f"\n• **Goals / Scoring Plays So Far:**\n{ev_lines}"
             if snap.stats_summary:
                 extra_details += f"\n• **Live Match Stats:** {snap.stats_summary}"
-            llm_instruction = (
-                f"\n\n=== CRITICAL INSTRUCTION FOR YOU (THE LLM) ===\n"
-                f"1. Live tracking is NOW ACTIVE and RUNNING in the background for {snap.home_team} vs {snap.away_team}.\n"
-                f"2. The match is CURRENTLY LIVE IN PROGRESS at {snap.status_detail} "
-                f"(Current Score: {snap.home_team} {snap.home_score} - {snap.away_score} {snap.away_team}). "
-                f"It is NOT over! Do NOT say the game ended at {snap.status_detail}, do NOT call {snap.home_score}-{snap.away_score} the 'final result', "
-                f"and do NOT say tracking stopped or ended immediately!\n"
-                f"3. Ignore any older scores or minutes from earlier messages in the conversation."
-            )
         else:
             status_badge = f"🕒 Scheduled ({snap.status_detail}) — **{snap.away_team} @ {snap.home_team}**"
-            llm_instruction = (
-                f"\n\n=== CRITICAL INSTRUCTION FOR YOU (THE LLM) ===\n"
-                f"1. Live tracking is NOW ACTIVE and RUNNING in the background for {snap.home_team} vs {snap.away_team}."
-            )
+        llm_instruction = build_live_tracker_instructions(snap)
         return (
             f"📡 **LIVE MATCH TRACKER ACTIVATED**\n"
             f"• **Match:** {snap.home_team} vs {snap.away_team} ({info['league_name']})\n"
@@ -805,8 +683,6 @@ class LiveSportsTracker:
         if not matches:
             return "ℹ️ No live matches are currently being tracked in this channel."
 
-        from src.skills.sports.aggregators.espn_utils import cached_espn_get_many
-
         req_list = [
             (
                 f"https://site.api.espn.com/apis/site/v2/sports/{m.sport_path}/{m.league_code}/summary?event={m.event_id}",
@@ -822,8 +698,8 @@ class LiveSportsTracker:
             if summary_data and summary_data.get("header"):
                 try:
                     s = extract_snapshot_from_summary(summary_data)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to extract snapshot in list_tracked: %s", e)
             lines.append(
                 f"• **{m.home_team} {s.home_score} - {s.away_score} {m.away_team}** "
                 f"({m.league_name}) — Status: `{s.status_detail}`"
@@ -836,7 +712,7 @@ LIVE_TRACKER = LiveSportsTracker()
 
 def skill_track_live_game(
     query: str = "",
-    action: Optional[str] = "start",
+    action: Optional[str] = TrackerAction.START,
     sport: Optional[str] = None,
 ) -> str:
     """
@@ -851,27 +727,19 @@ def skill_track_live_game(
         sport: Optional sport or league hint (e.g. 'soccer', 'ucl', 'nba', 'nhl', 'nfl').
     """
     channel_id = get_active_channel_id()
-    act = (action or "start").strip().lower()
+    act = (action or TrackerAction.START).strip().lower()
 
-    if act in ("stop", "untrack", "cancel", "remove", "end"):
+    if act in (TrackerAction.STOP, "untrack", "cancel", "remove", "end"):
         return LIVE_TRACKER.stop_tracking(channel_id, query=query)
-    if act in ("list", "status", "active", "show"):
+    if act in (TrackerAction.LIST, "status", "active", "show"):
         return LIVE_TRACKER.list_tracked(channel_id)
 
     res = LIVE_TRACKER.start_tracking(channel_id, query=query, sport=sport)
     # Schedule the polling loop on the main Discord event loop if called from a worker thread
-    if _MAIN_EVENT_LOOP is not None and LIVE_TRACKER.tracked_matches:
+    bound_loop = get_bound_event_loop()
+    if bound_loop is not None and LIVE_TRACKER.tracked_matches:
         try:
-            _MAIN_EVENT_LOOP.call_soon_threadsafe(LIVE_TRACKER.ensure_loop_running)
-        except Exception:
+            bound_loop.call_soon_threadsafe(LIVE_TRACKER.ensure_loop_running)
+        except RuntimeError:
             pass
     return res
-
-
-_MAIN_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
-
-
-def bind_tracker_event_loop(loop: asyncio.AbstractEventLoop) -> None:
-    """Bind the main Discord asyncio event loop so worker threads can wake up the polling task."""
-    global _MAIN_EVENT_LOOP
-    _MAIN_EVENT_LOOP = loop

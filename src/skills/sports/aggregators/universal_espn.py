@@ -22,103 +22,13 @@ from src.skills.sports.aggregators.espn_utils import (
 )
 
 
+from src.skills.sports.catalogs import UNIVERSAL_SPORT_LEAGUE_REGISTRY
+
+
 class UniversalEspnAggregator(BaseSportsAggregator):
     """Generic ESPN aggregator supporting any sport, league, team, or athlete."""
 
-    SPORT_LEAGUE_REGISTRY: Dict[str, Dict[str, Any]] = {
-        "nfl": {
-            "sport": "football",
-            "league": "nfl",
-            "label": "NFL Football",
-            "icon": "🏈",
-            "aliases": [
-                "nfl", "national football league", "super bowl", "touchdown", "quarterback",
-                "chiefs", "eagles", "cowboys", "49ers", "niners", "ravens", "bills", "lions",
-                "packers", "bengals", "texans", "steelers", "jets", "giants", "patriots",
-                "dolphins", "chargers", "raiders", "broncos", "seahawks", "rams", "cardinals",
-                "falcons", "saints", "buccaneers", "bucs", "panthers", "bears", "vikings",
-                "commanders", "browns", "colts", "jaguars", "titans",
-            ],
-        },
-        "ncaaf": {
-            "sport": "football",
-            "league": "college-football",
-            "label": "NCAA College Football",
-            "icon": "🏈",
-            "aliases": [
-                "ncaaf", "college football", "cfb", "heisman", "crimson tide", "longhorns",
-                "buckeyes", "wolverines", "bulldogs", "fighting irish", "sooners", "oregon ducks",
-            ],
-        },
-        "mlb": {
-            "sport": "baseball",
-            "league": "mlb",
-            "label": "MLB Baseball",
-            "icon": "⚾",
-            "aliases": [
-                "mlb", "baseball", "world series", "home run", "innings",
-                "yankees", "dodgers", "red sox", "blue jays", "mets", "astros", "braves",
-                "phillies", "padres", "cubs", "cardinals", "orioles", "guardians", "twins",
-                "mariners", "rangers", "diamondbacks", "d-backs", "brewers", "reds", "pirates",
-                "royals", "tigers", "white sox", "angels", "athletics", "marlins", "nationals", "rockies",
-            ],
-        },
-        "wnba": {
-            "sport": "basketball",
-            "league": "wnba",
-            "label": "WNBA Basketball",
-            "icon": "🏀",
-            "aliases": [
-                "wnba", "indiana fever", "las vegas aces", "new york liberty", "minnesota lynx",
-                "connecticut sun", "seattle storm", "chicago sky", "caitlin clark", "aja wilson",
-            ],
-        },
-        "ncaab": {
-            "sport": "basketball",
-            "league": "mens-college-basketball",
-            "label": "NCAA Men's College Basketball",
-            "icon": "🏀",
-            "aliases": [
-                "ncaab", "college basketball", "march madness", "final four", "duke blue devils",
-                "kansas jayhawks", "kentucky wildcats", "uconn huskies", "unc tar heels",
-            ],
-        },
-        "ufc": {
-            "sport": "mma",
-            "league": "ufc",
-            "label": "UFC / MMA",
-            "icon": "🥊",
-            "aliases": [
-                "ufc", "mma", "mixed martial arts", "fight night", "octagon",
-                "makhachev", "pereira", "topuria", "jones", "adesanya", "chimaev",
-                "holloway", "oliveira", "omalley", "o'malley", "dvalishvili", "strickland", "du plessis",
-            ],
-        },
-        "atp": {
-            "sport": "tennis",
-            "league": "atp",
-            "label": "ATP Tennis",
-            "icon": "🎾",
-            "aliases": [
-                "tennis", "atp", "wimbledon", "us open tennis", "roland garros", "french open",
-                "australian open", "alcaraz", "sinner", "djokovic", "zverev", "medvedev",
-            ],
-        },
-        "wta": {
-            "sport": "tennis",
-            "league": "wta",
-            "label": "WTA Tennis",
-            "icon": "🎾",
-            "aliases": ["wta", "swiatek", "sabalenka", "gauff", "rybakina"],
-        },
-        "pga": {
-            "sport": "golf",
-            "league": "pga",
-            "label": "PGA Tour Golf",
-            "icon": "⛳",
-            "aliases": ["pga", "golf", "masters tournament", "scheffler", "mcilroy", "rahm", "schauffele"],
-        },
-    }
+    SPORT_LEAGUE_REGISTRY = UNIVERSAL_SPORT_LEAGUE_REGISTRY
 
     SPORT_ICONS = {
         "football": "🏈",

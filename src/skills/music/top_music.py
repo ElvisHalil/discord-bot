@@ -1,32 +1,29 @@
 import random
 from typing import Optional
+
+from src.skills.music import audio_analyzer
 from src.skills.music.aggregators.manager import MusicAggregatorManager
-from src.skills.music.moods import parse_mood_and_genre
 from src.skills.music.models import Track
+from src.skills.music.moods import parse_mood_and_genre
 from src.skills.music.playback.youtube_music import resolve_youtube_music_link
-from src.skills.music.utils import MUSIC_METADATA_CACHE
-from src.skills.music.templates import SONG_TEMPLATE
+from src.skills.music.spectrum import (
+    get_channel_last_played_song,
+    has_non_music_domain_context,
+    parse_spectrum_shift,
+    record_channel_played_song,
+    step_spectrum_zone,
+)
+from src.skills.music.templates import SONG_TEMPLATE, build_music_llm_instructions
+from src.skills.music.utils import (
+    MUSIC_METADATA_CACHE,
+    RECENTLY_PLAYED_TRACKS,
+    _norm_track_token,
+    is_recently_played,
+    parse_song_meta,
+    record_played_track,
+)
 
 manager = MusicAggregatorManager()
-
-
-def _is_manager_mocked() -> bool:
-    """Detects if `manager` or its methods are mocked in unit tests so offline tests skip live YT lookups."""
-    if hasattr(resolve_youtube_music_link, "assert_called"):
-        return False
-    return (
-        hasattr(manager, "assert_called")
-        or hasattr(manager.get_top_charts, "assert_called")
-        or hasattr(manager.get_similar_tracks, "assert_called")
-        or hasattr(manager.get_mood_tracks, "assert_called")
-        or hasattr(manager.get_artist_tracks, "assert_called")
-        or hasattr(manager.get_spectrum_tracks, "assert_called")
-        or any(
-            hasattr(getattr(agg, "get_similar", None), "assert_called")
-            or hasattr(getattr(agg, "get_charts", None), "assert_called")
-            for agg in getattr(manager, "aggregators", {}).values()
-        )
-    )
 
 
 def _pre_resolve_top_candidate(
@@ -40,10 +37,8 @@ def _pre_resolve_top_candidate(
     (trying up to 4 candidates if one has Discord embedding disabled by its label).
     Eliminates an entire extra LLM tool-call round-trip on single-song discovery requests.
     """
-    if not candidates or _is_manager_mocked():
+    if not candidates:
         return ""
-
-    from src.skills.music.utils import is_recently_played, record_played_track, RECENTLY_PLAYED_TRACKS, _norm_track_token
 
     # Filter out any tracks that have already been played in this session, and deprioritize the last played artist
     last_artist = RECENTLY_PLAYED_TRACKS[-1][1] if RECENTLY_PLAYED_TRACKS else ""
@@ -55,7 +50,7 @@ def _pre_resolve_top_candidate(
     ordered_candidates = fresh_diff_artist or fresh_any or candidates
 
     best_fallback = None
-    for idx, cand in enumerate(ordered_candidates[:4]):
+    for cand in ordered_candidates[:4]:
         # If we already have an official fallback that satisfied the tempo shift, don't let a slower/faster
         # runner-up that violates the tempo shift override it.
         if best_fallback is not None and anchor_bpm is not None and cand.bpm is not None:
@@ -91,9 +86,6 @@ def _pre_resolve_top_candidate(
 
 
 def _format_pre_resolved_entry(cand: Track, r: dict, ui_zone: Optional[str] = None) -> str:
-    from src.skills.music.utils import record_played_track
-    from src.skills.music.spectrum import record_channel_played_song
-
     record_played_track(cand.title, cand.artist)
     record_played_track(r["title"], r["artist"])
     vid = r.get("id")
@@ -151,15 +143,6 @@ def skill_top_music(
         mood: Mood or vibe keyword, e.g. 'banger', 'melodic', 'hard', 'dark', 'chill', 'sad', 'love', 'workout'.
         shift: Relative 1-notch tempo/intensity adjustment from the current song: 'harder', 'softer', 'faster', or 'slower'.
     """
-    from src.skills.music.spectrum import (
-        parse_spectrum_shift,
-        has_non_music_domain_context,
-        step_spectrum_zone,
-        get_channel_last_played_song,
-        record_channel_played_song,
-    )
-    from src.skills.music.utils import parse_song_meta, _norm_track_token
-
     # Detect if a 1-notch spectrum shift ('harder', 'softer', 'faster', 'slower') was requested
     # via `shift`, or passed by a small model inside `mood` or `genre` when no specific genre is given.
     shift_raw = (shift or "").strip()
@@ -237,32 +220,29 @@ def skill_top_music(
             )
 
             anchor_profile = None
-            if not _is_manager_mocked():
-                try:
-                    from src.skills.music.audio_analyzer import get_track_acoustic_profile
-                    if seed_song:
-                        anchor_profile = get_track_acoustic_profile(seed_song, seed_artist)
-                        if not anchor_profile and matched_last_played and last_played and last_played.get("alt_song"):
-                            anchor_profile = get_track_acoustic_profile(last_played["alt_song"], seed_artist)
-                    if matched_last_played and last_played and last_played.get("bpm"):
-                        if anchor_profile is None:
-                            anchor_profile = {
-                                "bpm": float(last_played["bpm"]),
-                                "speed_score": float(last_played.get("speed_score") or 5.5),
-                                "intensity_score": float(last_played.get("intensity_score") or 5.5),
-                                "gain_db": float(last_played.get("gain_db") or -9.0),
-                            }
-                        else:
-                            # Preserve previously verified BPM/scores if this turn matched last_played
-                            anchor_profile["bpm"] = float(last_played["bpm"])
-                            if last_played.get("speed_score") is not None:
-                                anchor_profile["speed_score"] = float(last_played["speed_score"])
-                            if last_played.get("intensity_score") is not None:
-                                anchor_profile["intensity_score"] = float(last_played["intensity_score"])
-                    if anchor_profile is not None:
-                        anchor_profile["genre"] = resolved_genre or seed_genre
-                except Exception as e:
-                    print(f"  └─ ⚠️ [Spectrum Anchor Profile]: {e}")
+            try:
+                if seed_song:
+                    anchor_profile = audio_analyzer.get_track_acoustic_profile(seed_song, seed_artist)
+                    if not anchor_profile and matched_last_played and last_played and last_played.get("alt_song"):
+                        anchor_profile = audio_analyzer.get_track_acoustic_profile(last_played["alt_song"], seed_artist)
+                if matched_last_played and last_played and last_played.get("bpm"):
+                    if anchor_profile is None:
+                        anchor_profile = {
+                            "bpm": float(last_played["bpm"]),
+                            "speed_score": float(last_played.get("speed_score") or 5.5),
+                            "intensity_score": float(last_played.get("intensity_score") or 5.5),
+                            "gain_db": float(last_played.get("gain_db") or -9.0),
+                        }
+                    else:
+                        anchor_profile["bpm"] = float(last_played["bpm"])
+                        if last_played.get("speed_score") is not None:
+                            anchor_profile["speed_score"] = float(last_played["speed_score"])
+                        if last_played.get("intensity_score") is not None:
+                            anchor_profile["intensity_score"] = float(last_played["intensity_score"])
+                if anchor_profile is not None:
+                    anchor_profile["genre"] = resolved_genre or seed_genre
+            except Exception as e:
+                print(f"  └─ ⚠️ [Spectrum Anchor Profile]: {e}")
 
             exclude_q = f"{seed_song} by {seed_artist}" if seed_song and seed_artist else None
             try:
@@ -284,7 +264,6 @@ def skill_top_music(
             if not all_tracks:
                 return f"No tracks found for spectrum zone '{target_zone_name}'."
 
-            from src.skills.music.utils import is_recently_played
             fresh_tracks = [t for t in all_tracks if not is_recently_played(t.title, t.artist)]
             source_tracks = fresh_tracks or all_tracks
 
@@ -299,18 +278,16 @@ def skill_top_music(
             random.shuffle(featured_diverse)
             candidate_pool = featured_diverse or source_tracks
 
-            if not _is_manager_mocked():
-                try:
-                    from src.skills.music.audio_analyzer import rank_candidates_by_acoustic_shift
-                    candidate_pool = rank_candidates_by_acoustic_shift(
-                        candidate_pool,
-                        d_tempo=d_tempo,
-                        d_intensity=d_intensity,
-                        anchor_profile=anchor_profile,
-                        max_analyze=14,
-                    )
-                except Exception as e:
-                    print(f"  └─ ⚠️ [Spectrum Acoustic Re-Ranker]: {e}")
+            try:
+                candidate_pool = audio_analyzer.rank_candidates_by_acoustic_shift(
+                    candidate_pool,
+                    d_tempo=d_tempo,
+                    d_intensity=d_intensity,
+                    anchor_profile=anchor_profile,
+                    max_analyze=14,
+                )
+            except Exception as e:
+                print(f"  └─ ⚠️ [Spectrum Acoustic Re-Ranker]: {e}")
 
             top_sample = candidate_pool[:15]
             pre_resolved = _pre_resolve_top_candidate(
@@ -373,13 +350,11 @@ def skill_top_music(
             for t in top_sample:
                 output += t.display_line() + "\n"
 
-            output += (
-                "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-                "Briefly mention how you adjusted the vibe 1 notch "
-                f"({shift_label} -> {target_zone['tempo']} tempo, {target_zone['intensity']} intensity: {styles_preview}).\n"
-                "CRITICAL: If `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, "
-                "you MUST present THAT EXACT Song, Artist, and Link immediately using the template below—do NOT pick a different track from the list and do NOT call `skill_youtube_searcher` again!\n\n"
-                + SONG_TEMPLATE
+            output += build_music_llm_instructions(
+                shift_note=(
+                    f"Briefly mention how you adjusted the vibe 1 notch "
+                    f"({shift_label} -> {target_zone['tempo']} tempo, {target_zone['intensity']} intensity: {styles_preview})."
+                )
             )
             return output
 
@@ -392,8 +367,7 @@ def skill_top_music(
 
             random.shuffle(tracks)
             top_sample = tracks[:15]
-            header = f"=== TOP TRACKS BY '{artist.title()}' ===\n\n"
-            output = header
+            output = f"=== TOP TRACKS BY '{artist.title()}' ===\n\n"
             pre_resolved = _pre_resolve_top_candidate(top_sample)
             if pre_resolved:
                 output += pre_resolved + "\n"
@@ -401,13 +375,7 @@ def skill_top_music(
             for t in top_sample:
                 output += t.display_line() + "\n"
 
-            output += (
-                "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-                "CRITICAL: If the user asked for a single song and `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, "
-                "you MUST present THAT EXACT Song, Artist, and Link immediately using the template below—do NOT pick a different track from the list and do NOT call `skill_youtube_searcher` again! "
-                "Only call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` if the user explicitly asked for multiple songs.\n\n"
-                + SONG_TEMPLATE
-            )
+            output += build_music_llm_instructions()
             return output
         except Exception as e:
             return f"Error finding tracks for artist '{artist}': {e}"
@@ -436,7 +404,6 @@ def skill_top_music(
             if not tracks:
                 return f"No similar songs found for '{similar_to}'."
 
-            # Deduplicate by title & artist and prioritize artist diversity
             seen = set()
             unique_tracks = []
             for t in tracks:
@@ -464,24 +431,9 @@ def skill_top_music(
             for t in top_sample:
                 output += t.display_line() + "\n"
 
-            if is_unrelated_fallback:
-                output += (
-                    "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-                    f"IMPORTANT: No directly related songs were found for '{similar_to}'. "
-                    "Clearly let the user know that you couldn't find any directly related songs for that track, "
-                    "and suggest ONE track from above that they might like instead. "
-                    "If `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, present THAT EXACT track and its Link immediately without calling `skill_youtube_searcher` again; "
-                    "otherwise call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)`.\n\n"
-                    + SONG_TEMPLATE
-                )
-            else:
-                output += (
-                    "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-                    "CRITICAL: If the user asked for a single song and `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, "
-                    "you MUST present THAT EXACT Song, Artist, and Link immediately using the template below—do NOT pick a different track from the list and do NOT call `skill_youtube_searcher` again! "
-                    "Only call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` if the user explicitly asked for multiple songs.\n\n"
-                    + SONG_TEMPLATE
-                )
+            output += build_music_llm_instructions(
+                unrelated_seed=similar_to if is_unrelated_fallback else None
+            )
             return output
         except Exception as e:
             return f"Error finding similar songs: {e}"
@@ -496,7 +448,6 @@ def skill_top_music(
             all_tracks = manager.get_top_charts(genre=parsed_genre)
             output = f"=== TODAY'S TOP CHARTING MUSIC ({parsed_genre.upper() if parsed_genre else 'ALL GENRES'}) ===\n\n"
         if all_tracks:
-            # Featured diverse selection (max 1 track per artist, randomized across all providers)
             artist_seen = set()
             featured_diverse = []
             for t in all_tracks:
@@ -519,15 +470,7 @@ def skill_top_music(
         else:
             output += "No charting music found.\n"
 
-        output += (
-            "=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-            "Present these recommendations to the user naturally.\n"
-            "CRITICAL: If the user asked for a single song and `=== VERIFIED YOUTUBE MUSIC RESULT ===` is provided above, "
-            "you MUST present THAT EXACT Song, Artist, and Link immediately using the template below—do NOT pick a different track from the list and do NOT call `skill_youtube_searcher` again!\n"
-            "Only call `skill_youtube_searcher(query='<Song Title> by <Artist Name>', is_music=True)` if the user explicitly asked for multiple songs or if no pre-resolved link is shown above.\n\n"
-            + SONG_TEMPLATE
-        )
+        output += build_music_llm_instructions()
         return output
     except Exception as e:
         return f"Error fetching top music: {e}"
-

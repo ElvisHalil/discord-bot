@@ -2,6 +2,8 @@ import re
 from collections import defaultdict, deque
 import requests
 
+from src.context import get_active_channel_id
+
 # Global in-memory cache of resolved music metadata
 MUSIC_METADATA_CACHE = {}
 
@@ -21,11 +23,7 @@ RECENTLY_PLAYED_TRACKS = _ChannelAwareDeque(maxlen=30)
 
 def _get_music_channel_deque(channel_id: int = None) -> deque:
     if channel_id is None:
-        try:
-            from src.skills.sports.live_tracker import get_active_channel_id
-            channel_id = get_active_channel_id()
-        except Exception:
-            channel_id = 0
+        channel_id = get_active_channel_id()
     if not channel_id:
         return RECENTLY_PLAYED_TRACKS
     return _CHANNEL_RECENTLY_PLAYED_TRACKS[channel_id]

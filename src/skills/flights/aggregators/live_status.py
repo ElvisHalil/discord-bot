@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import logging
 import math
 import re
 from types import SimpleNamespace
@@ -7,8 +8,11 @@ from zoneinfo import ZoneInfo
 
 from FlightRadarAPI import FlightRadar24API
 
+from src.skills.flights.enums import FlightState
 from src.utils.http import fetch_json
 from src.utils.timezones import get_local_now
+
+logger = logging.getLogger(__name__)
 
 
 class LiveFlightStatusAggregator:
@@ -41,10 +45,9 @@ class LiveFlightStatusAggregator:
         if not ts or not isinstance(ts, (int, float)) or ts <= 0:
             return "TBD"
         try:
-            from datetime import timedelta as _td
             utc_dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
             if tz_offset is not None and isinstance(tz_offset, (int, float)):
-                loc_dt = utc_dt.astimezone(timezone(_td(seconds=int(tz_offset))))
+                loc_dt = utc_dt.astimezone(timezone(timedelta(seconds=int(tz_offset))))
                 abbr = tz_abbr or "Local"
                 return f"{loc_dt.strftime('%a %b %d, %I:%M %p').replace(' 0', ' ')} {abbr}"
             if tz_name:
@@ -52,12 +55,13 @@ class LiveFlightStatusAggregator:
                     loc_dt = utc_dt.astimezone(ZoneInfo(tz_name))
                     abbr = tz_abbr or loc_dt.strftime("%Z")
                     return f"{loc_dt.strftime('%a %b %d, %I:%M %p').replace(' 0', ' ')} {abbr}"
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"ZoneInfo conversion failed for {tz_name}: {e}")
             loc_dt = get_local_now(now=utc_dt)
             abbr = tz_abbr or loc_dt.strftime("%Z") or "Local"
             return f"{loc_dt.strftime('%a %b %d, %I:%M %p').replace(' 0', ' ')} {abbr}"
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Timestamp formatting failed for {ts}: {e}")
             return "TBD"
 
     @staticmethod
@@ -164,9 +168,10 @@ class LiveFlightStatusAggregator:
                         flight_id = str(cand_id)
                         try:
                             live_detail = self.fr_api.get_flight_details(SimpleNamespace(id=flight_id))
-                        except Exception:
-                            pass
-            except Exception:
+                        except Exception as e:
+                            logger.debug(f"FlightRadar24 get_flight_details failed for {flight_id}: {e}")
+            except Exception as e:
+                logger.debug(f"FlightRadar24 schedule list lookup failed for {norm_code}: {e}")
                 schedule_item = None
 
         source_doc = live_detail or schedule_item
@@ -251,16 +256,16 @@ class LiveFlightStatusAggregator:
 
         st_low = f"{status_text} {generic_status}".lower()
         if "cancel" in st_low:
-            state = "cancelled"
+            state = FlightState.CANCELLED
         elif "divert" in st_low:
-            state = "diverted"
+            state = FlightState.DIVERTED
         elif "landed" in st_low or real_block.get("arrival"):
-            state = "landed"
+            state = FlightState.LANDED
             is_live = False
         elif is_live or real_block.get("departure"):
-            state = "airborne"
+            state = FlightState.AIRBORNE
         else:
-            state = "scheduled"
+            state = FlightState.SCHEDULED
 
         # Trail / telemetry from FR24
         trail = (live_detail or {}).get("trail") or []
@@ -276,8 +281,8 @@ class LiveFlightStatusAggregator:
         # Stage 2: Enrich with ADSB.lol live transponder telemetry
         adsb_ac = self._query_adsb_lol(callsign=callsign, registration=registration)
         if adsb_ac:
-            if state == "scheduled" and adsb_ac.get("alt_baro") not in (None, "ground"):
-                state = "airborne"
+            if state == FlightState.SCHEDULED and adsb_ac.get("alt_baro") not in (None, "ground"):
+                state = FlightState.AIRBORNE
                 is_live = True
             if adsb_ac.get("alt_baro") not in (None, "ground"):
                 altitude_ft = int(adsb_ac["alt_baro"])
@@ -320,8 +325,8 @@ class LiveFlightStatusAggregator:
                     )
                     if tot_d > 50:
                         pct_complete = max(0, min(100, int(round(100.0 * (1.0 - rem_d / tot_d)))))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Route progress calculation failed for {flight_number}: {e}")
 
         fr24_url = (
             f"https://www.flightradar24.com/data/flights/{flight_number.lower()}"
@@ -389,11 +394,11 @@ class LiveFlightStatusAggregator:
             )
 
         state_badge = {
-            "airborne": "🟢 EN ROUTE / AIRBORNE (LIVE RADAR)",
-            "landed": "🏁 LANDED",
-            "scheduled": "🕒 SCHEDULED",
-            "cancelled": "🛑 CANCELLED",
-            "diverted": "⚠️ DIVERTED",
+            FlightState.AIRBORNE: "🟢 EN ROUTE / AIRBORNE (LIVE RADAR)",
+            FlightState.LANDED: "🏁 LANDED",
+            FlightState.SCHEDULED: "🕒 SCHEDULED",
+            FlightState.CANCELLED: "🛑 CANCELLED",
+            FlightState.DIVERTED: "⚠️ DIVERTED",
         }.get(snap["state"], snap["status_text"].upper())
 
         delay_str = ""

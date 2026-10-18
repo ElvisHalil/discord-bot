@@ -1,6 +1,7 @@
 import calendar
-from datetime import datetime, timedelta
+from datetime import date as _date, datetime, timedelta
 import json
+import logging
 import re
 import time
 from typing import Any, Optional
@@ -12,14 +13,17 @@ import primp
 from selectolax.lexbor import LexborHTMLParser
 
 from src.skills.flights.airports import (
-    NEARBY_HUB_AIRPORTS,
-    ORIGIN_INTERNATIONAL_GATEWAYS,
     parse_route_from_query,
     resolve_airport,
+)
+from src.skills.flights.catalogs import (
+    NEARBY_HUB_AIRPORTS,
+    ORIGIN_INTERNATIONAL_GATEWAYS,
 )
 from src.utils.timezones import get_local_now
 from src.utils.workers import SUB_WORKER_POOL, submit_to_worker
 
+logger = logging.getLogger(__name__)
 _PROBE_EXECUTOR = SUB_WORKER_POOL
 
 
@@ -159,8 +163,8 @@ class GoogleFlightsPriceAggregator:
                         insights["history_min_60d"] = min(hist_prices)
                         insights["history_max_60d"] = max(hist_prices)
                         insights["history_avg_60d"] = round(sum(hist_prices) / len(hist_prices))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to parse Google Flights price insights: {e}")
 
         return all_flights, insights
 
@@ -221,8 +225,8 @@ class GoogleFlightsPriceAggregator:
                 mns_arr = json.loads(m_mns.group(1))
                 if isinstance(mns_arr, list) and len(mns_arr) > 7 and mns_arr[7] is not None:
                     bgr_token = str(mns_arr[7])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to parse mnsUbf BotGuard token: {e}")
 
         token = None
         try:
@@ -377,10 +381,9 @@ class GoogleFlightsPriceAggregator:
         max_layover_mins = 0
         if len(legs) > 1:
             try:
-                from datetime import datetime as _dt
                 for i in range(len(legs) - 1):
-                    arr_dt = _dt(*legs[i].arrival.date, *legs[i].arrival.time)
-                    dep_dt = _dt(*legs[i + 1].departure.date, *legs[i + 1].departure.time)
+                    arr_dt = datetime(*legs[i].arrival.date, *legs[i].arrival.time)
+                    dep_dt = datetime(*legs[i + 1].departure.date, *legs[i + 1].departure.time)
                     gap = int((dep_dt - arr_dt).total_seconds() // 60)
                     if 10 <= gap <= 1440:
                         layover_mins += gap
@@ -394,10 +397,9 @@ class GoogleFlightsPriceAggregator:
         arr_str = cls._format_hm(last_leg.arrival.time)
         day_diff = 0
         try:
-            from datetime import date as _date
             day_diff = (_date(*last_leg.arrival.date) - _date(*first_leg.departure.date)).days
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Itinerary day_diff calculation failed: {e}")
         if day_diff > 0:
             arr_str += f" (+{day_diff}d)"
 
@@ -640,7 +642,7 @@ class GoogleFlightsPriceAggregator:
                                 p_val = int(price_info[0][1])
                                 if p_val > 0:
                                     out.append((p_val, dep_d, ret_d))
-                            except Exception:
+                            except (ValueError, TypeError):
                                 pass
             return out
 
@@ -657,7 +659,8 @@ class GoogleFlightsPriceAggregator:
             if not rows and not (seed_ret_date and return_start_date and return_end_date):
                 raw_cal = self._post_google_flights_rpc("GetCalendarPicker", ctx["params"], ctx["headers"], cal_req)
                 rows = _parse_cal_rows(raw_cal)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"GetCalendarPicker RPC failed: {e}")
             rows = []
 
         # If a return month window was also specified (e.g. May 2027 <-> August 2027),
@@ -685,8 +688,8 @@ class GoogleFlightsPriceAggregator:
                         if (dep_d, ret_d) not in seen_pairs:
                             seen_pairs.add((dep_d, ret_d))
                             rows.append((p_val, dep_d, ret_d))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"GetCalendarPicker return-window RPC failed: {e}")
 
         rows.sort(key=lambda x: (x[0], x[1], x[2] or ""))
         return rows
@@ -863,8 +866,8 @@ class GoogleFlightsPriceAggregator:
                 ns = res.get("lowest_nonstop")
                 if ns:
                     found.append((dt_s, ns))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Nearby direct probe failed for {dt_s}: {e}")
         found.sort(key=lambda x: (x[1]["price"], x[0]))
         return found
 
@@ -995,8 +998,8 @@ class GoogleFlightsPriceAggregator:
     ) -> list[str]:
         """
         When a date or window is >6 months out (beyond Google Flights' married-segment horizon for
-        1-stop interline/codeshare connections like YEG -> AMS -> ZAG), probes the origin's
-        known international nonstop gateways (e.g. Amsterdam AMS, Frankfurt FRA) to verify
+        1-stop interline/codeshare connections), probes the origin's
+        known international nonstop gateways (e.g. London LHR, Frankfurt FRA) to verify
         whether the individual nonstop legs (Outbound: Origin -> Hub -> Dest, and Return:
         Dest -> Hub -> Origin) are already published and bookable in that future window.
         """
@@ -1012,7 +1015,7 @@ class GoogleFlightsPriceAggregator:
             base_dt = (get_local_now() + timedelta(days=30)).date()
 
         # Align with Tuesday (weekday == 1) inside the target window so 5x-weekly transatlantic
-        # nonstop routes (like KLM YEG -> AMS on Tue/Thu/Fri/Sat/Sun) are reliably hit
+        # nonstop routes (e.g. operating on Tue/Thu/Fri/Sat/Sun) are reliably hit
         days_to_tue = (1 - base_dt.weekday()) % 7
         dep_dt = base_dt + timedelta(days=days_to_tue)
         dep_date_s = dep_dt.strftime("%Y-%m-%d")
@@ -1410,13 +1413,8 @@ class GoogleFlightsPriceAggregator:
             for dt_s in date_list
         ]
 
-        # When running against live Google Flights (or when fetch_calendar_prices is explicitly patched),
-        # use GetCalendarPicker to discover the lowest-priced date pairs across the entire month/window first.
-        use_calendar_rpc = (
-            not hasattr(self.fetch_structured_fares, "_mock_name")
-            or hasattr(self.fetch_calendar_prices, "_mock_name")
-        )
-        if use_calendar_rpc and len(date_list) >= 10:
+        # Use GetCalendarPicker to discover the lowest-priced date pairs across the entire month/window first.
+        if len(date_list) >= 10:
             cal_end_date = end_date
             if s_dt.day == 1 and e_dt.day >= 20:
                 last_m_day = calendar.monthrange(s_dt.year, s_dt.month)[1]
@@ -1462,7 +1460,7 @@ class GoogleFlightsPriceAggregator:
                     selected_pairs.append(pair)
                     try:
                         seen_weekdays.add(datetime.strptime(dep_d, "%Y-%m-%d").weekday())
-                    except Exception:
+                    except ValueError:
                         pass
                     if len(selected_pairs) >= 6:
                         break
@@ -1475,7 +1473,7 @@ class GoogleFlightsPriceAggregator:
                         continue
                     try:
                         wd_idx = datetime.strptime(dep_d, "%Y-%m-%d").weekday()
-                    except Exception:
+                    except ValueError:
                         continue
                     if wd_idx not in seen_weekdays:
                         seen_weekdays.add(wd_idx)
@@ -1506,8 +1504,8 @@ class GoogleFlightsPriceAggregator:
                 if res and res.get("options"):
                     wd = datetime.strptime(dep_s, "%Y-%m-%d").strftime("%A")
                     daily_results.append((dep_s, wd, res))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Calendar day scan failed for {dep_s}: {e}")
 
         def _fmt_day_label(dt_s: str, wd: str, res_obj: Optional[dict[str, Any]] = None, short_wd: bool = False) -> str:
             base_lbl = f"{wd[:3]} {dt_s}" if short_wd else f"{wd}, {dt_s}"

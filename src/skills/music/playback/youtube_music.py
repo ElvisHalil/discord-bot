@@ -1,11 +1,19 @@
 import os
 import re
 import time
+import urllib.parse
 import requests
 from dotenv import load_dotenv
 from ddgs import DDGS
 from src.skills.music.utils import parse_song_meta, MUSIC_METADATA_CACHE, record_played_track
-from src.skills.youtube.client import verify_embeddable, get_video_oembed, is_youtube_short, _OEMBED_CACHE
+from src.skills.youtube.client import (
+    verify_embeddable,
+    get_video_oembed,
+    is_youtube_short,
+    _OEMBED_CACHE,
+    _http_get,
+)
+from src.utils.workers import map_in_workers
 
 load_dotenv()
 
@@ -76,22 +84,12 @@ def clear_resolved_music_cache() -> None:
     _LAST_BLOCKED_OFFICIAL.clear()
     SERVED_SONG_VIDS.clear()
 
-GARBAGE_MUSIC_KEYWORDS = [
-    "tutorial", "how to play", "how to make", "reaction", "reacting",
-    "reacts", "review", "podcast", "interview", "behind the scenes",
-    "gameplay", "walkthrough", "tier list", "parody", "lesson",
-    "drum cover", "synth tutorial", "unboxing", "vlog", "prank",
-    "meme", "tiktok compilation", "nightcore", "sped up", "speed up",
-    "slowed", "super slowed", "ultra slowed", "vocal coach", "reverb",
-    "reverbed", "top 50", "top 100", "top 20", "top 10",
-    "top 25", "most viral", "compilation", "playlist", "best of",
-    "1 hour", "10 hours", "full album", "tracklist", "track list",
-    "full set", "dj set", "live set", "club set", "festival set",
-    "b2b set", "vinyl set", "radio set", "closing set", "opening set",
-    "extended set", "boiler room", "continuous mix", "megamix",
-    "hour mix", "min mix", "guest mix", "promo mix", "yearmix",
-    "bootleg", "ai cover", "ai version", "type beat", "karaoke",
-]
+
+from src.skills.music.catalogs import (
+    GARBAGE_MUSIC_KEYWORDS,
+    MUSIC_TOKEN_STOPWORDS,
+    TRUSTED_MUSIC_LABELS as _TRUSTED_MUSIC_LABELS,
+)
 
 # Matches DJ/live set markers like "(Set)", "[Live Set]", "| Set", "- Set", "Techno Set", "Live @"
 # while preserving normal song titles like "Set Fire to the Rain", "Set Me Free", "Sunset", "Mindset"
@@ -136,13 +134,7 @@ def is_garbage_music_title(title: str, query: str = "", author: str = "") -> boo
 def extract_music_tokens(text: str) -> set[str]:
     """Tokenizes alphanumeric words excluding common musical and grammatical stop words."""
     words = re.findall(r'[a-zA-Z0-9]+', text.lower())
-    stopwords = {
-        "by", "the", "a", "an", "and", "or", "of", "in", "on", "at", "to",
-        "for", "with", "feat", "ft", "official", "video", "audio", "music",
-        "topic", "remix", "original", "mix", "full", "hd", "4k", "hq",
-        "unknown", "artist", "track", "song"
-    }
-    return {w for w in words if w not in stopwords and len(w) > 1}
+    return {w for w in words if w not in MUSIC_TOKEN_STOPWORDS and len(w) > 1}
 
 def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, int, str]:
     """
@@ -224,7 +216,7 @@ def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, in
             score = 2 if is_artist_channel else 1
             channel_type = "artist channel/VEVO" if is_artist_channel else "standard channel"
             return True, score, f"Song and artist match on {channel_type}"
-        return False, 0, f"Missing song or artist match (song={song_match}, artist={bool(artist_overlap)})"
+        return False, 0, f"Missing song or artist match (song={song_match}, artist={artist_match})"
 
     if not song_match:
         return False, 0, "Rejected: candidate title does not match song tokens"
@@ -244,22 +236,30 @@ def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, in
 
     return False, 0, f"Low token overlap ({len(overlap)}/{len(q_tokens)} tokens, ratio {ratio:.2f})"
 
-_TRUSTED_MUSIC_LABELS = (
-    "afterlife", "ukf", "hospital records", "spinnin", "monstercat",
-    "armada music", "defected", "ultra music", "ultra records", "drumcode",
-    "anjunadeep", "anjunabeats", "liquicity", "blackout music", "ram records",
-    "selected.", "mrsuicidesheep", "suicidesheep", "proximity", "stmpd rcrds",
-    "musical freedom", "kontor.tv", "napalm records", "nuclear blast",
-    "fueled by ramen", "atlantic records", "interscope", "death row",
-    "aftermath", "shady records", "top dawg", "empire", "epitaph",
-    "sub pop", "xl recordings", "warp records", "ninja tune", "owsla",
-    "mad decent", "spinning records", "ministry of sound",
-)
-
 
 def _is_trusted_music_label(author: str) -> bool:
     auth_low = (author or "").lower().strip()
     return bool(auth_low and any(lbl in auth_low for lbl in _TRUSTED_MUSIC_LABELS))
+
+
+def _fetch_direct_youtube_video_ids(yt_q: str, limit: int) -> list[str]:
+    """Queries YouTube search directly over the persistent HTTP session and extracts video IDs."""
+    try:
+        print(f"  └─ 🔍 [YouTube Direct]: Querying '{yt_q}'...")
+        yt_search_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(yt_q)}"
+        r_yt = _http_get(
+            yt_search_url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=3.5,
+        )
+        if r_yt.status_code == 200:
+            direct_vids = list(dict.fromkeys(re.findall(r'"videoRenderer":\{"videoId":"([0-9A-Za-z_-]{11})"', r_yt.text)))
+            if not direct_vids:
+                direct_vids = list(dict.fromkeys(re.findall(r'"videoId":"([0-9A-Za-z_-]{11})"', r_yt.text)))
+            return direct_vids[:limit]
+    except Exception as e:
+        print(f"  └─ ⚠️ [YouTube Direct Search Warning]: {e}")
+    return []
 
 
 def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: set[str] | None = None) -> list[dict]:
@@ -270,18 +270,12 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
        (preferred over sketchy third-party re-uploads when an official upload exists).
     3. Tier 3 (standard_embeddable): Clean standard upload, used ONLY when no official upload exists at all.
     """
-    is_mocked = (
-        hasattr(DDGS, "assert_called")
-        or hasattr(verify_embeddable, "assert_called")
-        or hasattr(is_youtube_short, "assert_called")
-        or hasattr(requests.get, "assert_called")
-    )
     excluded = set(exclude_ids or ())
     cache_key = f"{query.strip().lower()}:{max_results}"
     norm_key = _norm_lookup_key(query)
     now = time.monotonic()
 
-    if not is_mocked and not excluded:
+    if not excluded:
         if cache_key in _RESOLVED_MUSIC_CACHE:
             ts, cached_res = _RESOLVED_MUSIC_CACHE[cache_key]
             if now - ts < _RESOLVED_MUSIC_TTL and cached_res:
@@ -413,10 +407,6 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
         else:
             standard_embeddable.append(entry)
 
-    import urllib.parse
-    from src.skills.youtube.client import _http_get
-    from src.utils.workers import map_in_workers
-
     def _verify_batch(batch_candidates: list[tuple[str, str, str]]) -> None:
         if not batch_candidates:
             return
@@ -436,28 +426,14 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
     # =========================================================================
     # PHASE 1A: Direct YouTube Search over Persistent Keep-Alive Session (~0.5s)
     # =========================================================================
-    if not hasattr(DDGS, "assert_called") and not hasattr(requests.get, "assert_called"):
-        yt_q = f"{song_q} {artist_q} Topic".strip() if (song_q and artist_q) else f"{query.replace(' by ', ' ')} Topic".strip()
-        try:
-            print(f"  └─ 🔍 [YouTube Direct]: Querying '{yt_q}'...")
-            yt_search_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(yt_q)}"
-            r_yt = _http_get(
-                yt_search_url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-                timeout=3.5,
-            )
-            if r_yt.status_code == 200:
-                direct_vids = list(dict.fromkeys(re.findall(r'"videoRenderer":\{"videoId":"([0-9A-Za-z_-]{11})"', r_yt.text)))
-                if not direct_vids:
-                    direct_vids = list(dict.fromkeys(re.findall(r'"videoId":"([0-9A-Za-z_-]{11})"', r_yt.text)))
-                direct_batch = []
-                for vid in direct_vids[: max_results + 5]:
-                    if vid not in seen_ids:
-                        seen_ids.add(vid)
-                        direct_batch.append((vid, "", f"https://www.youtube.com/watch?v={vid}"))
-                _verify_batch(direct_batch)
-        except Exception as e:
-            print(f"  └─ ⚠️ [YouTube Direct Search Warning]: {e}")
+    yt_q = f"{song_q} {artist_q} Topic".strip() if (song_q and artist_q) else f"{query.replace(' by ', ' ')} Topic".strip()
+    direct_vids = _fetch_direct_youtube_video_ids(yt_q, max_results + 5)
+    direct_batch = []
+    for vid in direct_vids:
+        if vid not in seen_ids:
+            seen_ids.add(vid)
+            direct_batch.append((vid, "", f"https://www.youtube.com/watch?v={vid}"))
+    _verify_batch(direct_batch)
 
     # =========================================================================
     # PHASE 1B: Free DuckDuckGo Search Fallback (0 API Quota Units)
@@ -495,7 +471,7 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
     # =========================================================================
     # PHASE 2: Fallback to YouTube Data API v3 (Burns 100 quota units ONLY on failure)
     # =========================================================================
-    if not official_embeddable and not official_blocked and not standard_embeddable and api_key and (not is_mocked or hasattr(requests.get, "assert_called")):
+    if not official_embeddable and not official_blocked and not standard_embeddable and api_key:
         print(f"⚠️ [Music Resolver Fallback]: Web search yielded no verified match. Falling back to YouTube Data API for '{query}'...")
         try:
             url = "https://www.googleapis.com/youtube/v3/search"
@@ -597,7 +573,7 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
         final_results = standard_embeddable[:max_results]
     else:
         print(f"❌ [Music Resolver]: No verified music tracks found for '{query}'.")
-        if not is_mocked and not excluded:
+        if not excluded:
             _FAILED_MUSIC_CACHE[cache_key] = time.monotonic()
         return []
 
@@ -617,7 +593,7 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
         fb_tag = " [Official Link - Inline Embed Disabled by Label]" if cand.get("is_official_fallback") else ""
         print(f"🎧 [Music Resolver Returned]: '{cand['title']}' by '{cand['artist']}' -> {cand['url']}{topic_tag}{fb_tag} (Score: {cand.get('score', 0)}/3)")
 
-    if not is_mocked and final_results:
+    if final_results:
         _RESOLVED_MUSIC_CACHE[cache_key] = (time.monotonic(), final_results)
         # Also index by canonical 'title by artist' so subsequent lookups hit 0ms cache
         canon_key = f"{final_results[0]['title'].strip().lower()} by {final_results[0]['artist'].strip().lower()}:{max_results}"

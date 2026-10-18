@@ -1,68 +1,29 @@
 import asyncio
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 import json
 import os
 import re
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+from src.context import get_active_channel_id, get_bound_event_loop
 from src.skills.flights.aggregators import GoogleFlightsPriceAggregator, LiveFlightStatusAggregator
 from src.skills.flights.airports import extract_flight_numbers, parse_route_from_query
-from src.skills.sports.live_tracker import get_active_channel_id
+from src.skills.flights.enums import (
+    CabinClass,
+    FlightState,
+    FlightTrackerAction,
+)
+from src.skills.flights.models import (
+    TrackedFlight,
+    TrackedPriceWatch,
+)
 from src.utils.workers import run_in_worker
 
 PRICE_WATCH_FILE = os.path.join("data", "flight_price_watches.json")
 FLIGHT_SAFETY_TIMEOUT_SECONDS = 16 * 3600  # 16 hours for ultra-long-haul flights
 DEFAULT_FLIGHT_POLL_SECONDS = 60
 DEFAULT_PRICE_POLL_SECONDS = 1800  # 30 minutes
-
-
-@dataclass
-class TrackedFlight:
-    """Represents a live commercial flight being monitored for status/gate/delay/landing alerts."""
-    channel_id: int
-    flight_number: str
-    callsign: str
-    airline: str
-    origin_code: str
-    dest_code: str
-    last_state: str = "scheduled"
-    last_status_text: str = "Scheduled"
-    last_origin_gate: Optional[str] = None
-    last_dest_gate: Optional[str] = None
-    last_delay_mins: int = 0
-    last_snapshot: Dict[str, Any] = field(default_factory=dict)
-    created_at: float = field(default_factory=time.time)
-    last_polled_at: float = field(default_factory=time.time)
-
-
-@dataclass
-class TrackedPriceWatch:
-    """Represents a route & date being monitored for Google Flights ticket price drops."""
-    channel_id: int
-    origin_code: str
-    origin_city: str
-    dest_code: str
-    dest_city: str
-    date: str
-    return_date: Optional[str] = None
-    cabin: str = "economy"
-    currency: str = "CAD"
-    baseline_price: int = 0
-    lowest_seen_price: int = 0
-    last_alerted_price: Optional[int] = None
-    target_price: Optional[int] = None
-    best_airline: str = ""
-    booking_url: str = ""
-    direct_only: bool = False
-    created_at: float = field(default_factory=time.time)
-    last_polled_at: float = field(default_factory=time.time)
-
-    @property
-    def watch_id(self) -> str:
-        ret_part = f":{self.return_date}" if self.return_date else ""
-        dir_part = ":direct" if self.direct_only else ""
-        return f"{self.origin_code}-{self.dest_code}:{self.date}{ret_part}:{self.cabin}{dir_part}"
 
 
 class FlightTrackerManager:
@@ -123,11 +84,12 @@ class FlightTrackerManager:
             if self._task is None or self._task.done():
                 self._task = loop.create_task(self._poll_loop())
         except RuntimeError:
-            if self._event_loop and self._event_loop.is_running():
+            target_loop = self._event_loop or get_bound_event_loop()
+            if target_loop and target_loop.is_running():
                 def _start():
                     if self._task is None or self._task.done():
                         self._task = asyncio.create_task(self._poll_loop())
-                self._event_loop.call_soon_threadsafe(_start)
+                target_loop.call_soon_threadsafe(_start)
 
     @staticmethod
     def diff_flight_snapshots(
@@ -147,14 +109,14 @@ class FlightTrackerManager:
         new_delay = int(new_snap.get("delay_mins") or 0)
 
         # 1. State transitions
-        if flight.last_state == "scheduled" and new_state == "airborne":
+        if flight.last_state == FlightState.SCHEDULED and new_state == FlightState.AIRBORNE:
             dep_str = new_snap.get("est_dep_str") or "Just now"
             eta_str = new_snap.get("est_arr_str") or "TBD"
             alerts.append(
                 f"🛫 **TAKEOFF ALERT**: **{flight.flight_number}** ({flight.origin_code} -> {flight.dest_code}) "
                 f"is now **Airborne / En Route**! (Departed: {dep_str} | ETA: {eta_str})"
             )
-        elif new_state == "landed" and flight.last_state != "landed":
+        elif new_state == FlightState.LANDED and flight.last_state != FlightState.LANDED:
             arr_str = new_snap.get("est_arr_str") or "Just now"
             gate_info = []
             if new_snap.get("dest_terminal"):
@@ -169,20 +131,20 @@ class FlightTrackerManager:
                 f"({arr_str}){gate_suffix}!"
             )
             should_remove = True
-        elif new_state == "cancelled" and flight.last_state != "cancelled":
+        elif new_state == FlightState.CANCELLED and flight.last_state != FlightState.CANCELLED:
             alerts.append(
                 f"🛑 **FLIGHT CANCELLED**: **{flight.flight_number}** ({flight.origin_code} -> {flight.dest_code}) "
                 f"has been marked **Cancelled**."
             )
             should_remove = True
-        elif new_state == "diverted" and flight.last_state != "diverted":
+        elif new_state == FlightState.DIVERTED and flight.last_state != FlightState.DIVERTED:
             alerts.append(
                 f"⚠️ **FLIGHT DIVERTED**: **{flight.flight_number}** ({flight.origin_code} -> {flight.dest_code}) "
                 f"has been **Diverted** ({new_snap.get('status_text')})."
             )
 
         # 2. Gate changes
-        if new_origin_gate and new_origin_gate != flight.last_origin_gate and flight.last_state == "scheduled":
+        if new_origin_gate and new_origin_gate != flight.last_origin_gate and flight.last_state == FlightState.SCHEDULED:
             alerts.append(
                 f"🚪 **DEPARTURE GATE UPDATE ({flight.flight_number})**: Gate at {flight.origin_code} is now **Gate {new_origin_gate}**."
             )

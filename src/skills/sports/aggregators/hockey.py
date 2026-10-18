@@ -314,17 +314,21 @@ class HockeyAggregator(BaseSportsAggregator):
             from src.skills.sports.aggregators.odds import format_inline_scoreboard_odds
             data = fetch_json(url, timeout=8)
             events = list(data.get("events", []))
-            is_mock = hasattr(fetch_json, "assert_called") or "MagicMock" in str(type(fetch_json))
+            today_iso_prefix = now.strftime("%Y-%m-%d")
 
-            if events and not date_param and not is_mock:
+            if events and not date_param:
                 all_completed = all(
                     (ev.get("competitions") or [{}])[0].get("status", {}).get("type", {}).get("completed", False)
                     for ev in events
                 )
-                if all_completed:
+                has_stale_event_date = any(
+                    ev.get("date") and not str(ev.get("date")).startswith(today_iso_prefix)
+                    for ev in events
+                )
+                if all_completed and has_stale_event_date:
                     today_ymd = now.strftime("%Y%m%d")
                     today_data = fetch_json(f"{self.SCOREBOARD_URL}?dates={today_ymd}", timeout=5) or {}
-                    today_evs = today_data.get("events") or []
+                    today_evs = today_data.get("events") or [] if isinstance(today_data, dict) else []
                     if today_evs:
                         seen_ids = {str(e.get("id")) for e in today_evs if e.get("id")}
                         events = list(today_evs) + [e for e in events if str(e.get("id")) not in seen_ids]

@@ -235,82 +235,33 @@ def format_inline_scoreboard_odds(comp: dict, home_name: str, away_name: str) ->
     return ""
 
 
+from src.skills.sports.catalogs import (
+    CS_TEAMS as _CS_TEAMS,
+    ESPN_TEAM_ALIASES as TEAM_ALIASES,
+    ESPN_TO_ODDS_API_LEAGUE as _ESPN_TO_ODDS_API_LEAGUE,
+    F1_DRIVERS as _F1_DRIVERS,
+    ODDS_STRIP_PHRASES,
+    ODDS_STRIP_WORDS,
+)
+from src.utils.domain_vocab import compile_phrase_stripper, compile_word_boundary_re
+
+_ODDS_PHRASE_STRIPPER_RE = compile_phrase_stripper(ODDS_STRIP_PHRASES)
+_ODDS_WORD_STRIPPER_RE = compile_word_boundary_re(ODDS_STRIP_WORDS)
+
+
 class OddsAggregator(BaseSportsAggregator):
     """Centralized aggregator for sports, F1, and esports Decimal betting odds and implied win probabilities."""
 
-    ESPN_TO_ODDS_API_LEAGUE = {
-        "uefa.champions": "soccer_uefa_champs_league",
-        "ucl": "soccer_uefa_champs_league",
-        "uefa.europa": "soccer_uefa_europa_league",
-        "uefa.europa.conf": "soccer_uefa_europa_conference_league",
-        "eng.1": "soccer_epl",
-        "epl": "soccer_epl",
-        "eng.2": "soccer_efl_champ",
-        "esp.1": "soccer_spain_la_liga",
-        "laliga": "soccer_spain_la_liga",
-        "ger.1": "soccer_germany_bundesliga",
-        "bundesliga": "soccer_germany_bundesliga",
-        "ita.1": "soccer_italy_serie_a",
-        "seriea": "soccer_italy_serie_a",
-        "fra.1": "soccer_france_ligue_one",
-        "ligue1": "soccer_france_ligue_one",
-        "usa.1": "soccer_usa_mls",
-        "mls": "soccer_usa_mls",
-        "ned.1": "soccer_netherlands_eredivisie",
-        "por.1": "soccer_portugal_primeira_liga",
-        "nba": "basketball_nba",
-        "wnba": "basketball_wnba",
-        "mens-college-basketball": "basketball_ncaab",
-        "nhl": "icehockey_nhl",
-        "nfl": "americanfootball_nfl",
-        "college-football": "americanfootball_ncaaf",
-        "mlb": "baseball_mlb",
-        "ufc": "mma_mixed_martial_arts",
-    }
-
-    CS_TEAMS = (
-        "falcons", "team falcons", "nip", "ninjas in pyjamas", "spirit", "team spirit",
-        "vitality", "team vitality", "mouz", "mousesports", "furia", "faze", "g2",
-        "navi", "natus vincere", "astralis", "complexity", "mongolz", "heroic",
-        "eternal fire", "virtus.pro", "9z", "aurora", "betboom", "parivision",
-        "thunderpick", "blast", "pgl", "iem", "esl", "cs", "cs2", "csgo"
-    )
-
-    F1_DRIVERS = (
-        "max verstappen", "verstappen", "lando norris", "norris", "charles leclerc", "leclerc",
-        "oscar piastri", "piastri", "lewis hamilton", "hamilton", "george russell", "russell",
-        "kimi antonelli", "antonelli", "carlos sainz", "sainz", "fernando alonso", "alonso",
-        "alex albon", "albon", "pierre gasly", "gasly", "esteban ocon", "ocon",
-        "nico hulkenberg", "hulkenberg", "yuki tsunoda", "tsunoda", "lance stroll", "stroll",
-        "oliver bearman", "bearman", "liam lawson", "lawson", "isack hadjar", "hadjar",
-        "gabriel bortoleto", "bortoleto", "franco colapinto", "colapinto", "arvid lindblad",
-        "sergio perez", "perez", "valtteri bottas", "bottas",
-    )
+    ESPN_TO_ODDS_API_LEAGUE = _ESPN_TO_ODDS_API_LEAGUE
+    CS_TEAMS = _CS_TEAMS
+    F1_DRIVERS = _F1_DRIVERS
 
     @staticmethod
     def _clean_query_target(query: str) -> str:
         """Strips betting/conversational filler words and expands short team aliases."""
-        from src.skills.sports.aggregators.espn_utils import TEAM_ALIASES
         clean = _strip_accents(query.lower())
-        for phrase in [
-            "if i bet", "i bet", "bet on", "will i win and how much",
-            "will i win", "how much", "what are the", "can you check",
-            "right now", "next game", "next match", "moneyline", "betting line",
-            "betting odds", "live odds", "match odds", "game odds",
-            "point spread", "over under", "tracked games", "tracked matches",
-            "tracked game", "tracked match", "both games", "both matches",
-            "these games", "these matches", "the games", "the matches",
-        ]:
-            clean = re.sub(rf'\b{re.escape(phrase)}\b', ' ', clean, flags=re.IGNORECASE)
-        for word in [
-            "bet", "betting", "odds", "odd", "line", "lines", "spread", "moneyline",
-            "tomorrow", "today", "tonight", "live", "now", "currently",
-            "next", "match", "matches", "game", "games", "tracked", "tracking", "track",
-            "soccer", "football", "basketball", "hockey", "nhl", "nba", "nfl", "mlb",
-            "dollars", "bucks", "usd", "on", "for", "the", "in", "at", "of", "are", "is",
-            "what", "whats", "please", "both", "these", "those", "get", "check", "why", "cant",
-        ]:
-            clean = re.sub(rf'\b{re.escape(word)}\b', ' ', clean, flags=re.IGNORECASE)
+        clean = _ODDS_PHRASE_STRIPPER_RE.sub(" ", clean)
+        clean = _ODDS_WORD_STRIPPER_RE.sub(" ", clean)
         clean = re.sub(r'[\$0-9]+(?:\.[0-9]{2})?', ' ', clean)
         clean = re.sub(r'[^\w\s]', ' ', clean)
         clean = ' '.join(clean.split()).strip()
@@ -371,11 +322,6 @@ class OddsAggregator(BaseSportsAggregator):
         ESPN's live/pre-match odds in the standardized CS-style Decimal odds card.
         Returns (formatted_odds_str, discovered_espn_league_slug, canonical_team_name).
         """
-        is_soup_mock = hasattr(fetch_soup, "assert_called") or "MagicMock" in str(type(fetch_soup))
-        is_json_mock = hasattr(fetch_json, "assert_called") or "MagicMock" in str(type(fetch_json))
-        if is_soup_mock and not is_json_mock:
-            return None, None, None
-
         try:
             from src.skills.sports.aggregators.espn_utils import espn_search_auto_discover, resolve_espn_team
             from src.skills.sports.aggregators.soccer import SoccerAggregator
@@ -435,7 +381,7 @@ class OddsAggregator(BaseSportsAggregator):
             )
             team_name = (disc or {}).get("display_name") or (disc or {}).get("name") or matched_cand.title()
 
-            if (not disc or ent_type != "team" or not team_id) and not is_json_mock:
+            if not disc or ent_type != "team" or not team_id:
                 fallback_leagues = [(sport_path, league_code)] if sport_hint else [
                     ("hockey", "nhl"),
                     ("basketball", "nba"),
@@ -545,10 +491,10 @@ class OddsAggregator(BaseSportsAggregator):
                 o_url = f"https://sports.core.api.espn.com/v2/sports/{sport_path}/leagues/{e_lg_slug}/events/{e_id}/competitions/{e_id}/odds"
                 s_url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{e_lg_slug}/summary?event={e_id}"
 
-                if not is_json_mock and st_state == "in" and (not h_score or not a_score):
+                if st_state == "in" and (not h_score or not a_score):
                     o_data, s_data = parallel_fetch_json(fetch_json, [o_url, s_url], timeout=8, ttl=15)
-                    o_items = (o_data or {}).get("items", [])
-                    s_data = s_data or {}
+                    o_items = (o_data or {}).get("items", []) if isinstance(o_data, dict) else []
+                    s_data = s_data if isinstance(s_data, dict) else {}
                     h_comps = (s_data.get("header") or {}).get("competitions") or []
                     if h_comps:
                         h_c = next((c for c in h_comps[0].get("competitors", []) if c.get("homeAway") == "home"), {})
@@ -559,10 +505,11 @@ class OddsAggregator(BaseSportsAggregator):
                         o_items = s_data.get("pickcenter") or s_data.get("odds") or []
                 else:
                     o_data = parallel_fetch_json(fetch_json, [o_url], timeout=8, ttl=15)[0]
-                    o_items = (o_data or {}).get("items", [])
-                    if not is_json_mock and not o_items:
+                    o_items = (o_data or {}).get("items", []) if isinstance(o_data, dict) else []
+                    if not o_items:
                         try:
-                            s_data = parallel_fetch_json(fetch_json, [s_url], timeout=8, ttl=15)[0] or {}
+                            s_raw = parallel_fetch_json(fetch_json, [s_url], timeout=8, ttl=15)[0]
+                            s_data = s_raw if isinstance(s_raw, dict) else {}
                             o_items = s_data.get("pickcenter") or s_data.get("odds") or []
                         except Exception:
                             pass
@@ -574,7 +521,7 @@ class OddsAggregator(BaseSportsAggregator):
 
             items, ev_league_slug, ev_league_name, ev_date, state, status_detail, home_name, away_name, home_score, away_score = _load_ev_odds(chosen_ev)
 
-            if not items and state == "pre" and not is_json_mock:
+            if not items and state == "pre":
                 post_candidates = [
                     ev for ev in candidate_events
                     if (ev.get("competitions") or [{}])[0].get("status", {}).get("type", {}).get("state", "") == "post"
@@ -655,11 +602,6 @@ class OddsAggregator(BaseSportsAggregator):
         Fetch Decimal betting odds for all live or upcoming games on a league/sport scoreboard
         (e.g. 'hockey odds', 'nhl odds', 'soccer odds', 'premier league odds', 'nba odds').
         """
-        is_soup_mock = hasattr(fetch_soup, "assert_called") or "MagicMock" in str(type(fetch_soup))
-        is_json_mock = hasattr(fetch_json, "assert_called") or "MagicMock" in str(type(fetch_json))
-        if is_soup_mock and not is_json_mock:
-            return None
-
         scope = self._detect_sport_or_league_scope(query, sport)
         if not scope or scope in ("f1", "cs2"):
             return None
@@ -694,7 +636,7 @@ class OddsAggregator(BaseSportsAggregator):
         cards: list[str] = []
         for sport_path, lg_code, lg_name in league_targets:
             base_url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/{lg_code}/scoreboard"
-            urls_to_check = [base_url] if is_json_mock else [base_url, f"{base_url}?dates={today_ymd}", f"{base_url}?dates={tomorrow_ymd}"]
+            urls_to_check = [base_url, f"{base_url}?dates={today_ymd}", f"{base_url}?dates={tomorrow_ymd}"]
             payloads = parallel_fetch_json(fetch_json, urls_to_check, timeout=7, ttl=20)
 
             seen_ev_ids: set[str] = set()
@@ -717,7 +659,7 @@ class OddsAggregator(BaseSportsAggregator):
                         active_events.append(ev)
 
             # If no live/upcoming games today or tomorrow, check the next scheduled calendar date
-            if not active_events and calendar_dates and not is_json_mock:
+            if not active_events and calendar_dates:
                 for cal_item in calendar_dates:
                     cal_str = cal_item.get("startDate", "") if isinstance(cal_item, dict) else str(cal_item)
                     if not cal_str:
@@ -1269,13 +1211,14 @@ class OddsAggregator(BaseSportsAggregator):
         if sport_clean in ("cs", "cs2", "csgo") or (sport_clean == "esports" and is_cs):
             hltv_odds = self._fetch_esports_hltv_odds(query_clean, stake=stake)
             kr_props = ""
-            is_mock = hasattr(fetch_soup, "assert_called") or "MagicMock" in str(type(fetch_soup))
-            if not is_mock:
-                try:
-                    from src.skills.sports.aggregators.kashrock import KashrockAggregator
-                    kr_props = KashrockAggregator().get_props_for_query(query_clean)
-                except Exception:
-                    kr_props = ""
+            try:
+                from src.skills.sports.aggregators.kashrock import KashrockAggregator
+                kr = KashrockAggregator()
+                if kr.is_configured():
+                    kr_props = kr.get_props_for_query(query_clean)
+            except Exception as e:
+                print(f"  └─ ⚠️ [Odds KashRock props fallback error]: {e}")
+                kr_props = ""
             if hltv_odds:
                 return hltv_odds + kr_props
             if kr_props:
@@ -1358,7 +1301,8 @@ class OddsAggregator(BaseSportsAggregator):
 
         if wants_tracked or (not cleaned_main and not detected_scope):
             try:
-                from src.skills.sports.live_tracker import LIVE_TRACKER, get_active_channel_id, get_channel_last_match_query
+                from src.context import get_active_channel_id
+                from src.skills.sports.live_tracker import LIVE_TRACKER, get_channel_last_match_query
                 ch_id = get_active_channel_id()
                 active_matches = [
                     m for (cid, _), m in LIVE_TRACKER.tracked_matches.items()
@@ -1374,8 +1318,8 @@ class OddsAggregator(BaseSportsAggregator):
                     last_q, last_s = get_channel_last_match_query(ch_id)
                     if last_q:
                         _add_sub(last_q, last_s or sport_clean)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  └─ ⚠️ [Odds tracked match lookup error]: {e}")
 
         # Split multi-matchup or multi-sport queries (e.g. "Washington Capitals vs Montreal Canadiens and Colorado Avalanche vs Dallas Stars", or "soccer and hockey odds")
         if re.search(r'(?:,|;|\s+and\s+|\s*&\s*)', query_clean, flags=re.IGNORECASE) and "brighton and hove" not in query_clean.lower():
@@ -1398,19 +1342,12 @@ class OddsAggregator(BaseSportsAggregator):
             q_single, sp_single = sub_queries[0]
             return self._get_single_match_odds(q_single, sp_single, stake=stake)
 
-        from src.skills.sports.aggregators.espn_utils import SPORTS_EXECUTOR
-        is_mock = (
-            hasattr(fetch_json, "assert_called")
-            or "MagicMock" in str(type(fetch_json))
-            or hasattr(fetch_soup, "assert_called")
-            or "MagicMock" in str(type(fetch_soup))
-        )
+        from src.utils.workers import submit_to_worker
         batch = sub_queries[:4]
-        if is_mock:
-            raw_results = [self._get_single_match_odds(q_item, sp_item, stake=stake) for q_item, sp_item in batch]
-        else:
-            raw_results = list(
-                SPORTS_EXECUTOR.map(lambda item: self._get_single_match_odds(item[0], item[1], stake=stake), batch)
-            )
+        futures = [
+            submit_to_worker(self._get_single_match_odds, q_item, sp_item, stake)
+            for q_item, sp_item in batch
+        ]
+        raw_results = [f.result() for f in futures]
         results = [r.strip() for r in raw_results if r]
         return "\n\n---\n\n".join(results) + "\n\n"

@@ -1,160 +1,17 @@
 import re
 import random
+import time
 import requests
 from bs4 import BeautifulSoup
 from src.skills.music.aggregators.base import BaseMusicAggregator
+from src.skills.music.catalogs import (
+    COMPOUND_REGIONAL_GENRES,
+    GENRE_MAP,
+    GENRE_REGION_MAP,
+    REGION_MODIFIERS,
+)
 from src.skills.music.models import Track
-
-GENRE_MAP = {
-    "pop": 14,
-    "rock": 21,
-    "country": 6,
-    "countrymusic": 6,
-    "hiphop": 18,
-    "rap": 18,
-    "hiphoprap": 18,
-    "drill": 18,
-    "grime": 18,
-    "trap": 18,
-    "randb": 15,
-    "rnb": 15,
-    "rb": 15,
-    "soul": 15,
-    "rbsoul": 15,
-    "funk": 15,
-    "dance": 17,
-    "electronic": 7,
-    "edm": 7,
-    "jazz": 11,
-    "alternative": 20,
-    "indie": 20,
-    "punk": 20,
-    "christian": 22,
-    "gospel": 22,
-    "kpop": 50,
-    "jpop": 27,
-    "anime": 29,
-    "latino": 12,
-    "latin": 12,
-    "reggaeton": 12,
-    "salsa": 12,
-    "classical": 5,
-    "blues": 2,
-    "reggae": 24,
-    "soundtrack": 16,
-    "dubstep": 100014,
-    "bass": 100015,
-    "drumandbass": 1049,
-    "drumnbass": 1049,
-    "dnb": 1049,
-    "jungle": 1049,
-    "house": 1048,
-    "techhouse": 1048,
-    "deephouse": 1048,
-    "techno": 1050,
-    "trance": 1051,
-    "afrohouse": 100049,
-    "afrobeats": 19,
-    "world": 19,
-    "metal": 1153,
-    "heavymetal": 1153,
-    "deathmetal": 1149,
-    "blackmetal": 1149,
-    "hairmetal": 1151,
-    "christianmetal": 1095,
-    "Minimalism": 1767,
-    "minimalism": 1767,
-}
-
-# Maps nationality/country modifiers to iTunes 2-letter storefront codes
-REGION_MODIFIERS = {
-    "german": "de",
-    "deutsch": "de",
-    "germany": "de",
-    "uk": "gb",
-    "british": "gb",
-    "english": "gb",
-    "french": "fr",
-    "france": "fr",
-    "japanese": "jp",
-    "japan": "jp",
-    "korean": "kr",
-    "korea": "kr",
-    "spanish": "es",
-    "spain": "es",
-    "mexican": "mx",
-    "mexico": "mx",
-    "brazilian": "br",
-    "brazil": "br",
-    "italian": "it",
-    "italy": "it",
-    "swedish": "se",
-    "sweden": "se",
-    "dutch": "nl",
-    "netherlands": "nl",
-    "canadian": "ca",
-    "canada": "ca",
-    "australian": "au",
-    "australia": "au",
-    "turkish": "tr",
-    "turkey": "tr",
-    "indian": "in",
-    "india": "in",
-    "nigerian": "za",
-    "southafrican": "za",
-    "american": "us",
-    "us": "us",
-}
-
-# Compound regional-genre shorthand terms (e.g. "deutschrap" -> de + rap)
-COMPOUND_REGIONAL_GENRES = {
-    "deutschrap": ("de", 18),
-    "jpop": ("jp", 27),
-    "jrock": ("jp", 21),
-    "kpop": ("kr", 50),
-    "krap": ("kr", 18),
-    "khiphop": ("kr", 18),
-    "khop": ("kr", 18),
-    "ukdrill": ("gb", 18),
-    "ukgrime": ("gb", 18),
-    "ukgarage": ("gb", 17),
-    "ukg": ("gb", 17),
-    "frenchhouse": ("fr", 1048),
-    "frenchtouch": ("fr", 7),
-    "bailefunk": ("br", 17),
-    "brazilianfunk": ("br", 17),
-    "bollywood": ("in", 14),
-    "punjabi": ("in", 14),
-    "afrobeats": ("za", 19),
-    "amapiano": ("za", 100049),
-}
-
-# Default multi-region storefront pools for genres when no country modifier is given
-GENRE_REGION_MAP = {
-    "dnb": ["gb", "us", "de"],
-    "drumandbass": ["gb", "us", "de"],
-    "drumnbass": ["gb", "us", "de"],
-    "jungle": ["gb", "us"],
-    "dubstep": ["gb", "us"],
-    "house": ["gb", "us", "de", "nl"],
-    "techhouse": ["gb", "us", "de", "es"],
-    "deephouse": ["gb", "de", "nl", "za"],
-    "dance": ["gb", "us", "de"],
-    "electronic": ["gb", "de", "us", "fr"],
-    "edm": ["us", "gb", "nl", "de"],
-    "techno": ["de", "gb", "nl", "us"],
-    "trance": ["nl", "de", "gb", "us"],
-    "metal": ["de", "gb", "se", "us"],
-    "heavymetal": ["de", "gb", "se", "us"],
-    "deathmetal": ["se", "de", "us", "gb"],
-    "blackmetal": ["se", "de", "gb"],
-    "kpop": ["kr", "jp", "us"],
-    "jpop": ["jp", "us"],
-    "latin": ["mx", "es", "br", "us"],
-    "latino": ["mx", "es", "br", "us"],
-    "reggaeton": ["mx", "es", "us"],
-    "afrohouse": ["za", "gb", "fr"],
-}
+from src.utils.workers import map_in_workers, submit_to_worker
 
 
 def resolve_genre_and_regions(g_name: str | None) -> tuple[int | None, list[str]]:
@@ -214,8 +71,6 @@ _HTTP_SESSION.mount("https://", _adapter)
 _HTTP_SESSION.mount("http://", _adapter)
 
 def _http_get(url: str, **kwargs):
-    if hasattr(requests.get, "assert_called"):
-        return requests.get(url, **kwargs)
     return _HTTP_SESSION.get(url, **kwargs)
 
 _CHARTS_RAW_CACHE: dict[str, tuple[float, list]] = {}
@@ -231,10 +86,8 @@ class ChartsAggregator(BaseMusicAggregator):
         return []
 
     def _fetch_kworb_rows(self, cache_key: str, url: str, selector: str, label: str) -> list[tuple[str, str]]:
-        import time
-        is_mocked = hasattr(requests.get, "assert_called")
         now = time.monotonic()
-        if not is_mocked and cache_key in _CHARTS_RAW_CACHE:
+        if cache_key in _CHARTS_RAW_CACHE:
             ts, cached_rows = _CHARTS_RAW_CACHE[cache_key]
             if now - ts < _CHARTS_CACHE_TTL:
                 return cached_rows
@@ -253,18 +106,16 @@ class ChartsAggregator(BaseMusicAggregator):
                     if " - " in text:
                         artist, title = text.split(" - ", 1)
                         rows_data.append((title.strip(), artist.strip()))
-            if not is_mocked and rows_data:
+            if rows_data:
                 _CHARTS_RAW_CACHE[cache_key] = (now, rows_data)
         except Exception as e:
             print(f"  └─ ⚠️ [Charts]: Error loading {cache_key} charts: {e}")
         return rows_data
 
     def _fetch_itunes_region(self, region: str, g_id: int | None, g_name: str | None) -> list[tuple[str, dict]]:
-        import time
-        is_mocked = hasattr(requests.get, "assert_called")
         cache_key = f"itunes:{region}:{g_id or 0}"
         now = time.monotonic()
-        if not is_mocked and cache_key in _CHARTS_RAW_CACHE:
+        if cache_key in _CHARTS_RAW_CACHE:
             ts, cached_entries = _CHARTS_RAW_CACHE[cache_key]
             if now - ts < _CHARTS_CACHE_TTL:
                 return cached_entries
@@ -283,14 +134,12 @@ class ChartsAggregator(BaseMusicAggregator):
                 entries = [entries]
             if entries:
                 entries_out = [(region, entry) for entry in entries]
-                if not is_mocked:
-                    _CHARTS_RAW_CACHE[cache_key] = (now, entries_out)
+                _CHARTS_RAW_CACHE[cache_key] = (now, entries_out)
         except Exception as e:
             print(f"  └─ ⚠️ [Charts]: Error fetching iTunes ({region}) charts for {g_name}: {e}")
         return entries_out
 
     def get_charts(self, genre: str = None) -> list[Track]:
-        from concurrent.futures import ThreadPoolExecutor
         tracks = []
 
         # 1. Global charts (Kworb) when no genre specified — fetched concurrently
@@ -300,16 +149,15 @@ class ChartsAggregator(BaseMusicAggregator):
                 ("youtube_trending", "https://kworb.net/youtube/trending.html", "table tbody tr", "📺 [Charts]: Scraping YouTube Trending..."),
                 ("radio_airplay", "https://kworb.net/radio/", "table tbody tr", "📻 [Charts]: Scraping US Radio Airplay..."),
             ]
-            with ThreadPoolExecutor(max_workers=3) as pool:
-                futures = [
-                    (src, pool.submit(self._fetch_kworb_rows, src, url, sel, lbl))
-                    for src, url, sel, lbl in kworb_targets
-                ]
-                for src, fut in futures:
-                    rows = fut.result()
-                    if rows:
-                        for title, artist in random.sample(rows, min(10, len(rows))):
-                            tracks.append(Track(title=title, artist=artist, source=src))
+            futures = [
+                (src, submit_to_worker(self._fetch_kworb_rows, src, url, sel, lbl))
+                for src, url, sel, lbl in kworb_targets
+            ]
+            for src, fut in futures:
+                rows = fut.result()
+                if rows:
+                    for title, artist in random.sample(rows, min(10, len(rows))):
+                        tracks.append(Track(title=title, artist=artist, source=src))
 
         # 2. Multi-Region & Nationality-Aware iTunes RSS genre feeds
         genre_list = [genre] if genre else [None]
@@ -329,9 +177,8 @@ class ChartsAggregator(BaseMusicAggregator):
             if len(selected_regions) == 1:
                 pooled_entries.extend(self._fetch_itunes_region(selected_regions[0], g_id, g_name))
             elif selected_regions:
-                with ThreadPoolExecutor(max_workers=min(2, len(selected_regions))) as pool:
-                    for reg_entries in pool.map(lambda reg: self._fetch_itunes_region(reg, g_id, g_name), selected_regions):
-                        pooled_entries.extend(reg_entries)
+                for reg_entries in map_in_workers(lambda reg: self._fetch_itunes_region(reg, g_id, g_name), selected_regions):
+                    pooled_entries.extend(reg_entries)
 
             if pooled_entries:
                 random.shuffle(pooled_entries)

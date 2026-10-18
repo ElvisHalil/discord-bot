@@ -1,10 +1,11 @@
-from concurrent.futures import ThreadPoolExecutor
 import re
 import time
 from typing import Optional
 from urllib.parse import quote_plus
 from src.skills.sports.aggregators.base import BaseSportsAggregator
+from src.skills.sports.catalogs import HLTV_STOPWORDS, HLTV_TEAM_ALIASES
 from src.utils.http import fetch_soup
+from src.utils.workers import submit_to_worker
 
 _HLTV_CACHE: dict[str, tuple[float, object]] = {}
 _HLTV_CACHE_TTL = 600  # 10 minutes
@@ -15,71 +16,20 @@ def clear_hltv_cache() -> None:
     _HLTV_CACHE.clear()
 
 
-def _is_mocked(fn) -> bool:
-    return hasattr(fn, "assert_called") or " unittest.mock" in str(type(fn)) or "MagicMock" in str(type(fn))
-
-
 class HltvAggregator(BaseSportsAggregator):
     """Aggregator for HLTV team rankings and CS player statistics using centralized stealth client."""
 
-    TEAM_ALIASES = {
-        "falcons": "falcons",
-        "team falcons": "falcons",
-        "vitality": "vitality",
-        "team vitality": "vitality",
-        "spirit": "spirit",
-        "team spirit": "spirit",
-        "mouz": "mouz",
-        "mousesports": "mouz",
-        "furia": "furia",
-        "navi": "natus vincere",
-        "natus vincere": "natus vincere",
-        "g2": "g2",
-        "g2 esports": "g2",
-        "faze": "faze",
-        "faze clan": "faze",
-        "aurora": "aurora",
-        "aurora gaming": "aurora",
-        "legacy": "legacy",
-        "nip": "ninjas in pyjamas",
-        "ninjas in pyjamas": "ninjas in pyjamas",
-        "mongolz": "the mongolz",
-        "the mongolz": "the mongolz",
-        "astralis": "astralis",
-        "liquid": "liquid",
-        "team liquid": "liquid",
-        "heroic": "heroic",
-        "virtus.pro": "virtus.pro",
-        "vp": "virtus.pro",
-        "eternal fire": "eternal fire",
-        "3dmax": "3dmax",
-        "pain": "pain",
-        "mibr": "mibr",
-        "complexity": "complexity",
-        "big": "big",
-        "fnatic": "fnatic",
-        "9z": "9z",
-        "betboom": "betboom",
-        "parivision": "parivision",
-        "fut": "fut",
-    }
-
-    STOPWORDS = {
-        "what", "whats", "what's", "are", "is", "the", "current", "player", "players",
-        "stat", "stats", "statistics", "for", "of", "in", "on", "cs", "cs2", "csgo",
-        "team", "roster", "lineup", "rating", "ratings", "kd", "kdr", "performance",
-        "how", "doing", "right", "now", "today", "show", "me", "get", "tell", "about",
-    }
+    TEAM_ALIASES = HLTV_TEAM_ALIASES
+    STOPWORDS = HLTV_STOPWORDS
 
     def _get_cached_or_fetch_soup(self, url: str, timeout: int = 30):
-        use_cache = not _is_mocked(fetch_soup)
         now = time.time()
-        if use_cache and url in _HLTV_CACHE:
+        if url in _HLTV_CACHE:
             ts, cached_soup = _HLTV_CACHE[url]
             if now - ts < _HLTV_CACHE_TTL:
                 return cached_soup
         soup = fetch_soup(url, timeout=timeout)
-        if use_cache and soup is not None:
+        if soup is not None:
             _HLTV_CACHE[url] = (now, soup)
         return soup
 
@@ -300,16 +250,18 @@ class HltvAggregator(BaseSportsAggregator):
             text = "\n".join(stats_texts)[:4000]
             return f"[PLAYER STATS: {player_url}]\n{text}\n\n"
 
-        # Fetch official Pro CS2 K/D, ADR, KPR, DPR, HS%, and 30-day map gamelogs from KashRock API when not in mocked unit tests
+        # Fetch official Pro CS2 K/D, ADR, KPR, DPR, HS%, and 30-day map gamelogs from KashRock API
         if kr_stats is None:
             kr_stats = {}
-            if not _is_mocked(fetch_soup):
-                try:
-                    from src.skills.sports.aggregators.kashrock import KashrockAggregator
+            try:
+                from src.skills.sports.aggregators.kashrock import KashrockAggregator
+                kr = KashrockAggregator()
+                if kr.is_configured():
                     slug = (nick or player_url.rstrip('/').split('/')[-1]).lower().rstrip('-')
-                    kr_stats = KashrockAggregator().get_player_pro_stats(slug)
-                except Exception:
-                    kr_stats = {}
+                    kr_stats = kr.get_player_pro_stats(slug)
+            except Exception as e:
+                print(f"  └─ ⚠️ [HLTV KashRock single player fallback error]: {e}")
+                kr_stats = {}
 
         full_link = f"https://www.hltv.org{player_url}" if player_url.startswith("/") else player_url
         header_parts = [f"👤 **{nick}**"]
@@ -384,35 +336,33 @@ class HltvAggregator(BaseSportsAggregator):
 
             props_section = ""
             kr_map: dict[str, dict] = {}
-            if not _is_mocked(fetch_soup):
-                try:
-                    from src.skills.sports.aggregators.kashrock import KashrockAggregator
-                    kr = KashrockAggregator()
-                    if kr.is_configured():
-                        props_query = team_label or (targets[0][0] if len(targets) == 1 else target_str)
-                        props_section = kr.get_props_for_query(props_query)
+            try:
+                from src.skills.sports.aggregators.kashrock import KashrockAggregator
+                kr = KashrockAggregator()
+                if kr.is_configured():
+                    props_query = team_label or (targets[0][0] if len(targets) == 1 else target_str)
+                    props_section = kr.get_props_for_query(props_query)
 
-                        with ThreadPoolExecutor(max_workers=min(5, len(targets))) as ex:
-                            slug_list = [(p_name, p_href.rstrip('/').split('/')[-1].lower().rstrip('-')) for p_name, p_href in targets]
-                            futs = {p_name: ex.submit(kr.get_player_pro_stats, slug) for p_name, slug in slug_list}
-                            for p_name, fut in futs.items():
-                                kr_map[p_name] = fut.result()
+                    slug_list = [(p_name, p_href.rstrip('/').split('/')[-1].lower().rstrip('-')) for p_name, p_href in targets]
+                    futs = {p_name: submit_to_worker(kr.get_player_pro_stats, slug) for p_name, slug in slug_list}
+                    for p_name, fut in futs.items():
+                        kr_map[p_name] = fut.result()
 
-                        # If any teammate has recent_30d match_slugs, backfill teammates whose /gamelogs was still warming
-                        team_match_slugs: list[str] = []
-                        for st in kr_map.values():
-                            ms = (st.get("recent_30d") or {}).get("match_slugs") or []
-                            if ms:
-                                team_match_slugs = ms
-                                break
-                        if team_match_slugs:
-                            for p_name, slug in slug_list:
-                                if not kr_map.get(p_name, {}).get("recent_30d"):
-                                    backfilled = kr.backfill_recent_from_match_boxscores(team_match_slugs, slug)
-                                    if backfilled:
-                                        kr_map.setdefault(p_name, {})["recent_30d"] = backfilled
-                except Exception:
-                    pass
+                    # If any teammate has recent_30d match_slugs, backfill teammates whose /gamelogs was still warming
+                    team_match_slugs: list[str] = []
+                    for st in kr_map.values():
+                        ms = (st.get("recent_30d") or {}).get("match_slugs") or []
+                        if ms:
+                            team_match_slugs = ms
+                            break
+                    if team_match_slugs:
+                        for p_name, slug in slug_list:
+                            if not kr_map.get(p_name, {}).get("recent_30d"):
+                                backfilled = kr.backfill_recent_from_match_boxscores(team_match_slugs, slug)
+                                if backfilled:
+                                    kr_map.setdefault(p_name, {})["recent_30d"] = backfilled
+            except Exception as e:
+                print(f"  └─ ⚠️ [HLTV KashRock team stats fallback error]: {e}")
 
             if len(targets) == 1 and not team_label:
                 p_name, p_href = targets[0]
@@ -421,14 +371,13 @@ class HltvAggregator(BaseSportsAggregator):
                     return block + props_section
                 return f"[PLAYER STATS: {p_name} ({p_href})]\n{block}\n" + props_section
 
-            # Multiple players (e.g. full team roster like Team Falcons) -> fetch concurrently!
+            # Multiple players (e.g. full team roster like Team Falcons) -> fetch concurrently via shared worker pool!
             header = f"[TEAM PLAYER STATS: {team_label or target_str}]\n"
-            with ThreadPoolExecutor(max_workers=min(5, len(targets))) as executor:
-                futures = [
-                    executor.submit(self._fetch_single_player, p_name, p_href, kr_map.get(p_name) if kr_map else None)
-                    for p_name, p_href in targets
-                ]
-                blocks = [f.result() for f in futures]
+            futures = [
+                submit_to_worker(self._fetch_single_player, p_name, p_href, kr_map.get(p_name) if kr_map else None)
+                for p_name, p_href in targets
+            ]
+            blocks = [f.result() for f in futures]
 
             return header + "\n".join(blocks) + "\n" + props_section
         except Exception as e:

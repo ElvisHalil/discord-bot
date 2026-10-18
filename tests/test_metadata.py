@@ -81,7 +81,15 @@ class TestMusicMetadata(unittest.TestCase):
         self.assertFalse(is_placeholder_text("Mac Declos"))
         self.assertFalse(is_placeholder_text("Give Nothing"))
 
-    def test_standardize_song_reply_auto_resolve(self):
+    @patch("src.skills.music.playback.youtube_music.resolve_youtube_music_link")
+    @patch("src.skills.youtube.client.verify_embeddable", return_value=False)
+    def test_standardize_song_reply_auto_resolve(self, _mock_verify, mock_resolve):
+        mock_resolve.return_value = [{
+            "id": "ueT3qH1GC5E",
+            "title": "Victory Song",
+            "artist": "Ensiferum",
+            "url": "https://music.youtube.com/watch?v=ueT3qH1GC5E",
+        }]
         # Even with a fake/hallucinated video ID, valid song & artist auto-resolves or retains song and artist
         fake_reply = (
             "Here is a great epic track:\n\n"
@@ -105,7 +113,8 @@ class TestMusicMetadata(unittest.TestCase):
         self.assertNotIn("<song title>", res)
         self.assertIn("Here is your recommendation:", res)
 
-    def test_standardize_song_reply_preserves_user_mention(self):
+    @patch("src.skills.youtube.client.verify_embeddable", return_value=True)
+    def test_standardize_song_reply_preserves_user_mention(self, _mock_verify):
         mention_reply = (
             "<@123456789> Since you liked that track, here is another one:\n\n"
             "**Song:** Strobe\n"
@@ -123,11 +132,15 @@ class TestEmbeddability(unittest.TestCase):
 
     def setUp(self):
         from src.skills.youtube.client import clear_youtube_caches
+        from src.skills.music.playback.youtube_music import clear_resolved_music_cache
         clear_youtube_caches()
+        clear_resolved_music_cache()
 
     def tearDown(self):
         from src.skills.youtube.client import clear_youtube_caches
+        from src.skills.music.playback.youtube_music import clear_resolved_music_cache
         clear_youtube_caches()
+        clear_resolved_music_cache()
 
     def test_verify_embeddable_invalid_id(self):
         from src.skills.youtube.client import verify_embeddable
@@ -135,7 +148,7 @@ class TestEmbeddability(unittest.TestCase):
         self.assertFalse(verify_embeddable("abc"))
         self.assertFalse(verify_embeddable("toolongvideoid12345"))
 
-    @patch("src.skills.youtube.client.requests.get")
+    @patch("src.skills.youtube.client._HTTP_SESSION.get")
     def test_verify_embeddable_oembed_unauthorized(self, mock_get):
         from src.skills.youtube.client import verify_embeddable
         mock_resp = MagicMock()
@@ -143,9 +156,9 @@ class TestEmbeddability(unittest.TestCase):
         mock_get.return_value = mock_resp
         self.assertFalse(verify_embeddable("12345678901"))
 
-    @patch("src.skills.youtube.client.requests.get")
+    @patch("src.skills.youtube.client._HTTP_SESSION.get")
     def test_verify_embeddable_markers(self, mock_get):
-        from src.skills.youtube.client import verify_embeddable
+        from src.skills.youtube.client import verify_embeddable, clear_youtube_caches
         oembed_resp = MagicMock()
         oembed_resp.status_code = 200
 
@@ -157,15 +170,18 @@ class TestEmbeddability(unittest.TestCase):
             "UNPLAYABLE",
             "Video unavailable",
         ):
+            clear_youtube_caches()
+            mock_get.reset_mock()
             embed_resp = MagicMock()
             embed_resp.status_code = 200
             embed_resp.text = f"<html><body><div>{marker}</div></body></html>"
-            mock_get.side_effect = [oembed_resp, embed_resp]
+            mock_get.side_effect = lambda url, **kw: oembed_resp if "oembed" in url else embed_resp
             self.assertFalse(verify_embeddable("12345678901"))
-            _, kwargs = mock_get.call_args
-            self.assertEqual(kwargs.get("headers", {}).get("Referer"), "https://discord.com/")
+            self.assertTrue(
+                any(call.kwargs.get("headers", {}).get("Referer") == "https://discord.com/" for call in mock_get.call_args_list)
+            )
 
-    @patch("src.skills.youtube.client.requests.get")
+    @patch("src.skills.youtube.client._HTTP_SESSION.get")
     def test_verify_embeddable_success(self, mock_get):
         from src.skills.youtube.client import verify_embeddable, get_video_oembed
         oembed_resp = MagicMock()
@@ -174,7 +190,7 @@ class TestEmbeddability(unittest.TestCase):
         embed_resp = MagicMock()
         embed_resp.status_code = 200
         embed_resp.text = "<html><body><div>Normal playable video player</div></body></html>"
-        mock_get.side_effect = [oembed_resp, embed_resp]
+        mock_get.side_effect = lambda url, **kw: oembed_resp if "oembed" in url else embed_resp
         self.assertTrue(verify_embeddable("12345678901"))
         self.assertEqual(mock_get.call_count, 2)
 
@@ -206,11 +222,12 @@ class TestEmbeddability(unittest.TestCase):
         self.assertIn("https://music.youtube.com/watch?v=workingid12", res)
         self.assertNotIn("badid123456", res)
 
+    @patch("src.skills.music.playback.youtube_music._fetch_direct_youtube_video_ids", return_value=[])
     @patch("src.skills.music.playback.youtube_music.is_youtube_short")
     @patch("src.skills.music.playback.youtube_music.get_video_oembed")
     @patch("src.skills.music.playback.youtube_music.verify_embeddable")
     @patch("src.skills.music.playback.youtube_music.DDGS")
-    def test_resolve_skips_unembeddable_candidate(self, mock_ddgs, mock_verify, mock_oembed, mock_short):
+    def test_resolve_skips_unembeddable_candidate(self, mock_ddgs, mock_verify, mock_oembed, mock_short, _mock_direct):
         from src.skills.music.playback.youtube_music import resolve_youtube_music_link
         mock_short.return_value = False
         mock_ddgs_instance = MagicMock()
@@ -231,7 +248,15 @@ class TestEmbeddability(unittest.TestCase):
 class TestDeezerExpansion(unittest.TestCase):
     """Test suite for expanded Deezer aggregator and artist search."""
 
-    @patch("src.skills.music.aggregators.deezer.requests.get")
+    def setUp(self):
+        from src.skills.music.aggregators.deezer import clear_deezer_cache
+        clear_deezer_cache()
+
+    def tearDown(self):
+        from src.skills.music.aggregators.deezer import clear_deezer_cache
+        clear_deezer_cache()
+
+    @patch("src.skills.music.aggregators.deezer._HTTP_SESSION.get")
     def test_deezer_artist_top_tracks(self, mock_get):
         from unittest.mock import MagicMock
         from src.skills.music.aggregators.deezer import DeezerAggregator
@@ -252,7 +277,7 @@ class TestDeezerExpansion(unittest.TestCase):
         self.assertEqual(tracks[0].artist, "Deadmau5")
         self.assertEqual(tracks[0].album, "Random Album Title")
 
-    @patch("src.skills.music.aggregators.deezer.requests.get")
+    @patch("src.skills.music.aggregators.deezer._HTTP_SESSION.get")
     def test_deezer_global_charts(self, mock_get):
         from unittest.mock import MagicMock
         from src.skills.music.aggregators.deezer import DeezerAggregator
@@ -325,7 +350,10 @@ class TestMusicDiversityExpansion(unittest.TestCase):
         self.assertEqual(len(tracks), 1)
         self.assertEqual(tracks[0].source, "fallback_unrelated")
 
-        with patch("src.skills.music.top_music.manager", mgr):
+        with (
+            patch("src.skills.music.top_music.manager", mgr),
+            patch("src.skills.music.top_music._pre_resolve_top_candidate", return_value=""),
+        ):
             out = skill_top_music(similar_to="Completely Unknown Obscure Track 99999 by Nobody")
             self.assertIn("NO DIRECT SIMILAR SONGS FOUND", out)
             self.assertIn("couldn't find any directly related songs", out)
@@ -360,9 +388,10 @@ class TestMusicDiversityExpansion(unittest.TestCase):
         self.assertEqual(resolve_genre_and_regions("american idiot"), (None, []))
         self.assertEqual(resolve_genre_and_regions("german shepherd"), (None, []))
 
-    @patch("src.skills.music.aggregators.deezer.requests.get")
+    @patch("src.skills.music.aggregators.deezer._HTTP_SESSION.get")
     def test_deezer_multi_playlist_pooling(self, mock_get):
-        from src.skills.music.aggregators.deezer import DeezerAggregator
+        from src.skills.music.aggregators.deezer import DeezerAggregator, clear_deezer_cache
+        clear_deezer_cache()
 
         mock_search_resp = MagicMock()
         mock_search_resp.json.return_value = {
@@ -385,6 +414,7 @@ class TestMusicDiversityExpansion(unittest.TestCase):
         tracks = deezer.get_charts(genre="dnb")
         artists = {t.artist for t in tracks}
         self.assertEqual(artists, {"Sub Focus", "Wilkinson"})
+        clear_deezer_cache()
 
     @patch("src.skills.music.aggregators.deezer.DeezerAggregator.get_charts")
     def test_beatport_techno_queries_beatport_top_100_techno_on_deezer(self, mock_deezer_charts):
@@ -541,7 +571,10 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         fake_mgr.get_mood_tracks.return_value = [
             Track(title="Adorn", artist="Miguel", genre="R&B", source="deezer_love")
         ]
-        with patch("src.skills.music.top_music.manager", fake_mgr):
+        with (
+            patch("src.skills.music.top_music.manager", fake_mgr),
+            patch("src.skills.music.top_music._pre_resolve_top_candidate", return_value=""),
+        ):
             out = skill_top_music(mood="love")
             fake_mgr.get_mood_tracks.assert_called_once_with(mood="love", genre=None)
             self.assertIn("TOP VIBE / MOOD SELECTION: LOVE (MULTI-GENRE MIX)", out)
@@ -576,8 +609,8 @@ class TestMoodVibeDiscovery(unittest.TestCase):
             self.assertIn("Artist: Artist B", out)
             self.assertIn("Link: https://music.youtube.com/watch?v=playable123", out)
 
-    @patch("src.skills.youtube.client.requests.head")
-    @patch("src.skills.youtube.client.requests.get")
+    @patch("src.skills.youtube.client._HTTP_SESSION.head")
+    @patch("src.skills.youtube.client._HTTP_SESSION.get")
     def test_topic_channel_skips_short_head_request(self, mock_get, mock_head):
         from src.skills.youtube.client import verify_embeddable, is_youtube_short, clear_youtube_caches
         clear_youtube_caches()
@@ -588,7 +621,7 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         embed_resp = MagicMock()
         embed_resp.status_code = 200
         embed_resp.text = "<html><body>Playable</body></html>"
-        mock_get.side_effect = [oembed_resp, embed_resp]
+        mock_get.side_effect = lambda url, **kw: oembed_resp if "oembed" in url else embed_resp
 
         self.assertTrue(verify_embeddable("topicvid123"))
         # Because author_name has ' - Topic', is_youtube_short should return False in 0ms without calling requests.head
@@ -722,16 +755,22 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         self.assertTrue(valid_label)
         self.assertEqual(score_label, 1)
 
+    @patch("src.skills.music.playback.youtube_music._fetch_direct_youtube_video_ids", return_value=[])
     @patch("src.skills.music.playback.youtube_music.is_youtube_short")
     @patch("src.skills.music.playback.youtube_music.get_video_oembed")
     @patch("src.skills.music.playback.youtube_music.verify_embeddable")
     @patch("src.skills.music.playback.youtube_music.DDGS")
-    def test_retry_exclusion_and_official_fallback_hierarchy(self, mock_ddgs, mock_verify, mock_oembed, mock_short):
+    def test_retry_exclusion_and_official_fallback_hierarchy(self, mock_ddgs, mock_verify, mock_oembed, mock_short, _mock_direct):
         from src.skills.youtube.client import clear_youtube_caches, _OEMBED_CACHE
-        from src.skills.music.playback.youtube_music import get_blocked_official_info, resolve_youtube_music_link
+        from src.skills.music.playback.youtube_music import (
+            clear_resolved_music_cache,
+            get_blocked_official_info,
+            resolve_youtube_music_link,
+        )
         from src.skills.youtube.searcher import skill_youtube_searcher
 
         clear_youtube_caches()
+        clear_resolved_music_cache()
         mock_short.return_value = False
 
         # Part A: Official 'Lay Low by Snoop Dogg' upload is embed-blocked while fake upload is rejected ->
@@ -769,6 +808,7 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         # Part B: 'Drop It Like It's Hot by Snoop Dogg' -> official Snoop Dogg - Topic (embed-blocked)
         # MUST beat unverified standard re-upload channel ('CuentasXXX Online', embeddable=True)
         clear_youtube_caches()
+        clear_resolved_music_cache()
         mock_ddgs_instance.text.return_value = [
             {"href": "https://www.youtube.com/watch?v=T6bjORaYktk", "title": "Drop It Like It's Hot"},
             {"href": "https://www.youtube.com/watch?v=VYOoqeldaUE", "title": "Snoop Dogg   Drop It Like It's Hot ft  Pharrell Williams"},
@@ -787,6 +827,7 @@ class TestMoodVibeDiscovery(unittest.TestCase):
 
         # Part C: Retry exclusion skips previously served video ID and picks the second valid candidate
         clear_youtube_caches()
+        clear_resolved_music_cache()
         mock_ddgs_instance.text.return_value = [
             {"href": "https://www.youtube.com/watch?v=firstvid111", "title": "Strobe - deadmau5"},
             {"href": "https://www.youtube.com/watch?v=secondvid22", "title": "Strobe (Radio Edit) - deadmau5"},

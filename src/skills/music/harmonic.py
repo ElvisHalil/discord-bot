@@ -1,19 +1,30 @@
+import logging
 from typing import Optional
+
+from src.skills.music import audio_analyzer
 from src.skills.music.aggregators.freqblog import FreqBlogAggregator
 from src.skills.music.aggregators.manager import MusicAggregatorManager
+from src.skills.music.enums import AudioAction
+from src.skills.music.moods import parse_mood_and_genre
+from src.skills.music.templates import build_music_llm_instructions
+from src.skills.music.top_music import skill_top_music
+from src.skills.music.utils import parse_song_meta
+
+logger = logging.getLogger(__name__)
 
 freqblog = FreqBlogAggregator()
 manager = MusicAggregatorManager()
 
+
 def skill_audio_intelligence(
     track: Optional[str] = None,
-    action: Optional[str] = "bpm_key",
+    action: Optional[str] = AudioAction.BPM_KEY,
     second_track: Optional[str] = None,
-    target_bpm: Optional[int] = None
+    target_bpm: Optional[int] = None,
 ) -> str:
     """
     Audio analysis and DJ harmonic mixing intelligence powered by FreqBlog.
-    Use ONLY when the user explicitly asks for tempo (BPM), musical key/Camelot, 
+    Use ONLY when the user explicitly asks for tempo (BPM), musical key/Camelot,
     audio transition mixing compatibility, harmonic DJ sets, or matching a song's emotional mood/vibe.
     - action='match_mood': Finds songs that acoustically and emotionally match the mood, energy, and vibe of 'track'.
     - action='bpm_key': Retrieves exact BPM, Camelot key, mood, and energy for a track.
@@ -30,46 +41,38 @@ def skill_audio_intelligence(
     if not track and not target_bpm:
         return "Please specify a track name or target BPM."
 
+    act = (action or AudioAction.BPM_KEY).strip().lower()
+
     # 1. BPM and Key analysis
-    if action == "bpm_key":
+    if act == AudioAction.BPM_KEY:
         data = freqblog.get_audio_features(track)
         if not data or not data.get("bpm"):
-            is_fb_mocked = (
-                hasattr(freqblog, "assert_called")
-                or hasattr(getattr(freqblog, "get_audio_features", None), "assert_called")
-            )
-            if not is_fb_mocked:
-                from src.skills.music.utils import parse_song_meta
-                from src.skills.music.audio_analyzer import (
-                    get_track_acoustic_profile,
-                    listen_with_gemma_audio,
+            meta = parse_song_meta(track)
+            prof = audio_analyzer.get_track_acoustic_profile(meta.get("song", track), meta.get("artist", ""))
+            if prof and prof.get("bpm"):
+                gemma_vibe = audio_analyzer.listen_with_gemma_audio(
+                    mp3_bytes=prof.get("_mp3_bytes"),
+                    preview_url=prof.get("preview_url"),
+                    song=prof.get("title", track),
+                    artist=prof.get("artist", ""),
                 )
-                meta = parse_song_meta(track)
-                prof = get_track_acoustic_profile(meta.get("song", track), meta.get("artist", ""))
-                if prof and prof.get("bpm"):
-                    gemma_vibe = listen_with_gemma_audio(
-                        mp3_bytes=prof.get("_mp3_bytes"),
-                        preview_url=prof.get("preview_url"),
-                        song=prof.get("title", track),
-                        artist=prof.get("artist", ""),
-                    )
-                    output = f"=== AUDIO INTELLIGENCE FOR '{prof.get('title', track)}' ===\n"
-                    output += f"Artist: {prof.get('artist', 'Unknown')}\n"
-                    output += f"BPM: ~{prof['bpm']} (Half-time/Double-time available)\n"
-                    output += f"Speed Rating: {prof['speed_score']:.1f} / 10.0 (Onset Rate: {prof['onset_rate']:.2f}/s)\n"
-                    output += (
-                        f"Acoustic Intensity: {prof['intensity_score']:.1f} / 10.0 "
-                        f"(Master Gain: {prof['gain_db']:+.1f} dB | Spectral Brightness: {int(prof['spectral_centroid_hz'])} Hz)\n"
-                    )
-                    output += f"Spectrum Zone: {prof['ui_zone']}\n"
-                    if gemma_vibe:
-                        if gemma_vibe.get("instruments"):
-                            output += f"Instruments: {gemma_vibe['instruments']}\n"
-                        if gemma_vibe.get("vocals"):
-                            output += f"Vocals: {gemma_vibe['vocals']}\n"
-                        if gemma_vibe.get("vibe"):
-                            output += f"Mood / Vibe: {gemma_vibe['vibe']}\n"
-                    return output
+                output = f"=== AUDIO INTELLIGENCE FOR '{prof.get('title', track)}' ===\n"
+                output += f"Artist: {prof.get('artist', 'Unknown')}\n"
+                output += f"BPM: ~{prof['bpm']} (Half-time/Double-time available)\n"
+                output += f"Speed Rating: {prof['speed_score']:.1f} / 10.0 (Onset Rate: {prof['onset_rate']:.2f}/s)\n"
+                output += (
+                    f"Acoustic Intensity: {prof['intensity_score']:.1f} / 10.0 "
+                    f"(Master Gain: {prof['gain_db']:+.1f} dB | Spectral Brightness: {int(prof['spectral_centroid_hz'])} Hz)\n"
+                )
+                output += f"Spectrum Zone: {prof['ui_zone']}\n"
+                if gemma_vibe:
+                    if gemma_vibe.get("instruments"):
+                        output += f"Instruments: {gemma_vibe['instruments']}\n"
+                    if gemma_vibe.get("vocals"):
+                        output += f"Vocals: {gemma_vibe['vocals']}\n"
+                    if gemma_vibe.get("vibe"):
+                        output += f"Mood / Vibe: {gemma_vibe['vibe']}\n"
+                return output
             return f"Audio features for '{track}' could not be resolved in the catalog."
         bpm = data.get("bpm")
         key = data.get("key")
@@ -91,7 +94,7 @@ def skill_audio_intelligence(
         return output
 
     # 2. Transition Scoring (Can I mix A into B?)
-    elif action == "transition":
+    elif act == AudioAction.TRANSITION:
         if not second_track:
             return "Please provide both 'track' and 'second_track' to score transition."
         res = freqblog.score_transition(track, second_track)
@@ -109,7 +112,7 @@ def skill_audio_intelligence(
         return output
 
     # 3. Find by BPM
-    elif action == "bpm_search":
+    elif act == AudioAction.BPM_SEARCH:
         bpm_val = target_bpm or 128
         tracks = freqblog.find_by_bpm(bpm_val, tolerance=3, limit=10)
         if not tracks:
@@ -120,7 +123,7 @@ def skill_audio_intelligence(
         return output
 
     # 4. Harmonic Radio / DJ Set
-    elif action == "harmonic_radio":
+    elif act == AudioAction.HARMONIC_RADIO:
         tracks = freqblog.get_harmonic_radio(track, count=10)
         if not tracks:
             return f"Could not generate harmonic DJ set for '{track}'."
@@ -130,9 +133,7 @@ def skill_audio_intelligence(
         return output
 
     # 5. Match Mood / Emotional Vibe
-    elif action == "match_mood":
-        from src.skills.music.moods import parse_mood_and_genre
-        from src.skills.music.top_music import skill_top_music
+    elif act == AudioAction.MATCH_MOOD:
         parsed_g, parsed_m = parse_mood_and_genre(track)
         if parsed_m and " by " not in (track or "").lower() and " - " not in (track or ""):
             return skill_top_music(genre=parsed_g, mood=parsed_m)
@@ -145,7 +146,6 @@ def skill_audio_intelligence(
         valence = mood_info.get("valence")
         seed_display = mood_info.get("seed_track", track)
 
-        # Deduplicate
         seen = set()
         unique = []
         for t in tracks:
@@ -155,22 +155,12 @@ def skill_audio_intelligence(
                 unique.append(t)
 
         dsp_profile_line = ""
-        is_mgr_mocked = (
-            hasattr(manager, "assert_called")
-            or hasattr(getattr(manager, "get_mood_matched_tracks", None), "assert_called")
-        )
-        if energy is None and not is_mgr_mocked:
+        if energy is None:
             try:
-                from src.skills.music.utils import parse_song_meta
-                from src.skills.music.audio_analyzer import (
-                    get_track_acoustic_profile,
-                    listen_with_gemma_audio,
-                    rank_candidates_by_acoustic_shift,
-                )
                 meta = parse_song_meta(track)
-                seed_prof = get_track_acoustic_profile(meta.get("song", track), meta.get("artist", ""))
+                seed_prof = audio_analyzer.get_track_acoustic_profile(meta.get("song", track), meta.get("artist", ""))
                 if seed_prof:
-                    gemma_vibe = listen_with_gemma_audio(
+                    gemma_vibe = audio_analyzer.listen_with_gemma_audio(
                         mp3_bytes=seed_prof.get("_mp3_bytes"),
                         preview_url=seed_prof.get("preview_url"),
                         song=seed_prof.get("title", track),
@@ -186,15 +176,15 @@ def skill_audio_intelligence(
                     if gemma_vibe and gemma_vibe.get("instruments"):
                         dsp_profile_line += f" | Instruments: {gemma_vibe['instruments']}"
                     dsp_profile_line += "\n\n"
-                    unique = rank_candidates_by_acoustic_shift(
+                    unique = audio_analyzer.rank_candidates_by_acoustic_shift(
                         unique,
                         d_tempo=0,
                         d_intensity=0,
                         anchor_profile=seed_prof,
                         max_analyze=6,
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Match mood DSP enrichment failed for %r: %s", track, e)
 
         mood_str = f" ({mood.title()})" if mood and mood.lower() != "similar" else ""
         output = f"=== TRACKS MATCHING MOOD OF '{seed_display}'{mood_str} ===\n"
@@ -213,30 +203,7 @@ def skill_audio_intelligence(
         for t in unique[:15]:
             output += t.display_line() + "\n"
 
-        output += """
-=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===
-Select ONE best matching song from the list above.
-CRITICAL INSTRUCTION: Call `skill_youtube_searcher` with `is_music=True` and query="<Song Title> by <Artist Name>" to fetch its verified YouTube Music link.
-When presenting the song to the user, you MUST format your response using this EXACT clean, text-only template (NO EMOJIS):
-
-[Your brief conversational intro or similarity explanation, if any]
-
-**Song:** <Song Title>
-**Artist:** <Artist Name>
-**Genre:** <Genre Name> (optional, include only if known)
-**Album:** <Album Name> (optional, include only if known)
-
-<Raw YouTube Music URL on its own blank line>
-
-CRITICAL RULES:
-1. BOTH '**Song:**' and '**Artist:**' MUST always be displayed.
-2. Do NOT include ANY emojis in the song template lines. Keep it clean and text-only.
-3. NEVER invent or hallucinate YouTube URLs. You MUST use `skill_youtube_searcher` to get the link.
-4. Paste ONLY the bare YouTube Music URL on a new blank line at the bottom.
-5. NEVER wrap the link in markdown (like `[Title](url)`) or `<>` brackets.
-6. Do NOT output ANY markdown links like `[YouTube](...)` or `[Channel](...)` or `[Title](...)`.
-"""
+        output += build_music_llm_instructions(require_youtube_lookup=True)
         return output
 
     return f"Unknown action '{action}'."
-

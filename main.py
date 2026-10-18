@@ -19,18 +19,29 @@ from src.utils import (
     run_in_worker,
     shutdown_worker_pool,
 )
+from src.context import (
+    bind_event_loop,
+    bind_tracker_event_loop,
+    set_active_channel_id,
+)
 from src.skills.music.utils import format_song_card, get_music_metadata, standardize_song_reply
 from src.skills.sports.live_tracker import (
     LIVE_TRACKER,
-    bind_tracker_event_loop,
-    set_active_channel_id,
     skill_track_live_game,
 )
 from src.skills.flights import (
     FLIGHT_TRACKER,
     skill_track_flight,
 )
-from src.config import MODES
+try:
+    from src.config import MODES
+except ImportError:
+    import importlib.util as _importlib_util
+    from pathlib import Path as _Path
+    _spec = _importlib_util.spec_from_file_location("src.config", _Path(__file__).resolve().parent / "src" / "config.example.py")
+    _mod = _importlib_util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    MODES = _mod.MODES
 from src.orchestrator import (
     normalize_tool_args,
     enrich_sports_tool_args,
@@ -102,6 +113,7 @@ def clear_tool_caches(channel_id: int = None):
         tools.YOUTUBE_CACHE.clear()
     try:
         from src.skills.youtube.client import clear_youtube_caches
+        from src.skills.music.playback.youtube_music import clear_resolved_music_cache
         from src.skills.music.aggregators.deezer import clear_deezer_cache
         from src.skills.music.aggregators.lastfm import clear_lastfm_cache
         from src.skills.music.aggregators.charts import clear_charts_cache
@@ -119,6 +131,7 @@ def clear_tool_caches(channel_id: int = None):
         clear_channel_flight_state(channel_id)
         if channel_id is None:
             clear_youtube_caches()
+            clear_resolved_music_cache()
             clear_deezer_cache()
             clear_lastfm_cache()
             clear_charts_cache()

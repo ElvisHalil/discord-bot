@@ -1,37 +1,12 @@
 from src.skills.music.aggregators.base import BaseMusicAggregator
+from src.skills.music.catalogs import BEATPORT_GENRE_QUERIES as _BEATPORT_GENRE_QUERIES
 from src.skills.music.models import Track
 
 class BeatportAggregator(BaseMusicAggregator):
     """Electronic music chart aggregator resolving Beatport Top 100, Hype 100, and Subgenre charts
     directly from Deezer-hosted Beatport playlists."""
 
-    BEATPORT_GENRE_QUERIES = {
-        "techno": "Beatport Top 100 Techno",
-        "melodic techno": "Beatport Top 100 Melodic House & Techno",
-        "melodic house": "Beatport Top 100 Melodic House & Techno",
-        "hard techno": "Beatport Top 100 Hard Techno",
-        "dnb": "Beatport Top 100 Drum & Bass",
-        "drum and bass": "Beatport Top 100 Drum & Bass",
-        "drumnbass": "Beatport Top 100 Drum & Bass",
-        "drum & bass": "Beatport Top 100 Drum & Bass",
-        "jungle": "Beatport Top 100 Drum & Bass",
-        "house": "Beatport Top 100 House",
-        "tech house": "Beatport Top 100 Tech House",
-        "deep house": "Beatport Top 100 Deep House",
-        "afro house": "Beatport Top 100 Afro House",
-        "afrohouse": "Beatport Top 100 Afro House",
-        "progressive house": "Beatport Top 100 Progressive House",
-        "trance": "Beatport Top 100 Trance",
-        "psytrance": "Beatport Top 100 Psy-Trance",
-        "dubstep": "Beatport Top 100 Dubstep",
-        "bass": "Beatport Top 100 Bass",
-        "electro": "Beatport Top 100 Electro",
-        "minimal": "Beatport Top 100 Minimal Deep Tech",
-        "electronic": "Beatport Top 100",
-        "edm": "Beatport Top 100",
-        "dance": "Beatport Top 100",
-        "hype": "Beatport Hype 100",
-    }
+    BEATPORT_GENRE_QUERIES = _BEATPORT_GENRE_QUERIES
 
     def get_charts(self, genre: str = None) -> list[Track]:
         tracks = []
