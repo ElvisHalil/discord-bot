@@ -92,6 +92,13 @@ src/skills/<skill_name>/
 4. **Implement your tool entrypoint** (`def skill_<your_skill>_info(...) -> str:`) in `<your_skill>.py` and export it in `src/skills/<your_skill>/__init__.py` and `src/skills/__init__.py`.
 5. **Register the tool** in `src/registry.py` (`RESEARCH_TOOLS` / `CHAT_TOOLS`) and add parameter synonyms to `TOOL_ARG_ALIASES` in `src/utils/domain_vocab.py`.
 
+#### 💡 Why Code-First Skill Packages Instead of `SKILL.md`?
+Many coding and OS agents (like Claude Code, Cursor, or OpenClaw) use `SKILL.md` files — Markdown instruction manuals that a large cloud model reads at runtime to figure out what shell commands or scripts to run across multiple turns.
+
+This bot intentionally uses **compiled Python skill packages + `templates.py`** instead:
+- **Built for Fast Local Models (`4B–8B`)**: Rather than asking a small local model to read a Markdown guide and improvise CLI commands across 3–4 turns, each skill exposes a strict, typed Python function (`<skill_name>.py`) and appends concise formatting rules (`templates.py`) directly to the tool output in a **single turn**.
+- **Deterministic Speed & Concurrency**: Heavy lifting — like 24-thread worker fan-out, API fallback chains, and in-memory MP3 FFT signal processing — runs in deterministic, unit-tested Python rather than prompt instructions.
+
 ---
 
 ## 🚀 Getting Started
