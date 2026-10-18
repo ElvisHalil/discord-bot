@@ -291,7 +291,7 @@ class TestSanitizeAgentReply(unittest.TestCase):
         )
         self.assertEqual(enriched, {"sport": "nhl", "team": "Edmonton Oilers", "query": "next"})
 
-        # 2. WttrAggregator passes curl User-Agent and guards against raw HTML pages
+        # 2. WttrAggregator passes curl User-Agent, supports 3-day JSON forecast, and guards against raw HTML pages
         agg = WttrAggregator()
         with patch("src.skills.weather.aggregators.wttr.fetch_text", return_value="Sunny +18°C ↑8km/h 29%") as mock_ft:
             res = agg.get_weather("Edmonton")
@@ -300,6 +300,61 @@ class TestSanitizeAgentReply(unittest.TestCase):
 
         with patch("src.skills.weather.aggregators.wttr.fetch_text", return_value="<!DOCTYPE html><html><body>Error</body></html>"):
             self.assertEqual(agg.get_weather("Edmonton"), "Weather service temporarily unavailable.")
+
+        # 2b. OpenMeteoAggregator primary 7-day forecast + WeatherAggregatorManager fallback to wttr.in
+        from src.skills.weather.aggregators import OpenMeteoAggregator, WeatherAggregatorManager, clear_weather_cache
+        clear_weather_cache()
+        om_agg = OpenMeteoAggregator()
+        fake_geo = {
+            "results": [
+                {"name": "Paris", "latitude": 33.66, "longitude": -95.55, "admin1": "Texas", "country": "United States", "timezone": "America/Chicago"},
+                {"name": "Paris", "latitude": 48.85, "longitude": 2.35, "admin1": "Île-de-France", "country": "France", "timezone": "Europe/Paris"},
+            ]
+        }
+        fake_forecast = {
+            "timezone": "Europe/Paris",
+            "current": {
+                "temperature_2m": 19.5,
+                "apparent_temperature": 18.2,
+                "relative_humidity_2m": 64,
+                "precipitation": 0.0,
+                "weather_code": 2,
+                "wind_speed_10m": 14.0,
+                "wind_direction_10m": 270,
+                "wind_gusts_10m": 24.5,
+                "uv_index": 4.2,
+            },
+            "daily": {
+                "time": ["2026-10-18", "2026-10-19", "2026-10-20"],
+                "weather_code": [2, 61, 0],
+                "temperature_2m_max": [20.0, 17.5, 21.0],
+                "temperature_2m_min": [11.0, 10.5, 9.5],
+                "precipitation_probability_max": [15, 80, 5],
+                "precipitation_sum": [0.0, 6.4, 0.0],
+                "wind_speed_10m_max": [18.0, 26.0, 12.0],
+                "uv_index_max": [4.5, 2.0, 5.0],
+                "sunrise": ["2026-10-18T08:12", "2026-10-19T08:14", "2026-10-20T08:15"],
+                "sunset": ["2026-10-18T18:58", "2026-10-19T18:56", "2026-10-20T18:54"],
+            },
+        }
+        with patch("src.skills.weather.aggregators.open_meteo.fetch_json", side_effect=[fake_geo, fake_forecast]):
+            om_out = om_agg.get_weather("Paris, France", days=3)
+        self.assertIn("Location: Paris, Île-de-France, France (Timezone: Europe/Paris)", om_out)
+        self.assertIn("Current: Partly cloudy, 19.5°C (67.1°F)", om_out)
+        self.assertIn("=== 3-DAY FORECAST ===", om_out)
+        self.assertIn("Tomorrow (Mon, Oct 19): Slight rain | High: 17.5°C", om_out)
+        self.assertIn("Precip Chance: 80% (6.4 mm)", om_out)
+
+        # Verify WeatherAggregatorManager falls back to wttr.in when Open-Meteo returns empty
+        clear_weather_cache()
+        mgr = WeatherAggregatorManager()
+        with (
+            patch.object(mgr.open_meteo, "get_weather", return_value=""),
+            patch.object(mgr.wttr, "get_forecast", return_value="Current: Sunny, 20°C | Wind: 10 km/h") as mock_wttr_fc,
+        ):
+            fb_out = mgr.get_weather("Tokyo", days=5)
+            self.assertEqual(fb_out, "Current: Sunny, 20°C | Wind: 10 km/h")
+            mock_wttr_fc.assert_called_once_with("Tokyo", days=3)
 
         # 3. enrich_tool_output_with_time_context strips stray HTML docs and preserves trailing instructions on huge payloads
         html_leak = "=== RAW WEATHER DATA ===\nConditions: <!DOCTYPE html><html><head><style>body{color:red}</style></head><body>Sunny 18C</body></html>\n\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\nKeep it concise."

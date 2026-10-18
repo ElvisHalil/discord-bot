@@ -191,7 +191,7 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
 
     def test_strict_separation_of_enums_models_and_catalogs(self):
         """Verify each domain skill strictly separates StrEnums (enums.py), dataclasses (models.py), and static tables (catalogs.py)."""
-        for skill in ("music", "sports", "flights", "news"):
+        for skill in ("music", "sports", "flights", "news", "weather", "youtube"):
             enums_mod = importlib.import_module(f"src.skills.{skill}.enums")
             models_mod = importlib.import_module(f"src.skills.{skill}.models")
             catalogs_mod = importlib.import_module(f"src.skills.{skill}.catalogs")
