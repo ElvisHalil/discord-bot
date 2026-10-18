@@ -1489,9 +1489,22 @@ class TestMultiUserDiscordChannelConcurrency(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Report for Berlin (5d)", res)
         clear_weather_cache()
 
+    def test_ollama_base_url_and_docker_boot_check(self):
+        import requests
+        from src.utils.discord import ensure_ollama_running, get_ollama_base_url
+
+        with patch.dict("os.environ", {"OLLAMA_HOST": "host.docker.internal:11434/"}, clear=False):
+            self.assertEqual(get_ollama_base_url(), "http://host.docker.internal:11434")
+            with patch("src.utils.discord.requests.get", side_effect=requests.exceptions.ConnectionError("unreachable")), \
+                 patch("src.utils.discord.subprocess.Popen") as mock_popen:
+                ensure_ollama_running()
+                # Must NOT attempt to spawn a local ollama subprocess when pointing at host.docker.internal
+                mock_popen.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

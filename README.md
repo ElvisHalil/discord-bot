@@ -132,9 +132,21 @@ pip install -r requirements.txt
    *(If `src/config.py` is omitted, the bot automatically loads the default `research` and `chat` profiles from `src/config.example.py`.)*
 
 ### 4. Run the Bot
+
+#### Option A: Run Natively
 ```bash
 python main.py
 ```
+
+#### Option B: Run in a Hardened, Isolated Docker Container
+For complete filesystem isolation from the host machine:
+1. Ensure Ollama on the host accepts connections from the Docker bridge (`OLLAMA_HOST=0.0.0.0:11434`).
+2. Build and start the sandboxed container:
+   ```bash
+   docker compose up -d --build
+   ```
+   - **Zero Host Bind-Mounts**: No host folders are mounted into the container (`bot_data` and `bot_workspace` use isolated Docker-managed named volumes).
+   - **Read-Only Root Filesystem**: `/`, `/usr`, and `/app` are mounted read-only; the bot runs as an unprivileged user (`1000:1000`) with `cap_drop: [ALL]` and `no-new-privileges:true`.
 
 ---
 

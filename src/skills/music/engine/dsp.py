@@ -493,12 +493,15 @@ def listen_with_gemma_audio(
     song: str = "",
     artist: str = "",
     model: str = "gemma4:e4b",
-    ollama_url: str = "http://localhost:11434/api/chat",
+    ollama_url: Optional[str] = None,
 ) -> Optional[Dict[str, str]]:
     """
     Use gemma4:e4b's native mel-spectrogram audio encoder (`gemma4a`) in Ollama (`think=False`)
     to listen to the 30-second MP3 preview and describe its instruments, vocals, and mood/vibe.
     """
+    if not ollama_url:
+        from src.utils.discord import get_ollama_base_url
+        ollama_url = f"{get_ollama_base_url()}/api/chat"
     audio_bytes = mp3_bytes
     if not audio_bytes and preview_url:
         try:

@@ -1,0 +1,53 @@
+services:
+  discord-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chappie-discord-bot
+    restart: unless-stopped
+
+    # Inject environment variables at runtime without mounting .env into the container
+    env_file:
+      - .env
+    environment:
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+
+    # Route host.docker.internal to the host gateway so the container can reach
+    # the host's GPU-accelerated Ollama server without host network mode
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # =========================================================================
+    # STRICT SANDBOX & HOST FILESYSTEM ISOLATION
+    # =========================================================================
+    # 1. Run as unprivileged user (botuser, UID 1000 : GID 1000)
+    user: "1000:1000"
+
+    # 2. Mount the entire root filesystem (/, /usr, /bin, /etc, /app) READ-ONLY
+    read_only: true
+
+    # 3. Block all privilege escalation (setuid/sudo/su binaries cannot gain root)
+    security_opt:
+      - no-new-privileges:true
+
+    # 4. Drop all Linux kernel capabilities (no mount, raw sockets, net_admin, ptrace, etc.)
+    cap_drop:
+      - ALL
+
+    # 5. Zero host bind-mounts: ONLY isolated Docker-managed named volumes and RAM tmpfs
+    #    The Windows/Linux host filesystem is 100% unreachable from inside the container.
+    volumes:
+      - bot_data:/app/data
+      - bot_workspace:/home/botuser/workspace
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+
+    # 6. Resource & process limits (protects host against runaway commands or fork bombs)
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2.0
+
+volumes:
+  bot_data:
+  bot_workspace:
+

@@ -1,24 +1,50 @@
+import os
 import re
+import shutil
 import subprocess
 import time
 import requests
 
+
+def get_ollama_base_url() -> str:
+    """Resolve the base URL for the Ollama server from OLLAMA_HOST (defaulting to http://127.0.0.1:11434)."""
+    raw = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").strip()
+    if not raw:
+        return "http://127.0.0.1:11434"
+    if not raw.startswith(("http://", "https://")):
+        raw = f"http://{raw}"
+    return raw.rstrip("/")
+
+
 def ensure_ollama_running():
-    """Checks if Ollama is running and starts it invisibly if it is not."""
-    print("⚙️ [Boot] Checking Ollama server status...")
+    """Checks if Ollama is running and starts it invisibly when running natively on localhost."""
+    base_url = get_ollama_base_url()
+    print(f"⚙️ [Boot] Checking Ollama server status at {base_url}...")
     try:
-        requests.get("http://127.0.0.1:11434/", timeout=2)
+        requests.get(f"{base_url}/", timeout=3)
         print("🟢 [Boot] Ollama is already running.")
-    except requests.exceptions.ConnectionError:
-        print("🔴 [Boot] Ollama is offline. Starting background service...")
-        subprocess.Popen(
-            ["ollama", "serve"],
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+    except requests.exceptions.RequestException:
+        is_local = (
+            any(h in base_url for h in ("127.0.0.1", "localhost", "0.0.0.0"))
+            and not os.path.exists("/.dockerenv")
         )
-        time.sleep(4)
-        print("🟢 [Boot] Ollama server successfully started.")
+        if is_local and shutil.which("ollama"):
+            print("🔴 [Boot] Ollama is offline. Starting background service...")
+            popen_kwargs = {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            subprocess.Popen(["ollama", "serve"], **popen_kwargs)
+            time.sleep(4)
+            print("🟢 [Boot] Ollama server successfully started.")
+        else:
+            print(
+                f"⚠️ [Boot] Could not reach Ollama at {base_url}. "
+                "If running in Docker, ensure Ollama is running on the host with OLLAMA_HOST=0.0.0.0:11434."
+            )
+
 
 def chunk_message(text: str, max_length: int = 1900) -> list[str]:
     """Chunks a long message for Discord safely, avoiding splitting words or markdown."""

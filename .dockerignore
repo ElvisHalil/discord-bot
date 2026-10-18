@@ -1,0 +1,42 @@
+# Git & Version Control
+.git
+.gitignore
+
+# Secrets & Environment Files (injected at runtime via env_file, never baked into image layers)
+.env
+.env.*
+*.env
+!.env.example
+
+# Host Virtual Environments & Caches
+venv/
+.venv/
+env/
+ENV/
+Lib/
+Include/
+scripts/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+
+# Host Data, Logs & Scratch Files (isolated named volumes are used at runtime)
+data/
+logs/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+scratch/
+lastfm.html
+test.json
+
+# IDE & OS Metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
