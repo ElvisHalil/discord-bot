@@ -1517,6 +1517,228 @@ class TestMultiUserDiscordChannelConcurrency(unittest.IsolatedAsyncioTestCase):
                 timeout=1800,
             )
 
+    def test_weather_open_meteo_timeout_falls_back_to_wttr_without_crashing(self):
+        from src.skills.weather.aggregators.manager import WeatherAggregatorManager, clear_weather_cache
+
+        clear_weather_cache()
+        mgr = WeatherAggregatorManager()
+        with patch(
+            "src.skills.weather.aggregators.open_meteo.fetch_json",
+            side_effect=RuntimeError("Failed to perform, curl: (28) Connection timed out after 5015 milliseconds."),
+        ), patch.object(
+            mgr.wttr,
+            "get_forecast",
+            return_value="Current: Partly cloudy, 12°C (54°F) | Humidity: 45% | Wind: 15 km/h NW",
+        ) as mock_wttr:
+            report = mgr.get_weather("Edmonton", days=7)
+            self.assertIn("Partly cloudy, 12°C", report)
+            mock_wttr.assert_called_once_with("Edmonton", days=3)
+        clear_weather_cache()
+
+    async def test_reasoning_model_empty_content_recovers_with_think_false(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        with patch.dict("os.environ", {"DISCORD_TOKEN": "fake_test_token"}, clear=False):
+            with patch("main.ensure_ollama_running"):
+                import main as main_mod
+
+        fake_mode_cfg = {
+            "model": "gemma4:e4b",
+            "is_research": True,
+            "supports_tools": True,
+            "max_iterations": 4,
+            "ollama_options": {"num_ctx": 16384, "num_predict": 4096},
+            "tools": {},
+        }
+        # Simulate turn-0 follow-up where model burns token budget inside <think> and returns content=""
+        empty_thinking_msg = SimpleNamespace(
+            role="assistant",
+            content="",
+            thinking="Let me compare all 12 flight itineraries and layover durations...",
+            tool_calls=None,
+        )
+        recovered_msg = SimpleNamespace(
+            role="assistant",
+            content="The shortest option is the 1-stop flight via AMS at $980 CAD.",
+            tool_calls=None,
+        )
+        mock_chat = AsyncMock(side_effect=[
+            SimpleNamespace(message=empty_thinking_msg),
+            SimpleNamespace(message=recovered_msg),
+        ])
+        turn_hist = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Alex says: which of those flights is the best deal?"},
+        ]
+        with patch.object(main_mod.ollama_client, "chat", mock_chat):
+            reply = await main_mod.run_agent_turn(888, fake_mode_cfg, turn_history=turn_hist)
+
+        self.assertEqual(reply, "The shortest option is the 1-stop flight via AMS at $980 CAD.")
+        self.assertEqual(mock_chat.call_count, 2)
+        self.assertIs(mock_chat.call_args_list[1].kwargs.get("think"), False)
+
+    def test_compact_intra_turn_tool_history(self):
+        from src.orchestrator import compact_intra_turn_tool_history
+
+        hist = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "research topic"},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "search_web"}}]},
+            {"role": "tool", "name": "search_web", "content": "A" * 10000},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "read_website"}}]},
+            {"role": "tool", "name": "read_website", "content": "B" * 10000},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "read_website"}}]},
+            {"role": "tool", "name": "read_website", "content": "C" * 10000},
+        ]
+        compact_intra_turn_tool_history(hist, max_total_tool_chars=24000, older_step_chars=2500)
+        # Earlier steps compacted, newest tool output (step 3) kept at full 10,000 chars
+        self.assertLessEqual(len(hist[3]["content"]), 2600)
+        self.assertEqual(len(hist[7]["content"]), 10000)
+
+
+    def test_weather_open_meteo_transient_timeout_retries_and_succeeds(self):
+        from src.skills.weather.aggregators.manager import clear_weather_cache
+        from src.skills.weather.weather import skill_weather_info
+
+        clear_weather_cache()
+        fake_geo = {
+            "results": [
+                {
+                    "name": "Edmonton",
+                    "latitude": 53.5501,
+                    "longitude": -113.4687,
+                    "country": "Canada",
+                    "admin1": "Alberta",
+                    "timezone": "America/Edmonton",
+                }
+            ]
+        }
+        fake_forecast = {
+            "timezone": "America/Edmonton",
+            "current": {
+                "temperature_2m": 8.5,
+                "apparent_temperature": 6.0,
+                "relative_humidity_2m": 50,
+                "weather_code": 2,
+                "wind_speed_10m": 14.0,
+                "wind_direction_10m": 270,
+                "wind_gusts_10m": 20.0,
+                "precipitation": 0.0,
+                "uv_index": 3.0,
+            },
+            "daily": {
+                "time": ["2026-10-18"],
+                "weather_code": [2],
+                "temperature_2m_max": [11.0],
+                "temperature_2m_min": [2.0],
+                "precipitation_probability_max": [10],
+                "precipitation_sum": [0.0],
+                "wind_speed_10m_max": [18.0],
+                "uv_index_max": [3.5],
+                "sunrise": ["2026-10-18T08:05"],
+                "sunset": ["2026-10-18T18:30"],
+            },
+        }
+        # First call raises curl (28) timeout, automatic retry succeeds for geocoding + forecast
+        with patch(
+            "src.skills.weather.aggregators.open_meteo.fetch_json",
+            side_effect=[
+                RuntimeError("Failed to perform, curl: (28) Connection timed out after 5015 milliseconds."),
+                fake_geo,
+                fake_forecast,
+            ],
+        ) as mock_fetch:
+            out = skill_weather_info("Edmonton", days=1)
+            self.assertEqual(mock_fetch.call_count, 3)
+            self.assertIn("Edmonton, Alberta, Canada", out)
+            self.assertIn("Partly cloudy, 8.5°C", out)
+        clear_weather_cache()
+
+    async def test_flight_and_web_research_multi_step_overflow_and_empty_reply_recovery(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        with patch.dict("os.environ", {"DISCORD_TOKEN": "fake_test_token"}, clear=False):
+            with patch("main.ensure_ollama_running"):
+                import main as main_mod
+
+        def fake_flight_info(query: str = "", **kwargs) -> str:
+            return "=== FLIGHT RESULTS ===\n" + ("Flight Option Row | $950 CAD | 1 stop\n" * 240) + "\n=== CRITICAL INSTRUCTIONS ===\nPresent top flights."
+
+        def fake_search_web(query: str = "", **kwargs) -> str:
+            return "=== SEARCH RESULTS ===\n" + ("Snippet line about topic and release specs.\n" * 200)
+
+        def fake_read_website(url: str = "", **kwargs) -> str:
+            return f"=== WEBSITE CONTENT ({url}) ===\n" + ("Detailed paragraph from article body.\n" * 230)
+
+        fake_mode_cfg = {
+            "model": "gemma4:e4b",
+            "is_research": True,
+            "supports_tools": True,
+            "max_iterations": 6,
+            "ollama_options": {"num_ctx": 16384, "num_predict": 4096},
+            "tools": {
+                "skill_flight_info": fake_flight_info,
+                "search_web": fake_search_web,
+                "read_website": fake_read_website,
+            },
+        }
+
+        step0_call = SimpleNamespace(
+            role="assistant",
+            content="",
+            tool_calls=[SimpleNamespace(function=SimpleNamespace(name="skill_flight_info", arguments={"query": "Edmonton to Tokyo in November"}))],
+        )
+        step1_call = SimpleNamespace(
+            role="assistant",
+            content="",
+            tool_calls=[SimpleNamespace(function=SimpleNamespace(name="search_web", arguments={"query": "Japan entry requirements 2026"}))],
+        )
+        step2_call = SimpleNamespace(
+            role="assistant",
+            content="",
+            tool_calls=[SimpleNamespace(function=SimpleNamespace(name="read_website", arguments={"url": "https://example.com/japan-travel"}))],
+        )
+        # On step 3 (after 3 large tool payloads), model exhausts num_predict in <think> and returns empty content=""
+        step3_empty_thinking = SimpleNamespace(
+            role="assistant",
+            content="",
+            thinking="Analyzing all 240 flight rows and the Japan travel article..." * 50,
+            tool_calls=None,
+        )
+        step4_recovered = SimpleNamespace(
+            role="assistant",
+            content="Best flight from Edmonton to Tokyo is $950 CAD (1 stop), and no visa is required for short stays.",
+            tool_calls=None,
+        )
+
+        mock_chat = AsyncMock(side_effect=[
+            SimpleNamespace(message=step0_call),
+            SimpleNamespace(message=step1_call),
+            SimpleNamespace(message=step2_call),
+            SimpleNamespace(message=step3_empty_thinking),
+            SimpleNamespace(message=step4_recovered),
+        ])
+
+        turn_hist = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "User Alex says: find flights from Edmonton to Tokyo in November and check Japan entry rules"},
+        ]
+        with patch.object(main_mod.ollama_client, "chat", mock_chat):
+            reply = await main_mod.run_agent_turn(889, fake_mode_cfg, turn_history=turn_hist)
+
+        self.assertIn("Best flight from Edmonton to Tokyo is $950 CAD", reply)
+        self.assertNotIn("Generated an empty response", reply)
+        # Verify final fallback call used think=False
+        self.assertIs(mock_chat.call_args_list[-1].kwargs.get("think"), False)
+        # Verify earlier tool outputs in turn_hist were compacted while preserving the CRITICAL INSTRUCTIONS footer
+        tool_msgs = [m for m in turn_hist if isinstance(m, dict) and m.get("role") == "tool"]
+        self.assertEqual(len(tool_msgs), 3)
+        self.assertLessEqual(len(tool_msgs[0]["content"]), 2600)
+        self.assertIn("=== CRITICAL INSTRUCTIONS ===", tool_msgs[0]["content"])
+        self.assertGreater(len(tool_msgs[2]["content"]), 7000)
+
 
 if __name__ == "__main__":
     unittest.main()

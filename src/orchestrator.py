@@ -217,6 +217,54 @@ def trim_history(history: list, limit: int, old_tool_chars: int = OLD_TOOL_OUTPU
     return [system] + rest
 
 
+INTRA_TURN_MAX_TOOL_CHARS = 24000
+INTRA_TURN_OLDER_STEP_CHARS = 2500
+
+
+def compact_intra_turn_tool_history(
+    history: list,
+    max_total_tool_chars: int = INTRA_TURN_MAX_TOOL_CHARS,
+    older_step_chars: int = INTRA_TURN_OLDER_STEP_CHARS,
+) -> None:
+    """Compact older tool outputs within a multi-step research turn (in-place) when accumulated
+    tool payloads exceed `max_total_tool_chars`, preserving the latest step's tool outputs in full
+    so the model never overflows `num_ctx` during deep web research."""
+    if not history:
+        return
+
+    tool_indices = [
+        i for i, m in enumerate(history)
+        if isinstance(m, dict) and m.get("role") == "tool"
+    ]
+    if len(tool_indices) <= 1:
+        return
+
+    total_chars = sum(len(str(history[i].get("content") or "")) for i in tool_indices)
+    if total_chars <= max_total_tool_chars:
+        return
+
+    # Find where the latest assistant tool-call batch begins so its tool results stay untouched
+    last_assistant_idx = max(
+        (i for i, m in enumerate(history) if _role(m) == "assistant"),
+        default=-1,
+    )
+    from src.utils.timezones import _sanitize_and_bound_tool_output
+
+    for idx in tool_indices:
+        if idx > last_assistant_idx:
+            continue
+        content = str(history[idx].get("content") or "")
+        if len(content) > older_step_chars:
+            history[idx] = {
+                **history[idx],
+                "content": _sanitize_and_bound_tool_output(content, max_chars=older_step_chars),
+            }
+            total_chars = sum(len(str(history[i].get("content") or "")) for i in tool_indices)
+            if total_chars <= max_total_tool_chars:
+                break
+
+
+
 # ---------------------------------------------------------------------------
 # Reply post-processing & sanitization
 # ---------------------------------------------------------------------------

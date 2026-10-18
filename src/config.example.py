@@ -42,7 +42,7 @@ MODES = {
         "tools": tools.RESEARCH_TOOLS,
         "ollama_options": {
             "num_ctx": 16384,
-            "num_predict": 2048,
+            "num_predict": 4096,
             "temperature": 0.7,
         },
         "get_prompt": _build_research_prompt,

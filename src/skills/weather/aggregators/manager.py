@@ -54,7 +54,12 @@ class WeatherAggregatorManager:
             return cached[1]
 
         # 1. Primary: Open-Meteo (Current + up to 16-Day Forecast)
-        report = self.open_meteo.get_weather(clean_city, days=forecast_days)
+        try:
+            report = self.open_meteo.get_weather(clean_city, days=forecast_days)
+        except Exception as exc:
+            print(f"  └─ ⚠️ [Weather Manager]: Primary provider failed for '{clean_city}' ({exc}); using wttr.in fallback.")
+            report = ""
+
         if report and report.strip():
             _WEATHER_CACHE[cache_key] = (now, report)
             return report

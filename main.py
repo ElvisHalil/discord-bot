@@ -51,6 +51,7 @@ from src.orchestrator import (
     detect_missed_music_shift_tool_call,
     detect_missed_flight_tool_call,
     trim_history,
+    compact_intra_turn_tool_history,
     apply_auto_ping,
     join_orphan_bullets,
     sanitize_agent_reply,
@@ -523,11 +524,30 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
     }
 
     async def final_answer_without_tools(nudge):
-        """Ask the model for a final answer with tools hidden, so it must write text."""
-        response = await ollama_client.chat(
-            **base_kwargs,
-            messages=history + [{"role": "user", "content": nudge}],
-        )
+        """Ask the model for a final answer with tools hidden and thinking disabled so all tokens go to visible text."""
+        while history:
+            last_msg = history[-1]
+            last_role = last_msg.get("role") if isinstance(last_msg, dict) else getattr(last_msg, "role", None)
+            last_content = (last_msg.get("content") if isinstance(last_msg, dict) else getattr(last_msg, "content", "")) or ""
+            last_tools = last_msg.get("tool_calls") if isinstance(last_msg, dict) else getattr(last_msg, "tool_calls", None)
+            if last_role == "assistant" and not str(last_content).strip() and not last_tools:
+                history.pop()
+            else:
+                break
+
+        compact_intra_turn_tool_history(history)
+        fallback_messages = history + [{"role": "user", "content": nudge}]
+        try:
+            response = await ollama_client.chat(
+                **base_kwargs,
+                messages=fallback_messages,
+                think=False,
+            )
+        except TypeError:
+            response = await ollama_client.chat(
+                **base_kwargs,
+                messages=fallback_messages,
+            )
         text = response.message.content or ""
         if text.strip():
             history.append({"role": "assistant", "content": text})
@@ -550,6 +570,9 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
     iterations = 0
     reply = ""
     while iterations < max_iterations:
+        if iterations >= 2:
+            compact_intra_turn_tool_history(history)
+
         # Dynamically construct chat arguments so tools are completely hidden
         # from models that can't handle them (or after self-contained terminal skills have returned).
         chat_kwargs = dict(base_kwargs, messages=history)
@@ -599,11 +622,19 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     continue
 
             reply = response.message.content or ""
-            # Nudge if the model returned nothing after using tools
-            if not reply.strip() and iterations > 0 and is_research:
-                reply = await final_answer_without_tools(
-                    "Now summarize and give your final answer based on the tool results above."
+            # Nudge with think=False if the model returned empty content (e.g. exhausted num_predict inside <think>)
+            if not reply.strip() and (iterations > 0 or is_research or getattr(response.message, "thinking", None)):
+                thinking_len = len(getattr(response.message, "thinking", "") or "")
+                print(
+                    f"⚠️ [{current_mode.upper()}] Empty content on step {iterations} "
+                    f"(thinking_chars={thinking_len}); forcing direct final answer with think=False."
                 )
+                nudge_msg = (
+                    "Now summarize and give your final answer based on the tool results above."
+                    if iterations > 0
+                    else "Give your direct, concise final answer to the user's message now."
+                )
+                reply = await final_answer_without_tools(nudge_msg)
             break
 
         print(f"⚡ [{current_mode.upper()}] Model requested {len(tool_calls)} tools simultaneously!")

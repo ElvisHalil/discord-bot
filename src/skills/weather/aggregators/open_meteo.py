@@ -47,6 +47,23 @@ def _wmo_description(code: Optional[int]) -> str:
     return WMO_WEATHER_CODES.get(int(code), f"Weather code {code}")
 
 
+def _safe_fetch_json(url: str, timeout: float = 8.0, retries: int = 1) -> Optional[dict]:
+    """Fetch JSON from Open-Meteo with a fast retry on transient timeout/connection errors."""
+    for attempt in range(retries + 1):
+        try:
+            data = fetch_json(url, timeout=timeout)
+            if isinstance(data, dict):
+                return data
+            return None
+        except Exception as exc:
+            if attempt < retries:
+                logger.debug("Open-Meteo request timed out/failed (attempt %d), retrying: %s", attempt + 1, exc)
+                continue
+            print(f"  └─ ⚠️ [Open-Meteo Notice]: Request failed ({exc}); falling back if available.")
+            return None
+    return None
+
+
 class OpenMeteoAggregator(BaseWeatherAggregator):
     """Primary weather & forecast provider using Open-Meteo Geocoding and Forecast APIs."""
 
@@ -70,7 +87,7 @@ class OpenMeteoAggregator(BaseWeatherAggregator):
 
         encoded_name = urllib.parse.quote(search_name)
         url = f"{self.GEOCODING_URL}?name={encoded_name}&count=5&language=en&format=json"
-        data = fetch_json(url, timeout=5)
+        data = _safe_fetch_json(url, timeout=8)
         if not isinstance(data, dict) or not data.get("results"):
             return None
 
@@ -103,25 +120,29 @@ class OpenMeteoAggregator(BaseWeatherAggregator):
 
     def get_weather(self, city: str, days: int = 7) -> str:
         """Fetch current weather conditions and a multi-day forecast (1-16 days) for `city`."""
-        loc = self.resolve_location(city)
-        if not loc:
-            return ""
+        try:
+            loc = self.resolve_location(city)
+            if not loc:
+                return ""
 
-        forecast_days = max(1, min(int(days or 7), 16))
-        params = (
-            f"latitude={loc.latitude}&longitude={loc.longitude}"
-            "&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,"
-            "weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index"
-            "&daily=weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,"
-            "apparent_temperature_min,precipitation_sum,precipitation_probability_max,"
-            "wind_speed_10m_max,uv_index_max,sunrise,sunset"
-            f"&timezone=auto&forecast_days={forecast_days}"
-        )
-        data = fetch_json(f"{self.FORECAST_URL}?{params}", timeout=6)
-        if not isinstance(data, dict) or "current" not in data:
-            return ""
+            forecast_days = max(1, min(int(days or 7), 16))
+            params = (
+                f"latitude={loc.latitude}&longitude={loc.longitude}"
+                "&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,"
+                "weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index"
+                "&daily=weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,"
+                "apparent_temperature_min,precipitation_sum,precipitation_probability_max,"
+                "wind_speed_10m_max,uv_index_max,sunrise,sunset"
+                f"&timezone=auto&forecast_days={forecast_days}"
+            )
+            data = _safe_fetch_json(f"{self.FORECAST_URL}?{params}", timeout=8)
+            if not isinstance(data, dict) or "current" not in data:
+                return ""
 
-        return self._format_report(loc, data, forecast_days)
+            return self._format_report(loc, data, forecast_days)
+        except Exception as exc:
+            logger.debug("Open-Meteo get_weather error for '%s': %s", city, exc)
+            return ""
 
     @staticmethod
     def _format_report(loc: GeocodedLocation, data: dict, forecast_days: int) -> str:
