@@ -11,11 +11,11 @@ Designed specifically to give compact local LLMs (4B–8B parameters) **determin
 | Domain | Capabilities |
 | :--- | :--- |
 | 🎙️ **Real-Time Discord Voice-Channel AI Co-Host** | Joins live Discord voice channels (`!join` or *"hop in the voice channel"*) as an interactive AI co-host. Features **Discord DAVE E2EE (`davey`) audio decryption**, **Per-Speaker Voice Activity Detection (VAD)** (`48 kHz` stereo $\rightarrow$ `16 kHz` mono with SSRC-to-user buffer merging), **Sub-Second Local Speech-to-Text** via **`faster-whisper` (`int8` pre-warmed)** + **`gemma4:e4b` native `gemma4a` USM audio encoder**, **Wake-Word (`"Hey bot"` with 8s follow-up window) / Open-Mic / Listen-Only modes**, **9 Neural Voice & Tone Presets (`!voice <preset>`)** (`edge-tts` / local `VOICE_TTS_URL` / pure-Python `wave_synth` fallback), **Spoken Song Discovery & Song Card Posting**, **Live Sports & Flight Tracker Voice Break-Ins**, **Speaker-Attributed Call Recaps (`!vrecap`)**, and **Discord Voice Message / Audio Attachment Transcription**. |
-| 📊 **On-Demand Graphing, Charts & Diagrams** | Deterministic, dark-themed high-DPI PNG rendering for **Arbitrary 2D Data Graphs** (`bar`, `horizontal_bar`, `stacked_bar`, `line`, `area`, `scatter`, `pie`, `donut`), **Financial & Multi-Ticker Market Plots** (single-ticker price + 50d/200d SMA + volume, or `%` return comparisons), and **Architecture Diagrams & Flowcharts** (`flowchart`, `sequence`, `architecture`, `state`, `mindmap` via **Kroki** with offline **Matplotlib Directed-DAG & Sequence** fallback). |
+| 📊 **On-Demand Graphing, Charts, Heatmaps & Diagrams** | Deterministic, dark-themed high-DPI PNG rendering for **Arbitrary 2D Data Graphs** (`bar`, `horizontal_bar`, `stacked_bar`, `line`, `area`, `scatter`, `pie`, `donut`), **Calendar & 2D Matrix Heatmaps** (`calendar_heatmap`, `heatmap` — color-coded monthly grids and comparison matrices), **Financial, FX & Multi-Ticker Market Plots** (single-ticker price + 50d/200d SMA + volume, currency pairs like `CAD/EUR`, or `%` return comparisons), and **Architecture Diagrams & Flowcharts** (`flowchart`, `sequence`, `architecture`, `state`, `mindmap` via **Kroki** with offline **Matplotlib Directed-DAG & Sequence** fallback). |
 | 📈 **Global Markets, TSX/Stocks & Crypto** | Real-time global macro benchmarks (**S&P/TSX**, **S&P 500**, **Nasdaq 100**, **Dow**, **FTSE**, **DAX**, **Nikkei**, **VIX**, **Gold**, **Silver**, **WTI Crude**, **USD/CAD**, **10Y Yields**), **Risk-On / Risk-Off Regime Classification**, **Yahoo Finance v8 + TradingView Scanner fallback** for US/Canadian TSX equities & ETFs, **CoinGecko Top Movers & DeFi TVL**, **Historical Chart Summaries (`1d`–`5y`)** with annualized volatility & max drawdown, **Fundamentals & Earnings Dates**, **Side-by-Side Comparison Matrix**, and **Portfolio / Watchlist Valuation**. |
 | 🎵 **Music Discovery & Audio DSP** | Multi-source chart & underground discovery (**Last.fm**, **Deezer**, **Beatport**, **FreqBlog**, **iTunes RSS / Billboard**), **Genre × Mood Matrix**, **3×3 Tempo × Intensity Spectrum Shifting** (`faster`, `slower`, `harder`, `softer`), **In-Memory DSP (`miniaudio` + `numpy`) BPM/Key/Gain Analysis**, native **`gemma4:e4b` Audio Listening**, and **👍 Song-Card Reaction Similar-Track Discovery**. |
 | 🏟️ **Live Sports, CS2 Esports & Decimal Odds** | Real-time scoreboards, fixtures, and standings for **Soccer** (UCL, EPL, La Liga, Serie A, Bundesliga, Ligue 1, MLS, etc.), **NHL**, **NBA**, **NFL**, **MLB**, **UFC**, **Formula 1** (3-day session timings & driver/constructor standings), and **Counter-Strike 2** (**HLTV**, **Liquipedia**, **ESL/BLAST** live streams). Includes **Decimal Betting Odds** with implied win probabilities and **Background Live Match Tracking** (kickoff, goals, red cards, period/halftime, full-time alerts). |
-| ✈️ **Flights, Airfare Calendars & Live Radar** | Live **Google Flights** itinerary scraping (Best, Cheapest, Shortest/Fastest), **Round-Trip & Flexible-Date Price Grids**, **Direct/Nonstop Route Schedules**, and **Live Commercial Flight Status & Radar Telemetry** (**Flightradar24** & **ADSB.lol** live ADS-B altitude/groundspeed/heading). Includes **Background Flight Status & Route Price Drop Alerts**. |
+| ✈️ **Flights, Airfare Calendars & Live Radar** | Live **Google Flights** itinerary scraping (Best, Cheapest, Shortest/Fastest), **Round-Trip & Flexible-Date Price Grids** with automatic **Visual Monthly Fare Calendar Heatmaps** (color-coded `MON–SUN` calendar cards highlighting cheapest deal days, nonstop flight days, and peak fares), **Direct/Nonstop Route Schedules**, and **Live Commercial Flight Status & Radar Telemetry** (**Flightradar24** & **ADSB.lol** live ADS-B altitude/groundspeed/heading). Includes **Background Flight Status & Route Price Drop Alerts**. |
 | 🌐 **Web Research, News & Weather** | Multi-engine web search (**DuckDuckGo** + **Brave Search** fallback), SSRF-hardened stealth article reader (**Jina Reader** + **curl_cffi** TLS impersonation), **YouTube Transcript & Metadata** analyzer, **Google News RSS** headlines (with automatic **Daily Global Market Pulse** enrichment), and **Open-Meteo** current + up to **16-day weather forecasts** (with **wttr.in** automatic fallback). |
 | 💬 **Dual-Platform Discord + Telegram** | Runs simultaneously on **Discord** (with per-channel concurrency locks, live voice co-hosting, and 👍 song-card reactions) and **Telegram** (zero-dependency HTTPS long-polling bridge with fail-closed user/chat allowlist security). |
 
@@ -222,9 +222,10 @@ The bot can join any Discord voice channel and participate as a real-time, voice
   - *(Spoken in voice chat)*: *"Hey bot, switch to a British accent"*
   - *"Give me a recap of what everyone talked about in the voice call"*
   - *"Announce in the voice channel that we're starting the match in 5 minutes"*
-- **On-Demand Graphing, Charts & Diagrams (`skill_graphing_info`)**:
+- **On-Demand Graphing, Charts, Heatmaps & Diagrams (`skill_graphing_info`)**:
   - *"Graph a bar chart of GPU VRAM: RTX 4090: 24, RTX 4080: 16, RTX 4070 Ti: 12"*
-  - *"Plot NVDA vs AMD vs SHOP.TO over the last 6 months"*
+  - *"Plot NVDA vs AMD vs SHOP.TO over the last 6 months"* / *"Graph the last 5 years of CAD/EUR"*
+  - *"Make a calendar heatmap of daily prices in May"* / *"Plot a heatmap of regional server latency"*
   - *"Draw a flowchart of how an OAuth2 login request is authenticated"*
   - *"Create a sequence diagram for a Discord message triggering a tool call in Ollama"*
 - **Global Markets, Stocks/TSX & Crypto (`skill_markets_info`)**:
@@ -243,7 +244,7 @@ The bot can join any Discord voice channel and participate as a real-time, voice
   - *"What's happening in CS2 right now and what are Vitality's player stats?"*
   - *"Track the Real Madrid game"* / *"Which games are we tracking right now?"* / *"Stop tracking the Real Madrid game"*
 - **Flights, Airfare Calendars & Live Radar Tracking (`skill_flight_info` / `skill_flight_tracker`)**:
-  - *"Find the cheapest round-trip flights from New York to Tokyo in November for 2 weeks"*
+  - *"Find the cheapest round-trip flights from New York to Tokyo in November for 2 weeks"* *(automatically attaches a color-coded Monthly Fare Calendar Heatmap)*
   - *"When are the direct flights from JFK to LHR?"*
   - *"Where is flight BA117 right now?"*
   - *"Track flight BA117"* / *"Track the price for JFK to LHR on Nov 21"* / *"Stop tracking flight BA117"*
@@ -252,7 +253,7 @@ The bot can join any Discord voice channel and participate as a real-time, voice
 
 ## 🧪 Running the Test Suite
 
-The repository includes **290+ unit, concurrency, combinatorial, and architectural boundary tests** (executing completely offline in ~6 seconds):
+The repository includes **310+ unit, concurrency, combinatorial, and architectural boundary tests** (executing completely offline in ~10 seconds):
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
