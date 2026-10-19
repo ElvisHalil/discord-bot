@@ -49,7 +49,7 @@ _CACHE = BoundedCache(maxsize=128)
 
 def decode_google_news_url(url: str, timeout: float = 8.0) -> Optional[str]:
     """Resolve a news.google.com/rss/articles/... link to the publisher's URL, or None."""
-    return _http_decode_google_news_url(url)
+    return _http_decode_google_news_url(url, timeout=timeout)
 
 
 def _build_feed_url(region: str, topic: str):

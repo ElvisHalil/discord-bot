@@ -326,7 +326,9 @@ TOOL_ARG_ALIASES: Dict[str, Dict[str, str]] = {
     },
     "skill_markets_info": {
         "q": "query", "search": "query", "topic": "query", "prompt": "query",
-        "symbol": "ticker", "stock": "ticker", "asset": "ticker", "coin": "ticker", "company": "ticker",
+        "symbol": "ticker", "symbols": "ticker", "tickers": "ticker", "stock": "ticker",
+        "stocks": "ticker", "asset": "ticker", "assets": "ticker", "coin": "ticker",
+        "company": "ticker", "companies": "ticker", "compare": "ticker",
         "market": "region", "country": "region", "area": "region",
         "mode": "view", "type": "view", "category": "view", "section": "view",
         "period": "timeframe", "range": "timeframe", "horizon": "timeframe", "duration": "timeframe", "window": "timeframe", "time_range": "timeframe",

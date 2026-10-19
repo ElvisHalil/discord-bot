@@ -43,8 +43,13 @@ class TickerQuote(DictLikeMixin):
     trailing_pe: Optional[float] = None
     forward_pe: Optional[float] = None
     eps_ttm: Optional[float] = None
+    price_to_book: Optional[float] = None
+    beta: Optional[float] = None
     dividend_yield: Optional[float] = None
+    ex_dividend_timestamp: Optional[int] = None
     earnings_timestamp: Optional[int] = None
+    target_mean_price: Optional[float] = None
+    analyst_rating: Optional[str] = None
     pre_market_price: Optional[float] = None
     pre_market_change_pct: Optional[float] = None
     post_market_price: Optional[float] = None
@@ -84,6 +89,12 @@ class HistoricalSummary(DictLikeMixin):
     abs_change: float = 0.0
     pct_change: float = 0.0
     cagr_pct: Optional[float] = None
+    total_return_pct: Optional[float] = None
+    total_return_cagr_pct: Optional[float] = None
+    dividends_paid: float = 0.0
+    dividends_count: int = 0
+    splits: list[str] = field(default_factory=list)
+    exact_date_bar: Optional[dict] = None
     period_high: float = 0.0
     period_high_date: str = ""
     period_low: float = 0.0
@@ -92,5 +103,15 @@ class HistoricalSummary(DictLikeMixin):
     annualized_volatility_pct: Optional[float] = None
     horizon_returns: dict[str, float] = field(default_factory=dict)
     checkpoints: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class MarketChannelState(DictLikeMixin):
+    """Per-channel conversation state for follow-up ticker, comparison, and timeframe queries."""
+
+    last_tickers: list[str] = field(default_factory=list)
+    last_timeframe: Optional[str] = None
+    last_region: Optional[str] = None
+    last_view: Optional[str] = None
 
 

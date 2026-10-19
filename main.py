@@ -52,10 +52,12 @@ from src.orchestrator import (
     enrich_sports_tool_args,
     enrich_music_tool_args,
     enrich_flight_tool_args,
+    enrich_markets_tool_args,
     enrich_tool_output_with_time_context,
     detect_missed_sports_tool_call,
     detect_missed_music_shift_tool_call,
     detect_missed_flight_tool_call,
+    detect_missed_markets_tool_call,
     trim_history,
     compact_intra_turn_tool_history,
     apply_auto_ping,
@@ -130,6 +132,7 @@ def clear_tool_caches(channel_id: int = None):
         )
         from src.skills.sports.tracker import clear_channel_last_match_query
         from src.skills.flights.context import clear_channel_flight_state
+        from src.skills.markets.context import clear_channel_market_state
         from src.skills.sports.aggregators.liquipedia import clear_liquipedia_cache
         from src.skills.sports.aggregators.hltv import clear_hltv_cache
         from src.skills.sports.aggregators.kashrock import clear_kashrock_cache
@@ -140,6 +143,7 @@ def clear_tool_caches(channel_id: int = None):
         clear_recently_played_tracks(channel_id)
         clear_channel_last_match_query(channel_id)
         clear_channel_flight_state(channel_id)
+        clear_channel_market_state(channel_id)
         if channel_id is None:
             clear_youtube_caches()
             clear_resolved_music_cache()
@@ -474,9 +478,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
         while history:
             last_msg = history[-1]
             last_role = last_msg.get("role") if isinstance(last_msg, dict) else getattr(last_msg, "role", None)
-            last_content = (last_msg.get("content") if isinstance(last_msg, dict) else getattr(last_msg, "content", "")) or ""
             last_tools = last_msg.get("tool_calls") if isinstance(last_msg, dict) else getattr(last_msg, "tool_calls", None)
-            if last_role == "assistant" and not str(last_content).strip() and not last_tools:
+            if last_role == "assistant" and not last_tools:
                 history.pop()
             else:
                 break
@@ -536,6 +539,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     detect_missed_sports_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_music_shift_tool_call(history)
                     or detect_missed_flight_tool_call(history, active_channel_id=channel_id)
+                    or detect_missed_markets_tool_call(history, active_channel_id=channel_id)
                 )
                 if missed and missed[0] in active_tools:
                     forced_tool_name, forced_raw_args = missed
@@ -544,6 +548,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     history.pop()  # Discard stale non-tool reply from iteration 0
                     if forced_tool_name in ("skill_flight_info", "skill_flight_tracker"):
                         forced_args = enrich_flight_tool_args(forced_args, history)
+                    elif forced_tool_name == "skill_markets_info":
+                        forced_args = enrich_markets_tool_args(forced_args, history, active_channel_id=channel_id)
                     set_active_channel_id(channel_id)
                     print(f"⚡ [{current_mode.upper()}] Intercepted missed tool on turn 0 -> forcing {forced_tool_name}({forced_args})")
                     try:
@@ -569,15 +575,24 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     continue
 
             reply = response.message.content or ""
-            # Nudge with think=False if the model returned empty content (e.g. exhausted num_predict inside <think>)
-            if not reply.strip() and (iterations > 0 or is_research or getattr(response.message, "thinking", None)):
-                thinking_len = len(getattr(response.message, "thinking", "") or "")
+            thinking_len = len(getattr(response.message, "thinking", "") or "")
+            done_reason = str(getattr(response, "done_reason", "") or "").lower()
+            is_truncated = (
+                not reply.strip()
+                or done_reason == "length"
+                or (thinking_len > 400 and len(reply.strip()) < 90)
+                or bool(re.search(r"\[[^\]]*\]\(<?https?://[^\s)>]*$", reply.strip()))
+            )
+            # Nudge with think=False if the model returned empty or mid-generation truncated content
+            if is_truncated and (iterations > 0 or is_research or thinking_len > 0):
                 print(
-                    f"⚠️ [{current_mode.upper()}] Empty content on step {iterations} "
-                    f"(thinking_chars={thinking_len}); forcing direct final answer with think=False."
+                    f"⚠️ [{current_mode.upper()}] Truncated/empty content on step {iterations} "
+                    f"(done_reason={done_reason or 'n/a'}, content_chars={len(reply)}, thinking_chars={thinking_len}); "
+                    f"forcing complete final answer with think=False."
                 )
                 nudge_msg = (
-                    "Now summarize and give your final answer based on the tool results above."
+                    "Now summarize and give your complete final answer based on the tool results above. "
+                    "Cover all sections from the tool results (including the Daily Market & Macro Pulse if present) with complete URLs."
                     if iterations > 0
                     else "Give your direct, concise final answer to the user's message now."
                 )
@@ -617,6 +632,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     args = enrich_music_tool_args(args, history)
                 elif tool_name in ("skill_flight_info", "skill_flight_tracker"):
                     args = enrich_flight_tool_args(args, history)
+                elif tool_name == "skill_markets_info":
+                    args = enrich_markets_tool_args(args, history, active_channel_id=channel_id)
                 set_active_channel_id(channel_id)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
                 try:
@@ -659,9 +676,21 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
             FLIGHT_TRACKER.ensure_loop_running()
         history.extend(tool_results)
         called_names = {c.function.name for c in tool_calls}
+        latest_user_text = next(
+            (
+                str(m.get("content") if isinstance(m, dict) else getattr(m, "content", "") or "")
+                for m in reversed(history)
+                if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
+            ),
+            "",
+        )
+        has_compound_media_intent = bool(re.search(r"\b(play|song|track|music|video)\b", latest_user_text, re.IGNORECASE))
         if (
             called_names.issubset(_TERMINAL_SKILLS)
-            and len(tool_calls) >= 2
+            and (
+                len(tool_calls) >= 2
+                or (called_names.issubset({"skill_news_headlines", "skill_markets_info"}) and not has_compound_media_intent)
+            )
             and all("PARALLEL_EXECUTION_BLOCKED" not in r["content"] and not r["content"].startswith("⚠️") for r in tool_results)
         ):
             hide_tools_next_step = True

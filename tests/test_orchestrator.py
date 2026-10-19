@@ -119,6 +119,35 @@ class TestTrimHistory(unittest.TestCase):
         trim_history(h, limit=2, old_tool_chars=10)
         self.assertEqual(h, before)
 
+    def test_markets_expired_and_news_pulse_preserved(self):
+        news_plus_pulse = (
+            "=== TOP HEADLINES ===\n"
+            + "\n".join(
+                f"{i}. Headline {i}\nURL: https://example.com/article-{i}-full-slug"
+                for i in range(1, 9)
+            )
+            + "\n\n=== 📈 DAILY GLOBAL MARKET PULSE & MACRO SIGNALS ===\n"
+            + "- **Market Regime:** **Risk-Off**\n"
+            + "- **🇨🇦 Canada & FX:** **S&P/TSX Composite**: 36,176.55 (+0.11%)\n"
+        )
+        h = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "market update"},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "skill_markets_info"}}]},
+            {"role": "tool", "name": "skill_markets_info", "content": "A" * 4000},
+            {"role": "assistant", "content": "Market summary."},
+            {"role": "user", "content": "whats happening in the world"},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "skill_news_headlines"}}]},
+            {"role": "tool", "name": "skill_news_headlines", "content": news_plus_pulse},
+            {"role": "assistant", "content": "Here's a digest"},
+            {"role": "user", "content": "you didn't give any updates"},
+        ]
+        trimmed = trim_history(h, limit=40)
+        tool_msgs = [m for m in trimmed if isinstance(m, dict) and m.get("role") == "tool"]
+        self.assertIn("EXPIRED MARKET SNAPSHOT", tool_msgs[0]["content"])
+        self.assertIn("https://example.com/article-8-full-slug", tool_msgs[1]["content"])
+        self.assertIn("DAILY GLOBAL MARKET PULSE", tool_msgs[1]["content"])
+
 
 class TestAutoPing(unittest.TestCase):
     def test_pings_names(self):
@@ -894,6 +923,7 @@ class TestConversationWithAllToolsAndSkills(unittest.IsolatedAsyncioTestCase):
             "skill_sports_tracker",
             "skill_flight_info",
             "skill_flight_tracker",
+            "skill_markets_info",
             "evaluate_math",
             "get_current_datetime",
             "save_memory",
@@ -917,6 +947,7 @@ class TestConversationWithAllToolsAndSkills(unittest.IsolatedAsyncioTestCase):
             ("skill_sports_tracker", {"team": "Real Madrid"}, {"query": "Real Madrid"}),
             ("skill_flight_info", {"from": "Calgary", "to": "Tokyo"}, {"origin": "Calgary", "destination": "Tokyo"}),
             ("skill_flight_tracker", {"flight": "AC850"}, {"query": "AC850"}),
+            ("skill_markets_info", {"symbol": "SHOP.TO", "period": "6mo"}, {"ticker": "SHOP.TO", "timeframe": "6mo"}),
             ("evaluate_math", {"math": "25 * 14"}, {"expression": "25 * 14"}),
             ("get_current_datetime", {}, {}),
             ("save_memory", {"memory": "Likes synthwave"}, {"fact": "Likes synthwave"}),
@@ -1852,8 +1883,78 @@ class TestMultiUserDiscordChannelConcurrency(unittest.IsolatedAsyncioTestCase):
         clear_weather_cache()
 
 
+class TestMidGenerationTruncationRecovery(unittest.IsolatedAsyncioTestCase):
+    async def test_news_and_market_pulse_mid_url_truncation_recovers_with_think_false(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        import main
+
+        call_obj = SimpleNamespace(
+            function=SimpleNamespace(name="skill_news_headlines", arguments={})
+        )
+        step0_resp = SimpleNamespace(
+            done_reason="stop",
+            message=SimpleNamespace(
+                role="assistant",
+                content="",
+                thinking="Calling news headlines.",
+                tool_calls=[call_obj],
+            ),
+        )
+        # Step 1 simulates gemma4 exhausting num_predict inside <think> and cutting off mid-URL on story #5
+        step1_truncated_resp = SimpleNamespace(
+            done_reason="length",
+            message=SimpleNamespace(
+                role="assistant",
+                content=(
+                    "Here’s a full look at what’s happening globally right now:\n"
+                    "- **West Bank Incident** [Source](<https://apnews.com/article/levine-d2e75c3c3b9e256e3ad"
+                ),
+                thinking="T" * 3800,
+                tool_calls=None,
+            ),
+        )
+        # Fallback with think=False returns the complete news + Daily Market & Macro Pulse
+        step1_recovered_resp = SimpleNamespace(
+            done_reason="stop",
+            message=SimpleNamespace(
+                role="assistant",
+                content=(
+                    "### 🌍 Top World News Headlines\n"
+                    "- **West Bank Incident** — Full summary. [AP News](<https://apnews.com/article/levine-full-url>)\n\n"
+                    "### 📈 Daily Market & Macro Pulse\n"
+                    "- **S&P/TSX Composite:** 36,176.55 (+0.11%) | **Gold:** $4,201.80 (+0.50%) | **BTC:** $82,436 USD"
+                ),
+                thinking="",
+                tool_calls=None,
+            ),
+        )
+
+        mock_chat = AsyncMock(side_effect=[step0_resp, step1_truncated_resp, step1_recovered_resp])
+        turn_history = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "whats happening in the world news"},
+        ]
+        mode_cfg = dict(main.MODES["research-gemma"])
+        mode_cfg["tools"] = {
+            "skill_news_headlines": lambda region=None, topic=None: "=== TOP HEADLINES ===\n1. Story",
+        }
+
+        with (
+            patch.object(main.ollama_client, "chat", mock_chat),
+            patch("src.skills.markets.get_daily_market_pulse", return_value="=== 📈 DAILY GLOBAL MARKET PULSE ==="),
+        ):
+            reply = await main.run_agent_turn(999111, mode_cfg, turn_history=turn_history)
+
+        self.assertEqual(mock_chat.call_count, 3)
+        self.assertIs(mock_chat.call_args_list[2].kwargs.get("think"), False)
+        self.assertIn("### 📈 Daily Market & Macro Pulse", reply)
+        self.assertIn("https://apnews.com/article/levine-full-url", reply)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

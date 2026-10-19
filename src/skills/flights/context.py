@@ -8,13 +8,34 @@ import re
 from typing import Dict, Optional, Tuple, Union
 
 from src.context import get_active_channel_id
-from src.skills.flights.aggregators.prices import GoogleFlightsPriceAggregator
 from src.skills.flights.catalogs import MONTH_MAP as _MONTH_MAP
 from src.skills.flights.enums import FlightTrackerAction
 from src.skills.flights.models import AirportRecord, FlightSearchState
 from src.utils.cache import BoundedCache
 
-build_google_flights_url = GoogleFlightsPriceAggregator.build_google_flights_url
+
+def build_google_flights_url(
+    origin_code: str,
+    dest_code: str,
+    date: str,
+    return_date: Optional[str] = None,
+    cabin: str = "economy",
+    currency: str = "CAD",
+    max_stops: Optional[int] = None,
+) -> str:
+    """Delegate Google Flights protobuf URL construction without introducing a module-level circular import."""
+    from src.skills.flights.aggregators.prices import GoogleFlightsPriceAggregator
+
+    return GoogleFlightsPriceAggregator.build_google_flights_url(
+        origin_code=origin_code,
+        dest_code=dest_code,
+        date=date,
+        return_date=return_date,
+        cabin=cabin,
+        currency=currency,
+        max_stops=max_stops,
+    )
+
 
 _CHANNEL_FLIGHT_STATE: Dict[int, FlightSearchState] = BoundedCache(maxsize=128)
 _CHANNEL_LAST_ROUTE: Dict[int, Tuple[Union[AirportRecord, Tuple[str, str, str, str]], Union[AirportRecord, Tuple[str, str, str, str]]]] = BoundedCache(maxsize=128)

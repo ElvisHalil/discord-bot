@@ -3,14 +3,22 @@ Centralized analytical LLM instructions for the markets and macro synthesis skil
 """
 
 
-def build_markets_llm_instructions(is_ticker_view: bool = False) -> str:
+def build_markets_llm_instructions(is_ticker_view: bool = False, is_compare_view: bool = False) -> str:
     """Build concise, high-IQ analytical instructions for presenting market and ticker data."""
+    if is_compare_view:
+        return (
+            "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
+            "1. Present a sharp, institutional-grade **Multi-Asset Head-to-Head Comparison**: lead with the **Relative Performance Winner & Spread** over the requested timeframe.\n"
+            "2. Compare each asset side-by-side across **Live Price & Intraday Move**, **Multi-Horizon Returns (1W, 1M, 3M, 6M, YTD, 1Y, 3Y, 5Y)**, and **Deep Window Risk/Return Metrics** (Window Price Return, Dividend-Adjusted Total Return, CAGR, Max Drawdown, and Realized Volatility).\n"
+            "3. Contrast **Valuation & Fundamentals** (P/E, Forward P/E, Market Cap, Dividend Yield, Beta, Analyst Target) and explain the risk-adjusted tradeoff (e.g. higher return vs. deeper drawdown or lower volatility).\n"
+            "4. Use exact prices, currencies, and percentages from the tool output—never invent numbers.\n"
+        )
     if is_ticker_view:
         return (
             "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
             "1. Present a sharp, institutional-grade Ticker & Historical Snapshot: lead with the current price, currency (CAD for TSX stocks), intraday $/%, and session status.\n"
-            "2. Highlight the **Multi-Horizon Performance Strip (1W, 1M, 3M, 6M, YTD, 1Y, 5Y)** and the **Historical Window Deep-Dive** (start → end price, period peak/trough with dates, max drawdown, and chronological price checkpoints).\n"
-            "3. Include the **Technical Posture** (50-Day & 200-Day Moving Averages, 52-Week Range percentile, volume vs. 3M average) and **Valuation Fundamentals** (Market Cap, Trailing/Forward P/E, EPS, Dividend Yield, Next Earnings).\n"
+            "2. Highlight the **Multi-Horizon Performance Strip (1W, 1M, 3M, 6M, YTD, 1Y, 3Y, 5Y)** and the **Historical Window Deep-Dive** (start → end price, Price Return & Dividend-Adjusted Total Return, CAGR, period peak/trough with dates, max drawdown, realized volatility, dividends/splits, any exact-date OHLC lookup, and chronological price checkpoints).\n"
+            "3. Include the **Technical Posture** (50-Day & 200-Day Moving Averages, 52-Week Range percentile, volume vs. 3M average) and **Valuation Fundamentals** (Market Cap, Trailing/Forward P/E, EPS, P/B, Beta, Dividend Yield, Analyst Consensus Target, Next/Last Earnings).\n"
             "4. Connect the price action and historical trend to the **Recent Catalyst Headlines**, and if a dual-listed price (e.g. TSX CAD and NYSE/NASDAQ USD) is shown, include both clearly.\n"
         )
     return (
@@ -20,6 +28,7 @@ def build_markets_llm_instructions(is_ticker_view: bool = False) -> str:
         "3. Call out **What's Going Up & What's Going Down** (TSX & US top gainers/losers and 24h crypto movers) and synthesize *why* based on the macro/financial headlines.\n"
         "4. Use exact prices, currencies, and percentage changes from the tool output—never invent numbers.\n"
     )
+
 
 
 def build_news_market_pulse_instructions() -> str:

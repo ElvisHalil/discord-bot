@@ -10,6 +10,7 @@ class MarketView(StrEnum):
     PULSE = "pulse"
     TICKER = "ticker"
     HISTORY = "history"
+    COMPARE = "compare"
     MOVERS = "movers"
     COMMODITIES = "commodities"
     CRYPTO = "crypto"
@@ -33,6 +34,7 @@ class AssetClass(StrEnum):
 
 
 class HistoricalTimeframe(StrEnum):
+    ONE_DAY = "1d"
     ONE_WEEK = "5d"
     ONE_MONTH = "1mo"
     THREE_MONTHS = "3mo"

@@ -3,7 +3,9 @@ CoinGecko v3 REST API + Yahoo Finance fallback aggregator for cryptocurrencies,
 USD/CAD pricing, 24h & 7d momentum, and top 24h crypto gainers/losers.
 """
 
+from dataclasses import replace
 import logging
+import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -15,6 +17,7 @@ from src.skills.markets.models import CryptoAssetQuote
 
 logger = logging.getLogger(__name__)
 
+_CRYPTO_LOCK = threading.Lock()
 _CRYPTO_CACHE: Optional[Tuple[float, List[CryptoAssetQuote]]] = None
 _CRYPTO_CACHE_TTL: float = 60.0
 
@@ -30,7 +33,27 @@ _STABLECOINS = frozenset({"USDT", "USDC", "DAI", "FDUSD", "USDE", "USDS", "PYUSD
 def clear_crypto_market_cache() -> None:
     """Clear in-memory cryptocurrency market cache."""
     global _CRYPTO_CACHE
-    _CRYPTO_CACHE = None
+    with _CRYPTO_LOCK:
+        _CRYPTO_CACHE = None
+
+
+def _round_cad(price_usd: float, usdcad_rate: float) -> float:
+    val = price_usd * usdcad_rate
+    if price_usd < 0.01:
+        return round(val, 8)
+    if price_usd < 1.0:
+        return round(val, 4)
+    return round(val, 2)
+
+
+def _apply_cad_rate(coins: List[CryptoAssetQuote], usdcad_rate: float) -> List[CryptoAssetQuote]:
+    """Return a new list of CryptoAssetQuote copies with `price_cad` computed for `usdcad_rate`."""
+    if usdcad_rate <= 0:
+        return [replace(c) for c in coins]
+    return [
+        replace(c, price_cad=_round_cad(c.price_usd, usdcad_rate) if c.price_usd > 0 else c.price_cad)
+        for c in coins
+    ]
 
 
 class CryptoAggregator(BaseMarketAggregator):
@@ -40,8 +63,9 @@ class CryptoAggregator(BaseMarketAggregator):
         """Return top cryptocurrencies with USD and CAD prices, 24h/7d % changes, and market caps."""
         global _CRYPTO_CACHE
         now = time.time()
-        if _CRYPTO_CACHE and (now - _CRYPTO_CACHE[0]) < ttl:
-            return _CRYPTO_CACHE[1]
+        with _CRYPTO_LOCK:
+            if _CRYPTO_CACHE and (now - _CRYPTO_CACHE[0]) < ttl:
+                return _apply_cad_rate(_CRYPTO_CACHE[1], usdcad_rate)
 
         coins: List[CryptoAssetQuote] = []
         try:
@@ -63,7 +87,7 @@ class CryptoAggregator(BaseMarketAggregator):
                                 symbol=sym,
                                 name=str(item.get("name") or sym),
                                 price_usd=price_usd,
-                                price_cad=round(price_usd * usdcad_rate, 2) if usdcad_rate > 0 else None,
+                                price_cad=_round_cad(price_usd, usdcad_rate) if usdcad_rate > 0 else None,
                                 change_24h_pct=float(chg_24h or 0.0),
                                 change_7d_pct=float(chg_7d) if chg_7d is not None else None,
                                 market_cap_usd=float(item["market_cap"]) if item.get("market_cap") is not None else None,
@@ -75,30 +99,43 @@ class CryptoAggregator(BaseMarketAggregator):
             logger.debug("CoinGecko markets fetch failed: %s", e)
 
         if coins:
-            _CRYPTO_CACHE = (now, coins)
-            return coins
+            with _CRYPTO_LOCK:
+                _CRYPTO_CACHE = (now, coins)
+            return _apply_cad_rate(coins, usdcad_rate)
 
-        # Fallback to Yahoo Finance crypto symbols if CoinGecko is unreachable
+        # Fallback to Yahoo Finance crypto symbols if CoinGecko is unreachable or rate-limited
         from src.skills.markets.aggregators.yahoo import YahooFinanceAggregator
 
         yf = YahooFinanceAggregator()
-        yf_quotes = yf.fetch_quotes([b.symbol for b in CRYPTO_BENCHMARKS])
-        for idx, b in enumerate(CRYPTO_BENCHMARKS, start=1):
-            q = yf_quotes.get(b.symbol.upper())
+        extra_fallback_syms = [
+            ("AVAX-USD", "Avalanche"),
+            ("LINK-USD", "Chainlink"),
+            ("DOT-USD", "Polkadot"),
+            ("HBAR-USD", "Hedera"),
+            ("ZEC-USD", "Zcash"),
+            ("LTC-USD", "Litecoin"),
+        ]
+        all_specs = [(b.symbol, b.label) for b in CRYPTO_BENCHMARKS] + extra_fallback_syms
+        yf_quotes = yf.fetch_quotes([sym for sym, _ in all_specs])
+        for idx, (sym_code, lbl) in enumerate(all_specs, start=1):
+            q = yf_quotes.get(sym_code.upper())
             if q and q.price > 0:
-                sym_clean = b.symbol.split("-")[0]
+                sym_clean = sym_code.split("-")[0]
                 coins.append(
                     CryptoAssetQuote(
                         symbol=sym_clean,
-                        name=b.label,
+                        name=lbl,
                         price_usd=q.price,
-                        price_cad=round(q.price * usdcad_rate, 2) if usdcad_rate > 0 else None,
+                        price_cad=_round_cad(q.price, usdcad_rate) if usdcad_rate > 0 else None,
                         change_24h_pct=q.change_percent,
                         market_cap_usd=float(q.market_cap) if q.market_cap else None,
                         volume_24h_usd=float(q.volume) if q.volume else None,
                         rank=idx,
                     )
                 )
+        if coins:
+            with _CRYPTO_LOCK:
+                _CRYPTO_CACHE = (now, coins)
         return coins
 
     def get_crypto_movers(

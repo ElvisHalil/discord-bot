@@ -331,7 +331,7 @@ def fetch_text(
 _NEWS_DECODE_SESSION = ThreadLocalRequestsSession({"User-Agent": DEFAULT_UA})
 
 
-def decode_google_news_url(source_url: str) -> Optional[str]:
+def decode_google_news_url(source_url: str, timeout: float = 8.0) -> Optional[str]:
     """
     Resolve a Google News redirect URL (news.google.com/rss/articles/CBMi...)
     to the underlying publisher article URL via Google's batchexecute endpoint.
@@ -348,10 +348,10 @@ def decode_google_news_url(source_url: str) -> Optional[str]:
             return None
         base64_str = path[-1]
 
-        for prefix in ("https://news.google.com/articles/", "https://news.google.com/rss/articles/"):
+        for prefix in ("https://news.google.com/rss/articles/", "https://news.google.com/articles/"):
             resp = _NEWS_DECODE_SESSION.get(
                 f"{prefix}{base64_str}",
-                timeout=5,
+                timeout=timeout,
                 cookies={"CONSENT": "YES+cb.20240710-07-p0.en+FX+410"},
             )
             text = unescape(resp.text)
@@ -363,11 +363,28 @@ def decode_google_news_url(source_url: str) -> Optional[str]:
         else:
             return None
 
-        req_data = [
-            "Fbv4je",
-            f'["garturlreq",[["X","X",["X","X"],null,null,1,1,"US:en",null,1,null,null,null,null,null,0,1],"X","X",1,[1,1,1],1,1,null,0,0,null,0],"{base64_str}",{timestamp},"{signature}"]',
+        inner = [
+            "garturlreq",
+            [
+                ["X", "X", ["X", "X"], None, None, 1, 1, "US:en", None, 1, None, None, None, None, None, 0, 1],
+                "X",
+                "X",
+                1,
+                [1, 1, 1],
+                1,
+                1,
+                None,
+                0,
+                0,
+                None,
+                0,
+            ],
+            base64_str,
+            int(timestamp),
+            signature,
         ]
-        payload = f"f.req={urlparse.quote(json.dumps([[req_data]]))}"
+        rpc_envelope = [[["Fbv4je", json.dumps(inner), None, "generic"]]]
+        payload = f"f.req={urlparse.quote(json.dumps(rpc_envelope))}"
         resp = _NEWS_DECODE_SESSION.post(
             "https://news.google.com/_/DotsSplashUi/data/batchexecute",
             headers={
@@ -376,14 +393,16 @@ def decode_google_news_url(source_url: str) -> Optional[str]:
                 "Referer": "https://news.google.com/",
             },
             data=payload,
-            timeout=5,
+            timeout=timeout,
         )
+        if resp.status_code != 200:
+            return None
         splitted = resp.text.split("\n\n")
         if len(splitted) < 2:
             return None
         parsed_data = json.loads(splitted[1])[:-2]
         decoded_url = json.loads(parsed_data[0][2])[1]
-        if decoded_url and decoded_url.startswith("http"):
+        if isinstance(decoded_url, str) and decoded_url.startswith("http"):
             _DECODED_NEWS_URL_CACHE[source_url] = decoded_url
             return decoded_url
         return None

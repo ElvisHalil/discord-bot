@@ -756,24 +756,21 @@ class OddsAggregator(BaseSportsAggregator):
 
             gp_name = "Grand Prix"
             season_year = datetime.now().year
-            se = getattr(fetch_json, "side_effect", None)
-            is_fixed_list_mock = se is not None and not callable(se)
-            if not is_fixed_list_mock:
-                try:
-                    f1_sb = fetch_json("https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard", timeout=6) or {}
-                    if isinstance(f1_sb, dict):
-                        season_year = (f1_sb.get("season") or {}).get("year", season_year)
-                        cal = ((f1_sb.get("leagues") or [{}])[0]).get("calendar") or []
-                        now_dt = datetime.now()
-                        for item in cal:
-                            s_date = item.get("startDate", "") if isinstance(item, dict) else ""
-                            if s_date:
-                                dt = datetime.fromisoformat(s_date.replace("Z", "+00:00")).replace(tzinfo=None)
-                                if dt >= now_dt:
-                                    gp_name = item.get("label") or gp_name
-                                    break
-                except Exception:
-                    pass
+            try:
+                f1_sb = fetch_json("https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard", timeout=6) or {}
+                if isinstance(f1_sb, dict):
+                    season_year = (f1_sb.get("season") or {}).get("year", season_year)
+                    cal = ((f1_sb.get("leagues") or [{}])[0]).get("calendar") or []
+                    now_dt = datetime.now()
+                    for item in cal:
+                        s_date = item.get("startDate", "") if isinstance(item, dict) else ""
+                        if s_date:
+                            dt = datetime.fromisoformat(s_date.replace("Z", "+00:00")).replace(tzinfo=None)
+                            if dt >= now_dt:
+                                gp_name = item.get("label") or gp_name
+                                break
+            except Exception:
+                pass
 
             q_low = (query or "").lower()
             wants_championship = any(w in q_low for w in ("championship", "champion", "title", "standings", "futures", "season"))

@@ -92,20 +92,10 @@ async def resolve_reaction_recommendation(
             if clean_title.lower() not in track_name.lower():
                 similar_tracks.append(track_name)
 
-    if not similar_tracks and allow_chart_fallback and "=== VERIFIED YOUTUBE MUSIC RESULT" not in similar_res:
-        is_unrelated_fallback = True
-        print("⚠️ [Reaction Fallback]: No similar tracks found, pulling general charts...")
-        bp_res = await run_in_worker(music_discovery_fn, genre=None)
-        similar_res = bp_res
-        for line in bp_res.split("\n"):
-            line_s = line.strip()
-            if line_s.startswith("- "):
-                similar_tracks.append(line_s[2:].strip())
-
-    verified_url: Optional[str] = None
-    chosen_track: Optional[str] = None
-    if "=== VERIFIED YOUTUBE MUSIC RESULT" in similar_res:
-        pre_block = similar_res.split("=== VERIFIED YOUTUBE MUSIC RESULT", 1)[1]
+    def _extract_pre_resolved(res_text: str) -> tuple[Optional[str], Optional[str]]:
+        if "=== VERIFIED YOUTUBE MUSIC RESULT" not in res_text:
+            return None, None
+        pre_block = res_text.split("=== VERIFIED YOUTUBE MUSIC RESULT", 1)[1]
         m_pre_song = re.search(r"(?m)^Song:\s*(.+)$", pre_block)
         m_pre_art = re.search(r"(?m)^Artist:\s*(.+)$", pre_block)
         m_pre_url = re.search(
@@ -116,8 +106,24 @@ async def resolve_reaction_recommendation(
             cand_song = m_pre_song.group(1).strip()
             cand_art = m_pre_art.group(1).strip()
             if clean_title.lower() not in cand_song.lower():
-                verified_url = m_pre_url.group(1).replace("www.youtube.com", "music.youtube.com")
-                chosen_track = f"{cand_song} by {cand_art}"
+                return (
+                    m_pre_url.group(1).replace("www.youtube.com", "music.youtube.com"),
+                    f"{cand_song} by {cand_art}",
+                )
+        return None, None
+
+    verified_url, chosen_track = _extract_pre_resolved(similar_res)
+
+    if not verified_url and not similar_tracks and allow_chart_fallback:
+        is_unrelated_fallback = True
+        print("⚠️ [Reaction Fallback]: No similar tracks found, pulling general charts...")
+        bp_res = await run_in_worker(music_discovery_fn, genre=None)
+        similar_res = bp_res
+        for line in bp_res.split("\n"):
+            line_s = line.strip()
+            if line_s.startswith("- "):
+                similar_tracks.append(line_s[2:].strip())
+        verified_url, chosen_track = _extract_pre_resolved(similar_res)
 
     if not verified_url or not chosen_track:
         random.shuffle(similar_tracks)

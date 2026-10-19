@@ -26,6 +26,10 @@ from src.skills.flights.context import (
     build_google_flights_url,
     detect_missed_flight_tool_call,
 )
+from src.skills.markets.context import (
+    detect_missed_markets_tool_call,
+    enrich_markets_tool_args,
+)
 from src.skills.music.context import (
     detect_missed_music_shift_tool_call,
     enrich_music_tool_args,
@@ -204,8 +208,21 @@ def trim_history(history: list, limit: int, old_tool_chars: int = OLD_TOOL_OUTPU
                         "again for the updated search.]"
                     ),
                 }
-            elif len(content) > old_tool_chars:
-                rest[i] = {**msg, "content": content[:old_tool_chars].rstrip() + "\n...[older tool output truncated]"}
+            elif tool_name == "skill_markets_info":
+                rest[i] = {
+                    **msg,
+                    "content": (
+                        "[EXPIRED MARKET SNAPSHOT FROM EARLIER TURN — DO NOT REUSE OLD PRICES, RETURNS, OR MOVERS "
+                        "WHEN THE USER ASKS A FOLLOW-UP TIMEFRAME, COMPARISON, OR PRICE QUESTION. You MUST call "
+                        "skill_markets_info again for fresh real-time / historical data.]"
+                    ),
+                }
+            else:
+                eff_chars = 3200 if (tool_name == "skill_news_headlines" and old_tool_chars == OLD_TOOL_OUTPUT_CHARS) else old_tool_chars
+                if len(content) > eff_chars:
+                    nl_idx = content.rfind("\n", 0, eff_chars)
+                    cut_at = nl_idx if nl_idx >= eff_chars // 2 else eff_chars
+                    rest[i] = {**msg, "content": content[:cut_at].rstrip() + "\n...[older tool output truncated]"}
 
     if len(rest) > limit:
         start = len(rest) - limit
