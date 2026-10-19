@@ -43,6 +43,10 @@ from src.skills.sports.context import (
     detect_missed_sports_tool_call,
     enrich_sports_tool_args,
 )
+from src.skills.voice.context import (
+    detect_missed_voice_tool_call,
+    enrich_voice_tool_args,
+)
 from src.utils.domain_vocab import (
     EPHEMERAL_SPORTS_TOOLS as _EPHEMERAL_SPORTS_TOOLS,
     MONTH_MAP_SYNC as _MONTH_MAP_SYNC,

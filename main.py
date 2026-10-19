@@ -18,6 +18,7 @@ from src.utils import (
     BoundedSet,
     clear_http_caches,
     dispatch_tracker_command,
+    dispatch_voice_command,
     ensure_ollama_running,
     extract_song_card_target,
     chunk_message,
@@ -41,6 +42,11 @@ from src.skills.flights import (
     FLIGHT_TRACKER,
     skill_flight_tracker,
 )
+from src.skills.voice import (
+    VOICE_COHOST,
+    clear_voice_cache,
+    skill_voice_info,
+)
 try:
     from src.config import MODES
 except ImportError:
@@ -57,12 +63,14 @@ from src.orchestrator import (
     enrich_flight_tool_args,
     enrich_markets_tool_args,
     enrich_graphing_tool_args,
+    enrich_voice_tool_args,
     enrich_tool_output_with_time_context,
     detect_missed_sports_tool_call,
     detect_missed_music_shift_tool_call,
     detect_missed_flight_tool_call,
     detect_missed_markets_tool_call,
     detect_missed_graphing_tool_call,
+    detect_missed_voice_tool_call,
     trim_history,
     compact_intra_turn_tool_history,
     apply_auto_ping,
@@ -88,6 +96,7 @@ ensure_ollama_running()
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.voice_states = True
 client = discord.Client(intents=intents)
 ollama_client = AsyncClient()
 
@@ -153,6 +162,7 @@ def clear_tool_caches(channel_id: int = None):
         clear_channel_flight_state(channel_id)
         clear_channel_market_state(channel_id)
         clear_channel_chart_state(channel_id)
+        clear_voice_cache(channel_id)
         if channel_id is None:
             clear_youtube_caches()
             clear_resolved_music_cache()
@@ -244,6 +254,11 @@ async def handle_live_match_update(match, snapshot, triggers):
         await send_telegram_message(match.channel_id, final_msg)
     else:
         await channel.send(final_msg)
+    await VOICE_COHOST.announce_tracker_event(
+        match.channel_id,
+        llm_text or fallback_msg,
+        profile_or_mode="sportscaster" if current_mode not in ("chat", "chappie") else current_mode,
+    )
 
     async with channel_locks[match.channel_id]:
         if match.channel_id not in chat_history:
@@ -277,6 +292,7 @@ async def handle_flight_tracker_update(channel_id: int, alert_text: str):
         await send_telegram_message(channel_id, alert_text)
     else:
         await channel.send(alert_text)
+    await VOICE_COHOST.announce_tracker_event(channel_id, alert_text, profile_or_mode=current_mode)
 
     mode_config = MODES[current_mode]
     async with channel_locks[channel_id]:
@@ -287,6 +303,79 @@ async def handle_flight_tracker_update(channel_id: int, alert_text: str):
             "role": "assistant",
             "content": alert_text,
         })
+
+
+async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
+    """Callback invoked by VOICE_COHOST when a speaker's utterance in Discord voice chat triggers the AI co-host."""
+    channel_id = session.channel_id
+    mode_config = MODES[current_mode]
+    is_research = mode_config.get("is_research", False)
+    tools.set_memory_file(mode_config["memory_file"])
+    set_active_channel_id(channel_id)
+
+    voice_prompt_hint = (
+        f"[Spoken in Discord Voice Channel '{session.voice_channel_name}' — "
+        f"lead with 1-2 natural spoken sentences for TTS, followed by any links/details]"
+    )
+    if current_mode == "chat":
+        user_msg = f"{utterance.display_name} (User ID: {utterance.user_id}) {voice_prompt_hint}: {cleaned_query}"
+    else:
+        user_msg = f"User {utterance.display_name} says {voice_prompt_hint}: {cleaned_query}"
+
+    async with channel_locks[channel_id]:
+        system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
+        if channel_id not in chat_history:
+            chat_history[channel_id] = [system_msg]
+        else:
+            chat_history[channel_id][0] = system_msg
+        turn_history = list(chat_history[channel_id])
+
+    turn_start_idx = len(turn_history)
+    turn_history.append({"role": "user", "content": user_msg})
+
+    clear_channel_attachments(channel_id)
+    reply = await run_agent_turn(channel_id, mode_config, turn_history=turn_history)
+    if not reply or not reply.strip():
+        return None
+
+    if is_research:
+        reply = join_orphan_bullets(reply)
+    reply = suppress_discord_embeds(reply)
+    set_active_channel_id(channel_id)
+    reply = await run_in_worker(standardize_song_reply, reply)
+    reply = sanitize_agent_reply(reply)
+
+    turn_delta = turn_history[turn_start_idx:]
+    if len(turn_delta) == 1:
+        turn_delta.append({"role": "assistant", "content": reply})
+    else:
+        turn_delta[-1] = {"role": "assistant", "content": reply}
+
+    async with channel_locks[channel_id]:
+        if channel_id not in chat_history:
+            chat_history[channel_id] = [system_msg]
+        chat_history[channel_id].extend(turn_delta)
+        chat_history[channel_id] = trim_history(
+            chat_history[channel_id], mode_config.get("history_limit", 40)
+        )
+
+    attachments = pop_channel_attachments(channel_id)
+    channel = client.get_channel(channel_id)
+    if channel is not None:
+        header = f"🎙️ **Voice Co-Host (replying to {utterance.display_name} — *\"{utterance.transcript}\"*):**\n"
+        chunks = [c for c in chunk_message(header + reply) if c]
+        discord_files = [
+            discord.File(io.BytesIO(att["data"]), filename=att["filename"])
+            for att in attachments
+            if att.get("data")
+        ]
+        for idx, chunk in enumerate(chunks):
+            if idx == len(chunks) - 1 and discord_files:
+                await channel.send(chunk, files=discord_files)
+            else:
+                await channel.send(chunk)
+
+    return reply
 
 
 @client.event
@@ -300,6 +389,7 @@ async def on_ready():
     FLIGHT_TRACKER.bind_event_loop(loop)
     FLIGHT_TRACKER.set_notify_callback(handle_flight_tracker_update)
     FLIGHT_TRACKER.ensure_loop_running()
+    VOICE_COHOST.set_utterance_callback(handle_voice_utterance_turn)
     asyncio.create_task(start_telegram_bridge(sys.modules[__name__]))
 
 
@@ -521,6 +611,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
         "skill_flight_tracker",
         "skill_markets_info",
         "skill_graphing_info",
+        "skill_voice_info",
         "skill_weather_info",
         "skill_news_headlines",
         "skill_music_analysis",
@@ -552,6 +643,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     or detect_missed_flight_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_graphing_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_markets_tool_call(history, active_channel_id=channel_id)
+                    or detect_missed_voice_tool_call(history, active_channel_id=channel_id)
                 )
                 if missed and missed[0] in active_tools:
                     forced_tool_name, forced_raw_args = missed
@@ -564,10 +656,17 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                         forced_args = enrich_markets_tool_args(forced_args, history, active_channel_id=channel_id)
                     elif forced_tool_name == "skill_graphing_info":
                         forced_args = enrich_graphing_tool_args(forced_args, history, active_channel_id=channel_id)
+                    elif forced_tool_name == "skill_voice_info":
+                        forced_args = enrich_voice_tool_args(forced_args, history, active_channel_id=channel_id)
+                        if not forced_args.get("voice_profile"):
+                            forced_args = dict(forced_args)
+                            forced_args["voice_profile"] = current_mode
                     set_active_channel_id(channel_id)
                     print(f"⚡ [{current_mode.upper()}] Intercepted missed tool on turn 0 -> forcing {forced_tool_name}({forced_args})")
                     try:
                         tool_output = await run_in_worker(func, **forced_args)
+                        if forced_tool_name == "skill_voice_info" and VOICE_COHOST.get_session(channel_id) is not None:
+                            await VOICE_COHOST.ensure_discord_voice_connected(channel_id)
                     except Exception as e:
                         print(f"  └─ ❌ Forced tool {forced_tool_name} crashed: {e}")
                         tool_output = f"Tool execution failed: {e}"
@@ -650,6 +749,11 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     args = enrich_markets_tool_args(args, history, active_channel_id=channel_id)
                 elif tool_name == "skill_graphing_info":
                     args = enrich_graphing_tool_args(args, history, active_channel_id=channel_id)
+                elif tool_name == "skill_voice_info":
+                    args = enrich_voice_tool_args(args, history, active_channel_id=channel_id)
+                    if not args.get("voice_profile"):
+                        args = dict(args)
+                        args["voice_profile"] = current_mode
                 set_active_channel_id(channel_id)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
                 try:
@@ -667,6 +771,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                         tool_output = f"{news_res}\n{pulse_res}" if pulse_res else news_res
                     else:
                         tool_output = await run_in_worker(func, **args)
+                        if tool_name == "skill_voice_info" and VOICE_COHOST.get_session(channel_id) is not None:
+                            await VOICE_COHOST.ensure_discord_voice_connected(channel_id)
                 except Exception as e:
                     print(f"  └─ ❌ Tool {tool_name} crashed: {e}")
                     tool_output = f"Tool execution failed: {e}"
@@ -705,7 +811,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
             called_names.issubset(_TERMINAL_SKILLS)
             and (
                 len(tool_calls) >= 2
-                or (called_names.issubset({"skill_news_headlines", "skill_markets_info", "skill_graphing_info"}) and not has_compound_media_intent)
+                or (called_names.issubset({"skill_news_headlines", "skill_markets_info", "skill_graphing_info", "skill_voice_info"}) and not has_compound_media_intent)
             )
             and all("PARALLEL_EXECUTION_BLOCKED" not in r["content"] and not r["content"].startswith("⚠️") for r in tool_results)
         ):
@@ -803,6 +909,23 @@ async def on_message(message):
         await message.channel.send(tracker_res)
         return
 
+    # Direct Voice Co-Host Commands (!join, !leave, !speak, !vmode, !vrecap, !vstatus, !vmute, !vunmute)
+    author_voice_state = getattr(message.author, "voice", None)
+    author_voice_channel = getattr(author_voice_state, "channel", None) if author_voice_state else None
+    VOICE_COHOST.register_author_voice_channel(message.channel.id, author_voice_channel)
+    voice_res = await dispatch_voice_command(
+        text=user_input,
+        channel_id=message.channel.id,
+        voice_info_fn=skill_voice_info,
+        voice_cohost_service=VOICE_COHOST,
+        author_voice_channel=author_voice_channel,
+        active_mode=current_mode,
+    )
+    if voice_res is not None:
+        active_channels.add(message.channel.id)
+        await message.channel.send(voice_res)
+        return
+
     is_mentioned = client.user in message.mentions
     is_dm = isinstance(message.channel, discord.DMChannel)
 
@@ -816,6 +939,24 @@ async def on_message(message):
     is_research = mode_config.get("is_research", False)
     tools.set_memory_file(mode_config["memory_file"])
     set_active_channel_id(channel_id)
+
+    # Transcribe Discord voice messages / audio attachments (.ogg, .wav, .mp3, .m4a) via gemma4a / faster-whisper
+    attachments = getattr(message, "attachments", None) or []
+    for att in attachments:
+        att_name = str(getattr(att, "filename", "") or "").lower()
+        att_ctype = str(getattr(att, "content_type", "") or "").lower()
+        if att_ctype.startswith("audio/") or att_name.endswith((".ogg", ".wav", ".mp3", ".m4a", ".flac")):
+            try:
+                audio_bytes = await att.read()
+                transcript = await run_in_worker(
+                    VOICE_COHOST.transcribe_attachment_bytes,
+                    audio_bytes,
+                    mode_config["model"],
+                )
+                if transcript:
+                    user_input = f"{user_input} [Spoken Voice Message: {transcript}]".strip()
+            except Exception as e:
+                print(f"⚠️ [Voice Attachment Transcription Error]: {e}")
 
     other_mentions = [f"{m.display_name} (ID: {m.id})" for m in message.mentions if m != client.user]
     mention_context = f" [Tagged in chat: {', '.join(other_mentions)}]" if other_mentions else ""
@@ -907,6 +1048,11 @@ async def on_message(message):
             elif discord_files:
                 await message.channel.send(files=discord_files)
 
+            # If an active unmuted voice co-host session is connected for this channel, speak the reply aloud too
+            active_voice_sess = VOICE_COHOST.get_session(channel_id)
+            if active_voice_sess and not active_voice_sess.is_muted:
+                await VOICE_COHOST.speak_async(channel_id, reply, profile_or_mode=current_mode)
+
         except Exception as e:
             print(f"❌ Error handling message: {type(e).__name__}: {e}")
             await message.channel.send("⚠️ Something went wrong while handling that. Please try again!")
@@ -925,4 +1071,9 @@ if __name__ == "__main__":
             FLIGHT_TRACKER.shutdown()
         except Exception:
             pass
+        try:
+            VOICE_COHOST.shutdown()
+        except Exception:
+            pass
         shutdown_worker_pool()
+

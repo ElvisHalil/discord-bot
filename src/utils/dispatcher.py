@@ -199,3 +199,90 @@ async def dispatch_tracker_command(
 
     return None
 
+
+def _strip_llm_instructions(text: str) -> str:
+    """Strip internal `[SYSTEM INSTRUCTION — ...]` blocks from direct bang command replies."""
+    if not text:
+        return text
+    return text.split("\n\n[SYSTEM INSTRUCTION")[0].strip()
+
+
+async def dispatch_voice_command(
+    text: str,
+    channel_id: int,
+    voice_info_fn: Callable[..., str],
+    voice_cohost_service: Any,
+    author_voice_channel: Any = None,
+    active_mode: str = "research",
+) -> Optional[str]:
+    """
+    Handle direct Discord voice co-host bang commands (`!join`, `!leave`, `!speak <text>`,
+    `!vmode <mode>`, `!vrecap`, `!vstatus`, `!vmute`, `!vunmute`).
+    Returns the formatted response string if `text` matched a voice command, or None otherwise.
+    """
+    if not text:
+        return None
+    low = text.strip().lower()
+
+    if low == "!join" or low.startswith("!join "):
+        mode_arg = text[5:].strip() or "wake_word"
+        set_active_channel_id(channel_id)
+        if author_voice_channel is not None:
+            if hasattr(voice_cohost_service, "register_author_voice_channel"):
+                voice_cohost_service.register_author_voice_channel(channel_id, author_voice_channel)
+            voice_cohost_service.start_session(
+                channel_id=channel_id,
+                voice_channel_id=int(getattr(author_voice_channel, "id", channel_id) or channel_id),
+                voice_channel_name=str(getattr(author_voice_channel, "name", "Discord Voice") or "Discord Voice"),
+                guild_id=int(getattr(getattr(author_voice_channel, "guild", None), "id", 0) or 0) or None,
+                mode=mode_arg,
+                voice_profile=active_mode,
+            )
+            if hasattr(voice_cohost_service, "ensure_discord_voice_connected"):
+                await voice_cohost_service.ensure_discord_voice_connected(channel_id)
+            res = await run_in_worker(voice_info_fn, action="status")
+            return _strip_llm_instructions(res)
+        res = await run_in_worker(voice_info_fn, action="join", mode=mode_arg, voice_profile=active_mode)
+        return _strip_llm_instructions(res)
+
+    if low in ("!leave", "!disconnect"):
+        set_active_channel_id(channel_id)
+        res = await run_in_worker(voice_info_fn, action="leave")
+        return _strip_llm_instructions(res)
+
+    if low.startswith("!speak "):
+        speech_text = text[7:].strip()
+        set_active_channel_id(channel_id)
+        res = await run_in_worker(voice_info_fn, action="speak", query=speech_text, voice_profile=active_mode)
+        return _strip_llm_instructions(res)
+
+    if low.startswith("!vmode"):
+        mode_arg = text[6:].strip() or "conversational"
+        set_active_channel_id(channel_id)
+        res = await run_in_worker(voice_info_fn, action="mode", mode=mode_arg)
+        return _strip_llm_instructions(res)
+
+    if low in ("!vrecap", "!voicerecap"):
+        set_active_channel_id(channel_id)
+        res = await run_in_worker(voice_info_fn, action="recap")
+        return _strip_llm_instructions(res)
+
+    if low in ("!vstatus", "!voicestatus"):
+        set_active_channel_id(channel_id)
+        res = await run_in_worker(voice_info_fn, action="status")
+        return _strip_llm_instructions(res)
+
+    if low == "!vmute":
+        set_active_channel_id(channel_id)
+        res = await run_in_worker(voice_info_fn, action="mute")
+        return _strip_llm_instructions(res)
+
+    if low == "!vunmute":
+        set_active_channel_id(channel_id)
+        res = await run_in_worker(voice_info_fn, action="unmute")
+        return _strip_llm_instructions(res)
+
+    return None
+
+
+

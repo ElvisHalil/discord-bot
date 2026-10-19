@@ -352,6 +352,12 @@ TOOL_ARG_ALIASES: Dict[str, Dict[str, str]] = {
         "y": "y_label", "ylabel": "y_label",
         "q": "query", "prompt": "query", "description": "query",
     },
+    "skill_voice_info": {
+        "command": "action", "cmd": "action", "type": "action", "operation": "action",
+        "q": "query", "text": "query", "speech": "query", "message": "query", "say": "query", "channel": "query",
+        "listen_mode": "mode", "activation": "mode",
+        "voice": "voice_profile", "profile": "voice_profile", "persona": "voice_profile", "speaker": "voice_profile",
+    },
     "evaluate_math": {
         "math": "expression", "expr": "expression", "equation": "expression",
         "formula": "expression", "query": "expression", "q": "expression",

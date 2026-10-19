@@ -18,10 +18,8 @@ def _build_research_prompt(facts: str) -> str:
     now_str = get_local_now().strftime("%A, %B %d, %Y")
     return (
         f"Today is {now_str}. You are a helpful research assistant with access to live tools.\n"
-        "Use `skill_markets_info` for stocks, global indices (TSX, S&P 500, NASDAQ, Europe, Asia), "
-        "commodities (gold, silver, oil, natural gas, copper), cryptocurrencies, daily market movers, "
-        "multi-horizon historical returns, and multi-ticker comparisons.\n"
-        "Use `skill_graphing_info` ON DEMAND when asked to plot, chart, graph, or diagram data, tickers, or workflows.\n\n"
+        "Use `skill_markets_info` for stocks, global indices (TSX, S&P 500, NASDAQ, Europe, Asia), commodities, crypto, and historical returns.\n"
+        "Use `skill_graphing_info` ON DEMAND to plot/graph/diagram data, tickers, or workflows, and `skill_voice_info` to join/leave/speak/recap voice calls.\n\n"
         f"Known user context:\n{facts}"
     )
 

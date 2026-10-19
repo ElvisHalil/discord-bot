@@ -109,6 +109,19 @@ from src.skills.sports.models import (
     TrackedMatch,
     UniversalLeagueConfig,
 )
+from src.skills.voice.enums import (
+    SttBackend,
+    TtsBackend,
+    VoiceAction,
+    VoiceMode,
+    VoiceSessionState,
+)
+from src.skills.voice.models import (
+    SpeakerUtterance,
+    TtsAudioClip,
+    VoiceProfileSpec,
+    VoiceSessionRecord,
+)
 from src.utils.domain_vocab import (
     has_non_music_domain_signal,
     has_non_sports_track_signal,
@@ -119,7 +132,7 @@ from src.utils.timezones import FixedTimezoneSpec
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src"
 SKILLS_ROOT = SRC_ROOT / "src" / "skills" if not (SRC_ROOT / "skills").exists() else SRC_ROOT / "skills"
-DOMAIN_SKILLS = {"music", "sports", "flights", "news", "weather", "markets", "graphing"}
+DOMAIN_SKILLS = {"music", "sports", "flights", "news", "weather", "markets", "graphing", "voice"}
 
 
 class TestArchitectureAndBoundaries(unittest.TestCase):
@@ -222,7 +235,7 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
 
     def test_strict_separation_of_enums_models_and_catalogs(self):
         """Verify each domain skill strictly separates StrEnums (enums.py), dataclasses (models.py), and static tables (catalogs.py)."""
-        for skill in ("music", "sports", "flights", "news", "weather", "youtube", "markets", "graphing"):
+        for skill in ("music", "sports", "flights", "news", "weather", "youtube", "markets", "graphing", "voice"):
             enums_mod = importlib.import_module(f"src.skills.{skill}.enums")
             models_mod = importlib.import_module(f"src.skills.{skill}.models")
             catalogs_mod = importlib.import_module(f"src.skills.{skill}.catalogs")
@@ -292,6 +305,11 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
             HistoricalTimeframe,
             ChartType,
             DiagramType,
+            VoiceAction,
+            VoiceMode,
+            VoiceSessionState,
+            SttBackend,
+            TtsBackend,
         )
         for enum_cls in enum_types:
             self.assertTrue(issubclass(enum_cls, StrEnum), f"{enum_cls.__name__} must inherit from StrEnum")
@@ -324,6 +342,10 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
             MarketBarSeries,
             RenderedVisual,
             ChartChannelState,
+            VoiceProfileSpec,
+            SpeakerUtterance,
+            TtsAudioClip,
+            VoiceSessionRecord,
         )
         for dc_cls in dataclass_types:
             self.assertTrue(is_dataclass(dc_cls), f"{dc_cls.__name__} must be a @dataclass")
@@ -472,7 +494,7 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
         skill_names = {d.name for d in skill_dirs}
         self.assertEqual(
             skill_names,
-            {".example", "flights", "graphing", "markets", "music", "news", "sports", "weather", "youtube"},
+            {".example", "flights", "graphing", "markets", "music", "news", "sports", "voice", "weather", "youtube"},
         )
 
         expected_base_aggregators = {
@@ -483,6 +505,7 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
             "music": "BaseMusicAggregator",
             "news": "BaseNewsAggregator",
             "sports": "BaseSportsAggregator",
+            "voice": "BaseVoiceAggregator",
             "weather": "BaseWeatherAggregator",
             "youtube": "BaseYouTubeAggregator",
         }
