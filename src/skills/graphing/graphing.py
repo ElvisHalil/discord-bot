@@ -203,12 +203,20 @@ def _extract_chart_timeframe(query: str, timeframe: str) -> str:
 
 _MC_LOOKBACK_PATTERNS = (
     re.compile(
-        r"\b(?:base(?:d)?\s+(?:it\s+)?(?:on|off(?:\s+of)?|of)|calibrated\s+(?:it\s+)?on|using|from|with)\s+"
-        r"(?:the\s+)?(?:last\s+|past\s+)?"
+        r"\b(?:base(?:d)?\s+(?:it\s+)?(?:on|off(?:\s+of)?|of)|calibrated\s+(?:it\s+)?on|use(?:d|ing)?|from|with)\s+"
+        r"(?:the\s+)?(?:last\s+|past\s+|previous\s+|prior\s+)?"
         r"(all[- ]time|max(?:\s+history)?|entire\s+history|full\s+history|"
         r"\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?|m\b|w(?:eeks?|ks?)?|d(?:ays?)?)|"
         r"one\s+year|two\s+years|three\s+years|five\s+years|decade|ytd|year[- ]to[- ]date)"
+        r"(?!\s*(?:into|in)\s+(?:the\s+)?future|\s+forward)"
         r"(?:\s+(?:of\s+)?(?:history|historical(?:\s+data)?|price\s+history|data|returns|timeframe))?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:over\s+)?(?:the\s+)?(?:past|last|previous|prior)\s+"
+        r"(all[- ]time|max|\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?|w(?:eeks?|ks?)?|d(?:ays?)?)|"
+        r"one\s+year|two\s+years|three\s+years|five\s+years|decade)"
+        r"(?:\s+(?:of\s+)?(?:history|historical(?:\s+data)?|price\s+history|data|returns|lookback|calibration))?\b",
         re.IGNORECASE,
     ),
     re.compile(

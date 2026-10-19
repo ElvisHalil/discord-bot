@@ -287,6 +287,8 @@ class TestGraphingSkill(unittest.TestCase):
         self.assertTrue(atts[0]["filename"].startswith("monte_carlo_btc-usd"))
         self.assertTrue(atts[0]["data"].startswith(PNG_MAGIC))
 
+        self.assertIn("| Basis: 5-Year History (Default)", atts[0]["caption"])
+
         # 2. Flexible custom lookback extraction (horizon vs lookback separation)
         self.assertEqual(
             _extract_monte_carlo_horizon_and_lookback(
@@ -308,6 +310,22 @@ class TestGraphingSkill(unittest.TestCase):
                 "max",
             ),
             ("1y", "max"),
+        )
+        self.assertEqual(
+            _extract_monte_carlo_horizon_and_lookback(
+                "use past 10 years and do 5 years in future",
+                "10y",
+                prev_horizon="2y",
+            ),
+            ("5y", "10y"),
+        )
+        self.assertEqual(
+            _extract_monte_carlo_horizon_and_lookback(
+                "use past 15 years and do it again",
+                "15y",
+                prev_horizon="2y",
+            ),
+            ("2y", "15y"),
         )
 
         # 3. Follow-up lookback adjustment on active Monte Carlo chart preserves horizon="2y" and sets lookback="10y"

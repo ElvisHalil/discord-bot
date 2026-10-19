@@ -234,8 +234,8 @@ def enrich_graphing_tool_args(
             enriched["timeframe"] = state.last_timeframe
 
     _mc_followup_re = re.compile(
-        r"\b(?:base(?:d)?\s+(?:it\s+)?(?:on|off|of)|calibrated\s+on|using\s+(?:the\s+)?(?:last|past|\d+|all)|"
-        r"into\s+(?:the\s+)?future|all[- ]time\s+history|\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?)\s+of\s+history)\b",
+        r"\b(?:base(?:d)?\s+(?:it\s+)?(?:on|off|of)|calibrated\s+on|use(?:d|ing)?\s+(?:the\s+)?(?:last|past|\d+|all)|"
+        r"(?:into|in)\s+(?:the\s+)?future|do\s+it\s+again|all[- ]time\s+history|\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?)\s+of\s+history)\b",
         re.IGNORECASE,
     )
     if latest_user_text and (
@@ -266,7 +266,7 @@ def enrich_graphing_tool_args(
         q_low = (latest_user_text or "").lower()
         has_tf_or_int = bool(_extract_timeframe_from_text(latest_user_text) or _extract_interval_from_text(latest_user_text))
         if (
-            re.search(r"\b(?:it|them|same|instead|past|last|hourly|daily|weekly|graph|chart|plot|monte\s*carlo|base|based|history)\b", q_low)
+            re.search(r"\b(?:it|them|same|instead|past|last|hourly|daily|weekly|graph|chart|plot|monte\s*carlo|base|based|history|use|future)\b", q_low)
             or has_tf_or_int
         ):
             enriched["ticker"] = ", ".join(state.last_tickers)
@@ -322,8 +322,8 @@ def detect_missed_graphing_tool_call(
         state
         and state.last_chart_type == ChartType.MONTE_CARLO
         and re.search(
-            r"\b(?:base(?:d)?\s+(?:it\s+)?(?:on|off|of)|calibrated\s+on|using\s+(?:the\s+)?(?:last|past|\d+|all)|"
-            r"into\s+(?:the\s+)?future|all[- ]time\s+history|\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?)\s+of\s+history)\b",
+            r"\b(?:base(?:d)?\s+(?:it\s+)?(?:on|off|of)|calibrated\s+on|use(?:d|ing)?\s+(?:the\s+)?(?:last|past|\d+|all)|"
+            r"(?:into|in)\s+(?:the\s+)?future|do\s+it\s+again|all[- ]time\s+history|\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?)\s+of\s+history)\b",
             q_low,
         )
     )

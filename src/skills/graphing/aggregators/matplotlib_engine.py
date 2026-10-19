@@ -440,10 +440,10 @@ class MatplotlibChartAggregator(BaseGraphingAggregator):
         p95_end = mc.p95_path[-1]
         mean_end = mc.mean_path[-1]
 
-        title_str = f"Monte Carlo GBM Simulation: {mc.name} ({mc.symbol}) — {mc.horizon_label}"
+        title_str = f"Monte Carlo GBM Simulation: {mc.name} ({mc.symbol}) — {mc.horizon_label} | Basis: {mc.lookback_label}"
         drift_sign = "+" if mc.annualized_drift_pct > 0 else ""
         subtitle_str = (
-            f"{mc.num_simulations:,} Paths  |  Basis: {mc.lookback_label} ({mc.lookback_days:,}d)  |  "
+            f"{mc.num_simulations:,} Paths  |  Calibrated on {mc.lookback_label} ({mc.lookback_days:,} daily bars)  |  "
             f"Spot: {_fmt_price_val(mc.spot_price)} {mc.currency}  |  Vol (σ): {mc.annualized_volatility_pct:.1f}%/yr  |  "
             f"Drift: {drift_sign}{mc.annualized_drift_pct:.1f}%/yr  |  P(Profit): {mc.prob_profit_pct:.1f}%"
         )
@@ -463,7 +463,7 @@ class MatplotlibChartAggregator(BaseGraphingAggregator):
                 mc.history_closes,
                 color=DARK_TEXT_COLOR,
                 linewidth=2.0,
-                label="Historical Close",
+                label=f"Recent Close (Calibrated: {mc.lookback_label})",
                 zorder=4,
             )
             ax_fan.axvline(

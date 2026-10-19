@@ -156,7 +156,7 @@ def _resolve_timeframe_and_interval(
         cutoff_days = days if mos not in (1, 3, 6, 12, 24) else None
     elif m_years:
         yrs = max(1, int(m_years.group(1)))
-        yf_range = "1y" if yrs == 1 else ("2y" if yrs == 2 else ("5y" if yrs <= 5 else "10y"))
+        yf_range = "1y" if yrs == 1 else ("2y" if yrs == 2 else ("5y" if yrs <= 5 else ("10y" if yrs <= 10 else "max")))
         default_int = "1d" if yrs <= 2 else "1wk"
         tf_label = f"{yrs}-Year ({yrs}Y)"
         cutoff_days = yrs * 365 if yrs not in (1, 2, 5, 10) else None

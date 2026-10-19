@@ -1172,6 +1172,12 @@ async def on_message(message):
             if not reply.strip() and attachments:
                 captions = [str(att.get("caption") or "").strip() for att in attachments if att.get("caption")]
                 reply = f"📊 **{captions[0]}**" if captions else "📊 Here is your rendered chart."
+            elif reply.strip() and attachments:
+                for att in attachments:
+                    cap = str(att.get("caption") or "").strip()
+                    if att.get("filename", "").startswith("monte_carlo_") and "| Basis:" in cap and "Basis:" not in reply:
+                        reply = f"📊 **{cap}**\n\n{reply.lstrip()}"
+                        break
 
             is_empty_fallback = False
             if not reply.strip():
