@@ -428,6 +428,13 @@ class TestMarketsSkill(unittest.TestCase):
         self.assertEqual(enriched_cmp.get("ticker"), "SHOP.TO, NVDA")
         self.assertEqual(enriched_cmp.get("view"), "compare")
 
+        # Switching to a new asset in the same channel must NOT inherit the previous ticker
+        enriched_new_asset = enrich_markets_tool_args(
+            {"query": "how has gold performed over the last 6 months?"},
+            [{"role": "user", "content": "how has gold performed over the last 6 months?"}],
+        )
+        self.assertIsNone(enriched_new_asset.get("ticker"))
+
         # Follow-up missed tool call detection when channel has active market state
         missed_followup = detect_missed_markets_tool_call([
             {"role": "user", "content": "how did it perform in 2024?"}

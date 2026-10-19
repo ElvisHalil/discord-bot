@@ -44,6 +44,12 @@ _FOLLOWUP_TIMEFRAME_RE = re.compile(
 _CASHTAG_RE = re.compile(r"(?<![A-Za-z0-9])\$([A-Z]{1,5}(?:\.TO)?)\b")
 
 
+_BARE_FOLLOWUP_START_RE = re.compile(
+    r"^\s*(?:what\s+about|how\s+about|and\s+(?:over|in|for|since|what|how|ytd)|what\s+if)\b",
+    re.IGNORECASE,
+)
+
+
 def _resolve_cid(channel_id: Optional[int] = None) -> int:
     return channel_id if channel_id is not None else (get_active_channel_id() or 0)
 
@@ -130,7 +136,7 @@ def enrich_markets_tool_args(
                 enriched.setdefault("view", "compare")
             elif not t_val:
                 enriched["ticker"] = state.last_tickers[0]
-        elif not t_val and _FOLLOWUP_TIMEFRAME_RE.search(q_val):
+        elif not t_val and _BARE_FOLLOWUP_START_RE.search(q_val) and _FOLLOWUP_TIMEFRAME_RE.search(q_val):
             enriched["ticker"] = ", ".join(state.last_tickers) if len(state.last_tickers) > 1 else state.last_tickers[0]
 
     return enriched
@@ -181,9 +187,18 @@ def detect_missed_markets_tool_call(
     )
     if (state and state.last_tickers or had_prior_markets_tool) and _FOLLOWUP_TIMEFRAME_RE.search(q_low):
         args: dict = {"query": latest_user_text}
-        if state and state.last_tickers and not re.search(r"\b(?:vs\.?|versus|compare)\b", q_low):
+        is_referential = bool(
+            re.search(r"\b(?:it|its|them|they)\b", q_low) or _BARE_FOLLOWUP_START_RE.search(q_low)
+        )
+        if (
+            state
+            and state.last_tickers
+            and is_referential
+            and not re.search(r"\b(?:vs\.?|versus|compare)\b", q_low)
+        ):
             args["ticker"] = state.last_tickers[0]
         return ("skill_markets_info", args)
 
     return None
+
 
