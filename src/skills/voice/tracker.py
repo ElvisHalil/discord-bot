@@ -293,8 +293,11 @@ class VoiceCohostService:
         with self._lock:
             acc = self._accumulators.get(channel_id)
             sess = self._sessions.get(channel_id)
+            need_loop = self._loop_task is None or self._loop_task.done()
         if acc is None or sess is None:
             return None
+        if need_loop:
+            self.ensure_loop_running()
 
         ready = acc.push_pcm_frame(user_id, display_name, pcm_48k_stereo, now=now)
         if ready is not None:
@@ -427,8 +430,11 @@ class VoiceCohostService:
             sess.last_activity_at = time.time()
             if vc is not None and hasattr(vc, "play"):
                 try:
-                    if hasattr(vc, "is_playing") and vc.is_playing() and hasattr(vc, "stop"):
-                        vc.stop()
+                    if hasattr(vc, "is_playing") and vc.is_playing():
+                        if hasattr(vc, "stop_playing"):
+                            vc.stop_playing()
+                        elif hasattr(vc, "stop"):
+                            vc.stop()
                     pcm_source = build_discord_pcm_source(clip.audio_bytes)
                     if pcm_source is not None:
                         sess.state = str(VoiceSessionState.SPEAKING)
@@ -558,25 +564,45 @@ class VoiceCohostService:
             self._loop_task = asyncio.run_coroutine_threadsafe(self._background_flush_loop(), loop)  # type: ignore[assignment]
 
     async def _background_flush_loop(self) -> None:
-        """Periodically flush speaker buffers whose silence gap has elapsed."""
+        """Periodically flush speaker buffers whose silence gap has elapsed and keep voice receivers alive."""
+        last_watchdog_ts = time.monotonic()
         while not self._stop_event.is_set():
             await asyncio.sleep(0.12)
-            with self._lock:
-                items = list(self._accumulators.items())
-            if not items:
-                break
-            for cid, acc in items:
-                ready_list = acc.flush_ready_utterances()
-                for uid, uname, wav_16k, dur_sec, rms_dbfs in ready_list:
-                    submit_to_worker(
-                        self.process_utterance_wav,
-                        cid,
-                        uid,
-                        uname,
-                        wav_16k,
-                        dur_sec,
-                        rms_dbfs,
-                    )
+            try:
+                with self._lock:
+                    items = list(self._accumulators.items())
+                    vc_items = list(self._voice_clients.items())
+                if not items:
+                    break
+                for cid, acc in items:
+                    ready_list = acc.flush_ready_utterances()
+                    for uid, uname, wav_16k, dur_sec, rms_dbfs in ready_list:
+                        submit_to_worker(
+                            self.process_utterance_wav,
+                            cid,
+                            uid,
+                            uname,
+                            wav_16k,
+                            dur_sec,
+                            rms_dbfs,
+                        )
+                now_mono = time.monotonic()
+                if now_mono - last_watchdog_ts >= 2.0:
+                    last_watchdog_ts = now_mono
+                    for cid, vc in vc_items:
+                        if (
+                            vc is not None
+                            and getattr(vc, "is_connected", lambda: False)()
+                            and hasattr(vc, "is_listening")
+                            and not vc.is_listening()
+                        ):
+                            logger.info("Re-attaching stopped voice receiver on channel %s", cid)
+                            attach_discord_voice_receiver(
+                                vc,
+                                lambda uid, uname, pcm, _cid=cid: self.ingest_pcm_frame(_cid, uid, uname, pcm),
+                            )
+            except Exception as e:
+                logger.debug("Voice background flush loop error: %s", e)
 
     def shutdown(self) -> None:
         """Stop the background loop and disconnect all active voice sessions."""
