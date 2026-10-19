@@ -381,6 +381,14 @@ def skill_music_discovery(
         except Exception as e:
             return f"Error finding tracks for artist '{artist}': {e}"
 
+    if genre and not similar_to and not artist and not mood and not shift_raw:
+        m_spec_song = re.match(r"^(?:play\s+)?(?:the\s+song\s+)?(.+?\s+by\s+.+?)$", genre.strip(), re.IGNORECASE)
+        if m_spec_song and not re.match(r"^(?:play\s+)?(?:a\s+|some\s+)?(?:songs?|tracks?|music)\s+by\s+", genre.strip(), re.IGNORECASE):
+            from src.skills.youtube.youtube import skill_youtube_search
+            spec_q = m_spec_song.group(1).strip()
+            print(f"🔄 [Music Discovery Skill]: Redirecting specific song query '{genre}' -> skill_youtube_search(query='{spec_q}', is_music=True).")
+            return skill_youtube_search(query=spec_q, max_results=1, is_music=True)
+
     parsed_genre, parsed_mood = parse_mood_and_genre(genre, mood)
 
     if similar_to:

@@ -825,7 +825,8 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         self.assertEqual(res_drop[0]["artist"], "Snoop Dogg")
         self.assertTrue(res_drop[0]["is_official_fallback"])
 
-        # Part C: Retry exclusion skips previously served video ID and picks the second valid candidate
+        # Part C: Specific song requests via skill_youtube_search do NOT exclude previously served links,
+        # while explicit exclude_ids on resolve_youtube_music_link still skips excluded IDs when requested.
         clear_youtube_caches()
         clear_resolved_music_cache()
         mock_ddgs_instance.text.return_value = [
@@ -842,10 +843,14 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         first_res = skill_youtube_search("Strobe by deadmau5", max_results=1, is_music=True)
         self.assertIn("firstvid111", first_res)
 
-        # Second call for the same song automatically excludes firstvid111 and serves secondvid22
+        # Second call for the same specific song reuses the official firstvid111 link rather than blocking it
         second_res = skill_youtube_search("Strobe by deadmau5", max_results=1, is_music=True)
-        self.assertIn("secondvid22", second_res)
-        self.assertNotIn("firstvid111", second_res)
+        self.assertIn("firstvid111", second_res)
+
+        # Explicit exclude_ids parameter on resolve_youtube_music_link still skips firstvid111 when needed
+        alt_res = resolve_youtube_music_link("Strobe by deadmau5", max_results=1, exclude_ids={"firstvid111"})
+        self.assertEqual(len(alt_res), 1)
+        self.assertEqual(alt_res[0]["id"], "secondvid22")
 
 
 if __name__ == "__main__":
