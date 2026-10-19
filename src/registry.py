@@ -66,13 +66,7 @@ RESEARCH_TOOLS = {
 # schemas don't eat context and the model isn't tempted into niche tools.
 CHAT_TOOLS = {
     **SYSTEM_TOOLS,
-    **WEB_TOOLS,
     "skill_youtube_search": skill_youtube_search,
-    "skill_sports_tracker": skill_sports_tracker,
-    "skill_flight_info": skill_flight_info,
-    "skill_flight_tracker": skill_flight_tracker,
-    "skill_markets_info": skill_markets_info,
-    "skill_graphing_info": skill_graphing_info,
     "skill_voice_info": skill_voice_info,
 }
 
