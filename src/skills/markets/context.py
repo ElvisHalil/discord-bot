@@ -26,6 +26,7 @@ _NON_MARKET_SPORT_FLIGHT_WORDS: frozenset[str] = frozenset({
 
 _EXPLICIT_MARKET_PHRASES: Tuple[str, ...] = (
     "stock market", "global markets", "market overview", "market pulse",
+    "how are the markets", "how is the market", "markets doing", "market doing",
     "canadian market", "us market", "european market", "asian market",
     "stock price", "share price", "ticker", "s&p 500", "sp500", "s&p/tsx",
     "tsx 60", "dow jones", "nasdaq", "russell 2000", "ftse 100", "nikkei 225",
@@ -107,7 +108,9 @@ def enrich_markets_tool_args(
         if role == "user":
             content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
             latest_user_text = str(content or "").strip()
+            latest_user_text = re.sub(r"\[Spoken in Discord Voice Channel[^\]]*\]\s*", "", latest_user_text).strip()
             latest_user_text = re.sub(r"^\[[^\]]+\]:\s*", "", latest_user_text).strip()
+            latest_user_text = re.sub(r"^(?:User\s+)?[^:\n]{1,80}(?:\bsays\b|\(User ID:\s*\d+\))\s*:\s*", "", latest_user_text, flags=re.IGNORECASE).strip()
             break
 
     if latest_user_text:
@@ -158,7 +161,9 @@ def detect_missed_markets_tool_call(
         if role == "user":
             content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
             latest_user_text = str(content or "").strip()
+            latest_user_text = re.sub(r"\[Spoken in Discord Voice Channel[^\]]*\]\s*", "", latest_user_text).strip()
             latest_user_text = re.sub(r"^\[[^\]]+\]:\s*", "", latest_user_text).strip()
+            latest_user_text = re.sub(r"^(?:User\s+)?[^:\n]{1,80}(?:\bsays\b|\(User ID:\s*\d+\))\s*:\s*", "", latest_user_text, flags=re.IGNORECASE).strip()
             break
     if not latest_user_text:
         return None

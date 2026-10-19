@@ -35,7 +35,7 @@ VOICE_PROFILES: Dict[str, VoiceProfileSpec] = {
     "chat": VoiceProfileSpec(
         profile_id="chat",
         display_name="Casual Hangout Co-Host (US Male — Andrew)",
-        edge_voice="en-US-AndrewMultilingualNeural",
+        edge_voice="en-US-AndrewNeural",
         rate_pct=10,
         pitch_hz=-2,
         speaking_style="relaxed, witty Discord friend",
@@ -67,7 +67,7 @@ VOICE_PROFILES: Dict[str, VoiceProfileSpec] = {
     "ava": VoiceProfileSpec(
         profile_id="ava",
         display_name="Expressive Female Co-Host (US Female — Ava)",
-        edge_voice="en-US-AvaMultilingualNeural",
+        edge_voice="en-US-AvaNeural",
         rate_pct=8,
         pitch_hz=0,
         speaking_style="warm, expressive conversational co-host",

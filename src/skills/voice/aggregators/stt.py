@@ -124,6 +124,7 @@ class VoiceSttAggregator(BaseVoiceAggregator):
                     "stream": False,
                     "think": False,
                     "options": {
+                        "num_ctx": 32768,
                         "num_predict": 120,
                         "temperature": 0.0,
                     },
@@ -144,6 +145,41 @@ class VoiceSttAggregator(BaseVoiceAggregator):
         except Exception as e:
             logger.debug("Gemma native STT failed: %s", e)
             return ""
+
+    @staticmethod
+    def _audio_bytes_to_16k_float32(audio_bytes: bytes):
+        """
+        Convert raw WAV/MP3/OGG bytes into a 1D 16 kHz mono float32 numpy array in [-1.0, 1.0].
+        Passing a numpy array directly to `faster_whisper.WhisperModel.transcribe` bypasses PyAV
+        (`av.open(..., metadata_errors="ignore")`), which raises TypeError on newer PyAV builds.
+        """
+        import wave
+        import numpy as np
+
+        if audio_bytes[:4] == b"RIFF" and audio_bytes[8:12] == b"WAVE":
+            try:
+                with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
+                    n_channels = wf.getnchannels()
+                    sampwidth = wf.getsampwidth()
+                    framerate = wf.getframerate()
+                    raw_frames = wf.readframes(wf.getnframes())
+                if sampwidth == 2 and framerate == 16000 and n_channels == 1:
+                    return np.frombuffer(raw_frames, dtype=np.int16).astype(np.float32) / 32768.0
+            except Exception:
+                pass
+
+        try:
+            import miniaudio
+
+            decoded = miniaudio.decode(
+                audio_bytes,
+                output_format=miniaudio.SampleFormat.SIGNED16,
+                nchannels=1,
+                sample_rate=16000,
+            )
+            return np.frombuffer(decoded.samples, dtype=np.int16).astype(np.float32) / 32768.0
+        except Exception:
+            return None
 
     def warmup_whisper_model(self) -> None:
         """Pre-load the local faster-whisper model into RAM so the first voice utterance has zero cold-start delay."""
@@ -177,13 +213,17 @@ class VoiceSttAggregator(BaseVoiceAggregator):
             self.warmup_whisper_model()
             if _WHISPER_MODEL is None:
                 return "", False
+            audio_input = self._audio_bytes_to_16k_float32(audio_bytes)
+            if audio_input is None:
+                audio_input = io.BytesIO(audio_bytes)
             lang = os.getenv("WHISPER_LANGUAGE", "en").strip() or None
             segments, _ = _WHISPER_MODEL.transcribe(
-                io.BytesIO(audio_bytes),
+                audio_input,
                 language=lang,
                 beam_size=1,
                 best_of=1,
                 temperature=0.0,
+                initial_prompt="Wake word is Hey bot.",
                 vad_filter=False,
                 without_timestamps=True,
                 condition_on_previous_text=False,

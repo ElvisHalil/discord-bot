@@ -33,6 +33,22 @@ logger = logging.getLogger(__name__)
 _TTS_CACHE_LOCK = threading.Lock()
 _TTS_CACHE: BoundedCache = BoundedCache(maxsize=128)
 _HTTP_SESSION = ThreadLocalRequestsSession()
+_EDGE_LOOP_LOCK = threading.Lock()
+_EDGE_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _get_edge_tts_loop() -> asyncio.AbstractEventLoop:
+    """Return a persistent background asyncio event loop for low-latency Edge TTS synthesis."""
+    global _EDGE_LOOP
+    if _EDGE_LOOP is not None and _EDGE_LOOP.is_running():
+        return _EDGE_LOOP
+    with _EDGE_LOOP_LOCK:
+        if _EDGE_LOOP is None or not _EDGE_LOOP.is_running():
+            loop = asyncio.new_event_loop()
+            t = threading.Thread(target=loop.run_forever, name="edge-tts-loop", daemon=True)
+            t.start()
+            _EDGE_LOOP = loop
+        return _EDGE_LOOP
 
 
 def clear_voice_tts_cache() -> None:
@@ -203,24 +219,30 @@ class VoiceTtsAggregator(BaseVoiceAggregator):
         pitch_str = f"{profile.pitch_hz:+d}Hz"
 
         async def _collect_mp3() -> bytes:
-            communicate = edge_tts.Communicate(
-                spoken_text,
-                voice=profile.edge_voice,
-                rate=rate_str,
-                pitch=pitch_str,
-            )
-            chunks = []
-            async for chunk in communicate.stream():
-                if chunk.get("type") == "audio" and chunk.get("data"):
-                    chunks.append(chunk["data"])
-            return b"".join(chunks)
+            import socket
+            import aiohttp
+
+            connector = aiohttp.TCPConnector(family=socket.AF_INET)
+            try:
+                communicate = edge_tts.Communicate(
+                    spoken_text,
+                    voice=profile.edge_voice,
+                    rate=rate_str,
+                    pitch=pitch_str,
+                    connector=connector,
+                )
+                chunks = []
+                async for chunk in communicate.stream():
+                    if chunk.get("type") == "audio" and chunk.get("data"):
+                        chunks.append(chunk["data"])
+                return b"".join(chunks)
+            finally:
+                await connector.close()
 
         try:
-            loop = asyncio.new_event_loop()
-            try:
-                mp3_bytes = loop.run_until_complete(asyncio.wait_for(_collect_mp3(), timeout=6.0))
-            finally:
-                loop.close()
+            loop = _get_edge_tts_loop()
+            fut = asyncio.run_coroutine_threadsafe(_collect_mp3(), loop)
+            mp3_bytes = fut.result(timeout=8.0)
             if mp3_bytes and len(mp3_bytes) > 100:
                 word_count = max(1, len(spoken_text.split()))
                 est_dur = round(word_count * 0.32, 2)
@@ -237,4 +259,146 @@ class VoiceTtsAggregator(BaseVoiceAggregator):
         except Exception as e:
             logger.debug("edge_tts synthesis failed: %s", e)
         return None
+
+    def synthesize_speech_streaming(
+        self,
+        text: str,
+        profile_or_mode: Optional[str] = "research",
+        backend: str = TtsBackend.AUTO,
+        max_chars: int = 200,
+    ):
+        """
+        Stream Edge Neural TTS over a single WebSocket and return `(initial_clip, bind_stream_fn)`
+        as soon as the first ~1.2s of MP3 audio (~7.2 KB) arrives (~0.65s latency), while the
+        remaining WebSocket chunks finish downloading in the background and append to `StreamingPcmAudioSource`.
+        """
+        spoken = sanitize_text_for_speech(text, max_chars=max_chars)
+        if not spoken:
+            spoken = "Ready."
+
+        profile = self.resolve_voice_profile(profile_or_mode)
+        raw_backend = (backend or "").strip().lower()
+        preferred = (
+            os.getenv("VOICE_TTS_BACKEND", TtsBackend.AUTO).strip().lower()
+            if (not raw_backend or raw_backend == TtsBackend.AUTO)
+            else raw_backend
+        )
+        tts_url = os.getenv("VOICE_TTS_URL", "").strip()
+        cache_key = hashlib.sha256(f"{profile.profile_id}|{preferred}|{spoken}".encode("utf-8")).hexdigest()[:24]
+
+        with _TTS_CACHE_LOCK:
+            cached = _TTS_CACHE.get(cache_key)
+            if cached is not None:
+                return cached, None
+
+        if preferred not in (TtsBackend.EDGE_NEURAL, TtsBackend.AUTO) or tts_url:
+            return self.synthesize_speech(text, profile_or_mode=profile_or_mode, backend=backend, max_chars=max_chars), None
+
+        try:
+            import concurrent.futures
+            import importlib
+            import socket
+            import aiohttp
+            from src.skills.voice.engine.vad import audio_bytes_to_discord_pcm_48k_stereo
+
+            if importlib.util.find_spec("edge_tts") is None:
+                return self.synthesize_speech(text, profile_or_mode=profile_or_mode, backend=backend, max_chars=max_chars), None
+            edge_tts = importlib.import_module("edge_tts")
+
+            rate_str = f"{profile.rate_pct:+d}%"
+            pitch_str = f"{profile.pitch_hz:+d}Hz"
+            first_ready: concurrent.futures.Future = concurrent.futures.Future()
+            rest_pcm_ready: concurrent.futures.Future = concurrent.futures.Future()
+
+            async def _stream_mp3() -> None:
+                connector = aiohttp.TCPConnector(family=socket.AF_INET)
+                first_buf = bytearray()
+                rest_buf = bytearray()
+                emitted_first = False
+                try:
+                    communicate = edge_tts.Communicate(
+                        spoken,
+                        voice=profile.edge_voice,
+                        rate=rate_str,
+                        pitch=pitch_str,
+                        connector=connector,
+                    )
+                    async for chunk in communicate.stream():
+                        if chunk.get("type") == "audio" and chunk.get("data"):
+                            data = chunk["data"]
+                            if not emitted_first:
+                                first_buf.extend(data)
+                                if len(first_buf) >= 7200:
+                                    emitted_first = True
+                                    first_ready.set_result((bytes(first_buf), False))
+                            else:
+                                rest_buf.extend(data)
+                    if not emitted_first:
+                        if len(first_buf) > 100:
+                            first_ready.set_result((bytes(first_buf), True))
+                        else:
+                            first_ready.set_result((b"", True))
+                        rest_pcm_ready.set_result(b"")
+                    else:
+                        full_mp3 = bytes(first_buf) + bytes(rest_buf)
+                        word_count = max(1, len(spoken.split()))
+                        with _TTS_CACHE_LOCK:
+                            _TTS_CACHE[cache_key] = TtsAudioClip(
+                                text=text,
+                                spoken_text=spoken,
+                                audio_bytes=full_mp3,
+                                audio_format="mp3",
+                                sample_rate=24000,
+                                duration_sec=round(word_count * 0.32, 2),
+                                voice_id=profile.edge_voice,
+                                backend=str(TtsBackend.EDGE_NEURAL),
+                            )
+                        pcm2 = audio_bytes_to_discord_pcm_48k_stereo(bytes(rest_buf)) if rest_buf else b""
+                        rest_pcm_ready.set_result(pcm2)
+                except Exception as exc:
+                    if not first_ready.done():
+                        first_ready.set_exception(exc)
+                    if not rest_pcm_ready.done():
+                        rest_pcm_ready.set_result(b"")
+                finally:
+                    await connector.close()
+
+            loop = _get_edge_tts_loop()
+            asyncio.run_coroutine_threadsafe(_stream_mp3(), loop)
+            first_mp3, is_complete = first_ready.result(timeout=6.0)
+            if first_mp3 and len(first_mp3) > 100:
+                word_count = max(1, len(spoken.split()))
+                est_dur = round(word_count * 0.32, 2)
+                clip = TtsAudioClip(
+                    text=text,
+                    spoken_text=spoken,
+                    audio_bytes=first_mp3,
+                    audio_format="mp3",
+                    sample_rate=24000,
+                    duration_sec=est_dur,
+                    voice_id=profile.edge_voice,
+                    backend=str(TtsBackend.EDGE_NEURAL),
+                )
+                if is_complete:
+                    with _TTS_CACHE_LOCK:
+                        _TTS_CACHE[cache_key] = clip
+                    return clip, None
+
+                def _bind_stream(base_stream) -> None:
+                    def _deliver(fut: concurrent.futures.Future) -> None:
+                        try:
+                            pcm2 = fut.result()
+                        except Exception:
+                            pcm2 = b""
+                        if base_stream is not None and hasattr(base_stream, "append_pcm"):
+                            base_stream.append_pcm(pcm2, done=True)
+
+                    rest_pcm_ready.add_done_callback(_deliver)
+
+                return clip, _bind_stream
+        except Exception as e:
+            logger.debug("Streaming edge_tts synthesis failed: %s", e)
+
+        return self.synthesize_speech(text, profile_or_mode=profile_or_mode, backend=backend, max_chars=max_chars), None
+
 

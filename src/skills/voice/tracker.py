@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import logging
+import re
 import threading
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -484,7 +485,10 @@ class VoiceCohostService:
         """
         sess = self.get_session(channel_id)
         prof_key = profile_or_mode or (sess.voice_profile if sess else "research")
-        clip = self._tts.synthesize_speech(text, profile_or_mode=prof_key)
+        if hasattr(self._tts, "synthesize_speech_streaming"):
+            clip, bind_stream_fn = self._tts.synthesize_speech_streaming(text, profile_or_mode=prof_key)
+        else:
+            clip, bind_stream_fn = self._tts.synthesize_speech(text, profile_or_mode=prof_key), None
 
         played = False
         with self._lock:
@@ -511,8 +515,11 @@ class VoiceCohostService:
                                     vc.stop_playing()
                                 elif hasattr(vc, "stop"):
                                     vc.stop()
-                    pcm_source = build_discord_pcm_source(clip.audio_bytes)
+                    pcm_source = build_discord_pcm_source(clip.audio_bytes, done=(bind_stream_fn is None))
                     if pcm_source is not None:
+                        if bind_stream_fn is not None:
+                            base_stream = getattr(pcm_source, "original", None)
+                            bind_stream_fn(base_stream)
                         sess.state = str(VoiceSessionState.SPEAKING)
 
                         def _after_play(_err: Optional[Exception]) -> None:
@@ -643,7 +650,7 @@ class VoiceCohostService:
         """Periodically flush speaker buffers whose silence gap has elapsed and keep voice receivers alive."""
         last_watchdog_ts = time.monotonic()
         while not self._stop_event.is_set():
-            await asyncio.sleep(0.06)
+            await asyncio.sleep(0.025)
             try:
                 with self._lock:
                     items = list(self._accumulators.items())

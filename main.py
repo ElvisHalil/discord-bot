@@ -309,8 +309,9 @@ async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
 
     voice_prompt_hint = (
         f"[Spoken in Discord Voice Channel '{session.voice_channel_name}' — "
-        f"use your normal tools as needed (including skill_music_discovery / skill_youtube_search with the verified YouTube Music URL for song requests); "
-        f"keep your spoken prose intro concise (1-2 short sentences) for live TTS]"
+        f"your text reply will be spoken aloud automatically via TTS, so NEVER call skill_voice_info(action='speak') to answer; "
+        f"only call tools if you need live data, music, or if the user explicitly asks to leave/mute/recap/switch voice. "
+        f"Reply directly in 1-2 short, natural spoken sentences]"
     )
     if current_mode == "chat":
         user_msg = f"{utterance.display_name} (User ID: {utterance.user_id}) {voice_prompt_hint}: {cleaned_query}"
@@ -323,7 +324,16 @@ async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
             chat_history[channel_id] = [system_msg]
         else:
             system_msg = chat_history[channel_id][0]
-        turn_history = list(chat_history[channel_id])
+        recent_tail = []
+        for m in chat_history[channel_id][1:][-6:]:
+            m_role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+            if m_role not in ("user", "assistant"):
+                continue
+            m_content = str((m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or "")
+            if len(m_content) > 400:
+                m_content = m_content[:400].rstrip() + "..."
+            recent_tail.append({"role": m_role, "content": m_content})
+        turn_history = [system_msg] + recent_tail
 
     turn_start_idx = len(turn_history)
     turn_history.append({"role": "user", "content": user_msg})
@@ -416,6 +426,8 @@ async def on_ready():
     FLIGHT_TRACKER.set_notify_callback(handle_flight_tracker_update)
     FLIGHT_TRACKER.ensure_loop_running()
     VOICE_COHOST.set_utterance_callback(handle_voice_utterance_turn)
+    if hasattr(VOICE_COHOST, "_stt") and hasattr(VOICE_COHOST._stt, "warmup_whisper_model"):
+        asyncio.create_task(run_in_worker(VOICE_COHOST._stt.warmup_whisper_model))
     asyncio.create_task(start_telegram_bridge(sys.modules[__name__]))
 
 
@@ -594,9 +606,25 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
 
     turn_options = dict(mode_config["ollama_options"])
     if fast_voice_turn:
-        # Keep num_ctx identical to mode_config so Ollama reuses its warm 8,500-token system+tools
-        # KV cache in 0ms and never truncates tool schemas (like skill_music_discovery).
-        turn_options["num_predict"] = min(int(turn_options.get("num_predict", 1024)), 320)
+        # Keep num_ctx identical to mode_config so Ollama reuses its warm system+tools
+        # KV cache in 0ms and cap spoken output tokens for ultra-low-latency TTS replies.
+        turn_options["num_predict"] = min(int(turn_options.get("num_predict", 1024)), 140)
+
+    def _format_tool_output_for_turn(raw_output: str) -> str:
+        text_out = str(raw_output or "")
+        if not fast_voice_turn:
+            return enrich_tool_output_with_time_context(text_out)
+        # Strip verbose Markdown-report system instructions on spoken voice turns so the LLM
+        # replies in 1-2 short spoken sentences instead of generating a 320-token wall of text.
+        stripped = text_out.split("\n\n[SYSTEM INSTRUCTION")[0].strip()
+        if len(stripped) > 2500:
+            stripped = stripped[:2500].rsplit("\n", 1)[0].strip() + "\n...(truncated for spoken brevity)"
+        voice_rule = (
+            "\n\n[VOICE CO-HOST SPOKEN MODE: The user asked this live in a Discord voice channel. "
+            "Summarize the top takeaway in 1-2 short, natural spoken sentences (under 45 words). "
+            "Do NOT output Markdown headers, bullet lists, tables, or URLs.]"
+        )
+        return enrich_tool_output_with_time_context(stripped + voice_rule)
 
     base_kwargs = {
         "model": mode_config["model"],
@@ -673,8 +701,10 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
 
         # Dynamically construct chat arguments so tools are completely hidden
         # from models that can't handle them (or after self-contained terminal skills have returned).
+        # On fast_voice_turn, keep `tools` in chat_kwargs so Ollama's 6,200-token system+tools
+        # KV cache prefix stays 100% warm across Step 0 -> Step 1 and across consecutive spoken turns.
         chat_kwargs = dict(base_kwargs, messages=history)
-        if supports_tools and tool_functions and not hide_tools_next_step:
+        if supports_tools and tool_functions and (fast_voice_turn or not hide_tools_next_step):
             chat_kwargs["tools"] = tool_functions
 
         if fast_voice_turn:
@@ -687,6 +717,14 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
         history.append(response.message)
 
         tool_calls = getattr(response.message, "tool_calls", None)
+        if fast_voice_turn and hide_tools_next_step and tool_calls:
+            if (response.message.content or "").strip():
+                tool_calls = None
+            else:
+                reply = await final_answer_without_tools(
+                    "Give a 1-2 sentence spoken summary of the result above with no Markdown or URLs."
+                )
+                break
         if not tool_calls and iterations == 0 and supports_tools and tool_functions and not hide_tools_next_step:
             step0_reply = response.message.content or ""
             step0_done = str(getattr(response, "done_reason", "") or "").lower()
@@ -727,7 +765,11 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                         forced_args = enrich_graphing_tool_args(forced_args, history, active_channel_id=channel_id)
                     elif forced_tool_name == "skill_voice_info":
                         forced_args = enrich_voice_tool_args(forced_args, history, active_channel_id=channel_id)
-                        if not forced_args.get("voice_profile"):
+                        if (
+                            not forced_args.get("voice_profile")
+                            and forced_args.get("action") == "join"
+                            and VOICE_COHOST.get_session(channel_id) is None
+                        ):
                             forced_args = dict(forced_args)
                             forced_args["voice_profile"] = current_mode
                     set_active_channel_id(channel_id)
@@ -753,7 +795,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     history.append({
                         "role": "tool",
                         "name": forced_tool_name,
-                        "content": enrich_tool_output_with_time_context(str(tool_output)),
+                        "content": _format_tool_output_for_turn(str(tool_output)),
                     })
                     if fast_voice_turn and (
                         forced_tool_name in _TERMINAL_SKILLS
@@ -766,12 +808,15 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
             reply = response.message.content or ""
             thinking_len = len(getattr(response.message, "thinking", "") or "")
             done_reason = str(getattr(response, "done_reason", "") or "").lower()
-            is_truncated = (
-                not reply.strip()
-                or done_reason == "length"
-                or (thinking_len > 400 and len(reply.strip()) < 90)
-                or bool(re.search(r"\[[^\]]*\]\(<?https?://[^\s)>]*$", reply.strip()))
-            )
+            if fast_voice_turn:
+                is_truncated = not reply.strip()
+            else:
+                is_truncated = (
+                    not reply.strip()
+                    or done_reason == "length"
+                    or (thinking_len > 400 and len(reply.strip()) < 90)
+                    or bool(re.search(r"\[[^\]]*\]\(<?https?://[^\s)>]*$", reply.strip()))
+                )
             # Nudge with think=False if the model returned empty or mid-generation truncated content
             if is_truncated and (iterations > 0 or is_research or thinking_len > 0):
                 print(
@@ -779,14 +824,33 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     f"(done_reason={done_reason or 'n/a'}, content_chars={len(reply)}, thinking_chars={thinking_len}); "
                     f"forcing complete final answer with think=False."
                 )
-                nudge_msg = (
-                    "Now summarize and give your complete final answer based on the tool results above. "
-                    "Cover all sections from the tool results (including the Daily Market & Macro Pulse if present) with complete URLs."
-                    if iterations > 0
-                    else "Give your direct, concise final answer to the user's message now."
-                )
+                if fast_voice_turn:
+                    nudge_msg = "Give a 1-2 sentence spoken summary of the result above with no Markdown or URLs."
+                else:
+                    nudge_msg = (
+                        "Now summarize and give your complete final answer based on the tool results above. "
+                        "Cover all sections from the tool results (including the Daily Market & Macro Pulse if present) with complete URLs."
+                        if iterations > 0
+                        else "Give your direct, concise final answer to the user's message now."
+                    )
                 reply = await final_answer_without_tools(nudge_msg)
             break
+
+        # Guardrail for spoken voice turns: if the model called skill_voice_info(action='speak', query=...)
+        # to answer a spoken question, return that spoken text directly in 1 step instead of playing TTS
+        # inside the tool and triggering a second "I said hello..." summary step.
+        if fast_voice_turn and len(tool_calls) == 1 and tool_calls[0].function.name == "skill_voice_info":
+            raw_v_args = dict(tool_calls[0].function.arguments or {})
+            v_act = str(raw_v_args.get("action") or "").strip().lower()
+            v_query = str(raw_v_args.get("query") or "").strip()
+            v_prof = str(raw_v_args.get("voice_profile") or "").strip()
+            if v_act in ("speak", "say", "talk", "announce") and v_query:
+                if v_prof:
+                    VOICE_COHOST.set_voice_profile(channel_id, v_prof)
+                history.pop()
+                reply = v_query
+                history.append({"role": "assistant", "content": reply})
+                break
 
         print(f"⚡ [{current_mode.upper()}] Model requested {len(tool_calls)} tools simultaneously!")
         has_top_music = any(call.function.name == "skill_music_discovery" for call in tool_calls)
@@ -827,15 +891,23 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     args = enrich_graphing_tool_args(args, history, active_channel_id=channel_id)
                 elif tool_name == "skill_voice_info":
                     args = enrich_voice_tool_args(args, history, active_channel_id=channel_id)
-                    if not args.get("voice_profile"):
+                    if (
+                        not args.get("voice_profile")
+                        and args.get("action") == "join"
+                        and VOICE_COHOST.get_session(channel_id) is None
+                    ):
                         args = dict(args)
                         args["voice_profile"] = current_mode
                 set_active_channel_id(channel_id)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
                 try:
                     topic_arg = str(args.get("topic") or "").strip().lower()
+                    user_mentions_markets = bool(
+                        re.search(r"\b(markets?|stocks?|indices|s&p|nasdaq|dow|tsx)\b", str(history[-2].get("content", "") if len(history) >= 2 and isinstance(history[-2], dict) else ""), re.IGNORECASE)
+                    )
                     if (
                         tool_name == "skill_news_headlines"
+                        and (not fast_voice_turn or user_mentions_markets)
                         and not has_explicit_markets
                         and topic_arg not in ("entertainment", "sports", "science", "health")
                     ):
@@ -844,7 +916,10 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                             run_in_worker(func, **args),
                             run_in_worker(get_daily_market_pulse),
                         )
-                        tool_output = f"{news_res}\n{pulse_res}" if pulse_res else news_res
+                        if pulse_res:
+                            tool_output = f"{pulse_res}\n{news_res}" if user_mentions_markets else f"{news_res}\n{pulse_res}"
+                        else:
+                            tool_output = news_res
                     else:
                         tool_output = await run_in_worker(func, **args)
                         if tool_name == "skill_voice_info" and VOICE_COHOST.get_session(channel_id) is not None:
@@ -858,7 +933,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                 print(f"  └─ ⚠ Unknown tool requested: {tool_name}")
                 tool_output = f"Tool '{tool_name}' not available."
 
-            enriched_content = enrich_tool_output_with_time_context(str(tool_output))
+            enriched_content = _format_tool_output_for_turn(str(tool_output))
             if len(tool_calls) > 1 and len(enriched_content) > per_tool_char_budget:
                 from src.utils.timezones import _sanitize_and_bound_tool_output
                 enriched_content = _sanitize_and_bound_tool_output(enriched_content, max_chars=per_tool_char_budget)
@@ -884,7 +959,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
             ),
             "",
         )
-        has_compound_media_intent = bool(re.search(r"\b(play|song|track|music|video)\b", latest_user_text, re.IGNORECASE))
+        latest_user_clean = re.sub(r"\[Spoken in Discord Voice Channel[^\]]*\]", "", latest_user_text)
+        has_compound_media_intent = bool(re.search(r"\b(play|song|track|music|video)\b", latest_user_clean, re.IGNORECASE))
         has_verified_music_link = any(
             r["name"] in ("skill_music_discovery", "skill_youtube_search") and "youtube.com/watch?v=" in r["content"]
             for r in tool_results

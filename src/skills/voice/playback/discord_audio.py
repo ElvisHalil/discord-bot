@@ -47,16 +47,63 @@ def ensure_opus_loaded() -> bool:
     return False
 
 
-def build_discord_pcm_source(audio_bytes: bytes, volume: float = 0.9) -> Optional[discord.AudioSource]:
+class StreamingPcmAudioSource(discord.AudioSource):
+    """
+    Thread-safe 48 kHz 16-bit stereo PCM audio source that starts playing immediately from the
+    first synthesized sentence while any remaining sentence finishes synthesizing in the background.
+    """
+
+    FRAME_SIZE = 3840  # 20ms of 48 kHz 16-bit stereo PCM
+
+    def __init__(self, initial_pcm: bytes, done: bool = True) -> None:
+        self._buf = bytearray(initial_pcm)
+        self._offset = 0
+        self._done = done
+        self._cond = threading.Condition()
+
+    def append_pcm(self, pcm_bytes: bytes, done: bool = True) -> None:
+        with self._cond:
+            if pcm_bytes:
+                self._buf.extend(pcm_bytes)
+            if done:
+                self._done = True
+            self._cond.notify_all()
+
+    def read(self) -> bytes:
+        with self._cond:
+            if len(self._buf) - self._offset < self.FRAME_SIZE and not self._done:
+                self._cond.wait(timeout=1.5)
+            avail = len(self._buf) - self._offset
+            if avail <= 0:
+                return b"" if self._done else (b"\x00" * self.FRAME_SIZE)
+            if avail >= self.FRAME_SIZE:
+                chunk = bytes(self._buf[self._offset : self._offset + self.FRAME_SIZE])
+                self._offset += self.FRAME_SIZE
+                return chunk
+            if not self._done:
+                return b"\x00" * self.FRAME_SIZE
+            chunk = bytes(self._buf[self._offset :]) + (b"\x00" * (self.FRAME_SIZE - avail))
+            self._offset = len(self._buf)
+            return chunk
+
+    def is_opus(self) -> bool:
+        return False
+
+
+def build_discord_pcm_source(
+    audio_bytes: bytes,
+    volume: float = 0.9,
+    done: bool = True,
+) -> Optional[discord.AudioSource]:
     """
     Decode MP3/WAV audio bytes into 48 kHz 16-bit stereo PCM in memory and wrap in a
-    `discord.PCMVolumeTransformer(discord.PCMAudio(...))` ready for `voice_client.play(...)`.
+    `discord.PCMVolumeTransformer(StreamingPcmAudioSource(...))` ready for `voice_client.play(...)`.
     """
     ensure_opus_loaded()
     pcm_48k = audio_bytes_to_discord_pcm_48k_stereo(audio_bytes)
     if not pcm_48k:
         return None
-    base_source = discord.PCMAudio(io.BytesIO(pcm_48k))
+    base_source = StreamingPcmAudioSource(pcm_48k, done=done)
     return discord.PCMVolumeTransformer(base_source, volume=max(0.05, min(2.0, volume)))
 
 
@@ -69,7 +116,7 @@ class PerSpeakerVoiceAccumulator:
     def __init__(
         self,
         speech_threshold_dbfs: float = -42.0,
-        silence_gap_sec: float = 0.55,
+        silence_gap_sec: float = 0.30,
         min_speech_sec: float = 0.25,
         max_utterance_sec: float = 12.0,
     ) -> None:
@@ -101,6 +148,7 @@ class PerSpeakerVoiceAccumulator:
                 target["speech_bytes"] += old_state["speech_bytes"]
                 target["first_ts"] = min(old_state["first_ts"], target["first_ts"])
                 target["last_speech_ts"] = max(old_state["last_speech_ts"], target["last_speech_ts"])
+                target["peak_dbfs"] = max(old_state.get("peak_dbfs", -96.0), target.get("peak_dbfs", -96.0))
                 if display_name:
                     target["display_name"] = display_name
 
@@ -120,12 +168,12 @@ class PerSpeakerVoiceAccumulator:
             return None
         ts = now if now is not None else time.monotonic()
         frame_dbfs = compute_pcm_rms_dbfs(pcm_48k_stereo)
-        is_speech = frame_dbfs >= self.speech_threshold_dbfs
+        is_onset_speech = frame_dbfs >= self.speech_threshold_dbfs
 
         with self._lock:
             state = self._buffers.get(user_id)
             if state is None:
-                if not is_speech:
+                if not is_onset_speech:
                     return None
                 state = {
                     "display_name": display_name or f"User-{user_id}",
@@ -133,12 +181,17 @@ class PerSpeakerVoiceAccumulator:
                     "speech_bytes": 0,
                     "first_ts": ts,
                     "last_speech_ts": ts,
+                    "peak_dbfs": frame_dbfs,
                 }
                 self._buffers[user_id] = state
 
             if display_name:
                 state["display_name"] = display_name
             state["chunks"].extend(pcm_48k_stereo)
+            peak_dbfs = max(state.get("peak_dbfs", frame_dbfs), frame_dbfs)
+            state["peak_dbfs"] = peak_dbfs
+            active_threshold = max(self.speech_threshold_dbfs, peak_dbfs - 14.0)
+            is_speech = frame_dbfs >= active_threshold
             if is_speech:
                 state["speech_bytes"] += len(pcm_48k_stereo)
                 state["last_speech_ts"] = ts
@@ -282,17 +335,20 @@ def _install_voice_recv_dave_patch() -> None:
 
         def _mde_wait(self: Any, timeout: Optional[float] = None) -> bool:
             self._check_ready()
-            return self._ready.wait(0.2 if timeout is None else timeout)
+            return self._ready.wait(0.02 if timeout is None else timeout)
 
         vr_utils.MultiDataEvent.register = _mde_register  # type: ignore[method-assign]
         vr_utils.MultiDataEvent.unregister = _mde_unregister  # type: ignore[method-assign]
         vr_utils.MultiDataEvent.wait = _mde_wait  # type: ignore[method-assign]
 
-        # 3. Fix HeapJitterBuffer dropping all packets after sequence jumps or single packet loss
+        # 3. Fix HeapJitterBuffer dropping all packets after sequence jumps and remove 1-packet holdback
+        _orig_hjb_init = vr_buffer.HeapJitterBuffer.__init__
+
+        def _hjb_init(self: Any, maxsize: int = 10, *, prefsize: int = 0, prefill: int = 0) -> None:
+            _orig_hjb_init(self, maxsize=maxsize, prefsize=0, prefill=0)
+
         def _hjb_update_has_item(self: Any) -> None:
-            prefilled = self._prefill == 0
-            packet_ready = len(self._buffer) > self.prefsize
-            if prefilled and packet_ready:
+            if len(self._buffer) > 0:
                 self._has_item.set()
             else:
                 self._has_item.clear()
@@ -309,12 +365,12 @@ def _install_voice_recv_dave_patch() -> None:
                     self._buffer.clear()
                     self._last_tx_seq = vr_utils.add_wrapped(seq, -1)
             self._push(packet)
-            if self._prefill > 0:
-                self._prefill -= 1
+            self._prefill = 0
             self._cleanup()
             self._update_has_item()
             return True
 
+        vr_buffer.HeapJitterBuffer.__init__ = _hjb_init  # type: ignore[method-assign]
         vr_buffer.HeapJitterBuffer._update_has_item = _hjb_update_has_item  # type: ignore[method-assign]
         vr_buffer.HeapJitterBuffer.push = _hjb_push  # type: ignore[method-assign]
 
@@ -324,7 +380,7 @@ def _install_voice_recv_dave_patch() -> None:
         # 5. Guard PacketRouter._do_run so a single bad packet never kills voice_client.listen()
         def _patched_router_do_run(self: Any) -> None:
             while not self._end_thread.is_set():
-                self.waiter.wait(0.2)
+                self.waiter.wait(0.02)
                 with self._lock:
                     for decoder in list(self.waiter.items):
                         try:

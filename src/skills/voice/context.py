@@ -139,7 +139,7 @@ def enrich_voice_tool_args(
             if m and not enriched.get("query"):
                 enriched["query"] = m.group(1).strip()
 
-    if latest_user_text and not enriched.get("query"):
+    if latest_user_text and not enriched.get("query") and enriched.get("action") != str(VoiceAction.SPEAK):
         enriched["query"] = latest_user_text
 
     return enriched

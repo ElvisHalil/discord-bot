@@ -325,7 +325,67 @@ class TestVoiceCohostServiceAndSkill(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(acc._buffers[42]["display_name"], "Elvis")
         VOICE_COHOST.stop_session(777888)
 
+    async def test_voice_profile_persists_across_speak_and_spoken_turns(self):
+        mock_vc = MagicMock()
+        mock_vc.is_playing.return_value = False
+        mock_voice_channel = SimpleNamespace(
+            id=555111,
+            name="Pwn Zone",
+            guild=SimpleNamespace(id=999),
+            connect=AsyncMock(return_value=mock_vc),
+        )
+        await dispatch_voice_command(
+            text="!join",
+            channel_id=777888,
+            voice_info_fn=skill_voice_info,
+            voice_cohost_service=VOICE_COHOST,
+            author_voice_channel=mock_voice_channel,
+            active_mode="research-gemma",
+        )
+        self.assertEqual(VOICE_COHOST.get_session(777888).voice_profile, "research-gemma")
+
+        # User runs !voice ava
+        ava_out = await dispatch_voice_command(
+            text="!voice ava",
+            channel_id=777888,
+            voice_info_fn=skill_voice_info,
+            voice_cohost_service=VOICE_COHOST,
+            active_mode="research-gemma",
+        )
+        self.assertIn("en-US-AvaNeural", ava_out)
+        self.assertEqual(VOICE_COHOST.get_session(777888).voice_profile, "ava")
+
+        # !speak must NOT overwrite 'ava' back to active_mode ('research-gemma')
+        with patch.dict("os.environ", {"VOICE_TTS_BACKEND": "wave_synth"}):
+            speak_out = await dispatch_voice_command(
+                text="!speak Hello from Ava",
+                channel_id=777888,
+                voice_info_fn=skill_voice_info,
+                voice_cohost_service=VOICE_COHOST,
+                active_mode="research-gemma",
+            )
+            self.assertIn("en-US-AvaNeural", speak_out)
+            self.assertEqual(VOICE_COHOST.get_session(777888).voice_profile, "ava")
+
+            # Spoken utterance TTS synthesis also uses 'ava' and only speaks once
+            clip, _ = VOICE_COHOST.synthesize_and_play(777888, "Doing great, ready to help!")
+            self.assertEqual(clip.voice_id, "en-US-AvaNeural")
+            self.assertEqual(VOICE_COHOST.get_session(777888).voice_profile, "ava")
+
+        # User runs !voice sonia
+        sonia_out = await dispatch_voice_command(
+            text="!voice sonia",
+            channel_id=777888,
+            voice_info_fn=skill_voice_info,
+            voice_cohost_service=VOICE_COHOST,
+            active_mode="research-gemma",
+        )
+        self.assertIn("en-GB-SoniaNeural", sonia_out)
+        self.assertEqual(VOICE_COHOST.get_session(777888).voice_profile, "sonia")
+        VOICE_COHOST.stop_session(777888)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
