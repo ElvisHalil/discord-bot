@@ -204,8 +204,21 @@ def trim_history(history: list, limit: int, old_tool_chars: int = OLD_TOOL_OUTPU
                         "again for the updated search.]"
                     ),
                 }
-            elif len(content) > old_tool_chars:
-                rest[i] = {**msg, "content": content[:old_tool_chars].rstrip() + "\n...[older tool output truncated]"}
+            elif tool_name == "skill_markets_info":
+                rest[i] = {
+                    **msg,
+                    "content": (
+                        "[EXPIRED MARKET SNAPSHOT FROM EARLIER TURN — DO NOT REUSE OLD QUOTES OR OVERVIEW DATA "
+                        "FOR NEW TICKERS OR FRESH MARKET REQUESTS. You MUST call skill_markets_info again for "
+                        "fresh real-time market or ticker data.]"
+                    ),
+                }
+            else:
+                eff_chars = 3200 if (tool_name == "skill_news_headlines" and old_tool_chars == OLD_TOOL_OUTPUT_CHARS) else old_tool_chars
+                if len(content) > eff_chars:
+                    nl_idx = content.rfind("\n", 0, eff_chars)
+                    cut_at = nl_idx if nl_idx >= eff_chars // 2 else eff_chars
+                    rest[i] = {**msg, "content": content[:cut_at].rstrip() + "\n...[older tool output truncated]"}
 
     if len(rest) > limit:
         start = len(rest) - limit

@@ -427,8 +427,58 @@ class TestMarketsSkill(unittest.TestCase):
         self.assertEqual(movers["gainers"][0].symbol, "ZEC")
         self.assertEqual(movers["losers"][0].symbol, "DOGE")
 
+    def test_crypto_qualifier_extraction_and_sub_cent_snapshot(self):
+        """Verify queries like 'conflux crypto', 'no crypto rxd', and 'raditan (RDX)' resolve to crypto pairs with sub-cent precision and CAD dual quote."""
+        self.assertEqual(_extract_candidate_ticker_query("conflux crypto", ""), "conflux")
+        self.assertEqual(_extract_candidate_ticker_query("no crypto rxd", ""), "rxd")
+        self.assertEqual(_extract_candidate_ticker_query("no it's a crpyro currency raditan (RDX)", ""), "rdx")
+
+        rxd_usd = TickerQuote(
+            symbol="RXD-USD",
+            name="Radiant USD",
+            exchange="CCC",
+            currency="USD",
+            market_state="REGULAR",
+            price=0.00002968,
+            change=0.00000071,
+            change_percent=2.45,
+            day_low=0.00002850,
+            day_high=0.00003020,
+            week52_low=0.00001800,
+            week52_high=0.00009500,
+            ma50=0.00002710,
+            ma200=0.00003420,
+            volume=185000,
+            avg_volume_3m=140000,
+        )
+        usdcad = _make_quote("USDCAD=X", "USD/CAD", 1.40, 0.10)
+
+        with (
+            patch(
+                "src.skills.markets.markets._yahoo_agg.resolve_ticker_and_news",
+                return_value=("RXD-USD", "RXD-CAD", ["Radiant network hash rate update [CoinDesk] (<https://example.com/rxd>)"]),
+            ) as mock_resolve,
+            patch(
+                "src.skills.markets.markets._yahoo_agg.fetch_quotes",
+                return_value={"RXD-USD": rxd_usd, "USDCAD=X": usdcad},
+            ),
+            patch(
+                "src.skills.markets.markets._yahoo_agg.fetch_historical_summary",
+                return_value=None,
+            ),
+        ):
+            out = skill_markets_info(query="no crypto rxd")
+
+        mock_resolve.assert_called_once_with("rxd", prefer_canada=True, prefer_crypto=True)
+        self.assertIn("Radiant USD (RXD-USD)", out)
+        self.assertIn("0.00002968 USD", out)
+        self.assertIn("Dual-Listed Quote (`RXD-CAD`", out)
+        self.assertIn("0.00004155 CAD", out)
+        self.assertIn("50-Day MA: **0.00002710**", out)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

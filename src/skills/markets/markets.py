@@ -59,12 +59,32 @@ def _fmt_arrow(pct: float) -> str:
     return "⚪ •"
 
 
+def _fmt_num(val: float) -> str:
+    abs_v = abs(val)
+    if abs_v >= 1000:
+        return f"{val:,.2f}"
+    if abs_v >= 1:
+        return f"{val:.2f}"
+    if abs_v >= 0.01:
+        return f"{val:.4f}"
+    if abs_v >= 0.0001:
+        return f"{val:.6f}"
+    return f"{val:.8f}"
+
+
+def _fmt_signed(val: float) -> str:
+    abs_v = abs(val)
+    if abs_v >= 1:
+        return f"{val:+.2f}"
+    if abs_v >= 0.01:
+        return f"{val:+.4f}"
+    if abs_v >= 0.0001:
+        return f"{val:+.6f}"
+    return f"{val:+.8f}"
+
+
 def _fmt_price(val: float, currency: str = "USD") -> str:
-    if val >= 1000:
-        return f"{val:,.2f} {currency}".strip()
-    if val >= 1:
-        return f"{val:.2f} {currency}".strip()
-    return f"{val:.4f} {currency}".strip()
+    return f"{_fmt_num(val)} {currency}".strip()
 
 
 def _fmt_large_number(num: Optional[float], prefix: str = "$") -> str:
@@ -185,7 +205,7 @@ def _format_single_ticker_snapshot(
     lines = [
         f"=== 📊 TICKER INTELLIGENCE SNAPSHOT: {primary.name} ({primary.symbol}) ===",
         f"- **Live Price:** {arrow} **{_fmt_price(primary.price, primary.currency)}** "
-        f"({primary.change:+.2f} / **{primary.change_percent:+.2f}%**) "
+        f"({_fmt_signed(primary.change)} / **{primary.change_percent:+.2f}%**) "
         f"[{primary.exchange or 'Exchange'} • State: {primary.market_state}]",
     ]
 
@@ -193,7 +213,7 @@ def _format_single_ticker_snapshot(
         d_arrow = _fmt_arrow(dual.change_percent)
         lines.append(
             f"- **Dual-Listed Quote (`{dual.symbol}` — {dual.exchange or dual.currency}):** "
-            f"{d_arrow} **{_fmt_price(dual.price, dual.currency)}** ({dual.change:+.2f} / **{dual.change_percent:+.2f}%**)"
+            f"{d_arrow} **{_fmt_price(dual.price, dual.currency)}** ({_fmt_signed(dual.change)} / **{dual.change_percent:+.2f}%**)"
         )
 
     if primary.pre_market_price and primary.pre_market_change_pct is not None:
@@ -218,12 +238,12 @@ def _format_single_ticker_snapshot(
     # Technical Posture
     tech_parts: List[str] = []
     if primary.day_low is not None and primary.day_high is not None:
-        tech_parts.append(f"Intraday Range: **{primary.day_low:,.2f} – {primary.day_high:,.2f} {primary.currency}**")
+        tech_parts.append(f"Intraday Range: **{_fmt_num(primary.day_low)} – {_fmt_num(primary.day_high)} {primary.currency}**")
     if primary.week52_low is not None and primary.week52_high is not None and primary.week52_high > primary.week52_low:
         pct_52w = (primary.price - primary.week52_low) / (primary.week52_high - primary.week52_low) * 100.0
         pct_52w = max(0.0, min(100.0, pct_52w))
         tech_parts.append(
-            f"52-Week Range: **{primary.week52_low:,.2f} – {primary.week52_high:,.2f}** (Trading at **{pct_52w:.0f}%** of 52w range)"
+            f"52-Week Range: **{_fmt_num(primary.week52_low)} – {_fmt_num(primary.week52_high)}** (Trading at **{pct_52w:.0f}%** of 52w range)"
         )
     if tech_parts:
         lines.append("- **Range Position:** " + " | ".join(tech_parts))
@@ -231,10 +251,10 @@ def _format_single_ticker_snapshot(
     ma_parts: List[str] = []
     if primary.ma50 and primary.ma50 > 0:
         diff50 = (primary.price - primary.ma50) / primary.ma50 * 100.0
-        ma_parts.append(f"50-Day MA: **{primary.ma50:,.2f}** ({diff50:+.1f}%)")
+        ma_parts.append(f"50-Day MA: **{_fmt_num(primary.ma50)}** ({diff50:+.1f}%)")
     if primary.ma200 and primary.ma200 > 0:
         diff200 = (primary.price - primary.ma200) / primary.ma200 * 100.0
-        ma_parts.append(f"200-Day MA: **{primary.ma200:,.2f}** ({diff200:+.1f}%)")
+        ma_parts.append(f"200-Day MA: **{_fmt_num(primary.ma200)}** ({diff200:+.1f}%)")
     if primary.ma50 and primary.ma200 and primary.ma50 > 0 and primary.ma200 > 0:
         structure = "Bullish (Price > 50d & 200d MA)" if (primary.price > primary.ma50 and primary.price > primary.ma200) else (
             "Bearish / Pullback (Below Key MAs)" if (primary.price < primary.ma50 and primary.price < primary.ma200) else "Consolidating Between MAs"
@@ -283,11 +303,11 @@ def _format_single_ticker_snapshot(
         lines.append(
             f"- **Window Return:** {h_arrow} **{_fmt_price(history.start_price, history.currency)} → "
             f"{_fmt_price(history.end_price, history.currency)}** "
-            f"({history.abs_change:+.2f} / **{history.pct_change:+.2f}%**){cagr_str}"
+            f"({_fmt_signed(history.abs_change)} / **{history.pct_change:+.2f}%**){cagr_str}"
         )
         lines.append(
-            f"- **Period Extremes & Risk:** **Period High:** {history.period_high:,.2f} ({history.period_high_date}) | "
-            f"**Period Low:** {history.period_low:,.2f} ({history.period_low_date}) | "
+            f"- **Period Extremes & Risk:** **Period High:** {_fmt_num(history.period_high)} ({history.period_high_date}) | "
+            f"**Period Low:** {_fmt_num(history.period_low)} ({history.period_low_date}) | "
             f"**Max Drawdown:** {history.max_drawdown_pct:.2f}%{vol_str}"
         )
         if history.checkpoints:
@@ -355,7 +375,7 @@ def _extract_timeframe(query: str, timeframe: str) -> Optional[str]:
 def _extract_candidate_ticker_query(
     query: str, ticker: str, has_timeframe: bool = False
 ) -> Optional[str]:
-    """Determine if the user is asking for a single specific company/ticker snapshot rather than a broad market overview."""
+    """Determine if the user is asking for a single specific company/ticker/crypto snapshot rather than a broad market overview."""
     if ticker and ticker.strip():
         return ticker.strip()
 
@@ -364,11 +384,14 @@ def _extract_candidate_ticker_query(
         return None
     q_low = q_clean.lower()
 
+    if q_low in ("crypto", "cryptocurrency", "cryptocurrencies", "coins", "tokens"):
+        return None
+
     broad_phrases = (
         "market", "markets", "indices", "indexes", "trends", "movers", "gainers",
         "losers", "going up", "going down", "commodities", "precious metals",
-        "metals", "crypto", "cryptocurrencies", "crypto market", "overview",
-        "summary", "pulse", "world", "europe", "european", "asia", "asian",
+        "metals", "cryptocurrencies", "crypto market", "crypto markets", "top crypto",
+        "overview", "summary", "pulse", "world", "europe", "european", "asia", "asian",
         "canadian market", "us market", "american market", "stock market",
         "what's up", "whats up", "what is up", "top stocks",
     )
@@ -390,7 +413,12 @@ def _extract_candidate_ticker_query(
         if re.search(rf"\b{re.escape(name)}\b", q_low):
             return name
 
-    # Strip timeframe phrases and generic market query words to see if a ticker symbol or company name remains
+    # If the user supplied an explicit parenthetical ticker like "raditan (RDX)", prefer the ticker symbol
+    paren_sym = re.search(r"\(([A-Za-z]{2,6})\)", q_clean)
+    if paren_sym:
+        return paren_sym.group(1).strip()
+
+    # Strip timeframe phrases and generic market query words to see if a ticker symbol or company/coin name remains
     q_stripped = re.sub(
         r"\b(10|5|3|2|1|6|12|30|7)\s*(years?|yrs?|months?|mos?|weeks?|wks?|days?)\b|\b20\d{2}\b",
         " ",
@@ -441,29 +469,31 @@ def get_daily_market_pulse() -> str:
     if signals:
         lines.extend(signals)
 
-    # Compact Regional Index Board
-    for reg_title, reg_enum in (
-        ("🇨🇦 Canada & FX", MarketRegion.CANADA),
-        ("🇺🇸 United States", MarketRegion.US),
-        ("🇪🇺 Europe", MarketRegion.EUROPE),
-        ("🌏 Asia-Pacific", MarketRegion.ASIA),
-    ):
-        reg_specs = [b for b in GLOBAL_INDICES if b.region == reg_enum]
-        if reg_enum == MarketRegion.CANADA:
-            reg_specs += [b for b in FOREX_BENCHMARKS if b.symbol == "CADUSD=X"]
+    # Compact Regional Index Board (Canada, US, Europe, Asia-Pacific)
+    pulse_regions = (
+        ("🇨🇦 Canada & FX", ("^GSPTSE", "CADUSD=X")),
+        ("🇺🇸 United States", ("^GSPC", "^IXIC", "^DJI", "^VIX", "^TNX")),
+        ("🇪🇺 Europe", ("^STOXX50E", "^FTSE", "^GDAXI", "^FCHI")),
+        ("🌏 Asia-Pacific", ("^N225", "^HSI", "000001.SS", "^KS11")),
+    )
+    spec_by_sym = {b.symbol.upper(): b for b in (*GLOBAL_INDICES, *FOREX_BENCHMARKS, *COMMODITY_BENCHMARKS)}
+    for reg_title, sym_tuple in pulse_regions:
         items: List[str] = []
-        for sp in reg_specs:
-            q = quotes.get(sp.symbol.upper())
-            if q and q.price > 0:
-                items.append(f"**{sp.label}**: {q.price:,.2f} ({q.change_percent:+.2f}%)")
+        for sym in sym_tuple:
+            sp = spec_by_sym.get(sym.upper())
+            q = quotes.get(sym.upper())
+            if sp and q and q.price > 0:
+                p_fmt = f"{q.price:.4f}" if sym == "CADUSD=X" else f"{q.price:,.2f}"
+                items.append(f"**{sp.label}**: {p_fmt} ({q.change_percent:+.2f}%)")
         if items:
             lines.append(f"- **{reg_title}:** " + " | ".join(items))
 
     # Commodities & Precious Metals
     comm_items: List[str] = []
-    for sp in COMMODITY_BENCHMARKS:
-        q = quotes.get(sp.symbol.upper())
-        if q and q.price > 0:
+    for sym in ("GC=F", "SI=F", "CL=F", "BZ=F", "NG=F", "HG=F"):
+        sp = spec_by_sym.get(sym)
+        q = quotes.get(sym)
+        if sp and q and q.price > 0:
             short_lbl = sp.label.replace(" Futures (Spot Proxy)", "").replace(" Futures", "")
             comm_items.append(f"**{short_lbl}**: ${q.price:,.2f} ({q.change_percent:+.2f}%)")
     if comm_items:
@@ -523,16 +553,27 @@ def skill_markets_info(
     has_tf = bool(detected_tf) or v_raw == MarketView.HISTORY
     candidate_ticker = (
         _extract_candidate_ticker_query(q_raw, t_raw, has_timeframe=has_tf)
-        if v_raw not in (MarketView.MOVERS, MarketView.COMMODITIES, MarketView.CRYPTO, MarketView.OVERVIEW)
+        if v_raw not in (MarketView.MOVERS, MarketView.COMMODITIES, MarketView.OVERVIEW)
         else (t_raw or None)
     )
 
     if candidate_ticker or v_raw in (MarketView.TICKER, MarketView.HISTORY):
         target = candidate_ticker or t_raw or q_raw
         prefer_ca = r_raw != MarketRegion.US and not target.upper().endswith((".US", ":US"))
-        primary_sym, dual_sym, headlines = _yahoo_agg.resolve_ticker_and_news(target, prefer_canada=prefer_ca)
+        prefer_crypto = (
+            v_raw == MarketView.CRYPTO
+            or bool(re.search(r"\b(crypto|cryptocurrency|crpyro|coin|token)\b", f"{q_raw} {t_raw}", re.IGNORECASE))
+        )
+        primary_sym, dual_sym, headlines = _yahoo_agg.resolve_ticker_and_news(
+            target,
+            prefer_canada=prefer_ca,
+            prefer_crypto=prefer_crypto,
+        )
         if primary_sym:
+            is_crypto_pair = primary_sym.upper().endswith("-USD")
             syms_to_fetch = [primary_sym] + ([dual_sym] if dual_sym else [])
+            if is_crypto_pair:
+                syms_to_fetch.append("USDCAD=X")
             fut_fetched = submit_to_worker(_yahoo_agg.fetch_quotes, syms_to_fetch)
             fut_history = submit_to_worker(
                 _yahoo_agg.fetch_historical_summary,
@@ -544,6 +585,20 @@ def skill_markets_info(
             primary_q = fetched.get(primary_sym.upper())
             dual_q = fetched.get(dual_sym.upper()) if dual_sym else None
             if primary_q and primary_q.price > 0:
+                if is_crypto_pair and (not dual_q or dual_q.price <= 0):
+                    usdcad_q = fetched.get("USDCAD=X")
+                    fx_rate = usdcad_q.price if (usdcad_q and usdcad_q.price > 0) else 1.41
+                    cad_sym = dual_sym or (primary_sym.removesuffix("-USD") + "-CAD")
+                    dual_q = TickerQuote(
+                        symbol=cad_sym.upper(),
+                        name=primary_q.name.replace("USD", "CAD"),
+                        exchange=primary_q.exchange or "CCC",
+                        currency="CAD",
+                        market_state=primary_q.market_state,
+                        price=primary_q.price * fx_rate,
+                        change=primary_q.change * fx_rate,
+                        change_percent=primary_q.change_percent,
+                    )
                 return _format_single_ticker_snapshot(primary_q, dual_q, headlines, history=history_summary)
 
     # Otherwise, run a parallel comprehensive Global Markets, Movers, Commodities & Crypto fetch
