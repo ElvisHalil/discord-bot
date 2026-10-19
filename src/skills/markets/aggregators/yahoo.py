@@ -228,10 +228,15 @@ class YahooFinanceAggregator(BaseMarketAggregator):
         elif q_low in COMMON_TICKER_ALIASES:
             primary_sym = COMMON_TICKER_ALIASES[q_low]
 
+        if primary_sym and primary_sym.endswith("-USD") and not dual_sym:
+            dual_sym = primary_sym.removesuffix("-USD") + "-CAD"
+
         # 2. Query Yahoo v1/finance/search for ticker resolution and breaking ticker news
-        # Note: Yahoo Search attaches news to the base symbol/company name rather than the '.TO' suffix.
+        # Note: Yahoo Search attaches news to the base symbol/company name rather than '.TO' or '-USD' suffixes.
         if primary_sym and primary_sym.endswith(".TO"):
             search_q = dual_sym or q_clean.removesuffix(".TO").removesuffix(".to")
+        elif primary_sym and primary_sym.endswith("-USD"):
+            search_q = {"BTC-USD": "IBIT", "ETH-USD": "ETHA"}.get(primary_sym, "COIN")
         else:
             search_q = primary_sym or q_clean
         headlines: List[str] = []
