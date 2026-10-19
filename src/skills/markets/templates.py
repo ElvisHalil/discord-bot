@@ -8,10 +8,10 @@ def build_markets_llm_instructions(is_ticker_view: bool = False) -> str:
     if is_ticker_view:
         return (
             "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
-            "1. Present a sharp, institutional-grade Ticker Snapshot: lead with the current price, currency (CAD for TSX stocks), intraday $/%, and session status.\n"
-            "2. Highlight the pre-computed **Technical Posture** (position vs. 50-Day & 200-Day Moving Averages, 52-Week Range percentile, and volume vs. 3M average) and **Valuation Fundamentals** (Market Cap, Trailing/Forward P/E, EPS, Dividend Yield, Next Earnings).\n"
-            "3. Connect the price action directly to the **Recent Catalyst Headlines** listed for the ticker so the user understands *why* it is moving.\n"
-            "4. If a dual-listed price (e.g. TSX CAD and NYSE/NASDAQ USD) is shown, include both clearly.\n"
+            "1. Present a sharp, institutional-grade Ticker & Historical Snapshot: lead with the current price, currency (CAD for TSX stocks), intraday $/%, and session status.\n"
+            "2. Highlight the **Multi-Horizon Performance Strip (1W, 1M, 3M, 6M, YTD, 1Y, 5Y)** and the **Historical Window Deep-Dive** (start → end price, period peak/trough with dates, max drawdown, and chronological price checkpoints).\n"
+            "3. Include the **Technical Posture** (50-Day & 200-Day Moving Averages, 52-Week Range percentile, volume vs. 3M average) and **Valuation Fundamentals** (Market Cap, Trailing/Forward P/E, EPS, Dividend Yield, Next Earnings).\n"
+            "4. Connect the price action and historical trend to the **Recent Catalyst Headlines**, and if a dual-listed price (e.g. TSX CAD and NYSE/NASDAQ USD) is shown, include both clearly.\n"
         )
     return (
         "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"

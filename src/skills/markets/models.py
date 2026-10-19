@@ -69,3 +69,28 @@ class CryptoAssetQuote(DictLikeMixin):
     volume_24h_usd: Optional[float] = None
     rank: Optional[int] = None
 
+
+@dataclass(slots=True)
+class HistoricalSummary(DictLikeMixin):
+    """Multi-horizon return strip and deep historical window statistics for a ticker or benchmark."""
+
+    symbol: str
+    currency: str = "USD"
+    timeframe_label: str = "1-Year (1Y)"
+    start_date: str = ""
+    end_date: str = ""
+    start_price: float = 0.0
+    end_price: float = 0.0
+    abs_change: float = 0.0
+    pct_change: float = 0.0
+    cagr_pct: Optional[float] = None
+    period_high: float = 0.0
+    period_high_date: str = ""
+    period_low: float = 0.0
+    period_low_date: str = ""
+    max_drawdown_pct: float = 0.0
+    annualized_volatility_pct: Optional[float] = None
+    horizon_returns: dict[str, float] = field(default_factory=dict)
+    checkpoints: list[str] = field(default_factory=list)
+
+

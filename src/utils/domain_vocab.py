@@ -329,6 +329,7 @@ TOOL_ARG_ALIASES: Dict[str, Dict[str, str]] = {
         "symbol": "ticker", "stock": "ticker", "asset": "ticker", "coin": "ticker", "company": "ticker",
         "market": "region", "country": "region", "area": "region",
         "mode": "view", "type": "view", "category": "view", "section": "view",
+        "period": "timeframe", "range": "timeframe", "horizon": "timeframe", "duration": "timeframe", "window": "timeframe", "time_range": "timeframe",
     },
     "evaluate_math": {
         "math": "expression", "expr": "expression", "equation": "expression",

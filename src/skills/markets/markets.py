@@ -29,7 +29,12 @@ from src.skills.markets.catalogs import (
     MARKET_QUERY_STOPWORDS,
 )
 from src.skills.markets.enums import MarketRegion, MarketView
-from src.skills.markets.models import BenchmarkSpec, CryptoAssetQuote, TickerQuote
+from src.skills.markets.models import (
+    BenchmarkSpec,
+    CryptoAssetQuote,
+    HistoricalSummary,
+    TickerQuote,
+)
 from src.skills.markets.templates import (
     build_markets_llm_instructions,
     build_news_market_pulse_instructions,
@@ -173,8 +178,9 @@ def _format_single_ticker_snapshot(
     primary: TickerQuote,
     dual: Optional[TickerQuote],
     headlines: List[str],
+    history: Optional[HistoricalSummary] = None,
 ) -> str:
-    """Format a comprehensive technical, fundamental, and news catalyst snapshot for a single ticker."""
+    """Format a comprehensive technical, fundamental, historical, and news catalyst snapshot for a single ticker."""
     arrow = _fmt_arrow(primary.change_percent)
     lines = [
         f"=== 📊 TICKER INTELLIGENCE SNAPSHOT: {primary.name} ({primary.symbol}) ===",
@@ -198,6 +204,16 @@ def _format_single_ticker_snapshot(
         lines.append(
             f"- **After-Hours:** {_fmt_price(primary.post_market_price, primary.currency)} ({primary.post_market_change_pct:+.2f}%)"
         )
+
+    # Multi-Horizon Performance Strip (1W, 1M, 3M, 6M, YTD, 1Y, 3Y, 5Y)
+    if history and history.horizon_returns:
+        h_parts = [
+            f"**{lbl}:** {ret:+.2f}%"
+            for lbl in ("1W", "1M", "3M", "6M", "YTD", "1Y", "3Y", "5Y")
+            if (ret := history.horizon_returns.get(lbl)) is not None
+        ]
+        if h_parts:
+            lines.append("- **Multi-Horizon Returns:** " + " | ".join(h_parts))
 
     # Technical Posture
     tech_parts: List[str] = []
@@ -252,6 +268,31 @@ def _format_single_ticker_snapshot(
     if fund_parts:
         lines.append("- **Valuation & Fundamentals:** " + " | ".join(fund_parts))
 
+    # Deep Historical Window Analysis
+    if history and history.start_price > 0 and history.end_price > 0:
+        h_arrow = _fmt_arrow(history.pct_change)
+        cagr_str = f" | **Annualized CAGR: {history.cagr_pct:+.2f}%/yr**" if history.cagr_pct is not None else ""
+        vol_str = (
+            f" | **Annualized Volatility:** {history.annualized_volatility_pct:.1f}%"
+            if history.annualized_volatility_pct is not None
+            else ""
+        )
+        lines.append(
+            f"\n=== 📅 HISTORICAL PERFORMANCE & TREND: {history.timeframe_label} ({history.start_date} → {history.end_date}) ==="
+        )
+        lines.append(
+            f"- **Window Return:** {h_arrow} **{_fmt_price(history.start_price, history.currency)} → "
+            f"{_fmt_price(history.end_price, history.currency)}** "
+            f"({history.abs_change:+.2f} / **{history.pct_change:+.2f}%**){cagr_str}"
+        )
+        lines.append(
+            f"- **Period Extremes & Risk:** **Period High:** {history.period_high:,.2f} ({history.period_high_date}) | "
+            f"**Period Low:** {history.period_low:,.2f} ({history.period_low_date}) | "
+            f"**Max Drawdown:** {history.max_drawdown_pct:.2f}%{vol_str}"
+        )
+        if history.checkpoints:
+            lines.append("- **Chronological Price Trajectory:** " + " → ".join(history.checkpoints))
+
     if headlines:
         lines.append("\n=== 📰 RECENT CATALYST HEADLINES FOR THIS TICKER ===")
         for idx, h in enumerate(headlines, start=1):
@@ -261,7 +302,59 @@ def _format_single_ticker_snapshot(
     return "\n".join(lines)
 
 
-def _extract_candidate_ticker_query(query: str, ticker: str) -> Optional[str]:
+def _extract_timeframe(query: str, timeframe: str) -> Optional[str]:
+    """Extract a canonical historical timeframe token from explicit `timeframe` arg or natural-language `query`."""
+    tf_raw = (timeframe or "").strip().lower()
+    if tf_raw:
+        alias_map = {
+            "1w": "5d", "5d": "5d", "7d": "5d", "week": "5d", "1 week": "5d",
+            "1m": "1mo", "1mo": "1mo", "month": "1mo", "1 month": "1mo", "30d": "1mo",
+            "3m": "3mo", "3mo": "3mo", "3 months": "3mo", "quarter": "3mo", "90d": "3mo",
+            "6m": "6mo", "6mo": "6mo", "6 months": "6mo", "half year": "6mo", "180d": "6mo",
+            "ytd": "ytd", "year to date": "ytd", "this year": "ytd",
+            "1y": "1y", "1yr": "1y", "year": "1y", "1 year": "1y", "12m": "1y",
+            "2y": "2y", "2yr": "2y", "2 years": "2y",
+            "3y": "3y", "3yr": "3y", "3 years": "3y",
+            "5y": "5y", "5yr": "5y", "5 years": "5y",
+            "10y": "10y", "10yr": "10y", "10 years": "10y", "decade": "10y",
+            "max": "max", "all": "max", "all time": "max", "lifetime": "max",
+        }
+        if tf_raw in alias_map:
+            return alias_map[tf_raw]
+        if re.fullmatch(r"20\d{2}", tf_raw):
+            return tf_raw
+
+    q_low = (query or "").strip().lower()
+    if not q_low:
+        return None
+
+    patterns = [
+        (r"\b(all[- ]time|lifetime|max\s+history)\b", "max"),
+        (r"\b(10\s*y(?:ears?|rs?)?|ten\s+years?|past\s+decade|last\s+decade)\b", "10y"),
+        (r"\b(5\s*y(?:ears?|rs?)?|five\s+years?)\b", "5y"),
+        (r"\b(3\s*y(?:ears?|rs?)?|three\s+years?)\b", "3y"),
+        (r"\b(2\s*y(?:ears?|rs?)?|two\s+years?)\b", "2y"),
+        (r"\b(ytd|year[- ]to[- ]date|so\s+far\s+this\s+year|this\s+year)\b", "ytd"),
+        (r"\b(1\s*y(?:ear|r)?|one\s+year|12\s*months?|past\s+year|last\s+year)\b", "1y"),
+        (r"\b(6\s*m(?:onths?|o)?|six\s+months?|half\s+a?\s*year)\b", "6mo"),
+        (r"\b(3\s*m(?:onths?|o)?|three\s+months?|past\s+quarter|last\s+quarter)\b", "3mo"),
+        (r"\b(1\s*m(?:onth|o)?|one\s+month|30\s*days?|past\s+month|last\s+month)\b", "1mo"),
+        (r"\b(1\s*w(?:eek|k)?|5\s*d(?:ays?)?|7\s*d(?:ays?)?|past\s+week|last\s+week)\b", "5d"),
+        (r"\b(?:in|during|for)\s+(20\d{2})\b", None),
+    ]
+    for pat, code in patterns:
+        m = re.search(pat, q_low)
+        if m:
+            return code if code is not None else m.group(1)
+
+    if any(w in q_low for w in ("historical", "history", "chart")):
+        return "1y"
+    return None
+
+
+def _extract_candidate_ticker_query(
+    query: str, ticker: str, has_timeframe: bool = False
+) -> Optional[str]:
     """Determine if the user is asking for a single specific company/ticker snapshot rather than a broad market overview."""
     if ticker and ticker.strip():
         return ticker.strip()
@@ -279,10 +372,15 @@ def _extract_candidate_ticker_query(query: str, ticker: str) -> Optional[str]:
         "canadian market", "us market", "american market", "stock market",
         "what's up", "whats up", "what is up", "top stocks",
     )
+    excluded_broad_aliases = (
+        ()
+        if has_timeframe
+        else ("gold", "silver", "oil", "crude", "tsx", "nasdaq", "dow", "s&p 500", "sp500", "ftse", "dax", "nikkei", "hang seng")
+    )
     if any(p in q_low for p in broad_phrases):
         # Check if they specifically asked for a known company in CANADIAN_DUAL_LISTED_MAP or COMMON_TICKER_ALIASES
         for name in sorted(set(CANADIAN_DUAL_LISTED_MAP) | set(COMMON_TICKER_ALIASES), key=len, reverse=True):
-            if len(name) >= 4 and name not in ("gold", "silver", "oil", "crude", "tsx", "nasdaq", "dow", "s&p 500", "sp500", "ftse", "dax", "nikkei", "hang seng"):
+            if len(name) >= 3 and name not in excluded_broad_aliases:
                 if re.search(rf"\b{re.escape(name)}\b", q_low):
                     return name
         return None
@@ -292,10 +390,16 @@ def _extract_candidate_ticker_query(query: str, ticker: str) -> Optional[str]:
         if re.search(rf"\b{re.escape(name)}\b", q_low):
             return name
 
-    # Strip generic market query words to see if a ticker symbol or company name remains
+    # Strip timeframe phrases and generic market query words to see if a ticker symbol or company name remains
+    q_stripped = re.sub(
+        r"\b(10|5|3|2|1|6|12|30|7)\s*(years?|yrs?|months?|mos?|weeks?|wks?|days?)\b|\b20\d{2}\b",
+        " ",
+        q_clean,
+        flags=re.IGNORECASE,
+    )
     tokens = [
-        t for t in re.findall(r"[A-Za-z0-9.^=-]+", q_clean)
-        if t.lower().strip(".-") not in MARKET_QUERY_STOPWORDS
+        t for t in re.findall(r"[A-Za-z0-9.^=-]+", q_stripped)
+        if t.lower().strip(".-") not in MARKET_QUERY_STOPWORDS and not t.isdigit()
     ]
     if 1 <= len(tokens) <= 3:
         candidate = " ".join(tokens).strip()
@@ -384,45 +488,63 @@ def skill_markets_info(
     ticker: Optional[str] = None,
     region: Optional[str] = None,
     view: Optional[str] = None,
+    timeframe: Optional[str] = None,
 ) -> str:
     """
-    Fetch real-time global stock market indices (Canada S&P/TSX, US S&P 500/NASDAQ/Dow/VIX, Europe FTSE/DAX/CAC/STOXX,
-    Asia Nikkei/Hang Seng/Shanghai/KOSPI/ASX/SENSEX), precious metals & commodities (Gold, Silver, Platinum, Palladium,
-    WTI & Brent Crude Oil, Natural Gas, Copper), cryptocurrencies (BTC, ETH, SOL, XRP + top 24h gainers/losers in USD & CAD),
-    daily stock market movers (what's going up and down on TSX and US exchanges), and deep single-ticker snapshots.
+    Fetch real-time and historical global stock market indices (Canada S&P/TSX, US S&P 500/NASDAQ/Dow/VIX,
+    Europe FTSE/DAX/CAC/STOXX, Asia Nikkei/Hang Seng/Shanghai/KOSPI/ASX/SENSEX), precious metals & commodities
+    (Gold, Silver, Platinum, Palladium, WTI & Brent Crude Oil, Natural Gas, Copper), cryptocurrencies
+    (BTC, ETH, SOL, XRP + top 24h gainers/losers in USD & CAD), daily stock market movers (what's going up and down
+    on TSX and US exchanges), and deep single-ticker snapshots with multi-horizon historical returns (1W, 1M, 3M, 6M, YTD, 1Y, 5Y, 10Y, MAX).
 
     Args:
-        query: What to look up (e.g. 'market overview', 'whats going up and down today', 'precious metals and oil', 'crypto', or a company/ticker like 'Shopify', 'NVDA').
+        query: What to look up (e.g. 'market overview', 'whats going up and down today', 'how has gold performed over 6 months', 'Shopify 5 year history').
         ticker: Specific stock, ETF, index, commodity, or crypto symbol/name (e.g. 'SHOP.TO', 'RY.TO', 'NVDA', 'AAPL', 'ASML', 'GC=F', 'BTC-USD').
         region: Optional regional focus: 'global' (default), 'canada', 'us', 'europe', 'asia'.
-        view: Optional view mode: 'overview' (default), 'ticker', 'movers', 'commodities', 'crypto', or 'pulse'.
+        view: Optional view mode: 'overview' (default), 'ticker', 'history', 'movers', 'commodities', 'crypto', or 'pulse'.
+        timeframe: Optional historical window for ticker/asset analysis: '5d' ('1w'), '1mo' ('1m'), '3mo' ('3m'), '6mo' ('6m'), 'ytd', '1y', '2y', '3y', '5y', '10y', 'max', or a year like '2024'.
     """
     q_raw = (query or "").strip()
     t_raw = (ticker or "").strip()
     r_raw = (region or "").strip().lower()
     v_raw = (view or "").strip().lower()
+    tf_raw = (timeframe or "").strip()
+    detected_tf = _extract_timeframe(q_raw, tf_raw)
 
-    print(f"📈 [Executing Markets Skill] Query: '{q_raw}', Ticker: '{t_raw}', Region: '{r_raw}', View: '{v_raw}'")
+    print(
+        f"📈 [Executing Markets Skill] Query: '{q_raw}', Ticker: '{t_raw}', "
+        f"Region: '{r_raw}', View: '{v_raw}', Timeframe: '{detected_tf or ''}'"
+    )
 
     if v_raw == MarketView.PULSE:
         return get_daily_market_pulse()
 
-    # Check if this is a single-ticker snapshot request
-    candidate_ticker = _extract_candidate_ticker_query(q_raw, t_raw) if v_raw not in (
-        MarketView.MOVERS, MarketView.COMMODITIES, MarketView.CRYPTO, MarketView.OVERVIEW
-    ) else (t_raw or None)
+    # Check if this is a single-ticker or historical asset snapshot request
+    has_tf = bool(detected_tf) or v_raw == MarketView.HISTORY
+    candidate_ticker = (
+        _extract_candidate_ticker_query(q_raw, t_raw, has_timeframe=has_tf)
+        if v_raw not in (MarketView.MOVERS, MarketView.COMMODITIES, MarketView.CRYPTO, MarketView.OVERVIEW)
+        else (t_raw or None)
+    )
 
-    if candidate_ticker or v_raw == MarketView.TICKER:
+    if candidate_ticker or v_raw in (MarketView.TICKER, MarketView.HISTORY):
         target = candidate_ticker or t_raw or q_raw
         prefer_ca = r_raw != MarketRegion.US and not target.upper().endswith((".US", ":US"))
         primary_sym, dual_sym, headlines = _yahoo_agg.resolve_ticker_and_news(target, prefer_canada=prefer_ca)
         if primary_sym:
             syms_to_fetch = [primary_sym] + ([dual_sym] if dual_sym else [])
-            fetched = _yahoo_agg.fetch_quotes(syms_to_fetch)
+            fut_fetched = submit_to_worker(_yahoo_agg.fetch_quotes, syms_to_fetch)
+            fut_history = submit_to_worker(
+                _yahoo_agg.fetch_historical_summary,
+                primary_sym,
+                detected_tf or "1y",
+            )
+            fetched = fut_fetched.result()
+            history_summary = fut_history.result()
             primary_q = fetched.get(primary_sym.upper())
             dual_q = fetched.get(dual_sym.upper()) if dual_sym else None
             if primary_q and primary_q.price > 0:
-                return _format_single_ticker_snapshot(primary_q, dual_q, headlines)
+                return _format_single_ticker_snapshot(primary_q, dual_q, headlines, history=history_summary)
 
     # Otherwise, run a parallel comprehensive Global Markets, Movers, Commodities & Crypto fetch
     all_bench_syms = (

@@ -285,11 +285,19 @@ COMMON_TICKER_ALIASES: Dict[str, str] = {
 }
 
 MARKET_QUERY_STOPWORDS: frozenset[str] = frozenset({
-    "what", "whats", "what's", "is", "are", "the", "current", "live", "price", "prices",
+    "what", "whats", "what's", "is", "are", "was", "were", "has", "have", "had",
+    "did", "do", "does", "done", "been", "the", "current", "live", "price", "prices",
     "quote", "quotes", "stock", "stocks", "share", "shares", "ticker", "symbol",
     "market", "markets", "doing", "going", "today", "right", "now", "how", "hows",
     "how's", "check", "get", "show", "me", "give", "for", "of", "on", "in", "at",
     "to", "and", "or", "tell", "about", "snapshot", "status", "update", "value",
-    "trading", "at", "worth", "canadian", "american", "us", "european", "asian",
+    "trading", "worth", "canadian", "american", "us", "european", "asian",
+    "history", "historical", "performance", "performed", "performing", "return",
+    "returns", "chart", "over", "past", "last", "since", "this", "year", "years",
+    "month", "months", "week", "weeks", "day", "days", "ytd", "date", "all",
+    "time", "lifetime", "decade", "quarter", "half",
+    "1w", "5d", "7d", "1m", "1mo", "3m", "3mo", "6m", "6mo", "1y", "1yr",
+    "2y", "2yr", "3y", "3yr", "5y", "5yr", "10y", "10yr", "max",
 })
+
 

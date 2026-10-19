@@ -64,8 +64,18 @@ from src.skills.music.engine.spectrum import (
     record_channel_played_song,
     step_spectrum_zone,
 )
-from src.skills.markets.enums import AssetClass, MarketRegion, MarketView
-from src.skills.markets.models import BenchmarkSpec, CryptoAssetQuote, TickerQuote
+from src.skills.markets.enums import (
+    AssetClass,
+    HistoricalTimeframe,
+    MarketRegion,
+    MarketView,
+)
+from src.skills.markets.models import (
+    BenchmarkSpec,
+    CryptoAssetQuote,
+    HistoricalSummary,
+    TickerQuote,
+)
 from src.skills.news.catalogs import NEWS_EDITIONS, NEWS_TOPICS_MAP
 from src.skills.news.enums import NewsTopic
 from src.skills.news.models import NewsEdition
@@ -268,6 +278,7 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
             MarketView,
             MarketRegion,
             AssetClass,
+            HistoricalTimeframe,
         )
         for enum_cls in enum_types:
             self.assertTrue(issubclass(enum_cls, StrEnum), f"{enum_cls.__name__} must inherit from StrEnum")
@@ -294,6 +305,7 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
             BenchmarkSpec,
             TickerQuote,
             CryptoAssetQuote,
+            HistoricalSummary,
         )
         for dc_cls in dataclass_types:
             self.assertTrue(is_dataclass(dc_cls), f"{dc_cls.__name__} must be a @dataclass")

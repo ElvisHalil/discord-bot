@@ -10,9 +10,10 @@ from src.skills.markets.enums import MarketRegion, MarketView
 from src.skills.markets.markets import (
     _compute_macro_regime_signals,
     _extract_candidate_ticker_query,
+    _extract_timeframe,
     _yahoo_agg,
 )
-from src.skills.markets.models import CryptoAssetQuote, TickerQuote
+from src.skills.markets.models import CryptoAssetQuote, HistoricalSummary, TickerQuote
 from src.utils.domain_vocab import TOOL_ARG_ALIASES
 
 
@@ -94,6 +95,25 @@ class TestMarketsSkill(unittest.TestCase):
             exchange="NYQ",
         )
         fake_news = ["**Shopify GMV Surges Past Expectations in Q3** — *BNN Bloomberg* (https://example.com/shopify-q3)"]
+        fake_hist = HistoricalSummary(
+            symbol="SHOP.TO",
+            currency="CAD",
+            timeframe_label="6-Month (6M)",
+            start_date="Apr 18, 2026",
+            end_date="Oct 18, 2026",
+            start_price=112.00,
+            end_price=148.50,
+            abs_change=36.50,
+            pct_change=32.59,
+            period_high=155.20,
+            period_high_date="Sep 24, 2026",
+            period_low=108.40,
+            period_low_date="May 02, 2026",
+            max_drawdown_pct=-9.45,
+            annualized_volatility_pct=34.2,
+            horizon_returns={"1W": 4.2, "1M": 9.8, "3M": 18.5, "6M": 32.59, "YTD": 27.4, "1Y": 54.1, "5Y": 88.0},
+            checkpoints=["Apr 18: **112.00**", "Jul 18: **131.40**", "Oct 18: **148.50**"],
+        )
 
         with (
             patch(
@@ -104,13 +124,23 @@ class TestMarketsSkill(unittest.TestCase):
                 "src.skills.markets.markets._yahoo_agg.fetch_quotes",
                 return_value={"SHOP.TO": shop_to, "SHOP": shop_us},
             ),
+            patch(
+                "src.skills.markets.markets._yahoo_agg.fetch_historical_summary",
+                return_value=fake_hist,
+            ),
         ):
-            output = skill_markets_info(ticker="Shopify")
+            output = skill_markets_info(ticker="Shopify", timeframe="6m")
 
         self.assertIn("TICKER INTELLIGENCE SNAPSHOT: Shopify Inc. (SHOP.TO)", output)
         self.assertIn("148.50 CAD", output)
         self.assertIn("Dual-Listed Quote (`SHOP` — NYQ):", output)
         self.assertIn("107.60 USD", output)
+        self.assertIn("Multi-Horizon Returns:", output)
+        self.assertIn("**6M:** +32.59%", output)
+        self.assertIn("HISTORICAL PERFORMANCE & TREND: 6-Month (6M)", output)
+        self.assertIn("112.00 CAD → 148.50 CAD", output)
+        self.assertIn("Max Drawdown:", output)
+        self.assertIn("Chronological Price Trajectory:", output)
         self.assertIn("52-Week Range:", output)
         self.assertIn("Moving Averages & Trend:", output)
         self.assertIn("Bullish (Price > 50d & 200d MA)", output)
@@ -220,7 +250,39 @@ class TestMarketsSkill(unittest.TestCase):
         self.assertEqual(aliases["symbol"], "ticker")
         self.assertEqual(aliases["country"], "region")
         self.assertEqual(aliases["mode"], "view")
+        self.assertEqual(aliases["period"], "timeframe")
+
+    def test_timeframe_extraction_and_historical_summary_computation(self):
+        """Verify _extract_timeframe and fetch_historical_summary compute returns, drawdowns, and checkpoints."""
+        self.assertEqual(_extract_timeframe("how has gold performed over the last 6 months", ""), "6mo")
+        self.assertEqual(_extract_timeframe("Shopify 5 year history", ""), "5y")
+        self.assertEqual(_extract_timeframe("TSX YTD performance", ""), "ytd")
+        self.assertEqual(_extract_timeframe("how did NVDA do in 2024", ""), "2024")
+        self.assertEqual(_extract_timeframe("", "3m"), "3mo")
+
+        # Build synthetic 400-day daily series
+        base_ts = 1750000000 - (400 * 86400)
+        synthetic_bars = []
+        for d in range(400):
+            ts = base_ts + d * 86400
+            price = 100.0 + (d * 0.25)  # climbs from 100.00 to 199.75
+            synthetic_bars.append((ts, price - 0.5, price + 1.0, price - 1.0, price))
+
+        with patch.object(_yahoo_agg, "_fetch_chart_bars", return_value=("CAD", synthetic_bars)):
+            hist = _yahoo_agg.fetch_historical_summary("SHOP.TO", timeframe="6mo")
+
+        self.assertIsNotNone(hist)
+        self.assertEqual(hist.symbol, "SHOP.TO")
+        self.assertEqual(hist.currency, "CAD")
+        self.assertEqual(hist.timeframe_label, "6-Month (6M)")
+        self.assertGreater(hist.pct_change, 20.0)
+        self.assertIn("1W", hist.horizon_returns)
+        self.assertIn("1M", hist.horizon_returns)
+        self.assertIn("6M", hist.horizon_returns)
+        self.assertIn("1Y", hist.horizon_returns)
+        self.assertEqual(len(hist.checkpoints), 6)
 
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -5,6 +5,8 @@ commodities, FX, US/Canadian market movers, and ticker-specific catalyst news.
 
 from datetime import datetime, timezone
 import logging
+import math
+import re
 import time
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote_plus
@@ -17,7 +19,7 @@ from src.skills.markets.catalogs import (
     COMMON_TICKER_ALIASES,
     TSX_60_LEADERS,
 )
-from src.skills.markets.models import TickerQuote
+from src.skills.markets.models import HistoricalSummary, TickerQuote
 from src.utils.workers import map_in_workers
 
 logger = logging.getLogger(__name__)
@@ -36,13 +38,17 @@ _SCREENER_CACHE_TTL: float = 90.0
 _NEWS_CACHE: Dict[str, Tuple[float, List[str]]] = {}
 _NEWS_CACHE_TTL: float = 180.0
 
+_CHART_SERIES_CACHE: Dict[str, Tuple[float, str, List[Tuple[int, float, float, float, float]]]] = {}
+_CHART_SERIES_TTL: float = 300.0
+
 
 def clear_yahoo_market_cache() -> None:
-    """Clear in-memory Yahoo Finance quote, screener, and news caches."""
+    """Clear in-memory Yahoo Finance quote, screener, chart, and news caches."""
     global _CRUMB, _CRUMB_TS
     _QUOTE_CACHE.clear()
     _SCREENER_CACHE.clear()
     _NEWS_CACHE.clear()
+    _CHART_SERIES_CACHE.clear()
     _CRUMB = None
     _CRUMB_TS = 0.0
 
@@ -365,3 +371,258 @@ class YahooFinanceAggregator(BaseMarketAggregator):
         if headlines:
             _NEWS_CACHE[cache_key] = (now, headlines)
         return headlines[:limit]
+
+    def _fetch_chart_bars(
+        self, symbol: str, range_str: str = "5y", interval: str = "1d"
+    ) -> Tuple[str, List[Tuple[int, float, float, float, float]]]:
+        """Fetch and cache (currency, [(timestamp, open, high, low, close), ...]) from Yahoo v8 chart API."""
+        clean_sym = symbol.strip().upper()
+        cache_key = f"{clean_sym}:{range_str}:{interval}"
+        now = time.time()
+        cached = _CHART_SERIES_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < _CHART_SERIES_TTL:
+            return cached[1], cached[2]
+
+        try:
+            session, _ = _get_session_and_crumb()
+            url = (
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{quote_plus(clean_sym)}"
+                f"?range={range_str}&interval={interval}"
+            )
+            resp = session.get(url, timeout=6)
+            if resp.status_code != 200:
+                return "USD", []
+            results = resp.json().get("chart", {}).get("result")
+            if not results:
+                return "USD", []
+            res0 = results[0]
+            meta = res0.get("meta") or {}
+            currency = str(meta.get("currency") or "USD").strip()
+            timestamps = res0.get("timestamp") or []
+            quotes_list = (res0.get("indicators") or {}).get("quote") or []
+            q0 = quotes_list[0] if quotes_list else {}
+            opens = q0.get("open") or []
+            highs = q0.get("high") or []
+            lows = q0.get("low") or []
+            closes = q0.get("close") or []
+
+            bars: List[Tuple[int, float, float, float, float]] = []
+            for idx, ts in enumerate(timestamps):
+                c_val = closes[idx] if idx < len(closes) else None
+                if c_val is None or ts is None:
+                    continue
+                c_f = float(c_val)
+                if c_f <= 0:
+                    continue
+                o_f = float(opens[idx]) if (idx < len(opens) and opens[idx] is not None) else c_f
+                h_f = float(highs[idx]) if (idx < len(highs) and highs[idx] is not None) else c_f
+                l_f = float(lows[idx]) if (idx < len(lows) and lows[idx] is not None) else c_f
+                bars.append((int(ts), o_f, h_f, l_f, c_f))
+
+            if bars:
+                _CHART_SERIES_CACHE[cache_key] = (now, currency, bars)
+            return currency, bars
+        except Exception as e:
+            logger.debug("Yahoo historical chart fetch failed for %s (%s): %s", clean_sym, range_str, e)
+            return "USD", []
+
+    def fetch_historical_summary(self, symbol: str, timeframe: str = "1y") -> Optional[HistoricalSummary]:
+        """
+        Compute multi-horizon returns (1W, 1M, 3M, 6M, YTD, 1Y, 3Y, 5Y) plus a deep historical window
+        analysis (start/end price, %/$, CAGR, period peak/trough with dates, max drawdown, realized volatility,
+        and chronological price checkpoints) for any global stock, index, commodity, FX pair, or crypto.
+        """
+        clean_sym = symbol.strip().upper()
+        if not clean_sym:
+            return None
+
+        # 1. Always fetch 5-year daily series first (115ms) so we can compute all standard horizon returns
+        currency, daily_bars = self._fetch_chart_bars(clean_sym, range_str="5y", interval="1d")
+        if len(daily_bars) < 2:
+            return None
+
+        latest_ts, _, _, _, latest_close = daily_bars[-1]
+        latest_dt = datetime.fromtimestamp(latest_ts, tz=timezone.utc)
+
+        # 2. Compute standard multi-horizon return strip
+        horizon_returns: Dict[str, float] = {}
+        horizon_specs = [
+            ("1W", 7),
+            ("1M", 31),
+            ("3M", 92),
+            ("6M", 183),
+            ("YTD", -1),
+            ("1Y", 365),
+            ("3Y", 3 * 365),
+            ("5Y", 5 * 365),
+        ]
+        jan1_ts = int(datetime(latest_dt.year, 1, 1, tzinfo=timezone.utc).timestamp())
+        earliest_ts = daily_bars[0][0]
+
+        for label, days in horizon_specs:
+            ref_price: Optional[float] = None
+            if label == "1W":
+                ref_idx = max(0, len(daily_bars) - 6)
+                ref_price = daily_bars[ref_idx][4]
+            elif label == "YTD":
+                # Standard YTD baseline: last trading close of previous calendar year (or first bar of current year)
+                prev_year_bars = [b for b in daily_bars if b[0] < jan1_ts]
+                if prev_year_bars:
+                    ref_price = prev_year_bars[-1][4]
+                else:
+                    curr_year_bars = [b for b in daily_bars if b[0] >= jan1_ts]
+                    if curr_year_bars:
+                        ref_price = curr_year_bars[0][4]
+            else:
+                cutoff_ts = latest_ts - days * 86400
+                # Require at least 80% of the horizon span to exist in the dataset for 3Y/5Y
+                if days >= 365 and (latest_ts - earliest_ts) < (days * 86400 * 0.80):
+                    continue
+                for b in daily_bars:
+                    if b[0] >= cutoff_ts:
+                        ref_price = b[4]
+                        break
+            if ref_price and ref_price > 0:
+                horizon_returns[label] = round((latest_close - ref_price) / ref_price * 100.0, 2)
+
+        # 3. Determine target historical window slice from `timeframe`
+        tf_norm = (timeframe or "1y").strip().lower()
+        window_bars = daily_bars
+        tf_label = "1-Year (1Y)"
+        is_daily = True
+
+        # Check if user asked for a specific calendar year (e.g. '2024', '2025')
+        year_match = re.fullmatch(r"(20\d{2})", tf_norm)
+        if year_match:
+            yr = int(year_match.group(1))
+            y_start = int(datetime(yr, 1, 1, tzinfo=timezone.utc).timestamp())
+            y_end = int(datetime(yr, 12, 31, 23, 59, 59, tzinfo=timezone.utc).timestamp())
+            if y_start < earliest_ts:
+                _, max_bars = self._fetch_chart_bars(clean_sym, range_str="max", interval="1wk")
+                source_bars = max_bars or daily_bars
+                is_daily = False
+            else:
+                source_bars = daily_bars
+            yr_bars = [b for b in source_bars if y_start <= b[0] <= y_end]
+            if len(yr_bars) >= 2:
+                window_bars = yr_bars
+                tf_label = f"Calendar Year {yr}"
+        elif tf_norm in ("10y", "10yr", "10 years", "decade"):
+            _, bars_10y = self._fetch_chart_bars(clean_sym, range_str="10y", interval="1wk")
+            if len(bars_10y) >= 2:
+                window_bars = bars_10y
+                is_daily = False
+            tf_label = "10-Year (10Y)"
+        elif tf_norm in ("max", "all", "all time", "lifetime"):
+            _, bars_max = self._fetch_chart_bars(clean_sym, range_str="max", interval="1mo")
+            if len(bars_max) >= 2:
+                window_bars = bars_max
+                is_daily = False
+            tf_label = "All-Time (MAX)"
+        else:
+            tf_map = {
+                "5d": ("1-Week (5D)", 7),
+                "1w": ("1-Week (5D)", 7),
+                "1mo": ("1-Month (1M)", 31),
+                "1m": ("1-Month (1M)", 31),
+                "3mo": ("3-Month (3M)", 92),
+                "3m": ("3-Month (3M)", 92),
+                "6mo": ("6-Month (6M)", 183),
+                "6m": ("6-Month (6M)", 183),
+                "ytd": ("Year-to-Date (YTD)", -1),
+                "1y": ("1-Year (1Y)", 365),
+                "2y": ("2-Year (2Y)", 730),
+                "3y": ("3-Year (3Y)", 1095),
+                "5y": ("5-Year (5Y)", 1825),
+            }
+            tf_label, days_back = tf_map.get(tf_norm, ("1-Year (1Y)", 365))
+            if days_back == -1:
+                prev_year_bars = [b for b in daily_bars if b[0] < jan1_ts]
+                curr_year_bars = [b for b in daily_bars if b[0] >= jan1_ts]
+                if prev_year_bars and curr_year_bars:
+                    window_bars = [prev_year_bars[-1]] + curr_year_bars
+                elif len(curr_year_bars) >= 2:
+                    window_bars = curr_year_bars
+            elif days_back == 7 and len(daily_bars) >= 6:
+                window_bars = daily_bars[-6:]
+            else:
+                cutoff = latest_ts - days_back * 86400
+                sliced = [b for b in daily_bars if b[0] >= cutoff]
+                if len(sliced) >= 2:
+                    window_bars = sliced
+
+        # 4. Calculate Window Statistics
+        start_ts, _, _, _, start_price = window_bars[0]
+        end_ts, _, _, _, end_price = window_bars[-1]
+        start_date_str = datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime("%b %d, %Y")
+        end_date_str = datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime("%b %d, %Y")
+
+        abs_change = round(end_price - start_price, 4)
+        pct_change = round((end_price - start_price) / start_price * 100.0, 2) if start_price > 0 else 0.0
+
+        span_years = (end_ts - start_ts) / (365.25 * 86400.0)
+        cagr_pct: Optional[float] = None
+        if span_years >= 1.5 and start_price > 0 and end_price > 0:
+            cagr_pct = round(((end_price / start_price) ** (1.0 / span_years) - 1.0) * 100.0, 2)
+
+        # Period Peak, Trough, and Max Drawdown
+        high_bar = max(window_bars, key=lambda b: b[2])
+        low_bar = min(window_bars, key=lambda b: b[3])
+        period_high = round(high_bar[2], 4)
+        period_high_date = datetime.fromtimestamp(high_bar[0], tz=timezone.utc).strftime("%b %d, %Y")
+        period_low = round(low_bar[3], 4)
+        period_low_date = datetime.fromtimestamp(low_bar[0], tz=timezone.utc).strftime("%b %d, %Y")
+
+        running_peak = window_bars[0][4]
+        max_dd = 0.0
+        daily_rets: List[float] = []
+        for idx, b in enumerate(window_bars):
+            close_v = b[4]
+            if close_v > running_peak:
+                running_peak = close_v
+            if running_peak > 0:
+                dd = (close_v - running_peak) / running_peak * 100.0
+                if dd < max_dd:
+                    max_dd = dd
+            if idx > 0 and window_bars[idx - 1][4] > 0:
+                daily_rets.append((close_v - window_bars[idx - 1][4]) / window_bars[idx - 1][4])
+
+        ann_vol: Optional[float] = None
+        if is_daily and len(daily_rets) >= 10:
+            mean_r = sum(daily_rets) / len(daily_rets)
+            variance = sum((r - mean_r) ** 2 for r in daily_rets) / (len(daily_rets) - 1)
+            ann_vol = round(math.sqrt(variance) * math.sqrt(252.0) * 100.0, 1)
+
+        # 5. Build 6 chronological checkpoints across the window
+        checkpoints: List[str] = []
+        n_bars = len(window_bars)
+        num_pts = min(6, n_bars)
+        indices = sorted({int(round(i * (n_bars - 1) / (num_pts - 1))) for i in range(num_pts)})
+        date_fmt = "%b %d, %Y" if span_years >= 0.8 else "%b %d"
+        for i in indices:
+            b_ts, _, _, _, b_close = window_bars[i]
+            d_str = datetime.fromtimestamp(b_ts, tz=timezone.utc).strftime(date_fmt)
+            p_str = f"{b_close:,.2f}" if b_close >= 1 else f"{b_close:.4f}"
+            checkpoints.append(f"{d_str}: **{p_str}**")
+
+        return HistoricalSummary(
+            symbol=clean_sym,
+            currency=currency,
+            timeframe_label=tf_label,
+            start_date=start_date_str,
+            end_date=end_date_str,
+            start_price=round(start_price, 4),
+            end_price=round(end_price, 4),
+            abs_change=abs_change,
+            pct_change=pct_change,
+            cagr_pct=cagr_pct,
+            period_high=period_high,
+            period_high_date=period_high_date,
+            period_low=period_low,
+            period_low_date=period_low_date,
+            max_drawdown_pct=round(max_dd, 2),
+            annualized_volatility_pct=ann_vol,
+            horizon_returns=horizon_returns,
+            checkpoints=checkpoints,
+        )
+
