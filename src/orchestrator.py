@@ -169,7 +169,7 @@ def enrich_flight_tool_args(args: dict, history: list) -> dict:
 # ---------------------------------------------------------------------------
 
 OLD_TOOL_OUTPUT_CHARS = 800
-MAX_HISTORY_CHARS = 12000
+MAX_HISTORY_CHARS = 16000
 
 
 def _role(msg):

@@ -134,17 +134,16 @@ def skill_music_discovery(
     shift: Optional[str] = None,
 ) -> str:
     """
-    Discovers and recommends music: fetches top trending/charting tracks by genre, finds tracks matching a mood/vibe ('banger', 'melodic', 'hard', 'chill', 'sad', 'love'), shifts 1 notch on the Tempo x Intensity spectrum ('harder', 'softer', 'faster', 'slower'), finds similar songs, OR searches top tracks by an artist.
-    ALWAYS use this skill FIRST when a user asks for genre recommendations, mood/vibe songs ('play me a banger', 'play something melodic', 'play something hard', 'play a love song'), tempo/intensity notch shifts ('harder', 'softer', 'faster', 'slower'), top hits, songs by a specific artist, or similar songs.
-    NOTE: When a user requests one specific song by title (e.g. 'play Strobe by Deadmau5'), call `skill_youtube_search(query='<Song> by <Artist>', is_music=True)` directly instead of passing the song title as a genre.
+    Discover and recommend music: top charting tracks by genre, mood/vibe tracks ('banger', 'melodic', 'hard', 'chill', 'sad', 'love'), 1-notch tempo/intensity shifts ('harder', 'softer', 'faster', 'slower'), similar songs, or top tracks by an artist.
+    For one specific song by title (e.g. 'play Strobe by Deadmau5'), call `skill_youtube_search(query='<Song> by <Artist>', is_music=True)` instead.
 
     Args:
-        genre: Genre or regional style for top charts, e.g. 'pop', 'techno', 'dnb', 'german rap'. Leave empty for all genres.
-        similar_to: Seed song to find similar tracks for (or current song to shift from), as 'Song Title by Artist Name'.
-        match_mood: Set true to match the emotional mood/energy of the similar_to song rather than just its style.
-        artist: Artist name to get their top popular tracks, e.g. 'Deadmau5' or 'Daft Punk'.
-        mood: Mood or vibe keyword, e.g. 'banger', 'melodic', 'hard', 'dark', 'chill', 'sad', 'love', 'workout'.
-        shift: Relative 1-notch tempo/intensity adjustment from the current song: 'harder', 'softer', 'faster', or 'slower'.
+        genre: Genre or style for top charts (e.g. 'pop', 'techno', 'dnb', 'phonk', 'german rap'). Leave empty for all genres.
+        similar_to: Seed song for similarity or spectrum shift, as 'Song Title by Artist Name'.
+        match_mood: Set true to match the emotional mood/energy of `similar_to` rather than just its style.
+        artist: Artist name to fetch their top tracks (e.g. 'Deadmau5', 'Daft Punk').
+        mood: Mood or vibe keyword (e.g. 'banger', 'melodic', 'hard', 'dark', 'chill', 'sad', 'love', 'workout').
+        shift: Relative 1-notch tempo/intensity shift from the current song: 'harder', 'softer', 'faster', or 'slower'.
     """
     shift_raw = (shift or "").strip()
     if not shift_raw and not artist:
@@ -492,18 +491,11 @@ def skill_music_analysis(
     target_bpm: Optional[int] = None,
 ) -> str:
     """
-    Audio analysis and DJ harmonic mixing intelligence powered by FreqBlog.
-    Use ONLY when the user explicitly asks for tempo (BPM), musical key/Camelot,
-    audio transition mixing compatibility, harmonic DJ sets, or matching a song's emotional mood/vibe.
-    - action='match_mood': Finds songs that acoustically and emotionally match the mood, energy, and vibe of 'track'.
-    - action='bpm_key': Retrieves exact BPM, Camelot key, mood, and energy for a track.
-    - action='transition': Scores how cleanly two tracks mix together (requires 'track' and 'second_track').
-    - action='bpm_search': Finds tracks at a specific tempo (requires 'target_bpm').
-    - action='harmonic_radio': Builds a continuous Camelot-compatible DJ set starting from 'track'.
+    Audio analysis and DJ harmonic mixing via FreqBlog. Use ONLY when asked for BPM, musical key/Camelot, transition compatibility, harmonic DJ sets, or matching a song's acoustic mood.
 
     Args:
         track: Seed song as 'Song Title by Artist Name'.
-        action: One of 'bpm_key' (default), 'match_mood', 'transition', 'bpm_search', 'harmonic_radio'.
+        action: 'bpm_key' (default: BPM/Camelot/energy), 'match_mood' (acoustic mood match), 'transition' (mix score for track + second_track), 'bpm_search' (tracks at target_bpm), or 'harmonic_radio' (Camelot DJ set).
         second_track: Second song for action='transition', as 'Song Title by Artist Name'.
         target_bpm: Tempo to search for with action='bpm_search'.
     """

@@ -294,29 +294,16 @@ def skill_graphing_info(
     query: Optional[str] = None,
 ) -> str:
     """
-    On-demand universal graphing and diagramming skill that renders high-resolution dark-mode PNG graphs, charts,
-    and diagrams and attaches them directly to the Discord or Telegram reply.
-
-    Use this tool ONLY when the user asks for a graph, plot, chart, visual comparison, or diagram:
-      1. **Arbitrary Data Graphs (`chart_type`: 'bar', 'horizontal_bar', 'stacked_bar', 'line', 'area', 'scatter', 'pie', 'donut')**:
-         Pass `labels` (e.g. 'Q1, Q2, Q3, Q4') and `data` (e.g. '120, 145, 160, 195', or key-value pairs
-         'AWS: 31, Azure: 25, GCP: 12, Other: 32', or multi-series 'Revenue: 10, 20, 30; Cost: 8, 12, 18',
-         or JSON `[{\"name\": \"2025\", \"values\": [10, 20]}]`).
-      2. **Financial & Market Graphs (`chart_type='market'` or pass `ticker`)**:
-         Pass `ticker` (e.g. 'SHOP.TO', 'NVDA, AMD', 'BTC-USD', 'GC=F') and `timeframe` ('1d', '5d', '1mo', '3mo',
-         '6mo', 'ytd', '1y', '2y', '5y', '10y', 'max', or a year like '2024') to plot price + moving averages + volume
-         or a multi-asset normalized % return comparison graph.
-      3. **Flowcharts, Sequence & Architecture Diagrams (`chart_type='diagram'` or 'flowchart' / 'sequence')**:
-         Pass `diagram` (or `data`) with Mermaid diagram code (e.g. `flowchart TD\\n A[\"User\"] --> B[\"API\"]`) or shorthand arrow chains
-         (e.g. `User -> Discord Gateway -> Orchestrator -> Skills -> Ollama`).
+    On-demand universal graphing and diagramming tool that renders dark-mode PNG charts or diagrams and attaches them to the reply.
+    Use ONLY when the user explicitly asks to graph, plot, chart, or draw a diagram (2D data charts, stock/crypto/FX price & comparison charts, or Mermaid flowcharts/sequence/architecture diagrams).
 
     Args:
-        chart_type: One of 'line', 'bar', 'horizontal_bar', 'stacked_bar', 'area', 'scatter', 'pie', 'donut', 'market', or 'diagram'.
+        chart_type: One of 'line', 'bar', 'horizontal_bar', 'stacked_bar', 'area', 'scatter', 'pie', 'donut', 'market', or 'diagram' ('flowchart'/'sequence').
         title: Title displayed at the top of the rendered graph or diagram.
-        data: Series numbers, key-value pairs, JSON dataset, or Mermaid/arrow diagram definition.
-        labels: Optional comma-separated X-axis categories or pie slice labels (e.g. 'Jan, Feb, Mar, Apr').
-        ticker: Optional market symbol(s) for financial graphs (e.g. 'SHOP.TO' or 'NVDA, AAPL, MSFT').
-        timeframe: Optional market graph window ('1d', '5d', '1mo', '3mo', '6mo', 'ytd', '1y', '5y', '10y', 'max').
+        data: Series numbers ('120, 145, 160'), key-value pairs ('AWS: 31, Azure: 25'), multi-series ('Rev: 10, 20; Cost: 8, 12'), JSON dataset, or Mermaid/arrow diagram code.
+        labels: Optional comma-separated X-axis categories or pie slice labels (e.g. 'Q1, Q2, Q3, Q4').
+        ticker: Optional market symbol(s) for financial graphs (e.g. 'SHOP.TO', 'NVDA, AMD', 'BTC-USD', 'CADEUR=X').
+        timeframe: Optional market graph window ('1d', '5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '3y', '5y', '10y', 'max').
         x_label: Optional X-axis label.
         y_label: Optional Y-axis label.
         diagram: Optional Mermaid syntax or shorthand arrow chain ('Node A -> Node B -> Node C') for flowcharts/diagrams.

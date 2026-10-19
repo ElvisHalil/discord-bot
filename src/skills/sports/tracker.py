@@ -1000,16 +1000,12 @@ def skill_sports_tracker(
     sport: Optional[str] = None,
 ) -> str:
     """
-    Start, stop, or list live background tracking for any sports or Counter-Strike 2 (CS2) match
-    (Soccer, NBA, NHL, NFL, MLB, CS2 Esports, etc.).
-    When started, the bot automatically monitors the live game in the background and posts updates
-    in the Discord channel whenever the score changes, a red card occurs, halftime is reached,
-    or the match finishes (and automatically stops tracking once the match is over).
+    Start, stop, or list live background match tracking (Soccer, NBA, NHL, NFL, MLB, CS2 Esports) that posts channel alerts on score changes, red cards, halftime, and full time.
 
     Args:
-        query: The team or matchup to track (e.g. 'Real Madrid', 'AS Roma vs Real Madrid', 'Lakers', 'Arsenal').
-        action: 'start' to begin tracking a match, 'stop' to stop tracking, or 'list' to view tracked games.
-        sport: Optional sport or league hint (e.g. 'soccer', 'ucl', 'nba', 'nhl', 'nfl').
+        query: Team or matchup to track (e.g. 'Real Madrid', 'AS Roma vs Real Madrid', 'Lakers', 'Arsenal').
+        action: 'start' to begin tracking, 'stop' to stop tracking, or 'list' to view tracked games.
+        sport: Optional sport or league hint (e.g. 'soccer', 'ucl', 'nba', 'nhl', 'nfl', 'cs2').
     """
     channel_id = get_active_channel_id()
     act = (action or TrackerAction.START).strip().lower()

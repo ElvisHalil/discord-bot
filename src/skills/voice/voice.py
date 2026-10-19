@@ -23,14 +23,7 @@ def skill_voice_info(
     voice_profile: Optional[str] = "",
 ) -> str:
     """
-    Control and query the Real-Time Discord Voice-Channel AI Co-Host:
-    - `action="join"`: Join or configure the active voice co-host session for the channel.
-    - `action="leave"`: Disconnect the bot from the active Discord voice channel.
-    - `action="speak"`: Synthesize `query` via Neural TTS and speak it out loud in the voice channel.
-    - `action="recap"`: Retrieve a speaker-attributed chronological transcript of the voice call.
-    - `action="mode"`: Switch listening mode (`wake_word`, `conversational`, `listen_only`) or voice profile (`british`, `sportscaster`, `ava`, `deep`, etc.).
-    - `action="mute"` / `"unmute"`: Mute or unmute spoken voice responses.
-    - `action="status"`: View current voice channel connection, active mode, voice profile, and utterance stats.
+    Control the Discord Voice-Channel AI Co-Host: join/leave voice chat, speak text aloud via Neural TTS, recap the voice call transcript, switch listening mode or voice persona, mute/unmute, or check status.
 
     Args:
         action: One of 'join', 'leave', 'speak', 'recap', 'mode', 'mute', 'unmute', or 'status'.

@@ -791,7 +791,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
         print(f"⚡ [{current_mode.upper()}] Model requested {len(tool_calls)} tools simultaneously!")
         has_top_music = any(call.function.name == "skill_music_discovery" for call in tool_calls)
         has_explicit_markets = any(call.function.name == "skill_markets_info" for call in tool_calls)
-        per_tool_char_budget = 10000 if len(tool_calls) == 1 else max(4000, 18000 // len(tool_calls))
+        per_tool_char_budget = 12000 if len(tool_calls) == 1 else max(5000, 20000 // len(tool_calls))
 
         async def run_tool(call):
             tool_name = call.function.name

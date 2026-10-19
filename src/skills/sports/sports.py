@@ -53,20 +53,12 @@ def skill_sports_esports(
     matchup: Optional[str] = None,
 ) -> str:
     """
-    Use this skill to fetch Counter-Strike (CS) esports information.
-    query_type can be:
-      - 'tournaments': Gets upcoming and ongoing S-Tier tournaments from Liquipedia.
-      - 'event_info': Gets detailed info about a specific event, including CURRENT MATCHES and full TEAM ROSTERS (requires event_page).
-      - 'rankings': Gets the current world team rankings from HLTV, including team rosters.
-      - 'player_stats': Gets stats for a specific player (requires player_url).
-      - 'live_streams': Checks live in-game CS2 series scoreboards (BO1/BO3/BO5 map scores, active map round scores, player boxscores) and live YouTube streams.
-      - 'odds': Gets live betting odds, moneylines, and win probabilities for a matchup (pass matchup or event_page).
-      - 'all': Fetches 'tournaments', 'rankings', and 'live_streams'.
+    Fetch Counter-Strike (CS2) esports tournaments, live series scoreboards (map/round scores, player boxscores), HLTV world rankings, rosters, player stats, and betting odds.
 
     Args:
-        query_type: One of 'tournaments', 'event_info', 'rankings', 'player_stats', 'live_streams', 'odds', 'all' (default).
-        event_page: Liquipedia event page, required for query_type='event_info'.
-        player_url: Player profile URL, required for query_type='player_stats'.
+        query_type: One of 'tournaments', 'event_info', 'rankings', 'player_stats', 'live_streams', 'odds', or 'all' (default).
+        event_page: Liquipedia event page (required for query_type='event_info').
+        player_url: Player profile URL or name (for query_type='player_stats').
         matchup: Team matchup for live scoreboards or betting odds (e.g. 'FURIA vs BetBoom', 'Falcons vs Ninjas in Pyjamas').
     """
     print(f"🎮 [Executing CS Esports Skill] Type: {query_type}, Matchup: {matchup}")
@@ -159,11 +151,11 @@ def skill_sports_esports(
 
 def skill_sports_odds(query: str, sport: Optional[str] = SportId.SPORTS) -> str:
     """
-    Fetch current match betting odds, decimal payout multipliers, and implied win probabilities for sports, F1, and esports.
+    Fetch live match betting odds, decimal payout multipliers, and implied win probabilities for sports, F1, and esports.
 
     Args:
-        query: Matchup, team, league, event name, or 'tracked games' (e.g. 'Washington Capitals vs Montreal Canadiens', 'soccer odds', 'nhl odds', 'f1 odds', 'Real Madrid', 'Aurora vs 9z').
-        sport: Sport category, default 'sports' (e.g. 'nhl', 'nba', 'nfl', 'soccer', 'ucl', 'epl', 'mlb', 'f1', 'cs2', 'esports').
+        query: Matchup, team, league, event name, or 'tracked games' (e.g. 'Real Madrid', 'nhl odds', 'f1 odds', 'Falcons vs NIP').
+        sport: Sport category, default 'sports' (e.g. 'nhl', 'nba', 'nfl', 'soccer', 'ucl', 'epl', 'mlb', 'f1', 'cs2').
     """
     print(f"🎲 [Executing Sports Odds Skill] Matchup: '{query}' (Sport: '{sport}')")
     odds_data = _odds_aggregator.get_odds(query, sport=sport)
@@ -177,28 +169,14 @@ def skill_sports_info(
     player: Optional[str] = None,
 ) -> str:
     """
-    Fetch live sports and esports information across ALL major sports via ESPN & esports APIs:
-    match scores, goal scorers, yellow/red cards, possession & match stats, starting lineups/substitutions,
-    player season stats, squad rosters, injury reports, quarter/period/inning linescores, upcoming schedules,
-    tournaments, betting odds, and standings.
-    Do NOT use this tool for AI models, technology, coding, general news, or non-sports topics (use search_web instead).
-
-    Supported sports (plus automatic team/player discovery across all ESPN sports):
-    - 'soccer' / 'epl' / 'ucl' / 'laliga' / 'seriea' / 'bundesliga' / 'ligue1' / 'mls': Matches, scores, goals, assists, yellow/red cards, possession/shots stats, lineups, substitutions, player stats, rosters, top scorers, injuries, and standings.
-    - 'nba' / 'wnba' / 'ncaab' / 'basketball': Live scores, quarter linescores, game leaders, team schedules, rosters, player stats, injury reports, and standings.
-    - 'nhl' / 'hockey': Live scores, period linescores, game leaders, team schedules, rosters, player stats, injury reports, and standings.
-    - 'nfl' / 'ncaaf' / 'football': NFL & College Football scores, schedules, rosters, player stats, injuries, and standings.
-    - 'mlb' / 'baseball': MLB scores, inning linescores, schedules, rosters, player stats, injuries, and standings.
-    - 'ufc' / 'mma' / 'tennis' / 'atp' / 'wta' / 'pga' / 'golf': Fight cards, tournament scoreboards, and athlete profiles.
-    - 'f1' / 'formula 1': Grand Prix schedule, session times (FP1-3, Qual, Race), results, driver & constructor standings.
-    - 'cs' / 'cs2' / 'esports': S-Tier CS tournaments, upcoming matches, live streams, HLTV rankings, player stats, and betting odds.
-    - 'odds' / 'betting': Live betting odds, moneylines, and match favorites across esports and sports.
+    Fetch live sports & esports data (scores, schedules, standings, rosters, injuries, lineups, player stats, F1 sessions/standings, CS2, and odds).
+    Do NOT use for AI models, tech, coding, or non-sports topics.
 
     Args:
-        sport: The sport or league to look up (e.g. 'soccer', 'bundesliga', 'epl', 'ucl', 'nba', 'nhl', 'nfl', 'mlb', 'ufc', 'f1', 'cs', 'odds').
+        sport: Sport or league ('soccer', 'epl', 'ucl', 'laliga', 'seriea', 'bundesliga', 'ligue1', 'mls', 'nba', 'nhl', 'nfl', 'mlb', 'ufc', 'tennis', 'pga', 'f1', 'cs', 'odds').
         query: What to fetch ('schedule', 'scores', 'standings', 'results', 'roster', 'injuries', 'lineups', 'player stats', 'top scorers', 'cards', or full question).
-        team: Optional specific team or club name (e.g. 'Bayern Munich', 'Arsenal', 'Kansas City Chiefs', 'Lakers').
-        player: Optional specific player or athlete name (e.g. 'Harry Kane', 'Erling Haaland', 'Patrick Mahomes', 'Shohei Ohtani').
+        team: Optional specific team or club name (e.g. 'Bayern Munich', 'Arsenal', 'Lakers', 'Oilers').
+        player: Optional specific player or athlete name (e.g. 'Harry Kane', 'Erling Haaland', 'Connor McDavid').
     """
     sport_raw = (sport or "").strip()
     query_raw = (query or "").strip()

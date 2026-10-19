@@ -884,19 +884,14 @@ def skill_markets_info(
     timeframe: Optional[str] = None,
 ) -> str:
     """
-    Fetch real-time and historical global stock market indices (Canada S&P/TSX, US S&P 500/NASDAQ/Dow/VIX,
-    Europe FTSE/DAX/CAC/STOXX, Asia Nikkei/Hang Seng/Shanghai/KOSPI/ASX/SENSEX), precious metals & commodities
-    (Gold, Silver, Platinum, Palladium, WTI & Brent Crude Oil, Natural Gas, Copper), cryptocurrencies
-    (BTC, ETH, SOL, XRP + top 24h gainers/losers in USD & CAD), daily stock market movers (what's going up and down
-    on TSX and US exchanges), multi-asset head-to-head comparisons, and deep single-ticker snapshots with
-    multi-horizon historical returns (1D, 1W, 1M, 3M, 6M, YTD, 1Y, 5Y, 10Y, MAX, calendar years, or custom date ranges).
+    Fetch real-time and historical global stock indices (Canada TSX, US S&P 500/NASDAQ/Dow/VIX, Europe, Asia), daily market movers, precious metals & commodities (Gold, Silver, Oil, NatGas, Copper), FX rates, crypto (BTC, ETH, SOL, 24h movers), multi-asset comparisons, and single-ticker fundamentals & historical returns.
 
     Args:
-        query: What to look up (e.g. 'market overview', 'compare SHOP.TO vs NVDA over 5 years', 'how has gold performed over 6 months', 'AAPL on Oct 15, 2024').
+        query: What to look up (e.g. 'market overview', 'compare SHOP.TO vs NVDA over 5 years', 'how has gold performed over 6 months').
         ticker: Specific stock, ETF, index, commodity, crypto, or comma/vs-separated comparison list (e.g. 'SHOP.TO', 'NVDA, AMD', 'GC=F', 'BTC-USD').
         region: Optional regional focus: 'global' (default), 'canada', 'us', 'europe', 'asia'.
         view: Optional view mode: 'overview' (default), 'ticker', 'history', 'compare', 'movers', 'commodities', 'crypto', or 'pulse'.
-        timeframe: Optional historical window: '1d' ('intraday'), '5d' ('1w'), '1mo' ('1m'), '3mo' ('3m'), '6mo' ('6m'), 'ytd', '1y', '2y', '3y', '5y', '10y', 'max', a year like '2024', or a date/range.
+        timeframe: Optional historical window: '1d', '5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '3y', '5y', '10y', 'max', a year ('2024'), or date range.
     """
     q_raw = (query or "").strip()
     t_raw = (ticker or "").strip()

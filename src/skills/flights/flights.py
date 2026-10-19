@@ -24,20 +24,15 @@ def skill_flight_info(
     trip_type: Optional[str] = None,
 ) -> str:
     """
-    Use this skill to:
-      1. Search live flight ticket prices, best/shortest/cheapest itineraries, flexible-date ('best day to fly')
-         calendars, round-trip month windows, and direct/1-stop flight operating schedules (via Google Flights).
-      2. Check real-time commercial flight status, gate/terminal info, delays, and live airborne radar telemetry
-         for any flight number (via Flightradar24 + ADSB.lol).
+    Search live flight ticket prices, best/shortest/cheapest itineraries, flexible-date calendars, and direct flight schedules (Google Flights), OR check real-time flight status, gates, delays, and airborne radar telemetry (Flightradar24 + ADSB.lol).
 
     Args:
-        query: The user's exact flight question or follow-up (e.g. 'planning trip from New York to Zagreb from May to August next year',
-               '1 stop only', 'i need round trip back in August', 'status of BA117'). Always pass the user's message here.
-        origin: Departure city or 3-letter IATA airport code (e.g. 'New York' or 'JFK', 'Toronto' or 'YYZ').
-        destination: Arrival city or 3-letter IATA airport code (e.g. 'London' or 'LHR', 'Tokyo' or 'HND').
-        date: Departure date ('YYYY-MM-DD' or natural language like 'tomorrow', 'Nov 21, 2026'). Omit if user only named a month.
-        return_date: Optional return date ('YYYY-MM-DD' or natural language) for round-trip searches. Omit if user only named a month.
-        flight_number: Specific commercial flight number or ICAO callsign to check live status (e.g. 'BA117', 'UA123', 'DL404').
+        query: Full flight question or follow-up (e.g. 'flights from Calgary to Tokyo in Nov', '1 stop only', 'status of AC850'). Always pass the user's message here.
+        origin: Departure city or 3-letter IATA airport code (e.g. 'Calgary', 'YYC', 'JFK').
+        destination: Arrival city or 3-letter IATA airport code (e.g. 'Tokyo', 'HND', 'LHR').
+        date: Departure date ('YYYY-MM-DD' or natural language). Omit if user only named a month.
+        return_date: Optional return date ('YYYY-MM-DD' or natural language) for round-trip searches.
+        flight_number: Commercial flight number or ICAO callsign for live status (e.g. 'AC850', 'BA117').
         cabin: Cabin class ('economy', 'premium-economy', 'business', 'first').
         currency: 3-letter currency code (e.g. 'CAD', 'USD', 'EUR', 'GBP').
         max_stops: Optional stop filter (0 for nonstop/direct only, 1 for max 1 stop, 2 for max 2 stops).
