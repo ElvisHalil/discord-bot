@@ -1415,6 +1415,7 @@ class GoogleFlightsPriceAggregator(BaseFlightAggregator):
         ]
 
         # Use GetCalendarPicker to discover the lowest-priced date pairs across the entire month/window first.
+        cal_rows: list[tuple[int, str, Optional[str]]] = []
         if len(date_list) >= 10:
             cal_end_date = end_date
             if s_dt.day == 1 and e_dt.day >= 20:
@@ -1804,6 +1805,68 @@ class GoogleFlightsPriceAggregator(BaseFlightAggregator):
                 else:
                     best_col = f"🏆 Best: **${best_opt['price']} {curr_lbl}** ({best_opt['airlines']}, {best_opt['stops_label']}, {best_opt['duration_str']})"
                 lines.append(f"• **{_fmt_day_label(dt_s, wd, res, short_wd=True)}**: {best_col} | {ns_col}")
+
+            # Delegate visual calendar heatmap rendering to src.skills.graphing
+            try:
+                from src.skills.graphing import (
+                    CalendarDayCell,
+                    CalendarHeatmapSpec,
+                    render_and_queue_calendar_heatmap,
+                )
+
+                cell_map: dict[str, CalendarDayCell] = {}
+                for p_val, dep_d, ret_d in cal_rows:
+                    if not dep_d or not p_val:
+                        continue
+                    try:
+                        wd_name = datetime.strptime(dep_d, "%Y-%m-%d").strftime("%A")
+                    except ValueError:
+                        wd_name = ""
+                    prev_c = cell_map.get(dep_d)
+                    if prev_c is None or float(p_val) < prev_c.value:
+                        cell_map[dep_d] = CalendarDayCell(
+                            date_str=dep_d,
+                            value=float(p_val),
+                            sublabel=f"↔ {ret_d[5:]}" if ret_d else "",
+                            is_direct=bool(operating_weekdays and wd_name in operating_weekdays),
+                        )
+
+                for dt_s, _wd, res in candidate_days:
+                    opt = res.get(pick_key) or res.get("lowest_reasonable") or res["lowest_overall"]
+                    if not opt or not opt.get("price"):
+                        continue
+                    has_ns = bool(res.get("lowest_nonstop"))
+                    ret_d = res.get("return_date")
+                    sub_lbl = f"↔ {ret_d[5:]}" if ret_d else (str(opt.get("airlines") or "")[:12])
+                    cell_map[dt_s] = CalendarDayCell(
+                        date_str=dt_s,
+                        value=float(opt["price"]),
+                        sublabel=sub_lbl,
+                        is_best=(dt_s == top_dt),
+                        is_direct=has_ns,
+                    )
+
+                if len(cell_map) >= 3:
+                    hm_arrow = "↔" if is_rt_scan else "→"
+                    hm_spec = CalendarHeatmapSpec(
+                        title=f"{orig_city} ({orig_code}) {hm_arrow} {dest_city} ({dest_code}) — Fare Calendar ({currency})",
+                        subtitle=f"{trip_mode_str}  •  Cabin: {cabin.title()}{f'  •  Max {max_stops} Stop(s)' if max_stops is not None else ''}",
+                        cells=list(cell_map.values()),
+                        value_prefix="$",
+                        currency=currency,
+                        footer_notes=(
+                            [f"**Direct Flight Days:** {', '.join(w[:3] for w in operating_weekdays)}"]
+                            if operating_weekdays
+                            else []
+                        ),
+                    )
+                    visual = render_and_queue_calendar_heatmap(hm_spec)
+                    lines.append(
+                        f"\n• 📊 **Visual Fare Calendar Heatmap Attached**: `{visual.filename}` "
+                        f"(Color-coded monthly fare grid attached automatically to this reply)"
+                    )
+            except Exception as e:
+                logger.debug(f"Calendar heatmap delegation skipped: {e}")
 
         # --- SECTION 4: SPARSE FUTURE WINDOW / MISSING 1-STOP HORIZON & GATEWAY HUB DISCOVERY ---
         is_sparse_window = len(candidate_days) <= max(2, len(scan_pairs) // 5)

@@ -1,4 +1,5 @@
 from src.skills.graphing.aggregators.base import BaseGraphingAggregator
+from src.skills.graphing.aggregators.heatmap_engine import HeatmapAggregator
 from src.skills.graphing.aggregators.market_series import (
     MarketSeriesAggregator,
     _SERIES_CACHE,
@@ -20,6 +21,7 @@ def clear_graphing_aggregator_caches() -> None:
 
 __all__ = [
     "BaseGraphingAggregator",
+    "HeatmapAggregator",
     "MarketSeriesAggregator",
     "MatplotlibChartAggregator",
     "MermaidDiagramAggregator",

@@ -16,6 +16,7 @@ from typing import Any, List, Optional
 
 from src.context import clear_channel_attachments, queue_channel_attachment
 from src.skills.graphing.aggregators import (
+    HeatmapAggregator,
     MarketSeriesAggregator,
     MatplotlibChartAggregator,
     MermaidDiagramAggregator,
@@ -35,13 +36,29 @@ from src.skills.graphing.context import (
     update_channel_chart_state,
 )
 from src.skills.graphing.enums import ChartType, DiagramType
-from src.skills.graphing.models import ChartSeries, ChartSpec, RenderedVisual
+from src.skills.graphing.models import CalendarHeatmapSpec, ChartSeries, ChartSpec, RenderedVisual
 from src.skills.graphing.templates import format_visual_confirmation
 from src.utils.workers import submit_to_worker
 
 _mpl_agg = MatplotlibChartAggregator()
+_heatmap_agg = HeatmapAggregator()
 _mermaid_agg = MermaidDiagramAggregator()
 _market_agg = MarketSeriesAggregator()
+
+
+def render_and_queue_calendar_heatmap(spec: CalendarHeatmapSpec) -> RenderedVisual:
+    """Render a 7-column Mon-Sun calendar heatmap card and queue it as a Discord/Telegram attachment."""
+    visual = _heatmap_agg.render_calendar_heatmap(spec)
+    queue_channel_attachment(
+        filename=visual.filename,
+        data=visual.png_bytes,
+        caption=visual.title,
+    )
+    update_channel_chart_state(
+        chart_type=ChartType.CALENDAR_HEATMAP,
+        title=visual.title,
+    )
+    return visual
 
 
 def clear_graphing_cache() -> None:
@@ -297,9 +314,9 @@ def skill_graphing_info(
     On-demand universal graphing and diagramming skill that renders high-resolution dark-mode PNG graphs, charts,
     and diagrams and attaches them directly to the Discord or Telegram reply.
 
-    Use this tool ONLY when the user asks for a graph, plot, chart, visual comparison, or diagram:
-      1. **Arbitrary Data Graphs (`chart_type`: 'bar', 'horizontal_bar', 'stacked_bar', 'line', 'area', 'scatter', 'pie', 'donut')**:
-         Pass `labels` (e.g. 'Q1, Q2, Q3, Q4') and `data` (e.g. '120, 145, 160, 195', or key-value pairs
+    Use this tool ONLY when the user asks for a graph, plot, chart, heatmap, visual comparison, or diagram:
+      1. **Arbitrary Data Graphs & Heatmaps (`chart_type`: 'bar', 'horizontal_bar', 'stacked_bar', 'line', 'area', 'scatter', 'pie', 'donut', 'heatmap', 'calendar_heatmap')**:
+         Pass `labels` (e.g. 'Q1, Q2, Q3, Q4' or ISO dates '2027-05-01, 2027-05-02, ...') and `data` (e.g. '120, 145, 160, 195', or key-value pairs
          'AWS: 31, Azure: 25, GCP: 12, Other: 32', or multi-series 'Revenue: 10, 20, 30; Cost: 8, 12, 18',
          or JSON `[{\"name\": \"2025\", \"values\": [10, 20]}]`).
       2. **Financial & Market Graphs (`chart_type='market'` or pass `ticker`)**:
@@ -311,10 +328,10 @@ def skill_graphing_info(
          (e.g. `User -> Discord Gateway -> Orchestrator -> Skills -> Ollama`).
 
     Args:
-        chart_type: One of 'line', 'bar', 'horizontal_bar', 'stacked_bar', 'area', 'scatter', 'pie', 'donut', 'market', or 'diagram'.
+        chart_type: One of 'line', 'bar', 'horizontal_bar', 'stacked_bar', 'area', 'scatter', 'pie', 'donut', 'heatmap', 'calendar_heatmap', 'market', or 'diagram'.
         title: Title displayed at the top of the rendered graph or diagram.
         data: Series numbers, key-value pairs, JSON dataset, or Mermaid/arrow diagram definition.
-        labels: Optional comma-separated X-axis categories or pie slice labels (e.g. 'Jan, Feb, Mar, Apr').
+        labels: Optional comma-separated X-axis categories, ISO dates, or pie slice labels (e.g. 'Jan, Feb, Mar, Apr').
         ticker: Optional market symbol(s) for financial graphs (e.g. 'SHOP.TO' or 'NVDA, AAPL, MSFT').
         timeframe: Optional market graph window ('1d', '5d', '1mo', '3mo', '6mo', 'ytd', '1y', '5y', '10y', 'max').
         x_label: Optional X-axis label.
@@ -334,6 +351,8 @@ def skill_graphing_info(
             w in q_raw.lower() for w in ("flowchart", "sequence diagram", "architecture diagram", "mermaid", "state diagram", "er diagram")
         ) or ("->" in d_raw or "-->" in d_raw or d_raw.lower().startswith(("flowchart", "graph ", "sequencediagram"))):
             resolved_type = ChartType.DIAGRAM
+        elif any(w in q_raw.lower() for w in ("heatmap", "heat map", "price calendar", "fare calendar", "calendar grid")):
+            resolved_type = ChartType.HEATMAP
         elif t_raw or (not d_raw and _extract_market_tickers(q_raw, t_raw)):
             resolved_type = ChartType.MARKET
         elif "pie" in q_raw.lower() or "donut" in q_raw.lower():
@@ -395,7 +414,7 @@ def skill_graphing_info(
                     timeframe=tf_code,
                 )
 
-    # 3. Universal 2D Data Chart Mode (bar, horizontal_bar, stacked_bar, line, area, scatter, pie, donut)
+    # 3. Universal 2D Data Chart & Heatmap Mode (bar, horizontal_bar, stacked_bar, line, area, scatter, pie, donut, heatmap, calendar_heatmap)
     if visual is None:
         effective_ctype = resolved_type if resolved_type not in (ChartType.MARKET, ChartType.DIAGRAM) else ChartType.LINE
         spec = _parse_chart_spec(
@@ -414,7 +433,10 @@ def skill_graphing_info(
                 "'AWS: 31, Azure: 25, GCP: 12'). To plot stocks/crypto, provide `ticker` (e.g. 'SHOP.TO' or 'NVDA, AMD'). "
                 "To draw a diagram, provide `chart_type='diagram'` and `data='A -> B -> C'`."
             )
-        visual = _mpl_agg.render_data_chart(spec)
+        if effective_ctype in (ChartType.HEATMAP, ChartType.CALENDAR_HEATMAP):
+            visual = _heatmap_agg.render_matrix_heatmap(spec)
+        else:
+            visual = _mpl_agg.render_data_chart(spec)
         update_channel_chart_state(
             chart_type=effective_ctype,
             title=visual.title,
