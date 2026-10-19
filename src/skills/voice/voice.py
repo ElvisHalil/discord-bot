@@ -31,7 +31,7 @@ def skill_voice_info(
         action: One of 'join', 'leave', 'speak', 'recap', 'mode', 'mute', 'unmute', or 'status'.
         query: Text to speak aloud (when action='speak') or channel/query context.
         mode: Listening mode ('wake_word', 'conversational', or 'listen_only').
-        voice_profile: Persona voice preset ('research', 'chat', 'chappie', or 'sportscaster').
+        voice_profile: Persona voice preset ('research', 'chat', or 'sportscaster').
     """
     cid = get_active_channel_id() or 0
     raw_act = (action or VoiceAction.STATUS).strip().lower()
@@ -40,7 +40,7 @@ def skill_voice_info(
 
     if act == VoiceAction.JOIN:
         sess = VOICE_COHOST.get_session(cid)
-        target_mode = VOICE_MODE_ALIASES.get((mode or "").strip().lower(), str(VoiceMode.CONVERSATIONAL))
+        target_mode = VOICE_MODE_ALIASES.get((mode or "").strip().lower(), str(VoiceMode.WAKE_WORD))
         prof_key = (voice_profile or (sess.voice_profile if sess else "research")).strip().lower()
         if prof_key not in VOICE_PROFILES:
             prof_key = "research"

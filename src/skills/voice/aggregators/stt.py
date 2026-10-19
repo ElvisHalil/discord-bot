@@ -141,28 +141,42 @@ class VoiceSttAggregator(BaseVoiceAggregator):
             logger.debug("Gemma native STT failed: %s", e)
             return ""
 
-    def _transcribe_with_faster_whisper(self, audio_bytes: bytes) -> str:
-        """Optional local faster-whisper transcription if `faster_whisper` is installed."""
+    def warmup_whisper_model(self) -> None:
+        """Pre-load the local faster-whisper model into RAM so the first voice utterance has zero cold-start delay."""
         global _WHISPER_MODEL
+        if _WHISPER_MODEL is not None:
+            return
         try:
             import importlib
 
-            fw_spec = importlib.util.find_spec("faster_whisper")
-            if fw_spec is None:
-                return ""
+            if importlib.util.find_spec("faster_whisper") is None:
+                return
             fw_mod = importlib.import_module("faster_whisper")
-        except Exception:
-            return ""
-
-        try:
             os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
             with _WHISPER_LOCK:
                 if _WHISPER_MODEL is None:
                     model_size = os.getenv("WHISPER_MODEL_SIZE", "base.en")
                     device = os.getenv("WHISPER_DEVICE", "cpu")
                     _WHISPER_MODEL = fw_mod.WhisperModel(model_size, device=device, compute_type="int8")
+        except Exception as e:
+            logger.debug("faster-whisper warmup failed: %s", e)
 
-            segments, _ = _WHISPER_MODEL.transcribe(io.BytesIO(audio_bytes), beam_size=1, vad_filter=True)
+    def _transcribe_with_faster_whisper(self, audio_bytes: bytes) -> str:
+        """Optional local faster-whisper transcription if `faster_whisper` is installed."""
+        global _WHISPER_MODEL
+        try:
+            self.warmup_whisper_model()
+            if _WHISPER_MODEL is None:
+                return ""
+            segments, _ = _WHISPER_MODEL.transcribe(
+                io.BytesIO(audio_bytes),
+                beam_size=1,
+                best_of=1,
+                temperature=0.0,
+                vad_filter=False,
+                without_timestamps=True,
+                condition_on_previous_text=False,
+            )
             joined = " ".join(seg.text.strip() for seg in segments if seg.text and seg.text.strip())
             return self._clean_transcript(joined)
         except Exception as e:

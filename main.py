@@ -208,12 +208,6 @@ async def handle_live_match_update(match, snapshot, triggers):
             "write 1-2 short lowercase sentences reacting to this live sports match update. "
             "include the exact score, team names, and scorer/event details. no links."
         )
-    elif current_mode == "chappie":
-        sys_prompt = (
-            "Act as Chappie, the childlike AI raised by South African gangsters. "
-            "Speak in the third person in 1-2 short sentences announcing this live sports match update "
-            "with the exact score and player/event details. No links."
-        )
     else:
         sys_prompt = (
             "You are a live sports desk commentator in Discord. "
@@ -257,7 +251,7 @@ async def handle_live_match_update(match, snapshot, triggers):
     await VOICE_COHOST.announce_tracker_event(
         match.channel_id,
         llm_text or fallback_msg,
-        profile_or_mode="sportscaster" if current_mode not in ("chat", "chappie") else current_mode,
+        profile_or_mode="sportscaster" if current_mode != "chat" else current_mode,
     )
 
     async with channel_locks[match.channel_id]:
@@ -315,7 +309,7 @@ async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
 
     voice_prompt_hint = (
         f"[Spoken in Discord Voice Channel '{session.voice_channel_name}' — "
-        f"lead with 1-2 natural spoken sentences for TTS, followed by any links/details]"
+        f"reply immediately in 1-2 short, natural spoken sentences for live TTS]"
     )
     if current_mode == "chat":
         user_msg = f"{utterance.display_name} (User ID: {utterance.user_id}) {voice_prompt_hint}: {cleaned_query}"
@@ -328,13 +322,19 @@ async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
             chat_history[channel_id] = [system_msg]
         else:
             chat_history[channel_id][0] = system_msg
-        turn_history = list(chat_history[channel_id])
+        recent_tail = chat_history[channel_id][1:][-8:]
+        turn_history = [system_msg] + list(recent_tail)
 
     turn_start_idx = len(turn_history)
     turn_history.append({"role": "user", "content": user_msg})
 
     clear_channel_attachments(channel_id)
-    reply = await run_agent_turn(channel_id, mode_config, turn_history=turn_history)
+    reply = await run_agent_turn(
+        channel_id,
+        mode_config,
+        turn_history=turn_history,
+        fast_voice_turn=True,
+    )
     if not reply or not reply.strip():
         return None
 
@@ -342,7 +342,8 @@ async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
         reply = join_orphan_bullets(reply)
     reply = suppress_discord_embeds(reply)
     set_active_channel_id(channel_id)
-    reply = await run_in_worker(standardize_song_reply, reply)
+    if "youtube.com" in reply.lower() or "youtu.be" in reply.lower():
+        reply = await run_in_worker(standardize_song_reply, reply)
     reply = sanitize_agent_reply(reply)
 
     turn_delta = turn_history[turn_start_idx:]
@@ -369,11 +370,18 @@ async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
             for att in attachments
             if att.get("data")
         ]
-        for idx, chunk in enumerate(chunks):
-            if idx == len(chunks) - 1 and discord_files:
-                await channel.send(chunk, files=discord_files)
-            else:
-                await channel.send(chunk)
+
+        async def _send_voice_text_reply():
+            try:
+                for idx, chunk in enumerate(chunks):
+                    if idx == len(chunks) - 1 and discord_files:
+                        await channel.send(chunk, files=discord_files)
+                    else:
+                        await channel.send(chunk)
+            except Exception as e:
+                print(f"⚠️ [Voice Co-Host Text Reply Error]: {e}")
+
+        asyncio.create_task(_send_voice_text_reply())
 
     return reply
 
@@ -481,8 +489,6 @@ async def on_raw_reaction_add(payload):
 
                     if current_mode == "chat":
                         light_sys_prompt = "you are a casual, opinionated human in discord. write 1 short, lowercase sentence with modern slang. no links, no emojis."
-                    elif current_mode == "chappie":
-                        light_sys_prompt = "Act as Chappie, the childlike AI raised by South African gangsters. Speak in the third person in 1 short sentence. No links."
                     else:
                         light_sys_prompt = "You are a helpful music assistant in Discord. Write a single natural, concise 1-sentence recommendation intro. No links, no markdown URLs, no emojis."
 
@@ -553,11 +559,11 @@ async def on_raw_reaction_add(payload):
                     await channel.send(f"{user_tag} ⚠️ Something went wrong while finding a similar song. Please try again!")
 
 
-async def run_agent_turn(channel_id, mode_config, turn_history=None):
+async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_turn: bool = False):
     """Run the model/tool loop for one user turn and return the final reply text."""
     is_research = mode_config.get("is_research", False)
     supports_tools = mode_config.get("supports_tools", True)
-    max_iterations = mode_config["max_iterations"]
+    max_iterations = min(mode_config["max_iterations"], 3) if fast_voice_turn else mode_config["max_iterations"]
     active_tools = mode_config.get("tools", {})
     tool_functions = list(active_tools.values())
     history = turn_history if turn_history is not None else chat_history[channel_id]
@@ -568,9 +574,14 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
         if turn_history is None:
             tools.VISITED_URLS.clear()
 
+    turn_options = dict(mode_config["ollama_options"])
+    if fast_voice_turn:
+        turn_options["num_ctx"] = min(int(turn_options.get("num_ctx", 8192)), 4096)
+        turn_options["num_predict"] = min(int(turn_options.get("num_predict", 1024)), 320)
+
     base_kwargs = {
         "model": mode_config["model"],
-        "options": mode_config["ollama_options"],
+        "options": turn_options,
     }
 
     async def final_answer_without_tools(nudge):
@@ -631,7 +642,13 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
         if supports_tools and tool_functions and not hide_tools_next_step:
             chat_kwargs["tools"] = tool_functions
 
-        response = await ollama_client.chat(**chat_kwargs)
+        if fast_voice_turn:
+            try:
+                response = await ollama_client.chat(**chat_kwargs, think=False)
+            except TypeError:
+                response = await ollama_client.chat(**chat_kwargs)
+        else:
+            response = await ollama_client.chat(**chat_kwargs)
         history.append(response.message)
 
         tool_calls = getattr(response.message, "tool_calls", None)

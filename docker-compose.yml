@@ -1,7 +1,7 @@
 services:
   ollama:
     image: ollama/ollama:latest
-    container_name: chappie-ollama
+    container_name: discord-bot-ollama
     restart: unless-stopped
     networks:
       - bot_internal
@@ -27,7 +27,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: chappie-discord-bot
+    container_name: discord-bot
     restart: unless-stopped
     depends_on:
       ollama:

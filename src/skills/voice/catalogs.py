@@ -20,7 +20,15 @@ VOICE_PROFILES: Dict[str, VoiceProfileSpec] = {
         profile_id="research-gemma",
         display_name="Broadcast Desk Analyst (Canadian English)",
         edge_voice="en-CA-LiamNeural",
-        rate_pct=4,
+        rate_pct=6,
+        pitch_hz=0,
+        speaking_style="clear, authoritative broadcast co-host",
+    ),
+    "research-qwen": VoiceProfileSpec(
+        profile_id="research-qwen",
+        display_name="Broadcast Desk Analyst (Canadian English)",
+        edge_voice="en-CA-LiamNeural",
+        rate_pct=6,
         pitch_hz=0,
         speaking_style="clear, authoritative broadcast co-host",
     ),
@@ -28,17 +36,9 @@ VOICE_PROFILES: Dict[str, VoiceProfileSpec] = {
         profile_id="chat",
         display_name="Casual Hangout Co-Host",
         edge_voice="en-US-AndrewMultilingualNeural",
-        rate_pct=6,
+        rate_pct=8,
         pitch_hz=-2,
         speaking_style="relaxed, witty Discord friend",
-    ),
-    "chappie": VoiceProfileSpec(
-        profile_id="chappie",
-        display_name="Chappie Neural Voice",
-        edge_voice="en-GB-RyanNeural",
-        rate_pct=10,
-        pitch_hz=6,
-        speaking_style="energetic, curious third-person AI sidekick",
     ),
     "sportscaster": VoiceProfileSpec(
         profile_id="sportscaster",
@@ -51,18 +51,7 @@ VOICE_PROFILES: Dict[str, VoiceProfileSpec] = {
 }
 
 DEFAULT_WAKE_WORDS: Tuple[str, ...] = (
-    "hey chappie",
-    "yo chappie",
-    "ok chappie",
-    "chappie",
     "hey bot",
-    "yo bot",
-    "ok bot",
-    "hey cohost",
-    "hey co-host",
-    "cohost",
-    "co-host",
-    "hey assistant",
 )
 
 VOICE_ACTION_ALIASES: Dict[str, str] = {

@@ -170,13 +170,13 @@ The bot can join any Discord voice channel and participate as a real-time, voice
 ### How It Works
 1. **Join a Voice Channel**: Hop into any Discord voice channel and type **`!join`** (or **`!join conversational`**), or simply ask in chat: *"@Bot hop into the voice channel"*.
 2. **Per-Speaker Listening & Native `gemma4:e4b` Speech-to-Text**:
-   - The bot demultiplexes incoming `48 kHz` stereo voice streams **per speaker** (so it knows whether *Elvis*, *Alex*, or *Sam* is talking), detects speech boundaries using RMS dBFS Voice Activity Detection (`0.85s` silence gap), resamples to `16 kHz` mono WAV in memory, and transcribes speech via **`gemma4:e4b`'s native `gemma4a` USM audio encoder** (zero extra VRAM required) or optional `faster-whisper`.
+   - The bot demultiplexes incoming `48 kHz` stereo voice streams **per speaker** (so it knows whether *Elvis*, *Alex*, or *Sam* is talking), detects speech boundaries using RMS dBFS Voice Activity Detection (`0.45s` silence gap), resamples to `16 kHz` mono WAV in memory, and transcribes speech via **`gemma4:e4b`'s native `gemma4a` USM audio encoder** (zero extra VRAM required) or local `faster-whisper`.
 3. **Choose Your Listening Mode (`!vmode <mode>`)**:
-   - **`wake_word` *(Default)***: Transcribes all utterances into the rolling call log for context, but **only speaks back** when someone says a wake word (`"hey bot"`, `"yo bot"`, `"ok bot"`, `"hey chappie"`, `"yo chappie"`, `"hey research"`, `"cohost"`, `"assistant"`).
+   - **`wake_word` *(Default)***: Transcribes all utterances into the rolling call log for context, but **only speaks back** when someone says the wake word (`"hey bot"`).
    - **`conversational` *(Open Mic)***: Replies to every spoken question or statement ($\ge 2$ words) without requiring a wake word.
    - **`listen_only` *(Passive Scribe)***: Silently logs the conversation in the background so you can generate a speaker-attributed call recap (`!vrecap`) at any time.
 4. **Dual Text + Persona-Matched Neural TTS Replies**:
-   - When triggered in voice chat, the bot executes any needed tools (sports scores, stock quotes, flights, web search, music), posts the full formatted answer with links in the text channel, and speaks a concise, natural spoken summary out loud into the Discord voice channel using a persona-matched Neural voice (`Research Co-Host`, `Casual Hangout Co-Host`, `Chappie Neural Voice`, or `Live Sportscaster Voice`).
+   - When triggered in voice chat, the bot executes any needed tools (sports scores, stock quotes, flights, web search, music), posts the full formatted answer with links in the text channel, and speaks a concise, natural spoken summary out loud into the Discord voice channel using a persona-matched Neural voice (`Research Co-Host`, `Casual Hangout Co-Host`, or `Live Sportscaster Voice`).
 5. **Live Sports & Flight Tracker Voice Break-Ins**:
    - While connected to a voice channel (and unmuted), any live goal, score change, red card, halftime, final whistle (`!track`), or flight status alert (`!trackflight`) is automatically announced out loud in the voice call in real time.
 6. **Discord Voice Messages & Audio Attachments**:
@@ -205,7 +205,7 @@ The bot can join any Discord voice channel and participate as a real-time, voice
 ### Natural Language Examples
 - **Discord Voice Co-Host (`skill_voice_info`)**:
   - *"Hop into the voice channel in conversational mode"*
-  - *(Spoken in voice chat)*: *"Hey Chappie, what is Shopify stock trading at right now?"*
+  - *(Spoken in voice chat)*: *"Hey bot, what is Shopify stock trading at right now?"*
   - *(Spoken in voice chat)*: *"Hey bot, when do the Oilers play next and what are the odds?"*
   - *"Give me a recap of what everyone talked about in the voice call"*
   - *"Announce in the voice channel that we're starting the match in 5 minutes"*

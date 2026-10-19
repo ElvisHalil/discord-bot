@@ -223,15 +223,16 @@ def extract_wake_word_command(
 
     sorted_wakes = sorted((w.strip().lower() for w in wake_words if w and w.strip()), key=len, reverse=True)
     for wake in sorted_wakes:
+        wake_pat = r"[\s,.:;!?-]+".join(re.escape(part) for part in wake.split())
         # Match wake word at the start or after a short greeting ("hey", "yo", "ok", "okay")
-        pat = rf"^(?:(?:hey|yo|ok|okay|hi|hello)\s+)?{re.escape(wake)}\b[\s,.:;!?-]*(.*)$"
+        pat = rf"^(?:(?:hey|yo|ok|okay|hi|hello)[\s,.:;!?-]+)?{wake_pat}\b[\s,.:;!?-]*(.*)$"
         m = re.match(pat, clean, flags=re.IGNORECASE)
         if m:
             remainder = m.group(1).strip()
             return True, (remainder or clean)
 
-        # Also catch wake word mid-sentence ("what's the weather hey chappie" or "chappie what time is it")
-        m_mid = re.search(rf"\b{re.escape(wake)}\b[\s,.:;!?-]*(.*)$", clean, flags=re.IGNORECASE)
+        # Also catch wake word mid-sentence ("what's the weather hey bot")
+        m_mid = re.search(rf"\b{wake_pat}\b[\s,.:;!?-]*(.*)$", clean, flags=re.IGNORECASE)
         if m_mid:
             before = clean[: m_mid.start()].strip(" ,.:;!?-")
             after = m_mid.group(1).strip(" ,.:;!?-")

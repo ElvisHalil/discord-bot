@@ -45,7 +45,7 @@ class VoiceTtsAggregator(BaseVoiceAggregator):
     """Multi-backend Text-to-Speech synthesizer with persona-matched voice profiles and bounded LRU caching."""
 
     def resolve_voice_profile(self, profile_or_mode: Optional[str] = None) -> VoiceProfileSpec:
-        """Resolve a mode or profile key (`research`, `chat`, `chappie`, `sportscaster`) to a VoiceProfileSpec."""
+        """Resolve a mode or profile key (`research`, `chat`, `sportscaster`) to a VoiceProfileSpec."""
         key = (profile_or_mode or "research").strip().lower()
         return VOICE_PROFILES.get(key, VOICE_PROFILES["research"])
 
@@ -54,7 +54,7 @@ class VoiceTtsAggregator(BaseVoiceAggregator):
         text: str,
         profile_or_mode: Optional[str] = "research",
         backend: str = TtsBackend.AUTO,
-        max_chars: int = 380,
+        max_chars: int = 240,
     ) -> TtsAudioClip:
         """
         Sanitize `text` for spoken delivery and synthesize it into a `TtsAudioClip`.
@@ -95,7 +95,7 @@ class VoiceTtsAggregator(BaseVoiceAggregator):
                 return clip
 
         # 3. Deterministic In-Memory WAV Tone-Envelope Fallback (zero external dependencies)
-        base_freq = 215.0 if profile.profile_id == "chappie" else (185.0 if profile.profile_id == "chat" else 170.0)
+        base_freq = 205.0 if profile.profile_id == "sportscaster" else (185.0 if profile.profile_id == "chat" else 170.0)
         wav_bytes, duration_sec = synthesize_tone_envelope_wav(spoken, sample_rate=24000, base_freq_hz=base_freq)
         clip = TtsAudioClip(
             text=text,

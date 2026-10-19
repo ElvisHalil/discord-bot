@@ -167,14 +167,14 @@ class VoiceCohostService:
         voice_channel_id: int,
         voice_channel_name: str = "General Voice",
         guild_id: Optional[int] = None,
-        mode: str = VoiceMode.CONVERSATIONAL,
+        mode: str = VoiceMode.WAKE_WORD,
         voice_profile: str = "research",
         voice_client: Any = None,
         announce_live_trackers: bool = True,
     ) -> VoiceSessionRecord:
         """Create and register a live `VoiceSessionRecord` and per-speaker VAD accumulator for `channel_id`."""
         now = time.time()
-        norm_mode = VOICE_MODE_ALIASES.get((mode or "").strip().lower(), str(VoiceMode.CONVERSATIONAL))
+        norm_mode = VOICE_MODE_ALIASES.get((mode or "").strip().lower(), str(VoiceMode.WAKE_WORD))
         prof_key = (voice_profile or "research").strip().lower()
         if prof_key not in VOICE_PROFILES:
             prof_key = "research"
@@ -220,6 +220,8 @@ class VoiceCohostService:
                 lambda uid, uname, pcm: self.ingest_pcm_frame(channel_id, uid, uname, pcm),
             )
 
+        if hasattr(self._stt, "warmup_whisper_model"):
+            submit_to_worker(self._stt.warmup_whisper_model)
         self.ensure_loop_running()
         return record
 
@@ -558,7 +560,7 @@ class VoiceCohostService:
     async def _background_flush_loop(self) -> None:
         """Periodically flush speaker buffers whose silence gap has elapsed."""
         while not self._stop_event.is_set():
-            await asyncio.sleep(0.35)
+            await asyncio.sleep(0.12)
             with self._lock:
                 items = list(self._accumulators.items())
             if not items:

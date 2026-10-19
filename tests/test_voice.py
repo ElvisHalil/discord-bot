@@ -70,9 +70,13 @@ class TestVoiceDspAndVad(unittest.TestCase):
         self.assertGreater(len(discord_pcm), 48000)
 
     def test_extract_wake_word_command(self):
-        trig, q = extract_wake_word_command("Hey Chappie, what is the price of Shopify stock today?", require_wake_word=True)
+        trig, q = extract_wake_word_command("Hey bot, what is the price of Shopify stock today?", require_wake_word=True)
         self.assertTrue(trig)
         self.assertEqual(q, "what is the price of Shopify stock today?")
+
+        trig_punct, q_punct = extract_wake_word_command("Hey, bot, what time is it?", require_wake_word=True)
+        self.assertTrue(trig_punct)
+        self.assertEqual(q_punct, "what time is it?")
 
         trig2, q2 = extract_wake_word_command("just talking to my friend about dinner", require_wake_word=True)
         self.assertFalse(trig2)
@@ -132,17 +136,17 @@ class TestVoiceSttAndTtsAggregators(unittest.TestCase):
 
         mock_resp = SimpleNamespace(
             status_code=200,
-            json=lambda: {"message": {"content": "Transcript: \"Hey Chappie, how is Bitcoin doing?\""}},
+            json=lambda: {"message": {"content": "Transcript: \"Hey bot, how is Bitcoin doing?\""}},
         )
         with patch("src.skills.voice.aggregators.stt._HTTP_SESSION.post", return_value=mock_resp) as mock_post:
             text, backend = stt.transcribe_audio(wav_bytes, backend="gemma_native")
-            self.assertEqual(text, "Hey Chappie, how is Bitcoin doing?")
+            self.assertEqual(text, "Hey bot, how is Bitcoin doing?")
             self.assertEqual(backend, "gemma_native")
             self.assertEqual(mock_post.call_count, 1)
 
             # Second call with identical audio hits BoundedCache
             text2, _ = stt.transcribe_audio(wav_bytes, backend="gemma_native")
-            self.assertEqual(text2, "Hey Chappie, how is Bitcoin doing?")
+            self.assertEqual(text2, "Hey bot, how is Bitcoin doing?")
             self.assertEqual(mock_post.call_count, 1)
 
         self.assertEqual(VoiceSttAggregator._clean_transcript("[SILENCE]"), "")
@@ -151,13 +155,13 @@ class TestVoiceSttAndTtsAggregators(unittest.TestCase):
         tts = VoiceTtsAggregator()
         clip = tts.synthesize_speech(
             "**Shopify (`$SHOP.TO`)** is up +3.10%! [Source](<https://example.com>)",
-            profile_or_mode="chappie",
+            profile_or_mode="sportscaster",
             backend="wave_synth",
         )
         self.assertIn("SHOP dot T O", clip.spoken_text)
         self.assertIn("up 3.10 percent", clip.spoken_text)
         self.assertTrue(clip.audio_bytes.startswith(b"RIFF"))
-        self.assertEqual(clip.voice_id, "en-GB-RyanNeural")
+        self.assertEqual(clip.voice_id, "en-US-GuyNeural")
 
 
 class TestVoiceCohostServiceAndSkill(unittest.IsolatedAsyncioTestCase):
@@ -194,11 +198,11 @@ class TestVoiceCohostServiceAndSkill(unittest.IsolatedAsyncioTestCase):
             voice_info_fn=skill_voice_info,
             voice_cohost_service=VOICE_COHOST,
             author_voice_channel=mock_voice_channel,
-            active_mode="chappie",
+            active_mode="chat",
         )
         self.assertIn("Squad Hangout", join_out)
         self.assertIn("conversational", join_out)
-        self.assertIn("Chappie Neural Voice", join_out)
+        self.assertIn("Casual Hangout Co-Host", join_out)
         self.assertNotIn("[SYSTEM INSTRUCTION", join_out)
 
         # 3. Simulate speaker utterances and verify recap
@@ -206,7 +210,7 @@ class TestVoiceCohostServiceAndSkill(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             VOICE_COHOST._stt,
             "transcribe_audio",
-            return_value=("Hey Chappie, what time is the Oilers game?", "gemma_native"),
+            return_value=("Hey bot, what time is the Oilers game?", "gemma_native"),
         ):
             utt = VOICE_COHOST.process_utterance_wav(
                 channel_id=777888,
