@@ -1,0 +1,178 @@
+"""
+Discord voice channel audio playback and per-speaker VAD utterance accumulator (`src/skills/voice/playback/discord_audio.py`).
+- Converts synthesized TTS (`TtsAudioClip`) or 30s music previews into `discord.PCMAudio` (48 kHz 16-bit stereo PCM)
+  completely in memory via `miniaudio` / `numpy`—no external `ffmpeg` subprocess required for TTS playback.
+- Accumulates per-speaker 48 kHz stereo PCM frames from Discord voice channels, detects speech start and
+  end-of-turn silence (~0.85s), and emits normalized 16 kHz mono WAV buffers ready for STT.
+"""
+
+from __future__ import annotations
+
+import io
+import logging
+import threading
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import discord
+
+from src.skills.voice.engine.vad import (
+    audio_bytes_to_discord_pcm_48k_stereo,
+    compute_pcm_rms_dbfs,
+    pcm_48k_stereo_to_16k_mono_wav,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def build_discord_pcm_source(audio_bytes: bytes, volume: float = 0.9) -> Optional[discord.AudioSource]:
+    """
+    Decode MP3/WAV audio bytes into 48 kHz 16-bit stereo PCM in memory and wrap in a
+    `discord.PCMVolumeTransformer(discord.PCMAudio(...))` ready for `voice_client.play(...)`.
+    """
+    pcm_48k = audio_bytes_to_discord_pcm_48k_stereo(audio_bytes)
+    if not pcm_48k:
+        return None
+    base_source = discord.PCMAudio(io.BytesIO(pcm_48k))
+    return discord.PCMVolumeTransformer(base_source, volume=max(0.05, min(2.0, volume)))
+
+
+class PerSpeakerVoiceAccumulator:
+    """
+    Thread-safe per-speaker voice buffer that segments continuous 48 kHz stereo PCM frames into
+    discrete utterances using RMS energy Voice Activity Detection (VAD) and silence-gap timing.
+    """
+
+    def __init__(
+        self,
+        speech_threshold_dbfs: float = -42.0,
+        silence_gap_sec: float = 0.85,
+        min_speech_sec: float = 0.35,
+        max_utterance_sec: float = 14.0,
+    ) -> None:
+        self.speech_threshold_dbfs = speech_threshold_dbfs
+        self.silence_gap_sec = silence_gap_sec
+        self.min_speech_sec = min_speech_sec
+        self.max_utterance_sec = max_utterance_sec
+        self._lock = threading.Lock()
+        # { user_id: { "display_name": str, "chunks": bytearray, "speech_bytes": int, "first_ts": float, "last_speech_ts": float } }
+        self._buffers: Dict[int, Dict[str, Any]] = {}
+
+    def push_pcm_frame(
+        self,
+        user_id: int,
+        display_name: str,
+        pcm_48k_stereo: bytes,
+        now: Optional[float] = None,
+    ) -> Optional[Tuple[int, str, bytes, float, float]]:
+        """
+        Append a 48 kHz stereo PCM frame for `user_id`.
+        If the utterance reaches `max_utterance_sec` or a silence gap >= `silence_gap_sec` follows active speech,
+        returns `(user_id, display_name, wav_16k_bytes, duration_sec, rms_dbfs)`. Otherwise returns `None`.
+        """
+        if not pcm_48k_stereo:
+            return None
+        ts = now if now is not None else time.monotonic()
+        frame_dbfs = compute_pcm_rms_dbfs(pcm_48k_stereo)
+        is_speech = frame_dbfs >= self.speech_threshold_dbfs
+
+        with self._lock:
+            state = self._buffers.get(user_id)
+            if state is None:
+                if not is_speech:
+                    return None
+                state = {
+                    "display_name": display_name or f"User-{user_id}",
+                    "chunks": bytearray(),
+                    "speech_bytes": 0,
+                    "first_ts": ts,
+                    "last_speech_ts": ts,
+                }
+                self._buffers[user_id] = state
+
+            if display_name:
+                state["display_name"] = display_name
+            state["chunks"].extend(pcm_48k_stereo)
+            if is_speech:
+                state["speech_bytes"] += len(pcm_48k_stereo)
+                state["last_speech_ts"] = ts
+
+            # 48,000 Hz * 2 channels * 2 bytes/sample = 192,000 bytes/sec
+            total_sec = len(state["chunks"]) / 192000.0
+            speech_sec = state["speech_bytes"] / 192000.0
+            silence_elapsed = ts - state["last_speech_ts"]
+
+            if total_sec >= self.max_utterance_sec or (
+                not is_speech and silence_elapsed >= self.silence_gap_sec
+            ):
+                popped = self._buffers.pop(user_id, None)
+                if not popped or speech_sec < self.min_speech_sec:
+                    return None
+                wav_bytes, dur_sec, rms_dbfs = pcm_48k_stereo_to_16k_mono_wav(bytes(popped["chunks"]))
+                if not wav_bytes:
+                    return None
+                return (user_id, popped["display_name"], wav_bytes, dur_sec, rms_dbfs)
+
+        return None
+
+    def flush_ready_utterances(
+        self,
+        now: Optional[float] = None,
+        force_all: bool = False,
+    ) -> List[Tuple[int, str, bytes, float, float]]:
+        """
+        Flush any speaker buffers whose trailing silence has exceeded `silence_gap_sec` (or all active buffers when `force_all=True`).
+        """
+        ts = now if now is not None else time.monotonic()
+        ready: List[Tuple[int, str, bytes, float, float]] = []
+        with self._lock:
+            for uid in list(self._buffers.keys()):
+                st = self._buffers[uid]
+                silence_elapsed = ts - st["last_speech_ts"]
+                speech_sec = st["speech_bytes"] / 192000.0
+                if force_all or silence_elapsed >= self.silence_gap_sec:
+                    popped = self._buffers.pop(uid)
+                    if speech_sec >= self.min_speech_sec:
+                        wav_bytes, dur_sec, rms_dbfs = pcm_48k_stereo_to_16k_mono_wav(bytes(popped["chunks"]))
+                        if wav_bytes:
+                            ready.append((uid, popped["display_name"], wav_bytes, dur_sec, rms_dbfs))
+        return ready
+
+    def clear(self) -> None:
+        """Discard all buffered PCM frames."""
+        with self._lock:
+            self._buffers.clear()
+
+
+def attach_discord_voice_receiver(
+    voice_client: Any,
+    on_pcm_chunk: Callable[[int, str, bytes], None],
+) -> bool:
+    """
+    Attach a per-speaker live audio receive sink to `voice_client` if `discord-ext-voice-recv`
+    (or a compatible `listen` sink API) is available on the connected `VoiceClient`.
+    Returns True if live packet capture was attached, False if in transmit-only mode.
+    """
+    if voice_client is None or not hasattr(voice_client, "listen"):
+        return False
+    try:
+        import importlib
+
+        if importlib.util.find_spec("discord.ext.voice_recv") is not None:
+            voice_recv = importlib.import_module("discord.ext.voice_recv")
+
+            def _sink_callback(user: Any, data: Any) -> None:
+                if user is None or getattr(user, "bot", False):
+                    return
+                pcm = getattr(data, "pcm", None)
+                if pcm:
+                    uid = int(getattr(user, "id", 0) or 0)
+                    uname = str(getattr(user, "display_name", None) or getattr(user, "name", f"User-{uid}"))
+                    on_pcm_chunk(uid, uname, bytes(pcm))
+
+            sink = voice_recv.BasicSink(_sink_callback)
+            voice_client.listen(sink)
+            return True
+    except Exception as e:
+        logger.debug("Could not attach discord-ext-voice-recv sink: %s", e)
+    return False

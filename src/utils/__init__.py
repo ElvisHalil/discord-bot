@@ -9,6 +9,7 @@ from src.utils.discord import (
 )
 from src.utils.dispatcher import (
     dispatch_tracker_command,
+    dispatch_voice_command,
     extract_song_card_target,
     resolve_reaction_recommendation,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "chunk_message",
     "suppress_discord_embeds",
     "dispatch_tracker_command",
+    "dispatch_voice_command",
     "extract_song_card_target",
     "resolve_reaction_recommendation",
     "fetch_url",
