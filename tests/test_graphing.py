@@ -245,12 +245,14 @@ class TestGraphingSkill(unittest.TestCase):
         self.assertEqual(enriched["timeframe"], "3d 1h")
 
     def test_monte_carlo_simulation_and_fan_chart(self):
+        from src.skills.graphing.graphing import _extract_monte_carlo_horizon_and_lookback
+
         base_ts = 1714521600
         fake_btc = MarketBarSeries(
             symbol="BTC-USD",
             name="Bitcoin USD",
             currency="USD",
-            timeframe_label="2-Year (2Y)",
+            timeframe_label="5-Year (5Y) [1D Bars]",
             timestamps=[base_ts + i * 86400 for i in range(120)],
             opens=[60000.0 + i * 180.0 for i in range(120)],
             highs=[61000.0 + i * 180.0 for i in range(120)],
@@ -261,6 +263,7 @@ class TestGraphingSkill(unittest.TestCase):
             period_high=82000.0,
             period_low=59000.0,
         )
+        # 1. Default 5-year lookback when user only specifies forward horizon
         hist_mc = [{"role": "user", "content": "can you do Monte Carlo simulation on btc 2 years into future?"}]
         missed_mc = detect_missed_graphing_tool_call(hist_mc, active_channel_id=self.channel_id)
         self.assertIsNotNone(missed_mc)
@@ -272,15 +275,57 @@ class TestGraphingSkill(unittest.TestCase):
             type(skill_graphing_info.__globals__["_market_agg"]),
             "fetch_bar_series",
             return_value=fake_btc,
-        ):
+        ) as mock_fetch:
             out_mc = skill_graphing_info(**missed_mc[1])
+            mock_fetch.assert_called_once_with("BTC-USD", timeframe="5y", interval="1d")
         self.assertIn("Monte Carlo GBM Simulation", out_mc)
+        self.assertIn("5-Year History (Default)", out_mc)
         self.assertIn("Terminal Price Percentiles", out_mc)
         self.assertIn("Probability Metrics", out_mc)
         atts = pop_channel_attachments(self.channel_id)
         self.assertEqual(len(atts), 1)
         self.assertTrue(atts[0]["filename"].startswith("monte_carlo_btc-usd"))
         self.assertTrue(atts[0]["data"].startswith(PNG_MAGIC))
+
+        # 2. Flexible custom lookback extraction (horizon vs lookback separation)
+        self.assertEqual(
+            _extract_monte_carlo_horizon_and_lookback(
+                "can you do Monte Carlo simulation on btc 2 years into future based on the last 10 years?",
+                "10y",
+            ),
+            ("2y", "10y"),
+        )
+        self.assertEqual(
+            _extract_monte_carlo_horizon_and_lookback(
+                "Monte Carlo simulation on BTC 1 year into future base off 3 years",
+                "3y",
+            ),
+            ("1y", "3y"),
+        )
+        self.assertEqual(
+            _extract_monte_carlo_horizon_and_lookback(
+                "Monte Carlo simulation on NVDA using all-time history",
+                "max",
+            ),
+            ("1y", "max"),
+        )
+
+        # 3. Follow-up lookback adjustment on active Monte Carlo chart preserves horizon="2y" and sets lookback="10y"
+        hist_mc_followup = [{"role": "user", "content": "what if we base it on 10 years of history?"}]
+        missed_followup = detect_missed_graphing_tool_call(hist_mc_followup, active_channel_id=self.channel_id)
+        self.assertIsNotNone(missed_followup)
+        self.assertEqual(missed_followup[1]["chart_type"], "monte_carlo")
+        self.assertEqual(missed_followup[1]["ticker"], "BTC-USD")
+        with patch.object(
+            type(skill_graphing_info.__globals__["_market_agg"]),
+            "fetch_bar_series",
+            return_value=fake_btc,
+        ) as mock_fetch_custom:
+            out_mc_custom = skill_graphing_info(**missed_followup[1])
+            mock_fetch_custom.assert_called_once_with("BTC-USD", timeframe="10y", interval="1d")
+        self.assertIn("10-Year (10Y) History", out_mc_custom)
+        self.assertNotIn("5-Year History (Default)", out_mc_custom)
+        pop_channel_attachments(self.channel_id)
 
 
 if __name__ == "__main__":

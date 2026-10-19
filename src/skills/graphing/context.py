@@ -233,7 +233,15 @@ def enrich_graphing_tool_args(
         elif not enriched.get("timeframe") and state and state.last_timeframe:
             enriched["timeframe"] = state.last_timeframe
 
-    if latest_user_text and _EXPLICIT_MONTE_CARLO_RE.search(latest_user_text):
+    _mc_followup_re = re.compile(
+        r"\b(?:base(?:d)?\s+(?:it\s+)?(?:on|off|of)|calibrated\s+on|using\s+(?:the\s+)?(?:last|past|\d+|all)|"
+        r"into\s+(?:the\s+)?future|all[- ]time\s+history|\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?)\s+of\s+history)\b",
+        re.IGNORECASE,
+    )
+    if latest_user_text and (
+        _EXPLICIT_MONTE_CARLO_RE.search(latest_user_text)
+        or (state and state.last_chart_type == ChartType.MONTE_CARLO and _mc_followup_re.search(latest_user_text))
+    ):
         enriched["chart_type"] = str(ChartType.MONTE_CARLO)
 
     ct_low = str(enriched.get("chart_type") or "").strip().lower()
@@ -258,7 +266,7 @@ def enrich_graphing_tool_args(
         q_low = (latest_user_text or "").lower()
         has_tf_or_int = bool(_extract_timeframe_from_text(latest_user_text) or _extract_interval_from_text(latest_user_text))
         if (
-            re.search(r"\b(?:it|them|same|instead|past|last|hourly|daily|weekly|graph|chart|plot|monte\s*carlo)\b", q_low)
+            re.search(r"\b(?:it|them|same|instead|past|last|hourly|daily|weekly|graph|chart|plot|monte\s*carlo|base|based|history)\b", q_low)
             or has_tf_or_int
         ):
             enriched["ticker"] = ", ".join(state.last_tickers)
@@ -309,8 +317,17 @@ def detect_missed_graphing_tool_call(
 
     state = get_channel_chart_state(active_channel_id)
 
-    # 2. Explicit Monte Carlo simulation request ("can you do Monte Carlo simulation on btc 2 years into future?")
-    if _EXPLICIT_MONTE_CARLO_RE.search(q_low):
+    # 2. Explicit Monte Carlo simulation request or follow-up lookback/horizon adjustment
+    is_mc_followup = bool(
+        state
+        and state.last_chart_type == ChartType.MONTE_CARLO
+        and re.search(
+            r"\b(?:base(?:d)?\s+(?:it\s+)?(?:on|off|of)|calibrated\s+on|using\s+(?:the\s+)?(?:last|past|\d+|all)|"
+            r"into\s+(?:the\s+)?future|all[- ]time\s+history|\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?)\s+of\s+history)\b",
+            q_low,
+        )
+    )
+    if _EXPLICIT_MONTE_CARLO_RE.search(q_low) or is_mc_followup:
         tickers = _extract_tickers_from_text(latest_user_text) or (list(state.last_tickers) if state and state.last_tickers else [])
         if tickers:
             raw_args = enrich_graphing_tool_args(

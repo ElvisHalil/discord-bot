@@ -176,8 +176,17 @@ def _extract_chart_timeframe(query: str, timeframe: str) -> str:
             break
 
     if not resolved_tf:
-        m_d = re.search(r"\b(\d{1,3})\s*d(?:ays?)\b", q_low)
-        if m_d:
+        m_y = re.search(r"\b(\d{1,2})\s*y(?:ears?|rs?)?\b", q_low)
+        m_mo = re.search(r"\b(\d{1,2})\s*mo(?:nths?)?\b", q_low)
+        m_w = re.search(r"\b(\d{1,2})\s*w(?:eeks?|ks?)?\b", q_low)
+        m_d = re.search(r"\b(\d{1,3})\s*d(?:ays?)?\b", q_low)
+        if m_y:
+            resolved_tf = f"{int(m_y.group(1))}y"
+        elif m_mo:
+            resolved_tf = f"{int(m_mo.group(1))}mo"
+        elif m_w:
+            resolved_tf = f"{int(m_w.group(1))}w"
+        elif m_d:
             resolved_tf = f"{int(m_d.group(1))}d"
 
     if not resolved_tf and tf_raw:
@@ -190,6 +199,78 @@ def _extract_chart_timeframe(query: str, timeframe: str) -> str:
     if int_code and int_code not in resolved_tf.split():
         return f"{resolved_tf} {int_code}"
     return resolved_tf
+
+
+_MC_LOOKBACK_PATTERNS = (
+    re.compile(
+        r"\b(?:base(?:d)?\s+(?:it\s+)?(?:on|off(?:\s+of)?|of)|calibrated\s+(?:it\s+)?on|using|from|with)\s+"
+        r"(?:the\s+)?(?:last\s+|past\s+)?"
+        r"(all[- ]time|max(?:\s+history)?|entire\s+history|full\s+history|"
+        r"\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?|m\b|w(?:eeks?|ks?)?|d(?:ays?)?)|"
+        r"one\s+year|two\s+years|three\s+years|five\s+years|decade|ytd|year[- ]to[- ]date)"
+        r"(?:\s+(?:of\s+)?(?:history|historical(?:\s+data)?|price\s+history|data|returns|timeframe))?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:last\s+|past\s+)?(all[- ]time|max|\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?|w(?:eeks?|ks?)?|d(?:ays?)?)|"
+        r"one\s+year|two\s+years|three\s+years|five\s+years|decade|ytd|year[- ]to[- ]date)\s+"
+        r"(?:of\s+)?(?:history|historical(?:\s+data)?|price\s+history|data|returns|lookback|calibration)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(all[- ]time(?:\s+history)?|max\s+history|entire\s+history|full\s+history)\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _extract_monte_carlo_horizon_and_lookback(
+    query: str,
+    timeframe: str,
+    prev_horizon: Optional[str] = None,
+) -> tuple[str, Optional[str]]:
+    """
+    Separate the forward simulation horizon (e.g. '2y') from an optional historical calibration
+    lookback (e.g. 'based on 10 years' -> '10y', 'all-time history' -> 'max').
+    When no lookback is specified by the user, returns `(horizon, None)` so `run_monte_carlo`
+    uses its 5-year history default.
+    """
+    q_clean = (query or "").strip()
+    lookback_code: Optional[str] = None
+    remaining_q = q_clean
+
+    for pat in _MC_LOOKBACK_PATTERNS:
+        m = pat.search(q_clean)
+        if m:
+            lb_span = m.group(1)
+            lookback_code = "max" if "entire" in lb_span.lower() or "full" in lb_span.lower() else _extract_chart_timeframe(lb_span, "")
+            remaining_q = (q_clean[: m.start()] + " " + q_clean[m.end() :]).strip()
+            break
+
+    # Extract forward horizon from the remaining query (excluding the lookback phrase)
+    rem_tf = _extract_chart_timeframe(remaining_q, "") if remaining_q else ""
+    has_explicit_rem_tf = bool(
+        remaining_q
+        and re.search(
+            r"\b(?:\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?|w(?:eeks?|ks?)?|d(?:ays?)?)|"
+            r"one\s+year|two\s+years|three\s+years|five\s+years|decade|next\s+year|next\s+month)\b",
+            remaining_q,
+            re.IGNORECASE,
+        )
+    )
+
+    if has_explicit_rem_tf and rem_tf:
+        horizon_code = rem_tf
+    elif not lookback_code and timeframe:
+        horizon_code = _extract_chart_timeframe("", timeframe)
+    elif prev_horizon:
+        horizon_code = prev_horizon
+    elif timeframe and _extract_chart_timeframe("", timeframe) != lookback_code:
+        horizon_code = _extract_chart_timeframe("", timeframe)
+    else:
+        horizon_code = "1y"
+
+    return horizon_code, lookback_code
 
 
 def _extract_market_tickers(query: str, ticker: str) -> List[str]:
@@ -474,21 +555,29 @@ def skill_graphing_info(
 
     # 2. Monte Carlo GBM Simulation Mode
     elif resolved_type == ChartType.MONTE_CARLO:
+        prev_st = get_channel_chart_state()
         targets = _extract_market_tickers(q_raw, t_raw)
-        if not targets:
-            prev_st = get_channel_chart_state()
-            if prev_st and prev_st.last_tickers:
-                targets = list(prev_st.last_tickers)
-        tf_code = _extract_chart_timeframe(q_raw, timeframe or "1y")
+        if not targets and prev_st and prev_st.last_tickers:
+            targets = list(prev_st.last_tickers)
+        prev_mc_horizon = (
+            prev_st.last_timeframe
+            if (prev_st and prev_st.last_chart_type == ChartType.MONTE_CARLO and prev_st.last_timeframe)
+            else None
+        )
+        horizon_code, lookback_code = _extract_monte_carlo_horizon_and_lookback(
+            q_raw,
+            timeframe or "",
+            prev_horizon=prev_mc_horizon,
+        )
         if targets:
-            mc_res = submit_to_worker(_market_agg.run_monte_carlo, targets[0], tf_code).result()
+            mc_res = submit_to_worker(_market_agg.run_monte_carlo, targets[0], horizon_code, 1000, lookback_code).result()
             if mc_res is not None:
                 visual = _mpl_agg.render_monte_carlo_chart(mc_res)
                 update_channel_chart_state(
                     chart_type=ChartType.MONTE_CARLO,
                     title=visual.title,
                     tickers=[mc_res.symbol],
-                    timeframe=tf_code,
+                    timeframe=horizon_code,
                 )
 
     # 3. Financial / Market Time-Series Mode

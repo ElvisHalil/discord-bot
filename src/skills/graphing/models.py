@@ -76,6 +76,7 @@ class MonteCarloResult:
     prob_profit_pct: float = 0.0
     prob_double_pct: float = 0.0
     prob_drawdown_20_pct: float = 0.0
+    lookback_label: str = "5-Year History (Default)"
 
 
 @dataclass(slots=True)

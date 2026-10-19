@@ -443,9 +443,9 @@ class MatplotlibChartAggregator(BaseGraphingAggregator):
         title_str = f"Monte Carlo GBM Simulation: {mc.name} ({mc.symbol}) — {mc.horizon_label}"
         drift_sign = "+" if mc.annualized_drift_pct > 0 else ""
         subtitle_str = (
-            f"{mc.num_simulations:,} Paths  |  Spot: {_fmt_price_val(mc.spot_price)} {mc.currency}  |  "
-            f"Calibrated Vol (σ): {mc.annualized_volatility_pct:.1f}%/yr  |  Drift: {drift_sign}{mc.annualized_drift_pct:.1f}%/yr  |  "
-            f"P(Profit): {mc.prob_profit_pct:.1f}%"
+            f"{mc.num_simulations:,} Paths  |  Basis: {mc.lookback_label} ({mc.lookback_days:,}d)  |  "
+            f"Spot: {_fmt_price_val(mc.spot_price)} {mc.currency}  |  Vol (σ): {mc.annualized_volatility_pct:.1f}%/yr  |  "
+            f"Drift: {drift_sign}{mc.annualized_drift_pct:.1f}%/yr  |  P(Profit): {mc.prob_profit_pct:.1f}%"
         )
         _style_dark_axes(
             ax_fan,
@@ -610,13 +610,14 @@ class MatplotlibChartAggregator(BaseGraphingAggregator):
             return f"{'+' if chg > 0 else ''}{chg:.1f}%"
 
         summary_lines = [
-            f"**Asset & Horizon:** {mc.name} (`{mc.symbol}`) — {mc.horizon_label} ({mc.num_simulations:,} GBM simulated paths, calibrated on {mc.lookback_days} daily bars)",
+            f"**Asset & Forecast Horizon:** {mc.name} (`{mc.symbol}`) — {mc.horizon_label} ({mc.num_simulations:,} GBM simulated paths)",
+            f"**Historical Calibration Basis:** **{mc.lookback_label}** ({mc.lookback_days:,} daily bars used to calibrate volatility & drift; mention clearly in your reply that this simulation is based on **{mc.lookback_label}**)",
             f"**Calibrated Parameters:** Spot **{_fmt_price_val(mc.spot_price)} {mc.currency}** | Annualized Volatility (σ): **{mc.annualized_volatility_pct:.2f}%** | Annualized Drift: **{drift_sign}{mc.annualized_drift_pct:.2f}%**",
             f"**Terminal Price Percentiles:** Bear P5: **{_fmt_price_val(p5_end)} {mc.currency}** ({_pct_vs_spot(p5_end)}) | P25: **{_fmt_price_val(p25_end)}** ({_pct_vs_spot(p25_end)}) | **Median P50: {_fmt_price_val(p50_end)} {mc.currency} ({_pct_vs_spot(p50_end)})** | Mean: **{_fmt_price_val(mean_end)}** ({_pct_vs_spot(mean_end)}) | P75: **{_fmt_price_val(p75_end)}** ({_pct_vs_spot(p75_end)}) | Bull P95: **{_fmt_price_val(p95_end)} {mc.currency}** ({_pct_vs_spot(p95_end)})",
             f"**Probability Metrics:** P(Price > Spot): **{mc.prob_profit_pct:.1f}%** | P(≥ 2x Spot): **{mc.prob_double_pct:.1f}%** | P(Drawdown ≥ 20%): **{mc.prob_drawdown_20_pct:.1f}%**",
         ]
         return RenderedVisual(
-            filename=_slugify_filename(f"monte_carlo_{mc.symbol}_{mc.horizon_days}d", default="monte_carlo_chart"),
+            filename=_slugify_filename(f"monte_carlo_{mc.symbol}_{mc.horizon_days}d_{mc.lookback_label}", default="monte_carlo_chart"),
             png_bytes=png_bytes,
             title=title_str,
             summary_lines=summary_lines,

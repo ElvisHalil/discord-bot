@@ -340,19 +340,33 @@ class MarketSeriesAggregator(BaseGraphingAggregator):
         target: str,
         horizon: str = "1y",
         num_simulations: int = 1000,
+        lookback: Optional[str] = None,
     ) -> Optional[MonteCarloResult]:
         """
         Execute a vectorized Geometric Brownian Motion (GBM) Monte Carlo simulation calibrated
-        from historical daily log returns of `target`.
+        from historical daily log returns of `target`. Defaults to 5 years of daily history ('5y')
+        unless a custom `lookback` timeframe (e.g. '10y', 'max', '3y', '1y', '6mo') is provided.
         """
-        # Fetch up to 2 years of daily bars for clean daily log-return calibration
+        lb_clean = (lookback or "").strip().lower()
+        is_default_lb = not lb_clean
+        eff_lb = lb_clean if lb_clean else "5y"
+
+        # Fetch daily ('1d') bars for the requested lookback window, with graceful fallback for newer listings
         hist_series = (
-            self.fetch_bar_series(target, timeframe="2y", interval="1d")
+            self.fetch_bar_series(target, timeframe=eff_lb, interval="1d")
+            or self.fetch_bar_series(target, timeframe="5y", interval="1d")
+            or self.fetch_bar_series(target, timeframe="2y", interval="1d")
             or self.fetch_bar_series(target, timeframe="1y", interval="1d")
-            or self.fetch_bar_series(target, timeframe="6mo", interval="1d")
         )
         if not hist_series or len(hist_series.closes) < 20:
             return None
+
+        _, _, raw_lb_label, _ = _resolve_timeframe_and_interval(eff_lb)
+        base_lb_name = re.sub(r"\s*\[.*?\]", "", raw_lb_label).strip()
+        if is_default_lb:
+            lookback_label = "5-Year History (Default)"
+        else:
+            lookback_label = f"{base_lb_name} History"
 
         closes = np.asarray(hist_series.closes, dtype=np.float64)
         valid_mask = closes > 0
@@ -405,7 +419,7 @@ class MarketSeriesAggregator(BaseGraphingAggregator):
         ann_vol = daily_vol * math.sqrt(days_per_year)
 
         n_sims = max(100, min(5000, int(num_simulations)))
-        rng = np.random.default_rng(seed=abs(hash((hist_series.symbol, horizon_days, round(spot_price, 2)))) % (2**32))
+        rng = np.random.default_rng(seed=abs(hash((hist_series.symbol, horizon_days, len(closes), round(spot_price, 2)))) % (2**32))
         # Antithetic variates (half Z, half -Z) for lower variance & cleaner percentile convergence
         half_n = n_sims // 2
         z_half = rng.standard_normal((half_n, horizon_days))
@@ -464,6 +478,7 @@ class MarketSeriesAggregator(BaseGraphingAggregator):
             prob_profit_pct=round(prob_profit, 1),
             prob_double_pct=round(prob_double, 1),
             prob_drawdown_20_pct=round(prob_dd20, 1),
+            lookback_label=lookback_label,
         )
 
 
