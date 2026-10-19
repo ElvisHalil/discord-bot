@@ -5,6 +5,7 @@ import sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
 import re
+import io
 import asyncio
 import random
 import requests
@@ -27,6 +28,8 @@ from src.utils import (
 )
 from src.context import (
     bind_event_loop,
+    clear_channel_attachments,
+    pop_channel_attachments,
     set_active_channel_id,
 )
 from src.skills.music.engine.formatting import format_song_card, get_music_metadata, standardize_song_reply
@@ -53,11 +56,13 @@ from src.orchestrator import (
     enrich_music_tool_args,
     enrich_flight_tool_args,
     enrich_markets_tool_args,
+    enrich_graphing_tool_args,
     enrich_tool_output_with_time_context,
     detect_missed_sports_tool_call,
     detect_missed_music_shift_tool_call,
     detect_missed_flight_tool_call,
     detect_missed_markets_tool_call,
+    detect_missed_graphing_tool_call,
     trim_history,
     compact_intra_turn_tool_history,
     apply_auto_ping,
@@ -114,6 +119,7 @@ except ValueError:
 
 
 def clear_tool_caches(channel_id: int = None):
+    clear_channel_attachments(channel_id)
     if channel_id is None:
         tools.VISITED_URLS.clear()
         tools.URL_CACHE.clear()
@@ -133,17 +139,20 @@ def clear_tool_caches(channel_id: int = None):
         from src.skills.sports.tracker import clear_channel_last_match_query
         from src.skills.flights.context import clear_channel_flight_state
         from src.skills.markets.context import clear_channel_market_state
+        from src.skills.graphing.context import clear_channel_chart_state
         from src.skills.sports.aggregators.liquipedia import clear_liquipedia_cache
         from src.skills.sports.aggregators.hltv import clear_hltv_cache
         from src.skills.sports.aggregators.kashrock import clear_kashrock_cache
         from src.skills.sports.aggregators.espn_utils import clear_espn_cache
         from src.skills.weather.aggregators import clear_weather_cache
         from src.skills.markets import clear_markets_cache
+        from src.skills.graphing import clear_graphing_cache
         clear_channel_played_songs(channel_id)
         clear_recently_played_tracks(channel_id)
         clear_channel_last_match_query(channel_id)
         clear_channel_flight_state(channel_id)
         clear_channel_market_state(channel_id)
+        clear_channel_chart_state(channel_id)
         if channel_id is None:
             clear_youtube_caches()
             clear_resolved_music_cache()
@@ -156,6 +165,7 @@ def clear_tool_caches(channel_id: int = None):
             clear_espn_cache()
             clear_weather_cache()
             clear_markets_cache()
+            clear_graphing_cache()
     except Exception:
         pass
 
@@ -510,6 +520,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
         "skill_flight_info",
         "skill_flight_tracker",
         "skill_markets_info",
+        "skill_graphing_info",
         "skill_weather_info",
         "skill_news_headlines",
         "skill_music_analysis",
@@ -539,6 +550,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     detect_missed_sports_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_music_shift_tool_call(history)
                     or detect_missed_flight_tool_call(history, active_channel_id=channel_id)
+                    or detect_missed_graphing_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_markets_tool_call(history, active_channel_id=channel_id)
                 )
                 if missed and missed[0] in active_tools:
@@ -550,6 +562,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                         forced_args = enrich_flight_tool_args(forced_args, history)
                     elif forced_tool_name == "skill_markets_info":
                         forced_args = enrich_markets_tool_args(forced_args, history, active_channel_id=channel_id)
+                    elif forced_tool_name == "skill_graphing_info":
+                        forced_args = enrich_graphing_tool_args(forced_args, history, active_channel_id=channel_id)
                     set_active_channel_id(channel_id)
                     print(f"⚡ [{current_mode.upper()}] Intercepted missed tool on turn 0 -> forcing {forced_tool_name}({forced_args})")
                     try:
@@ -634,6 +648,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     args = enrich_flight_tool_args(args, history)
                 elif tool_name == "skill_markets_info":
                     args = enrich_markets_tool_args(args, history, active_channel_id=channel_id)
+                elif tool_name == "skill_graphing_info":
+                    args = enrich_graphing_tool_args(args, history, active_channel_id=channel_id)
                 set_active_channel_id(channel_id)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
                 try:
@@ -689,7 +705,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
             called_names.issubset(_TERMINAL_SKILLS)
             and (
                 len(tool_calls) >= 2
-                or (called_names.issubset({"skill_news_headlines", "skill_markets_info"}) and not has_compound_media_intent)
+                or (called_names.issubset({"skill_news_headlines", "skill_markets_info", "skill_graphing_info"}) and not has_compound_media_intent)
             )
             and all("PARALLEL_EXECUTION_BLOCKED" not in r["content"] and not r["content"].startswith("⚠️") for r in tool_results)
         ):
@@ -836,6 +852,7 @@ async def on_message(message):
     # Phase 2: Lock-free turn execution and reply post-processing
     async with message.channel.typing():
         try:
+            clear_channel_attachments(channel_id)
             reply = await run_agent_turn(channel_id, mode_config, turn_history=turn_history)
 
             if not reply.strip():
@@ -874,10 +891,21 @@ async def on_message(message):
                     chat_history[channel_id], mode_config.get("history_limit", 40)
                 )
 
-            chunks = chunk_message(reply)
-            for chunk in chunks:
-                if chunk:
-                    await message.channel.send(chunk)
+            chunks = [c for c in chunk_message(reply) if c]
+            attachments = pop_channel_attachments(channel_id)
+            discord_files = [
+                discord.File(io.BytesIO(att["data"]), filename=att["filename"])
+                for att in attachments
+                if att.get("data")
+            ]
+            if chunks:
+                for idx, chunk in enumerate(chunks):
+                    if idx == len(chunks) - 1 and discord_files:
+                        await message.channel.send(chunk, files=discord_files)
+                    else:
+                        await message.channel.send(chunk)
+            elif discord_files:
+                await message.channel.send(files=discord_files)
 
         except Exception as e:
             print(f"❌ Error handling message: {type(e).__name__}: {e}")

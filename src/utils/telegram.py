@@ -29,7 +29,11 @@ from src.orchestrator import (
     sanitize_agent_reply,
     trim_history,
 )
-from src.context import set_active_channel_id
+from src.context import (
+    clear_channel_attachments,
+    pop_channel_attachments,
+    set_active_channel_id,
+)
 from src.skills.flights import (
     FLIGHT_TRACKER,
     skill_flight_tracker,
@@ -215,6 +219,54 @@ async def send_telegram_message(channel_or_chat_id: int, text: str, token: Optio
                 _SENT_SONG_CARDS[(chat_id, int(last_msg_id))] = chunk
 
     return last_msg_id
+
+
+def _tg_api_post_photo(
+    token: str,
+    chat_id: int,
+    filename: str,
+    png_bytes: bytes,
+    caption: str = "",
+    timeout: int = 30,
+) -> Optional[Dict[str, Any]]:
+    """Synchronous helper to upload a PNG photo via Telegram Bot HTTP API."""
+    url = f"{TELEGRAM_API_BASE}/bot{token}/sendPhoto"
+    data: Dict[str, Any] = {"chat_id": str(chat_id)}
+    if caption:
+        data["caption"] = clean_for_telegram(caption)[:1024]
+    files = {"photo": (filename or "chart.png", png_bytes, "image/png")}
+    try:
+        resp = requests.post(url, data=data, files=files, timeout=timeout)
+        return resp.json()
+    except Exception as e:
+        print(f"⚠️ [Telegram API Error (sendPhoto)]: {e}")
+        return None
+
+
+async def send_telegram_photo(
+    channel_or_chat_id: int,
+    filename: str,
+    png_bytes: bytes,
+    caption: str = "",
+    token: Optional[str] = None,
+) -> Optional[int]:
+    """Upload a rendered chart or diagram PNG to a Telegram chat."""
+    bot_token = token or os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not bot_token or not png_bytes:
+        return None
+    chat_id = from_tg_channel_id(channel_or_chat_id)
+    res = await asyncio.to_thread(
+        _tg_api_post_photo,
+        bot_token,
+        chat_id,
+        filename,
+        png_bytes,
+        caption,
+        30,
+    )
+    if res and res.get("ok") and isinstance(res.get("result"), dict):
+        return res["result"].get("message_id")
+    return None
 
 
 async def _discover_recent_discord_channels(client: Any) -> Set[int]:
@@ -545,6 +597,7 @@ async def handle_telegram_update(
     )
 
     try:
+        clear_channel_attachments(internal_cid)
         try:
             reply = await main_mod.run_agent_turn(internal_cid, mode_config, turn_history=turn_history)
         except TypeError:
@@ -580,6 +633,16 @@ async def handle_telegram_update(
             )
 
         await send_telegram_message(internal_cid, reply, token=bot_token)
+        attachments = pop_channel_attachments(internal_cid)
+        for att in attachments:
+            if att.get("data"):
+                await send_telegram_photo(
+                    internal_cid,
+                    att.get("filename") or "chart.png",
+                    att["data"],
+                    caption=att.get("caption") or "",
+                    token=bot_token,
+                )
     except Exception as e:
         print(f"❌ [Telegram Error]: {type(e).__name__}: {e}")
         await send_telegram_message(

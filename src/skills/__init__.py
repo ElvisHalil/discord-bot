@@ -10,6 +10,7 @@ from src.skills.sports import (
 from src.skills.news import skill_news_headlines
 from src.skills.flights import skill_flight_info, skill_flight_tracker
 from src.skills.markets import skill_markets_info
+from src.skills.graphing import skill_graphing_info
 
 __all__ = [
     "skill_weather_info",
@@ -24,4 +25,6 @@ __all__ = [
     "skill_flight_info",
     "skill_flight_tracker",
     "skill_markets_info",
+    "skill_graphing_info",
 ]
+

@@ -145,6 +145,13 @@ NON_SPORTS_TRACK_PHRASES: Tuple[str, ...] = FLIGHTS_DOMAIN_PHRASES + (
     "reacted with",
 )
 
+MUSIC_DOMAIN_WORDS: frozenset[str] = frozenset({
+    "beatport", "billboard", "playlist", "playlists", "song", "songs",
+    "track", "tracks", "album", "albums", "artist", "artists", "spotify",
+    "deezer", "lastfm", "soundcloud", "techno", "phonk", "dnb", "house",
+    "trance", "dubstep", "hardstyle", "hiphop", "rap", "banger",
+})
+
 # Matches commercial IATA/ICAO flight numbers such as AC850, KL675, WS102, UA 1234, BAW123
 _FLIGHT_NUMBER_CODE_RE = re.compile(
     r"\b(?:AC|WS|KL|LH|BA|AF|DL|UA|AA|EK|QR|TK|JL|NH|SQ|CX|QF|OS|LX|IB|AZ|SK|AY|EI|VS|WN|AS|B6|NK|F9|PD|TS|F8)\s?\d{1,4}\b",
@@ -333,6 +340,18 @@ TOOL_ARG_ALIASES: Dict[str, Dict[str, str]] = {
         "mode": "view", "type": "view", "category": "view", "section": "view",
         "period": "timeframe", "range": "timeframe", "horizon": "timeframe", "duration": "timeframe", "window": "timeframe", "time_range": "timeframe",
     },
+    "skill_graphing_info": {
+        "type": "chart_type", "kind": "chart_type", "mode": "chart_type", "style": "chart_type", "diagram_type": "chart_type",
+        "heading": "title", "name": "title", "chart_title": "title",
+        "values": "data", "series": "data", "dataset": "data", "datasets": "data", "numbers": "data", "points": "data",
+        "mermaid": "diagram", "diagram_code": "diagram", "code": "diagram", "flowchart": "diagram", "sequence": "diagram", "graph": "diagram",
+        "categories": "labels", "x_labels": "labels", "names": "labels", "items": "labels",
+        "symbol": "ticker", "symbols": "ticker", "tickers": "ticker", "stock": "ticker", "stocks": "ticker", "asset": "ticker",
+        "period": "timeframe", "range": "timeframe", "horizon": "timeframe", "window": "timeframe",
+        "x": "x_label", "xlabel": "x_label",
+        "y": "y_label", "ylabel": "y_label",
+        "q": "query", "prompt": "query", "description": "query",
+    },
     "evaluate_math": {
         "math": "expression", "expr": "expression", "equation": "expression",
         "formula": "expression", "query": "expression", "q": "expression",
@@ -341,5 +360,6 @@ TOOL_ARG_ALIASES: Dict[str, Dict[str, str]] = {
         "memory": "fact", "note": "fact", "info": "fact", "text": "fact", "content": "fact",
     },
 }
+
 
 

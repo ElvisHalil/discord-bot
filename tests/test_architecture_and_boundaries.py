@@ -76,6 +76,17 @@ from src.skills.markets.models import (
     HistoricalSummary,
     TickerQuote,
 )
+from src.skills.graphing.enums import (
+    ChartType,
+    DiagramType,
+)
+from src.skills.graphing.models import (
+    ChartChannelState,
+    ChartSeries,
+    ChartSpec,
+    MarketBarSeries,
+    RenderedVisual,
+)
 from src.skills.news.catalogs import NEWS_EDITIONS, NEWS_TOPICS_MAP
 from src.skills.news.enums import NewsTopic
 from src.skills.news.models import NewsEdition
@@ -108,7 +119,7 @@ from src.utils.timezones import FixedTimezoneSpec
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src"
 SKILLS_ROOT = SRC_ROOT / "src" / "skills" if not (SRC_ROOT / "skills").exists() else SRC_ROOT / "skills"
-DOMAIN_SKILLS = {"music", "sports", "flights", "news", "weather", "markets"}
+DOMAIN_SKILLS = {"music", "sports", "flights", "news", "weather", "markets", "graphing"}
 
 
 class TestArchitectureAndBoundaries(unittest.TestCase):
@@ -211,7 +222,7 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
 
     def test_strict_separation_of_enums_models_and_catalogs(self):
         """Verify each domain skill strictly separates StrEnums (enums.py), dataclasses (models.py), and static tables (catalogs.py)."""
-        for skill in ("music", "sports", "flights", "news", "weather", "youtube", "markets"):
+        for skill in ("music", "sports", "flights", "news", "weather", "youtube", "markets", "graphing"):
             enums_mod = importlib.import_module(f"src.skills.{skill}.enums")
             models_mod = importlib.import_module(f"src.skills.{skill}.models")
             catalogs_mod = importlib.import_module(f"src.skills.{skill}.catalogs")
@@ -279,6 +290,8 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
             MarketRegion,
             AssetClass,
             HistoricalTimeframe,
+            ChartType,
+            DiagramType,
         )
         for enum_cls in enum_types:
             self.assertTrue(issubclass(enum_cls, StrEnum), f"{enum_cls.__name__} must inherit from StrEnum")
@@ -306,6 +319,11 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
             TickerQuote,
             CryptoAssetQuote,
             HistoricalSummary,
+            ChartSeries,
+            ChartSpec,
+            MarketBarSeries,
+            RenderedVisual,
+            ChartChannelState,
         )
         for dc_cls in dataclass_types:
             self.assertTrue(is_dataclass(dc_cls), f"{dc_cls.__name__} must be a @dataclass")
@@ -454,12 +472,13 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
         skill_names = {d.name for d in skill_dirs}
         self.assertEqual(
             skill_names,
-            {".example", "flights", "markets", "music", "news", "sports", "weather", "youtube"},
+            {".example", "flights", "graphing", "markets", "music", "news", "sports", "weather", "youtube"},
         )
 
         expected_base_aggregators = {
             ".example": "BaseExampleAggregator",
             "flights": "BaseFlightAggregator",
+            "graphing": "BaseGraphingAggregator",
             "markets": "BaseMarketAggregator",
             "music": "BaseMusicAggregator",
             "news": "BaseNewsAggregator",
@@ -558,9 +577,11 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
             "skill_track_live_game",
             "skill_track_flight",
             "skill_flights_info",
+            "skill_charts_info",
             "skill_example_lookup",
             "skill_track_example",
             "BaseYouTubeSearchAggregator",
+            "BaseChartAggregator",
             "YouTubeSearchManager",
             "LiveSportsTracker",
             "LIVE_TRACKER",

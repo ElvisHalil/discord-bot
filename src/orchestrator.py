@@ -22,6 +22,10 @@ import re
 import types
 import typing
 
+from src.skills.graphing.context import (
+    detect_missed_graphing_tool_call,
+    enrich_graphing_tool_args,
+)
 from src.skills.flights.context import (
     build_google_flights_url,
     detect_missed_flight_tool_call,
@@ -215,6 +219,14 @@ def trim_history(history: list, limit: int, old_tool_chars: int = OLD_TOOL_OUTPU
                         "[EXPIRED MARKET SNAPSHOT FROM EARLIER TURN — DO NOT REUSE OLD PRICES, RETURNS, OR MOVERS "
                         "WHEN THE USER ASKS A FOLLOW-UP TIMEFRAME, COMPARISON, OR PRICE QUESTION. You MUST call "
                         "skill_markets_info again for fresh real-time / historical data.]"
+                    ),
+                }
+            elif tool_name == "skill_graphing_info":
+                rest[i] = {
+                    **msg,
+                    "content": (
+                        "[EXPIRED VISUAL CHART/DIAGRAM SNAPSHOT FROM EARLIER TURN — You MUST call "
+                        "skill_graphing_info again if the user asks to render a new or updated chart or diagram.]"
                     ),
                 }
             else:

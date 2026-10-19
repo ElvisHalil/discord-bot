@@ -1,0 +1,502 @@
+"""
+Thread-safe Matplotlib dark-mode rendering engine (`src/skills/graphing/aggregators/matplotlib_engine.py`).
+
+Uses Matplotlib's object-oriented `Figure` + `FigureCanvasAgg` directly (bypassing global `pyplot` state)
+so concurrent worker threads in `SUB_WORKER_POOL` can render charts in parallel with zero race conditions.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import io
+import math
+import re
+from typing import List, Optional, Tuple
+
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
+import matplotlib.patches as mpatches
+import matplotlib.ticker as mticker
+
+from src.skills.graphing.aggregators.base import BaseGraphingAggregator
+from src.skills.graphing.catalogs import (
+    BEARISH_RED,
+    BULLISH_GREEN,
+    DARK_BG_COLOR,
+    DARK_GRID_COLOR,
+    DARK_MUTED_TEXT_COLOR,
+    DARK_PANEL_COLOR,
+    DARK_TEXT_COLOR,
+    DARK_THEME_PALETTE,
+)
+from src.skills.graphing.enums import ChartType
+from src.skills.graphing.models import ChartSpec, MarketBarSeries, RenderedVisual
+
+
+def _slugify_filename(title: str, default: str = "chart") -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", (title or "").strip()).strip("_").lower()
+    return f"{slug[:48] or default}.png"
+
+
+def _fmt_price_val(val: float) -> str:
+    av = abs(val)
+    if 0 < av < 0.01:
+        return f"{val:,.8f}".rstrip("0").rstrip(".")
+    if 0 < av < 1.0:
+        return f"{val:,.4f}"
+    return f"{val:,.2f}"
+
+
+def _style_dark_axes(ax, title: str = "", subtitle: str = "", x_label: str = "", y_label: str = "") -> None:
+    ax.set_facecolor(DARK_PANEL_COLOR)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    for spine in ("bottom", "left"):
+        ax.spines[spine].set_color(DARK_GRID_COLOR)
+        ax.spines[spine].set_linewidth(0.9)
+    ax.tick_params(colors=DARK_TEXT_COLOR, labelsize=9.5)
+    ax.grid(True, linestyle="--", linewidth=0.6, color=DARK_GRID_COLOR, alpha=0.65)
+    ax.set_axisbelow(True)
+    if title:
+        ax.set_title(
+            title,
+            color=DARK_TEXT_COLOR,
+            fontsize=13,
+            fontweight="bold",
+            pad=18 if subtitle else 12,
+            loc="left",
+        )
+    if subtitle:
+        ax.text(
+            0.0,
+            1.02,
+            subtitle,
+            transform=ax.transAxes,
+            color=DARK_MUTED_TEXT_COLOR,
+            fontsize=9.5,
+            va="bottom",
+            ha="left",
+        )
+    if x_label:
+        ax.set_xlabel(x_label, color=DARK_MUTED_TEXT_COLOR, fontsize=10, labelpad=8)
+    if y_label:
+        ax.set_ylabel(y_label, color=DARK_MUTED_TEXT_COLOR, fontsize=10, labelpad=8)
+
+
+def _figure_to_png_bytes(fig: Figure, dpi: int = 140) -> bytes:
+    canvas = FigureCanvasAgg(fig)
+    buf = io.BytesIO()
+    canvas.print_png(buf)
+    return buf.getvalue()
+
+
+class MatplotlibChartAggregator(BaseGraphingAggregator):
+    """Renders universal 2D data charts, single/multi-ticker financial charts, and fallback flowcharts."""
+
+    name = "matplotlib"
+
+    def render_data_chart(self, spec: ChartSpec) -> RenderedVisual:
+        """Render a line, area, bar, horizontal_bar, stacked_bar, scatter, pie, or donut chart to PNG bytes."""
+        ctype = (spec.chart_type or ChartType.BAR).lower().strip()
+        fig = Figure(figsize=(10.0, 5.8), dpi=140, facecolor=DARK_BG_COLOR)
+        ax = fig.add_subplot(111)
+
+        summary_lines: List[str] = []
+        series_list = spec.series or []
+        labels = list(spec.labels or [])
+
+        if ctype in (ChartType.PIE, ChartType.DONUT):
+            ax.set_facecolor(DARK_BG_COLOR)
+            s0 = series_list[0] if series_list else None
+            vals = [max(0.0, float(v)) for v in (s0.values if s0 else [])]
+            if not labels or len(labels) < len(vals):
+                labels = labels + [f"Item {i + 1}" for i in range(len(labels), len(vals))]
+            colors = [DARK_THEME_PALETTE[i % len(DARK_THEME_PALETTE)] for i in range(len(vals))]
+            wedge_props = {"edgecolor": DARK_BG_COLOR, "linewidth": 1.8}
+            if ctype == ChartType.DONUT:
+                wedge_props["width"] = 0.45
+            wedges, texts, autotexts = ax.pie(
+                vals,
+                labels=labels[: len(vals)],
+                colors=colors,
+                autopct=lambda pct: f"{pct:.1f}%" if pct >= 3.0 else "",
+                startangle=140,
+                pctdistance=0.76 if ctype == ChartType.DONUT else 0.65,
+                wedgeprops=wedge_props,
+                textprops={"color": DARK_TEXT_COLOR, "fontsize": 10},
+            )
+            for at in autotexts:
+                at.set_color(DARK_BG_COLOR if ctype == ChartType.PIE else DARK_TEXT_COLOR)
+                at.set_fontweight("bold")
+                at.set_fontsize(9)
+            ax.set_title(spec.title or "Distribution", color=DARK_TEXT_COLOR, fontsize=13.5, fontweight="bold", pad=14)
+            total = sum(vals) or 1.0
+            top_items = sorted(zip(labels[: len(vals)], vals), key=lambda x: x[1], reverse=True)[:4]
+            summary_lines.append(
+                "**Top Segments:** "
+                + ", ".join(f"{lbl} ({val:,.2f} | {(val / total) * 100:.1f}%)" for lbl, val in top_items)
+            )
+        else:
+            _style_dark_axes(
+                ax,
+                title=spec.title or "Data Visualization",
+                subtitle=spec.subtitle,
+                x_label=spec.x_label,
+                y_label=spec.y_label,
+            )
+            max_len = max((len(s.values) for s in series_list), default=0)
+            if not labels and max_len > 0:
+                labels = [str(i + 1) for i in range(max_len)]
+            elif len(labels) < max_len:
+                labels = labels + [str(i + 1) for i in range(len(labels), max_len)]
+
+            x_idx = list(range(max_len))
+            n_series = max(1, len(series_list))
+
+            if ctype == ChartType.HORIZONTAL_BAR:
+                bar_h = 0.72 / n_series
+                for idx, s in enumerate(series_list):
+                    color = s.color or DARK_THEME_PALETTE[idx % len(DARK_THEME_PALETTE)]
+                    offsets = [y + (idx - (n_series - 1) / 2.0) * bar_h for y in range(len(s.values))]
+                    bars = ax.barh(offsets, s.values, height=bar_h * 0.92, color=color, label=s.name, alpha=0.92)
+                    if len(s.values) <= 12:
+                        for b in bars:
+                            w = b.get_width()
+                            ax.text(
+                                w,
+                                b.get_y() + b.get_height() / 2.0,
+                                f" {spec.value_prefix}{w:,.2f}{spec.value_suffix}",
+                                va="center",
+                                ha="left",
+                                color=DARK_TEXT_COLOR,
+                                fontsize=8.5,
+                            )
+                ax.set_yticks(range(len(labels)))
+                ax.set_yticklabels(labels)
+                ax.invert_yaxis()
+            elif ctype in (ChartType.BAR, ChartType.STACKED_BAR):
+                bar_w = 0.72 if ctype == ChartType.STACKED_BAR else (0.76 / n_series)
+                bottoms = [0.0] * max_len
+                for idx, s in enumerate(series_list):
+                    color = s.color or DARK_THEME_PALETTE[idx % len(DARK_THEME_PALETTE)]
+                    vals = list(s.values) + [0.0] * (max_len - len(s.values))
+                    if ctype == ChartType.STACKED_BAR:
+                        ax.bar(x_idx, vals, width=bar_w, bottom=bottoms, color=color, label=s.name, alpha=0.92)
+                        bottoms = [b + v for b, v in zip(bottoms, vals)]
+                    else:
+                        offsets = [x + (idx - (n_series - 1) / 2.0) * bar_w for x in x_idx]
+                        bars = ax.bar(offsets, vals, width=bar_w * 0.92, color=color, label=s.name, alpha=0.92)
+                        if max_len <= 10 and n_series <= 2:
+                            for b in bars:
+                                h = b.get_height()
+                                ax.annotate(
+                                    f"{spec.value_prefix}{h:,.2f}{spec.value_suffix}".rstrip("0").rstrip(".")
+                                    if h % 1 == 0
+                                    else f"{spec.value_prefix}{h:,.2f}{spec.value_suffix}",
+                                    xy=(b.get_x() + b.get_width() / 2.0, h),
+                                    xytext=(0, 4),
+                                    textcoords="offset points",
+                                    ha="center",
+                                    va="bottom",
+                                    color=DARK_TEXT_COLOR,
+                                    fontsize=8.5,
+                                )
+                ax.set_xticks(x_idx)
+                ax.set_xticklabels(labels[:max_len], rotation=25 if max_len > 7 else 0, ha="right" if max_len > 7 else "center")
+            elif ctype == ChartType.SCATTER:
+                for idx, s in enumerate(series_list):
+                    color = s.color or DARK_THEME_PALETTE[idx % len(DARK_THEME_PALETTE)]
+                    xs = s.x_values if (s.x_values and len(s.x_values) == len(s.values)) else list(range(len(s.values)))
+                    ax.scatter(xs, s.values, color=color, label=s.name, s=58, alpha=0.9, edgecolors=DARK_BG_COLOR, linewidth=0.8)
+                if labels and not any(s.x_values for s in series_list):
+                    ax.set_xticks(x_idx)
+                    ax.set_xticklabels(labels[:max_len], rotation=25 if max_len > 7 else 0)
+            else:
+                # LINE or AREA
+                for idx, s in enumerate(series_list):
+                    color = s.color or DARK_THEME_PALETTE[idx % len(DARK_THEME_PALETTE)]
+                    xs = list(range(len(s.values)))
+                    marker = "o" if len(s.values) <= 24 else None
+                    ax.plot(xs, s.values, color=color, label=s.name, linewidth=2.3, marker=marker, markersize=4.5)
+                    if ctype == ChartType.AREA or len(series_list) == 1:
+                        ax.fill_between(xs, s.values, min(0.0, min(s.values)) if min(s.values) < 0 else min(s.values) * 0.96, color=color, alpha=0.16)
+                if max_len > 0:
+                    step = max(1, math.ceil(max_len / 10))
+                    tick_positions = list(range(0, max_len, step))
+                    if (max_len - 1) not in tick_positions:
+                        tick_positions.append(max_len - 1)
+                    ax.set_xticks(tick_positions)
+                    ax.set_xticklabels([labels[i] for i in tick_positions], rotation=20 if len(tick_positions) > 6 else 0)
+
+            if len(series_list) > 1 or (series_list and series_list[0].name and series_list[0].name != "Series 1"):
+                leg = ax.legend(facecolor=DARK_PANEL_COLOR, edgecolor=DARK_GRID_COLOR, fontsize=9.5, loc="best")
+                for txt in leg.get_texts():
+                    txt.set_color(DARK_TEXT_COLOR)
+
+            for s in series_list[:4]:
+                if s.values:
+                    summary_lines.append(
+                        f"**{s.name}:** Start `{s.values[0]:,.2f}` → End `{s.values[-1]:,.2f}` "
+                        f"(Min `{min(s.values):,.2f}`, Max `{max(s.values):,.2f}`)"
+                    )
+
+        fig.tight_layout(pad=1.4)
+        png_bytes = _figure_to_png_bytes(fig)
+        return RenderedVisual(
+            filename=_slugify_filename(spec.title, default=f"{ctype}_chart"),
+            png_bytes=png_bytes,
+            title=spec.title or "Data Visualization",
+            summary_lines=summary_lines,
+            renderer_used="matplotlib",
+        )
+
+    def render_single_market_chart(self, bar_series: MarketBarSeries) -> RenderedVisual:
+        """Render a dual-panel dark-mode price + moving-averages + volume chart for a single market ticker."""
+        fig = Figure(figsize=(10.5, 6.4), dpi=140, facecolor=DARK_BG_COLOR)
+        gs = fig.add_gridspec(2, 1, height_ratios=[3.2, 1.0], hspace=0.08)
+        ax_price = fig.add_subplot(gs[0])
+        ax_vol = fig.add_subplot(gs[1], sharex=ax_price)
+
+        closes = bar_series.closes
+        timestamps = bar_series.timestamps
+        volumes = bar_series.volumes
+        n = len(closes)
+
+        is_up = closes[-1] >= closes[0] if n >= 2 else True
+        main_color = BULLISH_GREEN if is_up else BEARISH_RED
+        sign = "+" if bar_series.pct_change > 0 else ""
+
+        start_dt = datetime.fromtimestamp(timestamps[0], tz=timezone.utc).strftime("%b %d, %Y") if timestamps else ""
+        end_dt = datetime.fromtimestamp(timestamps[-1], tz=timezone.utc).strftime("%b %d, %Y") if timestamps else ""
+        title_str = f"{bar_series.name} ({bar_series.symbol}) — {bar_series.timeframe_label}"
+        subtitle_str = (
+            f"Latest: {_fmt_price_val(closes[-1])} {bar_series.currency} ({sign}{bar_series.pct_change:.2f}%)  |  "
+            f"Window: {start_dt} → {end_dt}  |  High: {_fmt_price_val(bar_series.period_high)} / Low: {_fmt_price_val(bar_series.period_low)}"
+        )
+
+        _style_dark_axes(ax_price, title=title_str, subtitle=subtitle_str, y_label=f"Price ({bar_series.currency})")
+        _style_dark_axes(ax_vol, y_label="Volume")
+        ax_price.tick_params(labelbottom=False)
+
+        xs = list(range(n))
+        ax_price.plot(xs, closes, color=main_color, linewidth=2.1, label=f"{bar_series.symbol} Close")
+        y_floor = min(closes) * 0.985 if min(closes) > 0 else min(closes)
+        ax_price.fill_between(xs, closes, y_floor, color=main_color, alpha=0.15)
+
+        # Overlay 50-period and 200-period moving averages when enough daily bars are present
+        if n >= 50:
+            ma50_vals = [sum(closes[max(0, i - 49) : i + 1]) / min(50, i + 1) for i in range(n)]
+            ax_price.plot(xs, ma50_vals, color="#58A6FF", linewidth=1.35, linestyle="--", alpha=0.88, label="50-Period MA")
+        if n >= 200:
+            ma200_vals = [sum(closes[max(0, i - 199) : i + 1]) / min(200, i + 1) for i in range(n)]
+            ax_price.plot(xs, ma200_vals, color="#D2A8FF", linewidth=1.35, linestyle="-.", alpha=0.88, label="200-Period MA")
+
+        # Annotate period high and low
+        if n >= 3:
+            hi_idx = max(range(n), key=lambda i: closes[i])
+            lo_idx = min(range(n), key=lambda i: closes[i])
+            ax_price.scatter([hi_idx], [closes[hi_idx]], color=BULLISH_GREEN, s=36, zorder=5)
+            ax_price.scatter([lo_idx], [closes[lo_idx]], color=BEARISH_RED, s=36, zorder=5)
+
+        leg = ax_price.legend(facecolor=DARK_PANEL_COLOR, edgecolor=DARK_GRID_COLOR, fontsize=9, loc="upper left")
+        for txt in leg.get_texts():
+            txt.set_color(DARK_TEXT_COLOR)
+
+        # Volume bars
+        vol_colors = [
+            BULLISH_GREEN if (i == 0 or closes[i] >= closes[i - 1]) else BEARISH_RED
+            for i in range(n)
+        ]
+        ax_vol.bar(xs, volumes, color=vol_colors, width=0.75, alpha=0.7)
+        ax_vol.yaxis.set_major_formatter(
+            mticker.FuncFormatter(
+                lambda v, _: f"{v / 1e6:.1f}M" if v >= 1e6 else (f"{v / 1e3:.0f}K" if v >= 1e3 else f"{v:.0f}")
+            )
+        )
+
+        # Date tick labels
+        step = max(1, math.ceil(n / 8))
+        tick_idxs = list(range(0, n, step))
+        if (n - 1) not in tick_idxs:
+            tick_idxs.append(n - 1)
+        span_days = (timestamps[-1] - timestamps[0]) / 86400.0 if n >= 2 else 30
+        fmt_str = "%H:%M" if span_days <= 2 else ("%b %d" if span_days <= 370 else "%b '%y")
+        tick_labels = [datetime.fromtimestamp(timestamps[i], tz=timezone.utc).strftime(fmt_str) for i in tick_idxs]
+        ax_vol.set_xticks(tick_idxs)
+        ax_vol.set_xticklabels(tick_labels, rotation=0)
+
+        png_bytes = _figure_to_png_bytes(fig)
+        summary_lines = [
+            f"**Asset:** {bar_series.name} (`{bar_series.symbol}`) — {bar_series.timeframe_label}",
+            f"**Price Trajectory:** {_fmt_price_val(closes[0])} {bar_series.currency} → **{_fmt_price_val(closes[-1])} {bar_series.currency}** (**{sign}{bar_series.pct_change:.2f}%**)",
+            f"**Period Range:** Low **{_fmt_price_val(bar_series.period_low)}** — High **{_fmt_price_val(bar_series.period_high)} {bar_series.currency}** ({n} bars plotted)",
+        ]
+        return RenderedVisual(
+            filename=_slugify_filename(f"{bar_series.symbol}_{bar_series.timeframe_label}", default="market_chart"),
+            png_bytes=png_bytes,
+            title=title_str,
+            summary_lines=summary_lines,
+            renderer_used="matplotlib_market",
+        )
+
+    def render_multi_market_comparison(self, series_list: List[MarketBarSeries]) -> RenderedVisual:
+        """Render a normalized cumulative % return comparison chart for 2 to 5 market tickers."""
+        fig = Figure(figsize=(10.5, 6.0), dpi=140, facecolor=DARK_BG_COLOR)
+        ax = fig.add_subplot(111)
+
+        tf_label = series_list[0].timeframe_label if series_list else "1-Year (1Y)"
+        sym_names = " vs. ".join(s.symbol for s in series_list)
+        title_str = f"Normalized Return Comparison: {sym_names} ({tf_label})"
+        _style_dark_axes(
+            ax,
+            title=title_str,
+            subtitle="Cumulative percentage return indexed to 0.0% at period start",
+            y_label="Cumulative Return (%)",
+        )
+        ax.axhline(0.0, color=DARK_MUTED_TEXT_COLOR, linestyle=":", linewidth=1.1, alpha=0.8)
+
+        ranked = sorted(series_list, key=lambda s: s.pct_change, reverse=True)
+        longest_s = max(series_list, key=lambda s: len(s.timestamps))
+
+        for idx, s in enumerate(ranked):
+            if not s.closes or s.closes[0] <= 0:
+                continue
+            base = s.closes[0]
+            pct_curve = [((c - base) / base) * 100.0 for c in s.closes]
+            # Normalize X positions to [0, 100] so slight bar-count differences (e.g. TSX vs US holidays vs 24/7 crypto) align cleanly
+            n_pts = len(pct_curve)
+            xs = [i * (100.0 / max(1, n_pts - 1)) for i in range(n_pts)]
+            color = DARK_THEME_PALETTE[idx % len(DARK_THEME_PALETTE)]
+            sign = "+" if s.pct_change > 0 else ""
+            ax.plot(
+                xs,
+                pct_curve,
+                color=color,
+                linewidth=2.3,
+                label=f"{s.symbol} ({sign}{s.pct_change:.2f}%)",
+            )
+
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{'+' if v > 0 else ''}{v:.1f}%"))
+
+        if longest_s.timestamps:
+            n_ts = len(longest_s.timestamps)
+            span_days = (longest_s.timestamps[-1] - longest_s.timestamps[0]) / 86400.0 if n_ts >= 2 else 30
+            fmt_str = "%b %d" if span_days <= 370 else "%b '%y"
+            tick_positions = [0, 20, 40, 60, 80, 100]
+            tick_labels = [
+                datetime.fromtimestamp(
+                    longest_s.timestamps[min(n_ts - 1, int(round((p / 100.0) * (n_ts - 1))))],
+                    tz=timezone.utc,
+                ).strftime(fmt_str)
+                for p in tick_positions
+            ]
+            ax.set_xticks(tick_positions)
+            ax.set_xticklabels(tick_labels)
+
+        leg = ax.legend(facecolor=DARK_PANEL_COLOR, edgecolor=DARK_GRID_COLOR, fontsize=10, loc="upper left")
+        for txt in leg.get_texts():
+            txt.set_color(DARK_TEXT_COLOR)
+
+        fig.tight_layout(pad=1.4)
+        png_bytes = _figure_to_png_bytes(fig)
+        summary_lines = [
+            f"**Comparison Window:** {tf_label}",
+            "**Ranked Cumulative Returns:** "
+            + " | ".join(f"**{s.symbol}**: {'+' if s.pct_change > 0 else ''}{s.pct_change:.2f}%" for s in ranked),
+        ]
+        if len(ranked) >= 2:
+            lead = ranked[0].pct_change - ranked[1].pct_change
+            summary_lines.append(
+                f"**Outperformer:** `{ranked[0].symbol}` led `{ranked[1].symbol}` by **+{lead:.2f}%**"
+            )
+        return RenderedVisual(
+            filename=_slugify_filename(f"compare_{'_vs_'.join(s.symbol for s in series_list)}", default="comparison_chart"),
+            png_bytes=png_bytes,
+            title=title_str,
+            summary_lines=summary_lines,
+            renderer_used="matplotlib_comparison",
+        )
+
+    def render_flowchart_fallback(
+        self,
+        title: str,
+        nodes: List[Tuple[str, str]],
+        edges: List[Tuple[str, str, Optional[str]]],
+        direction: str = "TD",
+    ) -> bytes:
+        """Render a clean dark-mode directed node-and-arrow flowchart locally via Matplotlib when offline."""
+        is_horiz = direction.upper() in ("LR", "RL")
+        n_nodes = max(1, len(nodes))
+        fig_w = max(8.5, min(14.0, n_nodes * 2.1)) if is_horiz else 9.0
+        fig_h = 5.2 if is_horiz else max(5.5, min(13.0, n_nodes * 1.45))
+        fig = Figure(figsize=(fig_w, fig_h), dpi=140, facecolor=DARK_BG_COLOR)
+        ax = fig.add_subplot(111)
+        ax.set_facecolor(DARK_BG_COLOR)
+        ax.axis("off")
+
+        if title:
+            ax.set_title(title, color=DARK_TEXT_COLOR, fontsize=13.5, fontweight="bold", pad=14)
+
+        coords: dict[str, Tuple[float, float]] = {}
+        for idx, (node_id, _) in enumerate(nodes):
+            t = (idx + 0.5) / n_nodes
+            if is_horiz:
+                coords[node_id] = (t, 0.5 + (0.14 * ((idx % 2) * 2 - 1) if n_nodes > 4 else 0.0))
+            else:
+                coords[node_id] = (0.5 + (0.18 * ((idx % 2) * 2 - 1) if n_nodes > 5 else 0.0), 1.0 - t)
+
+        # Draw edges
+        for src, dst, edge_lbl in edges:
+            if src in coords and dst in coords:
+                x0, y0 = coords[src]
+                x1, y1 = coords[dst]
+                arrow = mpatches.FancyArrowPatch(
+                    (x0, y0),
+                    (x1, y1),
+                    arrowstyle="-|>,head_length=8,head_width=5",
+                    connectionstyle="arc3,rad=0.06",
+                    color="#58A6FF",
+                    linewidth=1.8,
+                    zorder=2,
+                )
+                ax.add_patch(arrow)
+                if edge_lbl:
+                    mx, my = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+                    ax.text(
+                        mx,
+                        my + 0.03,
+                        edge_lbl,
+                        color=DARK_MUTED_TEXT_COLOR,
+                        fontsize=8.5,
+                        ha="center",
+                        va="center",
+                        bbox={"boxstyle": "round,pad=0.2", "facecolor": DARK_BG_COLOR, "edgecolor": "none"},
+                        zorder=4,
+                    )
+
+        # Draw node boxes
+        for idx, (node_id, label) in enumerate(nodes):
+            x, y = coords[node_id]
+            border_color = DARK_THEME_PALETTE[idx % len(DARK_THEME_PALETTE)]
+            ax.text(
+                x,
+                y,
+                label,
+                color=DARK_TEXT_COLOR,
+                fontsize=10,
+                fontweight="bold",
+                ha="center",
+                va="center",
+                bbox={
+                    "boxstyle": "round,pad=0.65,rounding_size=0.2",
+                    "facecolor": DARK_PANEL_COLOR,
+                    "edgecolor": border_color,
+                    "linewidth": 1.8,
+                },
+                zorder=5,
+            )
+
+        ax.set_xlim(0.0, 1.0)
+        ax.set_ylim(0.0, 1.0)
+        fig.tight_layout(pad=1.2)
+        return _figure_to_png_bytes(fig)

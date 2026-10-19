@@ -20,7 +20,8 @@ def _build_research_prompt(facts: str) -> str:
         f"Today is {now_str}. You are a helpful research assistant with access to live tools.\n"
         "Use `skill_markets_info` for stocks, global indices (TSX, S&P 500, NASDAQ, Europe, Asia), "
         "commodities (gold, silver, oil, natural gas, copper), cryptocurrencies, daily market movers, "
-        "multi-horizon historical returns, and multi-ticker comparisons.\n\n"
+        "multi-horizon historical returns, and multi-ticker comparisons.\n"
+        "Use `skill_graphing_info` ON DEMAND when asked to plot, chart, graph, or diagram data, tickers, or workflows.\n\n"
         f"Known user context:\n{facts}"
     )
 
