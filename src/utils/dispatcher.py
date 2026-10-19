@@ -225,7 +225,9 @@ async def dispatch_voice_command(
             if hasattr(author_voice_channel, "connect"):
                 try:
                     import importlib
+                    from src.skills.voice.playback.discord_audio import ensure_opus_loaded
 
+                    ensure_opus_loaded()
                     connect_kwargs: Dict[str, Any] = {}
                     if importlib.util.find_spec("discord.ext.voice_recv") is not None:
                         voice_recv = importlib.import_module("discord.ext.voice_recv")

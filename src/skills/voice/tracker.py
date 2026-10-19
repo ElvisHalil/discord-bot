@@ -500,3 +500,4 @@ def skill_voice_tracker(
     from src.skills.voice.voice import skill_voice_info
 
     return skill_voice_info(action=action, query=query, mode=mode, voice_profile=voice_profile)
+

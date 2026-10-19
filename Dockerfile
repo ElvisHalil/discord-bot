@@ -6,14 +6,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    HOME=/home/botuser
+    HOME=/home/botuser \
+    XDG_CACHE_HOME=/tmp/.cache
 
-# Install minimal system dependencies & sandboxed CLI utilities
+# Install minimal system dependencies, voice codecs (Opus/Sodium/FFmpeg) & sandboxed CLI utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    ffmpeg \
     git \
     jq \
+    libopus0 \
+    libsodium23 \
     procps \
     tzdata \
     && rm -rf /var/lib/apt/lists/*

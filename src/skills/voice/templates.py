@@ -26,3 +26,4 @@ def build_voice_llm_instructions(action: str = VoiceAction.STATUS, is_spoken_tur
         "- Confirm the voice channel status, active listening mode, voice profile, or spoken action concisely in 1-2 sentences.\n"
         "- Never mention internal tool or function names."
     )
+

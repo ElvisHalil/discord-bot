@@ -177,3 +177,4 @@ class VoiceSttAggregator(BaseVoiceAggregator):
         if re.fullmatch(r"\[?\s*(?:silence|no\s+speech|inaudible|background\s+noise|music|blank_audio)\s*\]?\.?", s, flags=re.IGNORECASE):
             return ""
         return s
+

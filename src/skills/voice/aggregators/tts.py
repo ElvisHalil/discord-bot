@@ -196,3 +196,4 @@ class VoiceTtsAggregator(BaseVoiceAggregator):
         except Exception as e:
             logger.debug("edge_tts synthesis failed: %s", e)
         return None
+

@@ -312,3 +312,4 @@ def sanitize_text_for_speech(text: str, max_chars: int = 380) -> str:
             s = cut.rsplit(" ", 1)[0].strip() + "."
 
     return s
+

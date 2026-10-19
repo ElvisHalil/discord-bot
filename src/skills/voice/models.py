@@ -71,3 +71,4 @@ class VoiceSessionRecord:
     announce_live_trackers: bool = True
     is_muted: bool = False
     utterances: List[SpeakerUtterance] = field(default_factory=list)
+

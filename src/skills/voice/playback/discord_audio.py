@@ -25,11 +25,32 @@ from src.skills.voice.engine.vad import (
 logger = logging.getLogger(__name__)
 
 
+def ensure_opus_loaded() -> bool:
+    """
+    Ensure `discord.opus` has loaded the native Opus codec library across Windows (bundled DLL),
+    Linux Docker (`libopus.so.0`), and macOS (`libopus.0.dylib`). Never raises if unavailable.
+    """
+    try:
+        if discord.opus.is_loaded():
+            return True
+        for lib_name in ("libopus.so.0", "libopus.so", "libopus.0.dylib", "opus"):
+            try:
+                discord.opus.load_opus(lib_name)
+                if discord.opus.is_loaded():
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
 def build_discord_pcm_source(audio_bytes: bytes, volume: float = 0.9) -> Optional[discord.AudioSource]:
     """
     Decode MP3/WAV audio bytes into 48 kHz 16-bit stereo PCM in memory and wrap in a
     `discord.PCMVolumeTransformer(discord.PCMAudio(...))` ready for `voice_client.play(...)`.
     """
+    ensure_opus_loaded()
     pcm_48k = audio_bytes_to_discord_pcm_48k_stereo(audio_bytes)
     if not pcm_48k:
         return None
@@ -176,3 +197,4 @@ def attach_discord_voice_receiver(
     except Exception as e:
         logger.debug("Could not attach discord-ext-voice-recv sink: %s", e)
     return False
+

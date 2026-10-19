@@ -16,3 +16,7 @@ fast-flights~=3.1
 FlightRadarAPI~=1.6
 primp~=0.15
 selectolax~=0.3
+PyNaCl~=1.5
+edge-tts~=7.0
+discord-ext-voice-recv>=0.5.2a179
+

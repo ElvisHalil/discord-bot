@@ -56,3 +56,4 @@ class TtsBackend(StrEnum):
     EDGE_NEURAL = "edge_neural"
     LOCAL_HTTP = "local_http"
     WAVE_SYNTH = "wave_synth"
+

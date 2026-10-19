@@ -7,3 +7,4 @@ from abc import ABC
 
 class BaseVoiceAggregator(ABC):
     """Base contract for Speech-to-Text (STT) and Text-to-Speech (TTS) providers."""
+

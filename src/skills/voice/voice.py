@@ -113,3 +113,4 @@ def skill_voice_info(
         return VOICE_COHOST.format_session_status(cid) + build_voice_llm_instructions(action=act)
 
     return VOICE_COHOST.format_session_status(cid) + build_voice_llm_instructions(action=VoiceAction.STATUS)
+
