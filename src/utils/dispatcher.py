@@ -225,7 +225,7 @@ async def dispatch_voice_command(
     low = text.strip().lower()
 
     if low == "!join" or low.startswith("!join "):
-        mode_arg = text[5:].strip() or "wake_word"
+        mode_arg = text[5:].strip() or "conversational"
         set_active_channel_id(channel_id)
         if author_voice_channel is not None:
             if hasattr(voice_cohost_service, "register_author_voice_channel"):

@@ -167,6 +167,94 @@ class PerSpeakerVoiceAccumulator:
             self._buffers.clear()
 
 
+_DAVE_PATCH_INSTALLED = False
+
+
+def _install_voice_recv_dave_patch() -> None:
+    """
+    Patch `discord.ext.voice_recv.opus.PacketDecoder._decode_packet` so it:
+    1. Decrypts Discord DAVE E2EE audio frames (`davey.DaveSession.decrypt`) introduced in `discord.py` 2.7+
+       before passing the Opus payload to `discord.opus.Decoder.decode`.
+    2. Automatically maps unknown SSRCs to their DAVE MLS `user_id` if a speaker was already talking
+       when the bot joined the voice channel.
+    3. Catches transient `OpusError` frames and returns 20ms of silence (`b'\\x00' * 3840`) instead of
+       crashing `PacketRouter.run()` and killing `voice_client.listen()`.
+    """
+    global _DAVE_PATCH_INSTALLED
+    if _DAVE_PATCH_INSTALLED:
+        return
+    try:
+        from discord.ext.voice_recv import opus as vr_opus
+
+        try:
+            import davey
+        except Exception:
+            davey = None  # type: ignore[assignment]
+
+        def _patched_decode_packet(self: Any, packet: Any) -> Tuple[Any, bytes]:
+            assert self._decoder is not None
+            if packet:
+                raw_data = getattr(packet, "decrypted_data", None)
+                if raw_data and raw_data != b"\xf8\xff\xfe" and davey is not None:
+                    vc = getattr(self.sink, "voice_client", None)
+                    conn = getattr(vc, "_connection", None)
+                    dave_session = getattr(conn, "dave_session", None)
+                    if dave_session is not None and getattr(conn, "dave_protocol_version", 0) > 0:
+                        uid = self._cached_id or (
+                            vc._get_id_from_ssrc(self.ssrc) if hasattr(vc, "_get_id_from_ssrc") else None
+                        )
+                        if uid:
+                            try:
+                                packet.decrypted_data = dave_session.decrypt(
+                                    int(uid), davey.MediaType.audio, bytes(raw_data)
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            bot_uid = int(getattr(getattr(conn, "user", None), "id", 0) or 0)
+                            cand_uids = list(
+                                dave_session.get_user_ids() if hasattr(dave_session, "get_user_ids") else []
+                            )
+                            for cand_uid in cand_uids:
+                                if int(cand_uid) == bot_uid:
+                                    continue
+                                try:
+                                    decrypted = dave_session.decrypt(
+                                        int(cand_uid), davey.MediaType.audio, bytes(raw_data)
+                                    )
+                                    packet.decrypted_data = decrypted
+                                    self._cached_id = int(cand_uid)
+                                    if hasattr(vc, "_add_ssrc"):
+                                        vc._add_ssrc(int(cand_uid), self.ssrc)
+                                    break
+                                except Exception:
+                                    continue
+                try:
+                    pcm = self._decoder.decode(packet.decrypted_data, fec=False)
+                except Exception:
+                    pcm = b"\x00" * 3840
+                return packet, pcm
+
+            next_packet = self._buffer.peek_next()
+            if next_packet is not None:
+                nextdata = getattr(next_packet, "decrypted_data", None)
+                try:
+                    pcm = self._decoder.decode(nextdata, fec=True)
+                except Exception:
+                    pcm = b"\x00" * 3840
+            else:
+                try:
+                    pcm = self._decoder.decode(None, fec=False)
+                except Exception:
+                    pcm = b"\x00" * 3840
+            return packet, pcm
+
+        vr_opus.PacketDecoder._decode_packet = _patched_decode_packet  # type: ignore[method-assign]
+        _DAVE_PATCH_INSTALLED = True
+    except Exception as e:
+        logger.debug("Could not install DAVE voice_recv patch: %s", e)
+
+
 def attach_discord_voice_receiver(
     voice_client: Any,
     on_pcm_chunk: Callable[[int, str, bytes], None],
@@ -183,6 +271,7 @@ def attach_discord_voice_receiver(
 
         ensure_opus_loaded()
         if importlib.util.find_spec("discord.ext.voice_recv") is not None:
+            _install_voice_recv_dave_patch()
             voice_recv = importlib.import_module("discord.ext.voice_recv")
 
             def _sink_callback(user: Any, data: Any) -> None:

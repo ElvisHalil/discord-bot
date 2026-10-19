@@ -155,10 +155,11 @@ class VoiceSttAggregator(BaseVoiceAggregator):
             return ""
 
         try:
+            os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
             with _WHISPER_LOCK:
                 if _WHISPER_MODEL is None:
                     model_size = os.getenv("WHISPER_MODEL_SIZE", "base.en")
-                    device = os.getenv("WHISPER_DEVICE", "auto")
+                    device = os.getenv("WHISPER_DEVICE", "cpu")
                     _WHISPER_MODEL = fw_mod.WhisperModel(model_size, device=device, compute_type="int8")
 
             segments, _ = _WHISPER_MODEL.transcribe(io.BytesIO(audio_bytes), beam_size=1, vad_filter=True)
@@ -180,6 +181,8 @@ class VoiceSttAggregator(BaseVoiceAggregator):
         if not s:
             return ""
         if re.fullmatch(r"\[?\s*(?:silence|no\s+speech|inaudible|background\s+noise|music|blank_audio)\s*\]?\.?", s, flags=re.IGNORECASE):
+            return ""
+        if re.search(r"\b(?:need an audio file|provide the audio|cannot transcribe|no audio file)\b", s, flags=re.IGNORECASE):
             return ""
         return s
 

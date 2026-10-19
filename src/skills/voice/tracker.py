@@ -167,14 +167,14 @@ class VoiceCohostService:
         voice_channel_id: int,
         voice_channel_name: str = "General Voice",
         guild_id: Optional[int] = None,
-        mode: str = VoiceMode.WAKE_WORD,
+        mode: str = VoiceMode.CONVERSATIONAL,
         voice_profile: str = "research",
         voice_client: Any = None,
         announce_live_trackers: bool = True,
     ) -> VoiceSessionRecord:
         """Create and register a live `VoiceSessionRecord` and per-speaker VAD accumulator for `channel_id`."""
         now = time.time()
-        norm_mode = VOICE_MODE_ALIASES.get((mode or "").strip().lower(), str(VoiceMode.WAKE_WORD))
+        norm_mode = VOICE_MODE_ALIASES.get((mode or "").strip().lower(), str(VoiceMode.CONVERSATIONAL))
         prof_key = (voice_profile or "research").strip().lower()
         if prof_key not in VOICE_PROFILES:
             prof_key = "research"
@@ -363,6 +363,11 @@ class VoiceCohostService:
             sess.utterances_count += 1
             sess.last_activity_at = utterance.timestamp
 
+        print(
+            f"🎙️ [Voice Heard] {utterance.display_name} ({utterance.duration_sec:.1f}s, {backend_used}): "
+            f"\"{transcript}\" [mode={sess.mode}, triggered={is_triggered}]"
+        )
+
         if is_triggered and cleaned_query and self._utterance_callback is not None:
             loop = get_bound_event_loop()
             if loop and loop.is_running():
@@ -391,6 +396,7 @@ class VoiceCohostService:
                     await self.speak_async(session.channel_id, reply_text, profile_or_mode=session.voice_profile)
             return reply_text
         except Exception as e:
+            print(f"⚠️ [Voice Co-Host Turn Error]: {e}")
             logger.debug("Voice utterance callback error: %s", e)
             return None
         finally:

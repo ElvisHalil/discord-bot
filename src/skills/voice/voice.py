@@ -40,7 +40,7 @@ def skill_voice_info(
 
     if act == VoiceAction.JOIN:
         sess = VOICE_COHOST.get_session(cid)
-        target_mode = VOICE_MODE_ALIASES.get((mode or "").strip().lower(), str(VoiceMode.WAKE_WORD))
+        target_mode = VOICE_MODE_ALIASES.get((mode or "").strip().lower(), str(VoiceMode.CONVERSATIONAL))
         prof_key = (voice_profile or (sess.voice_profile if sess else "research")).strip().lower()
         if prof_key not in VOICE_PROFILES:
             prof_key = "research"
