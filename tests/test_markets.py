@@ -1,20 +1,28 @@
+from datetime import datetime, timezone
 import unittest
 from unittest.mock import patch
 
 from src.skills.markets import (
+    clear_channel_market_state,
     clear_markets_cache,
+    detect_missed_markets_tool_call,
+    enrich_markets_tool_args,
+    get_channel_market_state,
     get_daily_market_pulse,
     skill_markets_info,
+    update_channel_market_state,
 )
 from src.skills.markets.enums import MarketRegion, MarketView
 from src.skills.markets.markets import (
     _compute_macro_regime_signals,
     _extract_candidate_ticker_query,
+    _extract_comparison_tickers,
     _extract_timeframe,
     _yahoo_agg,
 )
 from src.skills.markets.models import CryptoAssetQuote, HistoricalSummary, TickerQuote
 from src.utils.domain_vocab import TOOL_ARG_ALIASES
+
 
 
 def _make_quote(
@@ -282,7 +290,176 @@ class TestMarketsSkill(unittest.TestCase):
         self.assertIn("1Y", hist.horizon_returns)
         self.assertEqual(len(hist.checkpoints), 6)
 
+    def test_multi_ticker_comparison_extraction_and_rendering(self):
+        """Verify multi-ticker comparisons ('Compare Shopify vs NVDA over 5 years') rank winners and render side-by-side."""
+        self.assertEqual(
+            _extract_comparison_tickers("Compare Shopify vs NVDA over 5 years", ""),
+            ["shopify", "nvda"],
+        )
+        self.assertEqual(
+            _extract_comparison_tickers("", "SHOP.TO, NVDA, AAPL"),
+            ["shop.to", "nvda", "aapl"],
+        )
+
+        shop_q = _make_quote("SHOP.TO", "Shopify Inc.", 148.50, 2.10, currency="CAD", exchange="TOR", beta=1.85, target_mean_price=168.0)
+        nvda_q = _make_quote("NVDA", "NVIDIA Corp.", 138.20, 4.10, currency="USD", exchange="NMS", beta=1.65, target_mean_price=160.0)
+        shop_hist = HistoricalSummary(
+            symbol="SHOP.TO",
+            currency="CAD",
+            timeframe_label="5-Year (5Y)",
+            start_date="Oct 18, 2021",
+            end_date="Oct 18, 2026",
+            start_price=80.0,
+            end_price=148.50,
+            abs_change=68.50,
+            pct_change=85.62,
+            cagr_pct=13.17,
+            period_high=175.0,
+            period_high_date="Nov 19, 2021",
+            period_low=35.0,
+            period_low_date="Oct 14, 2022",
+            max_drawdown_pct=-62.4,
+            annualized_volatility_pct=46.1,
+            horizon_returns={"1Y": 54.1, "5Y": 85.62},
+        )
+        nvda_hist = HistoricalSummary(
+            symbol="NVDA",
+            currency="USD",
+            timeframe_label="5-Year (5Y)",
+            start_date="Oct 18, 2021",
+            end_date="Oct 18, 2026",
+            start_price=22.0,
+            end_price=138.20,
+            abs_change=116.20,
+            pct_change=528.18,
+            cagr_pct=44.42,
+            total_return_pct=530.10,
+            total_return_cagr_pct=44.50,
+            period_high=142.0,
+            period_high_date="Oct 15, 2026",
+            period_low=11.2,
+            period_low_date="Oct 14, 2022",
+            max_drawdown_pct=-66.1,
+            annualized_volatility_pct=51.3,
+            horizon_returns={"1Y": 168.4, "5Y": 528.18},
+        )
+
+        def fake_bundle(target, prefer_ca, tf):
+            if "shop" in target.lower():
+                return (shop_q, None, shop_hist, ["Shopify expands enterprise merchants"])
+            return (nvda_q, None, nvda_hist, ["NVIDIA Blackwell demand surges"])
+
+        with patch("src.skills.markets.markets._fetch_single_asset_bundle", side_effect=fake_bundle):
+            out = skill_markets_info(query="Compare Shopify vs NVDA over 5 years")
+
+        self.assertIn("MULTI-ASSET HEAD-TO-HEAD COMPARISON", out)
+        self.assertIn("Relative Outperformer (5-Year (5Y)): **NVIDIA Corp. (`NVDA`)** at **+528.18%**", out)
+        self.assertIn("outperforming **Shopify Inc. (`SHOP.TO`)** (+85.62%) by **+442.56%**", out)
+        self.assertIn("Total Return (w/ Divs): +530.10%", out)
+
+    def test_custom_date_range_single_date_and_intraday_timeframes(self):
+        """Verify intraday ('1d'), single historical date ('on Oct 15, 2025'), custom range, and standalone year extraction."""
+        self.assertEqual(_extract_timeframe("AAPL intraday chart", ""), "1d")
+        self.assertEqual(_extract_timeframe("what did AAPL close at on Oct 15, 2025", ""), "date:2025-10-15")
+        self.assertEqual(
+            _extract_timeframe("NVDA performance from March 2025 to October 2025", ""),
+            "range:2025-03-01:2025-10-31",
+        )
+        self.assertEqual(_extract_timeframe("NVDA 2024 return", ""), "2024")
+        self.assertEqual(
+            _extract_candidate_ticker_query("Palantir five years", "", has_timeframe=True),
+            "Palantir",
+        )
+
+        # Build synthetic daily series across 2025
+        start_2025 = int(datetime(2024, 12, 20, tzinfo=timezone.utc).timestamp())
+        bars = []
+        for d in range(340):
+            ts = start_2025 + d * 86400
+            p = 100.0 + d * 0.5
+            bars.append((ts, p - 1.0, p + 2.0, p - 2.0, p))
+
+        with patch.object(_yahoo_agg, "_fetch_chart_bars", return_value=("USD", bars)):
+            # 1. Single-date lookup
+            hist_date = _yahoo_agg.fetch_historical_summary("AAPL", timeframe="date:2025-06-15")
+            self.assertIsNotNone(hist_date)
+            self.assertIsNotNone(hist_date.exact_date_bar)
+            self.assertEqual(hist_date.exact_date_bar["requested_date"], "2025-06-15")
+
+            # 2. Custom range lookup
+            hist_range = _yahoo_agg.fetch_historical_summary("AAPL", timeframe="range:2025-03-01:2025-08-01")
+            self.assertIsNotNone(hist_range)
+            self.assertIn("Custom Window (2025-03-01 → 2025-08-01)", hist_range.timeframe_label)
+
+            # 3. Calendar year with prior-year Dec 31 baseline
+            hist_yr = _yahoo_agg.fetch_historical_summary("AAPL", timeframe="2025")
+            self.assertEqual(hist_yr.timeframe_label, "Calendar Year 2025")
+            self.assertIn("2024", hist_yr.start_date)
+
+            # 4. Pre-IPO / empty calendar year graceful fallback
+            hist_empty_yr = _yahoo_agg.fetch_historical_summary("AAPL", timeframe="2019")
+            self.assertIn("Available History (No data in 2019)", hist_empty_yr.timeframe_label)
+
+    def test_channel_context_followup_and_missed_tool_detector(self):
+        """Verify per-channel market state resolves follow-up timeframe/comparison queries and turn-0 missed tool calls."""
+        clear_channel_market_state()
+        update_channel_market_state(tickers=["SHOP.TO"], timeframe="1y", view="ticker")
+
+        enriched = enrich_markets_tool_args({"query": "what about over 5 years?"}, [
+            {"role": "user", "content": "what about over 5 years?"}
+        ])
+        self.assertEqual(enriched.get("query"), "what about over 5 years?")
+
+        # Follow-up missed tool call detection when channel has active market state
+        missed_followup = detect_missed_markets_tool_call([
+            {"role": "user", "content": "how did it perform in 2024?"}
+        ])
+        self.assertIsNotNone(missed_followup)
+        self.assertEqual(missed_followup[0], "skill_markets_info")
+        self.assertEqual(missed_followup[1].get("ticker"), "SHOP.TO")
+
+        # Cashtag missed tool call detection
+        missed_cashtag = detect_missed_markets_tool_call([
+            {"role": "user", "content": "check $NVDA and $AMD today"}
+        ])
+        self.assertIsNotNone(missed_cashtag)
+        self.assertEqual(missed_cashtag[0], "skill_markets_info")
+        self.assertEqual(missed_cashtag[1].get("ticker"), "NVDA, AMD")
+
+        # Ensure sports/flight queries are never intercepted by detect_missed_markets_tool_call
+        self.assertIsNone(detect_missed_markets_tool_call([
+            {"role": "user", "content": "track the Arsenal match live"}
+        ]))
+        self.assertIsNone(detect_missed_markets_tool_call([
+            {"role": "user", "content": "cheapest flights from YYC to LHR"}
+        ]))
+
+    def test_region_and_view_filtering_in_skill_markets_info(self):
+        """Verify `view='commodities'` and `region='europe'` focus the output sections."""
+        fake_quotes = {
+            "^STOXX50E": _make_quote("^STOXX50E", "Euro Stoxx 50", 4985.0, 0.31, currency="EUR"),
+            "^GSPTSE": _make_quote("^GSPTSE", "S&P/TSX Composite", 24800.0, 0.62, currency="CAD"),
+            "USDCAD=X": _make_quote("USDCAD=X", "USD/CAD", 1.3802, -0.15, currency="CAD"),
+            "GC=F": _make_quote("GC=F", "Gold Futures", 2730.0, 0.85),
+        }
+        with (
+            patch("src.skills.markets.markets._yahoo_agg.fetch_quotes", return_value=fake_quotes),
+            patch("src.skills.markets.markets._yahoo_agg.fetch_us_movers", return_value={"gainers": [], "losers": [], "actives": []}),
+            patch("src.skills.markets.markets._yahoo_agg.fetch_macro_market_headlines", return_value=[]),
+            patch("src.skills.markets.markets._crypto_agg.fetch_top_coins", return_value=[]),
+        ):
+            comm_out = skill_markets_info(query="gold and commodities", view="commodities")
+            self.assertIn("PRECIOUS METALS & COMMODITIES", comm_out)
+            self.assertIn("CAD Spot Proxy:", comm_out)
+            self.assertNotIn("EUROPEAN MARKETS", comm_out)
+            self.assertNotIn("TODAY'S MARKET MOVERS", comm_out)
+
+            eu_out = skill_markets_info(query="european markets", region="europe", view="overview")
+            self.assertIn("EUROPEAN MARKETS", eu_out)
+            self.assertNotIn("ASIAN & PACIFIC MARKETS", eu_out)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -46,10 +46,12 @@ from src.orchestrator import (
     enrich_sports_tool_args,
     enrich_music_tool_args,
     enrich_flight_tool_args,
+    enrich_markets_tool_args,
     enrich_tool_output_with_time_context,
     detect_missed_sports_tool_call,
     detect_missed_music_shift_tool_call,
     detect_missed_flight_tool_call,
+    detect_missed_markets_tool_call,
     trim_history,
     compact_intra_turn_tool_history,
     apply_auto_ping,
@@ -123,6 +125,7 @@ def clear_tool_caches(channel_id: int = None):
         )
         from src.skills.sports.tracker import clear_channel_last_match_query
         from src.skills.flights.context import clear_channel_flight_state
+        from src.skills.markets.context import clear_channel_market_state
         from src.skills.sports.aggregators.liquipedia import clear_liquipedia_cache
         from src.skills.sports.aggregators.hltv import clear_hltv_cache
         from src.skills.sports.aggregators.kashrock import clear_kashrock_cache
@@ -133,6 +136,7 @@ def clear_tool_caches(channel_id: int = None):
         clear_recently_played_tracks(channel_id)
         clear_channel_last_match_query(channel_id)
         clear_channel_flight_state(channel_id)
+        clear_channel_market_state(channel_id)
         if channel_id is None:
             clear_youtube_caches()
             clear_resolved_music_cache()
@@ -592,6 +596,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     detect_missed_sports_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_music_shift_tool_call(history)
                     or detect_missed_flight_tool_call(history, active_channel_id=channel_id)
+                    or detect_missed_markets_tool_call(history, active_channel_id=channel_id)
                 )
                 if missed and missed[0] in active_tools:
                     forced_tool_name, forced_raw_args = missed
@@ -600,6 +605,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     history.pop()  # Discard stale non-tool reply from iteration 0
                     if forced_tool_name in ("skill_flight_info", "skill_flight_tracker"):
                         forced_args = enrich_flight_tool_args(forced_args, history)
+                    elif forced_tool_name == "skill_markets_info":
+                        forced_args = enrich_markets_tool_args(forced_args, history, active_channel_id=channel_id)
                     set_active_channel_id(channel_id)
                     print(f"⚡ [{current_mode.upper()}] Intercepted missed tool on turn 0 -> forcing {forced_tool_name}({forced_args})")
                     try:
@@ -673,6 +680,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     args = enrich_music_tool_args(args, history)
                 elif tool_name in ("skill_flight_info", "skill_flight_tracker"):
                     args = enrich_flight_tool_args(args, history)
+                elif tool_name == "skill_markets_info":
+                    args = enrich_markets_tool_args(args, history, active_channel_id=channel_id)
                 set_active_channel_id(channel_id)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
                 try:

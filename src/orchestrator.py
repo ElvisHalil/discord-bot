@@ -26,6 +26,10 @@ from src.skills.flights.aggregators.prices import GoogleFlightsPriceAggregator
 from src.skills.flights.context import (
     detect_missed_flight_tool_call,
 )
+from src.skills.markets.context import (
+    detect_missed_markets_tool_call,
+    enrich_markets_tool_args,
+)
 from src.skills.music.context import (
     detect_missed_music_shift_tool_call,
     enrich_music_tool_args,
@@ -202,6 +206,15 @@ def trim_history(history: list, limit: int, old_tool_chars: int = OLD_TOOL_OUTPU
                         "[EXPIRED FLIGHT SEARCH SNAPSHOT FROM EARLIER TURN — DO NOT REUSE OLD FARES OR BOOKING LINKS "
                         "WHEN THE USER REFINES STOPS, DATES, OR ROUND-TRIP OPTIONS. You MUST call skill_flight_info "
                         "again for the updated search.]"
+                    ),
+                }
+            elif tool_name == "skill_markets_info":
+                rest[i] = {
+                    **msg,
+                    "content": (
+                        "[EXPIRED MARKET SNAPSHOT FROM EARLIER TURN — DO NOT REUSE OLD PRICES, RETURNS, OR MOVERS "
+                        "WHEN THE USER ASKS A FOLLOW-UP TIMEFRAME, COMPARISON, OR PRICE QUESTION. You MUST call "
+                        "skill_markets_info again for fresh real-time / historical data.]"
                     ),
                 }
             elif len(content) > old_tool_chars:

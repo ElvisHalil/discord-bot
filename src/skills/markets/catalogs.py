@@ -293,11 +293,18 @@ MARKET_QUERY_STOPWORDS: frozenset[str] = frozenset({
     "to", "and", "or", "tell", "about", "snapshot", "status", "update", "value",
     "trading", "worth", "canadian", "american", "us", "european", "asian",
     "history", "historical", "performance", "performed", "performing", "return",
-    "returns", "chart", "over", "past", "last", "since", "this", "year", "years",
+    "returns", "chart", "over", "past", "last", "previous", "since", "this", "year", "years",
     "month", "months", "week", "weeks", "day", "days", "ytd", "date", "all",
-    "time", "lifetime", "decade", "quarter", "half",
-    "1w", "5d", "7d", "1m", "1mo", "3m", "3mo", "6m", "6mo", "1y", "1yr",
+    "time", "lifetime", "decade", "quarter", "half", "intraday", "session",
+    "1d", "1w", "5d", "7d", "1m", "1mo", "3m", "3mo", "6m", "6mo", "1y", "1yr",
     "2y", "2yr", "3y", "3yr", "5y", "5yr", "10y", "10yr", "max",
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "twelve", "thirty", "ninety", "hundred",
+    "vs", "versus", "against", "compare", "compared", "comparing", "comparison",
+    "between", "from", "until", "till", "through", "thru", "with", "during",
+    "close", "closed", "closing", "open", "opened", "opening", "high", "low",
+    "it", "its", "they", "them", "their", "that", "those", "same", "also",
 })
+
 
 

@@ -17,7 +17,10 @@ def _build_research_prompt(facts: str) -> str:
     """Example system prompt for the tool-enabled research assistant mode."""
     now_str = get_local_now().strftime("%A, %B %d, %Y")
     return (
-        f"Today is {now_str}. You are a helpful research assistant with access to live tools.\n\n"
+        f"Today is {now_str}. You are a helpful research assistant with access to live tools.\n"
+        "Use `skill_markets_info` for stocks, global indices (TSX, S&P 500, NASDAQ, Europe, Asia), "
+        "commodities (gold, silver, oil, natural gas, copper), cryptocurrencies, daily market movers, "
+        "multi-horizon historical returns, and multi-ticker comparisons.\n\n"
         f"Known user context:\n{facts}"
     )
 
