@@ -200,6 +200,13 @@ async def dispatch_tracker_command(
     return None
 
 
+def _strip_llm_instructions(text: str) -> str:
+    """Strip internal `[SYSTEM INSTRUCTION — ...]` blocks from direct bang command replies."""
+    if not text:
+        return text
+    return text.split("\n\n[SYSTEM INSTRUCTION")[0].strip()
+
+
 async def dispatch_voice_command(
     text: str,
     channel_id: int,
@@ -221,20 +228,8 @@ async def dispatch_voice_command(
         mode_arg = text[5:].strip() or "wake_word"
         set_active_channel_id(channel_id)
         if author_voice_channel is not None:
-            vc_client = None
-            if hasattr(author_voice_channel, "connect"):
-                try:
-                    import importlib
-                    from src.skills.voice.playback.discord_audio import ensure_opus_loaded
-
-                    ensure_opus_loaded()
-                    connect_kwargs: Dict[str, Any] = {}
-                    if importlib.util.find_spec("discord.ext.voice_recv") is not None:
-                        voice_recv = importlib.import_module("discord.ext.voice_recv")
-                        connect_kwargs["cls"] = voice_recv.VoiceRecvClient
-                    vc_client = await author_voice_channel.connect(**connect_kwargs)
-                except Exception as e:
-                    print(f"⚠️ [Voice Connect]: {e}")
+            if hasattr(voice_cohost_service, "register_author_voice_channel"):
+                voice_cohost_service.register_author_voice_channel(channel_id, author_voice_channel)
             voice_cohost_service.start_session(
                 channel_id=channel_id,
                 voice_channel_id=int(getattr(author_voice_channel, "id", channel_id) or channel_id),
@@ -242,41 +237,52 @@ async def dispatch_voice_command(
                 guild_id=int(getattr(getattr(author_voice_channel, "guild", None), "id", 0) or 0) or None,
                 mode=mode_arg,
                 voice_profile=active_mode,
-                voice_client=vc_client,
             )
-            return await run_in_worker(voice_info_fn, action="status")
-        return await run_in_worker(voice_info_fn, action="join", mode=mode_arg, voice_profile=active_mode)
+            if hasattr(voice_cohost_service, "ensure_discord_voice_connected"):
+                await voice_cohost_service.ensure_discord_voice_connected(channel_id)
+            res = await run_in_worker(voice_info_fn, action="status")
+            return _strip_llm_instructions(res)
+        res = await run_in_worker(voice_info_fn, action="join", mode=mode_arg, voice_profile=active_mode)
+        return _strip_llm_instructions(res)
 
     if low in ("!leave", "!disconnect"):
         set_active_channel_id(channel_id)
-        return await run_in_worker(voice_info_fn, action="leave")
+        res = await run_in_worker(voice_info_fn, action="leave")
+        return _strip_llm_instructions(res)
 
     if low.startswith("!speak "):
         speech_text = text[7:].strip()
         set_active_channel_id(channel_id)
-        return await run_in_worker(voice_info_fn, action="speak", query=speech_text, voice_profile=active_mode)
+        res = await run_in_worker(voice_info_fn, action="speak", query=speech_text, voice_profile=active_mode)
+        return _strip_llm_instructions(res)
 
     if low.startswith("!vmode"):
         mode_arg = text[6:].strip() or "conversational"
         set_active_channel_id(channel_id)
-        return await run_in_worker(voice_info_fn, action="mode", mode=mode_arg)
+        res = await run_in_worker(voice_info_fn, action="mode", mode=mode_arg)
+        return _strip_llm_instructions(res)
 
     if low in ("!vrecap", "!voicerecap"):
         set_active_channel_id(channel_id)
-        return await run_in_worker(voice_info_fn, action="recap")
+        res = await run_in_worker(voice_info_fn, action="recap")
+        return _strip_llm_instructions(res)
 
     if low in ("!vstatus", "!voicestatus"):
         set_active_channel_id(channel_id)
-        return await run_in_worker(voice_info_fn, action="status")
+        res = await run_in_worker(voice_info_fn, action="status")
+        return _strip_llm_instructions(res)
 
     if low == "!vmute":
         set_active_channel_id(channel_id)
-        return await run_in_worker(voice_info_fn, action="mute")
+        res = await run_in_worker(voice_info_fn, action="mute")
+        return _strip_llm_instructions(res)
 
     if low == "!vunmute":
         set_active_channel_id(channel_id)
-        return await run_in_worker(voice_info_fn, action="unmute")
+        res = await run_in_worker(voice_info_fn, action="unmute")
+        return _strip_llm_instructions(res)
 
     return None
+
 
 

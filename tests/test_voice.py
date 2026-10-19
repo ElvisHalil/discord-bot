@@ -199,6 +199,7 @@ class TestVoiceCohostServiceAndSkill(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Squad Hangout", join_out)
         self.assertIn("conversational", join_out)
         self.assertIn("Chappie Neural Voice", join_out)
+        self.assertNotIn("[SYSTEM INSTRUCTION", join_out)
 
         # 3. Simulate speaker utterances and verify recap
         wav_bytes, _, _ = pcm_48k_stereo_to_16k_mono_wav(_make_pcm_48k_stereo(duration_sec=0.4, amplitude=10000))
@@ -223,6 +224,7 @@ class TestVoiceCohostServiceAndSkill(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Elvis", recap_out)
         self.assertIn("what time is the Oilers game?", recap_out)
         self.assertIn("The Oilers drop the puck at 7 PM Mountain Time tonight.", recap_out)
+        self.assertIn("[SYSTEM INSTRUCTION", recap_out)
 
         # 4. Speak action streams PCM to mock_vc.play
         speak_out = skill_voice_info(action="speak", query="Goal for Arsenal! 2-1 in the 88th minute!")
@@ -241,7 +243,16 @@ class TestVoiceCohostServiceAndSkill(unittest.IsolatedAsyncioTestCase):
             voice_cohost_service=VOICE_COHOST,
         )
         self.assertIn("VOICE CO-HOST DISCONNECTED", leave_out)
+        self.assertNotIn("[SYSTEM INSTRUCTION", leave_out)
         self.assertIsNone(VOICE_COHOST.get_session(777888))
+
+        # 7. Natural-language join via skill_voice_info + ensure_discord_voice_connected
+        VOICE_COHOST.register_author_voice_channel(777888, mock_voice_channel)
+        nl_join = skill_voice_info(action="join", mode="wake_word", voice_profile="research")
+        self.assertIn("Squad Hangout", nl_join)
+        connected_vc = await VOICE_COHOST.ensure_discord_voice_connected(777888)
+        self.assertIs(connected_vc, mock_vc)
+        VOICE_COHOST.stop_session(777888)
 
 
 if __name__ == "__main__":

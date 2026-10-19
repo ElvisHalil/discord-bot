@@ -720,6 +720,9 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     args = enrich_markets_tool_args(args, history, active_channel_id=channel_id)
                 elif tool_name == "skill_voice_info":
                     args = enrich_voice_tool_args(args, history, active_channel_id=channel_id)
+                    if not args.get("voice_profile"):
+                        args = dict(args)
+                        args["voice_profile"] = current_mode
                 set_active_channel_id(channel_id)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
                 try:
@@ -737,6 +740,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                         tool_output = f"{news_res}\n{pulse_res}" if pulse_res else news_res
                     else:
                         tool_output = await run_in_worker(func, **args)
+                        if tool_name == "skill_voice_info" and VOICE_COHOST.get_session(channel_id) is not None:
+                            await VOICE_COHOST.ensure_discord_voice_connected(channel_id)
                 except Exception as e:
                     print(f"  └─ ❌ Tool {tool_name} crashed: {e}")
                     tool_output = f"Tool execution failed: {e}"
@@ -876,6 +881,7 @@ async def on_message(message):
     # Direct Voice Co-Host Commands (!join, !leave, !speak, !vmode, !vrecap, !vstatus, !vmute, !vunmute)
     author_voice_state = getattr(message.author, "voice", None)
     author_voice_channel = getattr(author_voice_state, "channel", None) if author_voice_state else None
+    VOICE_COHOST.register_author_voice_channel(message.channel.id, author_voice_channel)
     voice_res = await dispatch_voice_command(
         text=user_input,
         channel_id=message.channel.id,

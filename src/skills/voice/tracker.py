@@ -62,9 +62,66 @@ class VoiceCohostService:
         self._accumulators: Dict[int, PerSpeakerVoiceAccumulator] = {}
         # { channel_id: discord.VoiceClient | Any }
         self._voice_clients: Dict[int, Any] = {}
+        # { channel_id: discord.VoiceChannel }
+        self._author_voice_channels: Dict[int, Any] = {}
         self._utterance_callback: Optional[Callable[[VoiceSessionRecord, SpeakerUtterance, str], Awaitable[Optional[str]]]] = None
         self._loop_task: Optional[asyncio.Task] = None
         self._stop_event = threading.Event()
+
+    def register_author_voice_channel(self, channel_id: int, author_voice_channel: Any) -> None:
+        """Record the message author's active Discord `VoiceChannel` so natural-language join calls can connect."""
+        with self._lock:
+            if author_voice_channel is not None:
+                self._author_voice_channels[channel_id] = author_voice_channel
+            else:
+                self._author_voice_channels.pop(channel_id, None)
+
+    async def ensure_discord_voice_connected(self, channel_id: int) -> Any:
+        """
+        Ensure that if a `VoiceSessionRecord` is active for `channel_id` and the author was in a
+        Discord `VoiceChannel`, the underlying `discord.VoiceClient` is connected and receiving audio.
+        """
+        with self._lock:
+            sess = self._sessions.get(channel_id)
+            vc = self._voice_clients.get(channel_id)
+            author_vc = self._author_voice_channels.get(channel_id)
+
+        if sess is None or vc is not None or author_vc is None or not hasattr(author_vc, "connect"):
+            return vc
+
+        vc_client = None
+        try:
+            import importlib
+            from src.skills.voice.playback.discord_audio import ensure_opus_loaded
+
+            ensure_opus_loaded()
+            guild = getattr(author_vc, "guild", None)
+            existing_vc = getattr(guild, "voice_client", None) if guild is not None else None
+            if existing_vc is not None and getattr(existing_vc, "is_connected", lambda: True)():
+                if (
+                    getattr(getattr(existing_vc, "channel", None), "id", None) != getattr(author_vc, "id", None)
+                    and hasattr(existing_vc, "move_to")
+                ):
+                    await existing_vc.move_to(author_vc)
+                vc_client = existing_vc
+            else:
+                connect_kwargs: Dict[str, Any] = {}
+                if importlib.util.find_spec("discord.ext.voice_recv") is not None:
+                    voice_recv = importlib.import_module("discord.ext.voice_recv")
+                    connect_kwargs["cls"] = voice_recv.VoiceRecvClient
+                vc_client = await author_vc.connect(**connect_kwargs)
+        except Exception as e:
+            logger.debug("Discord voice channel connect failed: %s", e)
+            return None
+
+        if vc_client is not None:
+            with self._lock:
+                self._voice_clients[channel_id] = vc_client
+            attach_discord_voice_receiver(
+                vc_client,
+                lambda uid, uname, pcm: self.ingest_pcm_frame(channel_id, uid, uname, pcm),
+            )
+        return vc_client
 
     def set_utterance_callback(
         self,
@@ -99,6 +156,17 @@ class VoiceCohostService:
         prof_key = (voice_profile or "research").strip().lower()
         if prof_key not in VOICE_PROFILES:
             prof_key = "research"
+
+        with self._lock:
+            author_vc = self._author_voice_channels.get(channel_id)
+
+        if author_vc is not None:
+            if voice_channel_name in ("General Voice", "Discord Voice Channel"):
+                voice_channel_name = str(getattr(author_vc, "name", voice_channel_name) or voice_channel_name)
+            if voice_channel_id in (0, 1, channel_id):
+                voice_channel_id = int(getattr(author_vc, "id", voice_channel_id) or voice_channel_id)
+            if guild_id is None:
+                guild_id = int(getattr(getattr(author_vc, "guild", None), "id", 0) or 0) or None
 
         record = VoiceSessionRecord(
             channel_id=channel_id,
@@ -138,6 +206,7 @@ class VoiceCohostService:
         if channel_id is None:
             with self._lock:
                 cids = list(self._sessions.keys())
+                self._author_voice_channels.clear()
             for cid in cids:
                 self.stop_session(cid)
             clear_channel_voice_state(None)
@@ -147,6 +216,7 @@ class VoiceCohostService:
             record = self._sessions.pop(channel_id, None)
             acc = self._accumulators.pop(channel_id, None)
             vc = self._voice_clients.pop(channel_id, None)
+            self._author_voice_channels.pop(channel_id, None)
 
         if acc is not None:
             acc.clear()
@@ -484,6 +554,7 @@ VOICE_COHOST = VoiceCohostService()
 
 def clear_voice_cache(channel_id: Optional[int] = None) -> None:
     """Clear voice STT/TTS caches and per-channel session state."""
+    VOICE_COHOST.stop_session(channel_id)
     clear_channel_voice_state(channel_id)
     if channel_id is None:
         clear_voice_stt_cache()
