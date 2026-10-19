@@ -2,7 +2,6 @@ import re
 from typing import Optional
 from src.skills.music.playback.youtube_music import (
     get_blocked_official_info,
-    get_served_song_vids,
     record_served_song_vid,
     resolve_youtube_music_link,
 )
@@ -57,14 +56,9 @@ def skill_youtube_search(query: str, max_results: Optional[int] = 1, is_music: O
                 print(f"🔄 [YouTube Search Skill]: Redirecting genre/vibe query '{query}' -> skill_music_discovery(genre='{genre_term}').")
                 return skill_music_discovery(genre=genre_term)
 
-            previously_served = get_served_song_vids(query)
-            if previously_served:
-                try:
-                    results = resolve_youtube_music_link(query, max_results=max_results, exclude_ids=previously_served)
-                except TypeError:
-                    results = resolve_youtube_music_link(query, max_results=max_results)
-            else:
-                results = resolve_youtube_music_link(query, max_results=max_results)
+            # Do not exclude previously served video IDs when a user requests a specific song,
+            # as excluding the official upload forces inferior re-uploads or fails when only one official link exists.
+            results = resolve_youtube_music_link(query, max_results=max_results)
 
             if not results:
                 print(f"❌ [YouTube Search Skill]: No music tracks found for '{query}'.")
@@ -73,11 +67,6 @@ def skill_youtube_search(query: str, max_results: Optional[int] = 1, is_music: O
                     reason_detail = (
                         f"Found the official YouTube upload(s) of '{blocked_info['song']}' by '{blocked_info['artist']}' "
                         f"(channel: '{blocked_info['author']}'), but the record label has disabled third-party playback/embedding on Discord for all real uploads of this song."
-                    )
-                elif previously_served:
-                    reason_detail = (
-                        f"Searched for alternative uploads of '{query}' (excluding previously served ID(s): {', '.join(sorted(previously_served))}), "
-                        f"but no other verified, Discord-embeddable upload exists on YouTube."
                     )
                 else:
                     reason_detail = f"Could not find any embeddable YouTube Music link for '{query}' (all uploads blocked third-party Discord embeds or were unavailable)."
