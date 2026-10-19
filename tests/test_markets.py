@@ -9,6 +9,7 @@ from src.skills.markets import (
 from src.skills.markets.enums import MarketRegion, MarketView
 from src.skills.markets.markets import (
     _compute_macro_regime_signals,
+    _crypto_agg,
     _extract_candidate_ticker_query,
     _extract_timeframe,
     _yahoo_agg,
@@ -282,7 +283,152 @@ class TestMarketsSkill(unittest.TestCase):
         self.assertIn("1Y", hist.horizon_returns)
         self.assertEqual(len(hist.checkpoints), 6)
 
+    def test_yahoo_v7_to_v8_chart_fallback_preserves_all_symbols_and_technicals(self):
+        """When Yahoo v7/finance/quote fails (e.g. 429/500), v8/finance/chart fallback must recover all symbols and reconstruct MAs/volume."""
+        class _DummyResp:
+            def __init__(self, status_code: int, payload: dict):
+                self.status_code = status_code
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        class _DummySession:
+            def get(self, url: str, timeout: int = 5):
+                if "/v7/finance/quote" in url:
+                    return _DummyResp(429, {})
+                if "/v8/finance/chart/" in url:
+                    # Extract symbol from URL path
+                    sym = url.split("/v8/finance/chart/")[1].split("?")[0].replace("%5E", "^").replace("%3D", "=")
+                    closes = [100.0 + i * 0.5 for i in range(220)]  # ends at 209.5, prev_close = 209.0
+                    vols = [1_000_000 + (i * 1000) for i in range(220)]
+                    return _DummyResp(
+                        200,
+                        {
+                            "chart": {
+                                "result": [
+                                    {
+                                        "meta": {
+                                            "symbol": sym,
+                                            "longName": f"{sym} Asset",
+                                            "fullExchangeName": "TOR" if sym.endswith(".TO") else "NMS",
+                                            "currency": "CAD" if sym.endswith(".TO") else "USD",
+                                            "regularMarketPrice": 210.0,
+                                            "regularMarketDayLow": 208.0,
+                                            "regularMarketDayHigh": 211.5,
+                                            "fiftyTwoWeekLow": 95.0,
+                                            "fiftyTwoWeekHigh": 215.0,
+                                            "regularMarketVolume": 1_500_000,
+                                        },
+                                        "indicators": {
+                                            "quote": [{"close": closes, "volume": vols}]
+                                        },
+                                    }
+                                ]
+                            }
+                        },
+                    )
+                return _DummyResp(404, {})
+
+        symbols = [f"SYM{i}" for i in range(12)] + ["SHOP.TO"]
+        with patch(
+            "src.skills.markets.aggregators.yahoo._get_session_and_crumb",
+            return_value=(_DummySession(), "testcrumb"),
+        ):
+            fetched = _yahoo_agg.fetch_quotes(symbols)
+
+        # Verify zero symbols were dropped (even >8 symbols) and all technicals were reconstructed
+        self.assertEqual(len(fetched), 13)
+        shop_q = fetched["SHOP.TO"]
+        self.assertEqual(shop_q.currency, "CAD")
+        self.assertEqual(shop_q.price, 210.0)
+        # 1-day change vs closes[-2] (209.0) -> +1.0 (+0.48%)
+        self.assertAlmostEqual(shop_q.change, 1.0, places=2)
+        self.assertIsNotNone(shop_q.ma50)
+        self.assertIsNotNone(shop_q.ma200)
+        self.assertIsNotNone(shop_q.avg_volume_3m)
+        self.assertEqual(shop_q.week52_low, 95.0)
+        self.assertEqual(shop_q.week52_high, 215.0)
+
+    def test_yahoo_crumb_401_auto_refresh_recovery(self):
+        """When Yahoo v7 returns 401/403 due to an expired crumb, fetch_quotes refreshes the crumb and succeeds on retry."""
+        calls = []
+
+        class _DummyResp:
+            def __init__(self, status_code: int, payload: dict):
+                self.status_code = status_code
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        class _DummySession:
+            def get(self, url: str, timeout: int = 6):
+                calls.append(url)
+                if len(calls) == 1:
+                    return _DummyResp(401, {})
+                return _DummyResp(
+                    200,
+                    {
+                        "quoteResponse": {
+                            "result": [
+                                {
+                                    "symbol": "GC=F",
+                                    "longName": "Gold Futures",
+                                    "currency": "USD",
+                                    "regularMarketPrice": 4195.0,
+                                    "regularMarketChange": 15.0,
+                                    "regularMarketChangePercent": 0.36,
+                                }
+                            ]
+                        }
+                    },
+                )
+
+        sess = _DummySession()
+        with patch(
+            "src.skills.markets.aggregators.yahoo._get_session_and_crumb",
+            side_effect=[(sess, "stale_crumb"), (sess, "fresh_crumb")],
+        ):
+            res = _yahoo_agg.fetch_quotes(["GC=F"])
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("GC=F", res)
+        self.assertEqual(res["GC=F"].price, 4195.0)
+
+    def test_coingecko_rate_limit_fallback_to_yahoo_preserves_crypto_and_movers(self):
+        """When CoinGecko returns 429 or times out, CryptoAggregator falls back to Yahoo Finance with full USD/CAD & movers."""
+        class _DummyResp429:
+            status_code = 429
+
+        fake_yf_quotes = {
+            "BTC-USD": _make_quote("BTC-USD", "Bitcoin", 82500.0, 1.85),
+            "ETH-USD": _make_quote("ETH-USD", "Ethereum", 2420.0, 0.95),
+            "SOL-USD": _make_quote("SOL-USD", "Solana", 105.0, 3.40),
+            "XRP-USD": _make_quote("XRP-USD", "XRP", 1.31, -1.20),
+            "DOGE-USD": _make_quote("DOGE-USD", "Dogecoin", 0.085, -2.80),
+            "ZEC-USD": _make_quote("ZEC-USD", "Zcash", 1165.0, 4.50),
+        }
+
+        with (
+            patch("src.skills.markets.aggregators.crypto.creq.get", return_value=_DummyResp429()),
+            patch("src.skills.markets.aggregators.yahoo.YahooFinanceAggregator.fetch_quotes", return_value=fake_yf_quotes),
+        ):
+            coins = _crypto_agg.fetch_top_coins(usdcad_rate=1.40)
+
+        self.assertGreaterEqual(len(coins), 6)
+        btc = next(c for c in coins if c.symbol == "BTC")
+        self.assertEqual(btc.price_usd, 82500.0)
+        self.assertEqual(btc.price_cad, round(82500.0 * 1.40, 2))
+        self.assertIsNotNone(btc.market_cap_usd)
+        self.assertIsNotNone(btc.volume_24h_usd)
+
+        movers = _crypto_agg.get_crypto_movers(coins, count=2)
+        self.assertEqual(movers["gainers"][0].symbol, "ZEC")
+        self.assertEqual(movers["losers"][0].symbol, "DOGE")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

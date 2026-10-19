@@ -163,8 +163,8 @@ class YahooFinanceAggregator(BaseMarketAggregator):
 
         # Fallback to v8/finance/chart for any symbol not returned by v7/finance/quote
         still_missing = [s for s in missing if s not in results]
-        if still_missing and (not fetched_any or len(still_missing) <= 6):
-            chart_quotes = map_in_workers(self._fetch_single_v8_chart, still_missing[:8])
+        if still_missing:
+            chart_quotes = map_in_workers(self._fetch_single_v8_chart, still_missing)
             for cq in chart_quotes:
                 if cq and cq.symbol:
                     _QUOTE_CACHE[cq.symbol.upper()] = (now, cq)
@@ -173,21 +173,39 @@ class YahooFinanceAggregator(BaseMarketAggregator):
         return results
 
     def _fetch_single_v8_chart(self, symbol: str) -> Optional[TickerQuote]:
-        """Fallback keyless quote fetcher using Yahoo Finance v8/finance/chart."""
+        """Fallback keyless quote fetcher using Yahoo Finance v8/finance/chart with full technical reconstruction."""
         try:
             session, _ = _get_session_and_crumb()
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote_plus(symbol)}?interval=1d&range=5d"
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote_plus(symbol)}?interval=1d&range=1y"
             resp = session.get(url, timeout=5)
             if resp.status_code != 200:
                 return None
             res_list = (resp.json().get("chart") or {}).get("result") or []
             if not res_list:
                 return None
-            meta = res_list[0].get("meta") or {}
-            price = float(meta.get("regularMarketPrice") or 0.0)
-            prev_close = float(meta.get("chartPreviousClose") or meta.get("previousClose") or price)
+            res0 = res_list[0]
+            meta = res0.get("meta") or {}
+            quotes_list = (res0.get("indicators") or {}).get("quote") or []
+            q0 = quotes_list[0] if quotes_list else {}
+            closes = [float(c) for c in (q0.get("close") or []) if c is not None and float(c) > 0]
+            vols = [int(v) for v in (q0.get("volume") or []) if v is not None and int(v) >= 0]
+
+            price = float(meta.get("regularMarketPrice") or (closes[-1] if closes else 0.0))
+            if meta.get("previousClose") is not None:
+                prev_close = float(meta["previousClose"])
+            elif len(closes) >= 2:
+                prev_close = closes[-2]
+            else:
+                prev_close = float(meta.get("chartPreviousClose") or price)
+
             change = price - prev_close if prev_close else 0.0
             change_pct = (change / prev_close * 100.0) if prev_close else 0.0
+
+            ma50 = round(sum(closes[-50:]) / len(closes[-50:]), 4) if len(closes) >= 20 else None
+            ma200 = round(sum(closes[-200:]) / len(closes[-200:]), 4) if len(closes) >= 100 else None
+            avg_vol_3m = int(sum(vols[-63:]) / len(vols[-63:])) if len(vols) >= 10 else None
+            vol = int(meta["regularMarketVolume"]) if meta.get("regularMarketVolume") is not None else (vols[-1] if vols else None)
+
             return TickerQuote(
                 symbol=str(meta.get("symbol") or symbol).upper(),
                 name=str(meta.get("longName") or meta.get("shortName") or symbol),
@@ -199,9 +217,12 @@ class YahooFinanceAggregator(BaseMarketAggregator):
                 change_percent=change_pct,
                 day_low=float(meta["regularMarketDayLow"]) if meta.get("regularMarketDayLow") is not None else None,
                 day_high=float(meta["regularMarketDayHigh"]) if meta.get("regularMarketDayHigh") is not None else None,
-                week52_low=float(meta["fiftyTwoWeekLow"]) if meta.get("fiftyTwoWeekLow") is not None else None,
-                week52_high=float(meta["fiftyTwoWeekHigh"]) if meta.get("fiftyTwoWeekHigh") is not None else None,
-                volume=int(meta["regularMarketVolume"]) if meta.get("regularMarketVolume") is not None else None,
+                week52_low=float(meta["fiftyTwoWeekLow"]) if meta.get("fiftyTwoWeekLow") is not None else (min(closes) if closes else None),
+                week52_high=float(meta["fiftyTwoWeekHigh"]) if meta.get("fiftyTwoWeekHigh") is not None else (max(closes) if closes else None),
+                ma50=ma50,
+                ma200=ma200,
+                volume=vol,
+                avg_volume_3m=avg_vol_3m,
             )
         except Exception as e:
             logger.debug("Yahoo v8 chart fallback failed for %s: %s", symbol, e)

@@ -78,19 +78,28 @@ class CryptoAggregator(BaseMarketAggregator):
             _CRYPTO_CACHE = (now, coins)
             return coins
 
-        # Fallback to Yahoo Finance crypto symbols if CoinGecko is unreachable
+        # Fallback to Yahoo Finance crypto symbols if CoinGecko is unreachable or rate-limited
         from src.skills.markets.aggregators.yahoo import YahooFinanceAggregator
 
         yf = YahooFinanceAggregator()
-        yf_quotes = yf.fetch_quotes([b.symbol for b in CRYPTO_BENCHMARKS])
-        for idx, b in enumerate(CRYPTO_BENCHMARKS, start=1):
-            q = yf_quotes.get(b.symbol.upper())
+        extra_fallback_syms = [
+            ("AVAX-USD", "Avalanche"),
+            ("LINK-USD", "Chainlink"),
+            ("DOT-USD", "Polkadot"),
+            ("HBAR-USD", "Hedera"),
+            ("ZEC-USD", "Zcash"),
+            ("LTC-USD", "Litecoin"),
+        ]
+        all_specs = [(b.symbol, b.label) for b in CRYPTO_BENCHMARKS] + extra_fallback_syms
+        yf_quotes = yf.fetch_quotes([sym for sym, _ in all_specs])
+        for idx, (sym_code, lbl) in enumerate(all_specs, start=1):
+            q = yf_quotes.get(sym_code.upper())
             if q and q.price > 0:
-                sym_clean = b.symbol.split("-")[0]
+                sym_clean = sym_code.split("-")[0]
                 coins.append(
                     CryptoAssetQuote(
                         symbol=sym_clean,
-                        name=b.label,
+                        name=lbl,
                         price_usd=q.price,
                         price_cad=round(q.price * usdcad_rate, 2) if usdcad_rate > 0 else None,
                         change_24h_pct=q.change_percent,
@@ -99,6 +108,8 @@ class CryptoAggregator(BaseMarketAggregator):
                         rank=idx,
                     )
                 )
+        if coins:
+            _CRYPTO_CACHE = (now, coins)
         return coins
 
     def get_crypto_movers(
