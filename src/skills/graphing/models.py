@@ -50,6 +50,35 @@ class MarketBarSeries:
 
 
 @dataclass(slots=True)
+class MonteCarloResult:
+    """Quantitative Geometric Brownian Motion (GBM) Monte Carlo price simulation result."""
+    symbol: str
+    name: str
+    currency: str
+    spot_price: float
+    horizon_label: str
+    horizon_days: int
+    num_simulations: int
+    lookback_days: int
+    annualized_drift_pct: float
+    annualized_volatility_pct: float
+    history_timestamps: List[int] = field(default_factory=list)
+    history_closes: List[float] = field(default_factory=list)
+    future_timestamps: List[int] = field(default_factory=list)
+    sample_paths: List[List[float]] = field(default_factory=list)
+    p5_path: List[float] = field(default_factory=list)
+    p25_path: List[float] = field(default_factory=list)
+    p50_path: List[float] = field(default_factory=list)
+    p75_path: List[float] = field(default_factory=list)
+    p95_path: List[float] = field(default_factory=list)
+    mean_path: List[float] = field(default_factory=list)
+    terminal_prices: List[float] = field(default_factory=list)
+    prob_profit_pct: float = 0.0
+    prob_double_pct: float = 0.0
+    prob_drawdown_20_pct: float = 0.0
+
+
+@dataclass(slots=True)
 class RenderedVisual:
     """Result of rendering a chart or diagram image into memory."""
     filename: str

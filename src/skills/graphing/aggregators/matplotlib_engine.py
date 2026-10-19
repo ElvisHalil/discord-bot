@@ -30,7 +30,7 @@ from src.skills.graphing.catalogs import (
     DARK_THEME_PALETTE,
 )
 from src.skills.graphing.enums import ChartType
-from src.skills.graphing.models import ChartSpec, MarketBarSeries, RenderedVisual
+from src.skills.graphing.models import ChartSpec, MarketBarSeries, MonteCarloResult, RenderedVisual
 
 
 def _slugify_filename(title: str, default: str = "chart") -> str:
@@ -415,6 +415,212 @@ class MatplotlibChartAggregator(BaseGraphingAggregator):
             title=title_str,
             summary_lines=summary_lines,
             renderer_used="matplotlib_comparison",
+        )
+
+    def render_monte_carlo_chart(self, mc: MonteCarloResult) -> RenderedVisual:
+        """
+        Render a dual-panel dark-mode Geometric Brownian Motion (GBM) Monte Carlo fan chart
+        (trailing history + 60 stochastic paths + P5-P95 & P25-P75 confidence cones + right-hand
+        terminal price distribution histogram).
+        """
+        fig = Figure(figsize=(11.6, 6.6), dpi=140, facecolor=DARK_BG_COLOR)
+        gs = fig.add_gridspec(1, 2, width_ratios=[3.6, 1.0], wspace=0.06)
+        ax_fan = fig.add_subplot(gs[0])
+        ax_hist = fig.add_subplot(gs[1], sharey=ax_fan)
+
+        n_hist = len(mc.history_closes)
+        n_fut = len(mc.p50_path)
+        hist_xs = list(range(n_hist))
+        fut_xs = [max(0, n_hist - 1) + i for i in range(n_fut)]
+
+        p5_end = mc.p5_path[-1]
+        p25_end = mc.p25_path[-1]
+        p50_end = mc.p50_path[-1]
+        p75_end = mc.p75_path[-1]
+        p95_end = mc.p95_path[-1]
+        mean_end = mc.mean_path[-1]
+
+        title_str = f"Monte Carlo GBM Simulation: {mc.name} ({mc.symbol}) — {mc.horizon_label}"
+        drift_sign = "+" if mc.annualized_drift_pct > 0 else ""
+        subtitle_str = (
+            f"{mc.num_simulations:,} Paths  |  Spot: {_fmt_price_val(mc.spot_price)} {mc.currency}  |  "
+            f"Calibrated Vol (σ): {mc.annualized_volatility_pct:.1f}%/yr  |  Drift: {drift_sign}{mc.annualized_drift_pct:.1f}%/yr  |  "
+            f"P(Profit): {mc.prob_profit_pct:.1f}%"
+        )
+        _style_dark_axes(
+            ax_fan,
+            title=title_str,
+            subtitle=subtitle_str,
+            y_label=f"Price ({mc.currency})",
+        )
+        _style_dark_axes(ax_hist, x_label="Terminal Density")
+        ax_hist.tick_params(labelleft=False)
+
+        # 1. Plot trailing historical price
+        if n_hist >= 2:
+            ax_fan.plot(
+                hist_xs,
+                mc.history_closes,
+                color=DARK_TEXT_COLOR,
+                linewidth=2.0,
+                label="Historical Close",
+                zorder=4,
+            )
+            ax_fan.axvline(
+                n_hist - 1,
+                color=DARK_MUTED_TEXT_COLOR,
+                linestyle="--",
+                linewidth=1.1,
+                alpha=0.85,
+                zorder=3,
+            )
+
+        # 2. Plot sample stochastic trajectories
+        for path in mc.sample_paths[:55]:
+            ax_fan.plot(fut_xs, path, color="#58A6FF", linewidth=0.55, alpha=0.08, zorder=1)
+
+        # 3. Shaded confidence cones (P5-P95 and P25-P75)
+        ax_fan.fill_between(
+            fut_xs,
+            mc.p5_path,
+            mc.p95_path,
+            color="#58A6FF",
+            alpha=0.13,
+            label="90% Confidence Cone (P5–P95)",
+            zorder=2,
+        )
+        ax_fan.fill_between(
+            fut_xs,
+            mc.p25_path,
+            mc.p75_path,
+            color="#39C5CF",
+            alpha=0.24,
+            label="50% Interquartile Band (P25–P75)",
+            zorder=2,
+        )
+
+        # 4. Percentile trajectories
+        ax_fan.plot(
+            fut_xs,
+            mc.p95_path,
+            color=BULLISH_GREEN,
+            linewidth=1.8,
+            linestyle="--",
+            label=f"95th Pct Bull ({_fmt_price_val(p95_end)})",
+            zorder=5,
+        )
+        ax_fan.plot(
+            fut_xs,
+            mc.p75_path,
+            color="#39C5CF",
+            linewidth=1.5,
+            linestyle="-.",
+            label=f"75th Pct ({_fmt_price_val(p75_end)})",
+            zorder=5,
+        )
+        ax_fan.plot(
+            fut_xs,
+            mc.p50_path,
+            color="#58A6FF",
+            linewidth=2.5,
+            label=f"50th Pct Median ({_fmt_price_val(p50_end)})",
+            zorder=6,
+        )
+        ax_fan.plot(
+            fut_xs,
+            mc.p25_path,
+            color="#E3B341",
+            linewidth=1.5,
+            linestyle="-.",
+            label=f"25th Pct ({_fmt_price_val(p25_end)})",
+            zorder=5,
+        )
+        ax_fan.plot(
+            fut_xs,
+            mc.p5_path,
+            color=BEARISH_RED,
+            linewidth=1.8,
+            linestyle="--",
+            label=f"5th Pct Bear ({_fmt_price_val(p5_end)})",
+            zorder=5,
+        )
+        ax_fan.axhline(mc.spot_price, color=DARK_MUTED_TEXT_COLOR, linestyle=":", linewidth=0.9, alpha=0.7)
+
+        # Cap Y-axis upper bound slightly above P95 max so extreme single-path outliers don't squash the fan
+        y_min = min(min(mc.p5_path), min(mc.history_closes) if mc.history_closes else mc.spot_price) * 0.90
+        y_max = max(max(mc.p95_path), max(mc.history_closes) if mc.history_closes else mc.spot_price) * 1.08
+        if y_max > y_min > 0:
+            ax_fan.set_ylim(y_min, y_max)
+
+        # 5. Terminal distribution histogram on the right panel
+        clipped_term = [min(y_max, max(y_min, v)) for v in mc.terminal_prices if y_min <= v <= y_max * 1.05]
+        if clipped_term:
+            ax_hist.hist(
+                clipped_term,
+                bins=32,
+                orientation="horizontal",
+                color="#58A6FF",
+                 alpha=0.45,
+                edgecolor=DARK_PANEL_COLOR,
+            )
+        for lvl, col, lbl in (
+            (p95_end, BULLISH_GREEN, f"P95: {_fmt_price_val(p95_end)}"),
+            (p75_end, "#39C5CF", f"P75: {_fmt_price_val(p75_end)}"),
+            (p50_end, "#58A6FF", f"P50: {_fmt_price_val(p50_end)}"),
+            (p25_end, "#E3B341", f"P25: {_fmt_price_val(p25_end)}"),
+            (p5_end, BEARISH_RED, f"P5: {_fmt_price_val(p5_end)}"),
+        ):
+            ax_hist.axhline(lvl, color=col, linestyle="--", linewidth=1.2, alpha=0.9)
+            ax_hist.text(
+                0.96,
+                lvl,
+                lbl,
+                transform=ax_hist.get_yaxis_transform(),
+                color=col,
+                fontsize=8.0,
+                fontweight="bold",
+                ha="right",
+                va="bottom",
+                bbox={"boxstyle": "round,pad=0.15", "facecolor": DARK_BG_COLOR, "edgecolor": "none", "alpha": 0.8},
+            )
+
+        # Date tick labels across combined historical + future timeline
+        all_ts = (mc.history_timestamps[:-1] if n_hist >= 1 else []) + mc.future_timestamps
+        total_pts = len(all_ts)
+        if total_pts >= 2:
+            step = max(1, math.ceil(total_pts / 8))
+            tick_idxs = list(range(0, total_pts, step))
+            if (total_pts - 1) not in tick_idxs:
+                tick_idxs.append(total_pts - 1)
+            span_days = (all_ts[-1] - all_ts[0]) / 86400.0
+            fmt_str = "%b %d" if span_days <= 180 else "%b '%y"
+            tick_labels = [datetime.fromtimestamp(all_ts[i], tz=timezone.utc).strftime(fmt_str) for i in tick_idxs]
+            ax_fan.set_xticks(tick_idxs)
+            ax_fan.set_xticklabels(tick_labels)
+
+        leg = ax_fan.legend(facecolor=DARK_PANEL_COLOR, edgecolor=DARK_GRID_COLOR, fontsize=8.5, loc="upper left")
+        for txt in leg.get_texts():
+            txt.set_color(DARK_TEXT_COLOR)
+
+        fig.subplots_adjust(left=0.08, right=0.97, top=0.89, bottom=0.11)
+        png_bytes = _figure_to_png_bytes(fig)
+
+        def _pct_vs_spot(val: float) -> str:
+            chg = ((val - mc.spot_price) / mc.spot_price) * 100.0 if mc.spot_price > 0 else 0.0
+            return f"{'+' if chg > 0 else ''}{chg:.1f}%"
+
+        summary_lines = [
+            f"**Asset & Horizon:** {mc.name} (`{mc.symbol}`) — {mc.horizon_label} ({mc.num_simulations:,} GBM simulated paths, calibrated on {mc.lookback_days} daily bars)",
+            f"**Calibrated Parameters:** Spot **{_fmt_price_val(mc.spot_price)} {mc.currency}** | Annualized Volatility (σ): **{mc.annualized_volatility_pct:.2f}%** | Annualized Drift: **{drift_sign}{mc.annualized_drift_pct:.2f}%**",
+            f"**Terminal Price Percentiles:** Bear P5: **{_fmt_price_val(p5_end)} {mc.currency}** ({_pct_vs_spot(p5_end)}) | P25: **{_fmt_price_val(p25_end)}** ({_pct_vs_spot(p25_end)}) | **Median P50: {_fmt_price_val(p50_end)} {mc.currency} ({_pct_vs_spot(p50_end)})** | Mean: **{_fmt_price_val(mean_end)}** ({_pct_vs_spot(mean_end)}) | P75: **{_fmt_price_val(p75_end)}** ({_pct_vs_spot(p75_end)}) | Bull P95: **{_fmt_price_val(p95_end)} {mc.currency}** ({_pct_vs_spot(p95_end)})",
+            f"**Probability Metrics:** P(Price > Spot): **{mc.prob_profit_pct:.1f}%** | P(≥ 2x Spot): **{mc.prob_double_pct:.1f}%** | P(Drawdown ≥ 20%): **{mc.prob_drawdown_20_pct:.1f}%**",
+        ]
+        return RenderedVisual(
+            filename=_slugify_filename(f"monte_carlo_{mc.symbol}_{mc.horizon_days}d", default="monte_carlo_chart"),
+            png_bytes=png_bytes,
+            title=title_str,
+            summary_lines=summary_lines,
+            renderer_used="matplotlib_monte_carlo",
         )
 
     def render_flowchart_fallback(

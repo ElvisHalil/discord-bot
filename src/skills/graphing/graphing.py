@@ -116,10 +116,32 @@ def clear_graphing_cache() -> None:
 
 
 def _extract_chart_timeframe(query: str, timeframe: str) -> str:
-    tf = (timeframe or "").strip().lower()
-    if tf:
-        return tf
+    tf_raw = (timeframe or "").strip().lower()
     q_low = (query or "").lower()
+
+    # Check if query or timeframe explicitly requests a bar interval ('hourly', 'by hr', '1hr', '15m', '5m', 'daily', 'weekly')
+    int_code = ""
+    for src in (q_low, tf_raw):
+        m_int = re.search(
+            r"\b(hourly|by\s+h(?:our|r)|per\s+h(?:our|r)|1\s*h(?:r|our)\b|60\s*m(?:in)?|15\s*m(?:in)?|5\s*m(?:in)?|30\s*m(?:in)?|daily|weekly)\b",
+            src,
+        )
+        if m_int:
+            tok = m_int.group(1)
+            if "h" in tok or "60" in tok:
+                int_code = "1h"
+            elif "15" in tok:
+                int_code = "15m"
+            elif "30" in tok:
+                int_code = "30m"
+            elif "5" in tok:
+                int_code = "5m"
+            elif "week" in tok:
+                int_code = "1wk"
+            elif "dai" in tok:
+                int_code = "1d"
+            break
+
     patterns = [
         (r"\b(all[- ]time|max)\b", "max"),
         (r"\b(10\s*y(?:ears?|rs?)?|decade)\b", "10y"),
@@ -127,19 +149,47 @@ def _extract_chart_timeframe(query: str, timeframe: str) -> str:
         (r"\b(3\s*y(?:ears?|rs?)?|three\s+years?)\b", "3y"),
         (r"\b(2\s*y(?:ears?|rs?)?|two\s+years?)\b", "2y"),
         (r"\b(ytd|year[- ]to[- ]date)\b", "ytd"),
-        (r"\b(1\s*y(?:ear|r)?|one\s+year|12\s*months?)\b", "1y"),
-        (r"\b(6\s*m(?:onths?|o)?|six\s+months?)\b", "6mo"),
-        (r"\b(3\s*m(?:onths?|o)?|three\s+months?)\b", "3mo"),
-        (r"\b(1\s*m(?:onth|o)?|one\s+month|30\s*days?)\b", "1mo"),
-        (r"\b(1\s*w(?:eek|k)?|5\s*d(?:ays?)?|7\s*d(?:ays?)?)\b", "5d"),
+        (r"\b(1\s*y(?:ear|r)?|one\s+year|12\s*months?|(?:past|last|next)\s+year)\b", "1y"),
+        (r"\b(6\s*m(?:onths?|o)?|six\s+months?|half\s+year)\b", "6mo"),
+        (r"\b(3\s*m(?:onths?|o)?|three\s+months?|90\s*days?|quarter)\b", "3mo"),
+        (r"\b(2\s*m(?:onths?|o)?|two\s+months?|60\s*days?)\b", "2mo"),
+        (r"\b(1\s*m(?:onth|o)?|one\s+month|30\s*days?|(?:past|last)\s+month)\b", "1mo"),
+        (r"\b(3\s*w(?:eeks?|ks?)|21\s*d(?:ays?)?)\b", "21d"),
+        (r"\b(2\s*w(?:eeks?|ks?)|14\s*d(?:ays?)?)\b", "14d"),
+        (r"\b(10\s*d(?:ays?)?)\b", "10d"),
+        (r"\b(7\s*d(?:ays?)?|1\s*w(?:eek|k)?|(?:past|last)\s+week|seven\s+days?)\b", "7d"),
+        (r"\b(5\s*d(?:ays?)?|five\s+days?)\b", "5d"),
+        (r"\b(4\s*d(?:ays?)?|four\s+days?)\b", "4d"),
+        (r"\b(3\s*d(?:ays?)?|72\s*h(?:ours?|rs?)?|three\s+days?)\b", "3d"),
+        (r"\b(2\s*d(?:ays?)?|48\s*h(?:ours?|rs?)?|two\s+days?)\b", "2d"),
+        (r"\b(24\s*h(?:ours?|rs?)?)\b", "24h"),
         (r"\b(intraday|1\s*d(?:ay)?|today)\b", "1d"),
         (r"\b(20\d{2})\b", None),
     ]
+
+    # Prefer explicit timeframe in query when present so stale LLM timeframe defaults don't override user prompt
+    resolved_tf = ""
     for pat, code in patterns:
         m = re.search(pat, q_low)
         if m:
-            return code if code is not None else m.group(1)
-    return "1y"
+            resolved_tf = code if code is not None else m.group(1)
+            break
+
+    if not resolved_tf:
+        m_d = re.search(r"\b(\d{1,3})\s*d(?:ays?)\b", q_low)
+        if m_d:
+            resolved_tf = f"{int(m_d.group(1))}d"
+
+    if not resolved_tf and tf_raw:
+        tf_stripped = re.sub(r"\b(?:hourly|by\s+h(?:our|r)|1h|1hr|60m|15m|5m|30m|daily|weekly)\b", "", tf_raw).strip()
+        resolved_tf = tf_stripped
+
+    if not resolved_tf:
+        resolved_tf = "7d" if int_code in ("1h", "15m", "30m") else ("1d" if int_code == "5m" else "1y")
+
+    if int_code and int_code not in resolved_tf.split():
+        return f"{resolved_tf} {int_code}"
+    return resolved_tf
 
 
 def _extract_market_tickers(query: str, ticker: str) -> List[str]:
@@ -202,7 +252,7 @@ def _extract_market_tickers(query: str, ticker: str) -> List[str]:
     # Match explicit uppercase symbols like NVDA, SHOP.TO, BTC-USD
     for m in re.finditer(r"\b([A-Z]{2,5}(?:\.TO|-USD|-CAD)?)\b", q_clean):
         tok = m.group(1)
-        if tok.lower() not in CHART_QUERY_STOPWORDS and tok not in ("USD", "CAD", "EUR", "GBP", "YTD", "MAX", "CEO", "IPO", "ETF"):
+        if tok.lower() not in CHART_QUERY_STOPWORDS and tok not in ("USD", "CAD", "EUR", "GBP", "YTD", "MAX", "CEO", "IPO", "ETF", "GBM"):
             s_idx, e_idx = m.start(), m.end()
             if not any(not (e_idx <= a or s_idx >= b) for a, b, _ in spans):
                 spans.append((s_idx, e_idx, tok))
@@ -358,16 +408,16 @@ def skill_graphing_info(
     query: Optional[str] = None,
 ) -> str:
     """
-    On-demand universal graphing and diagramming tool that renders dark-mode PNG charts, heatmaps, or diagrams and attaches them to the reply.
-    Use ONLY when the user explicitly asks to graph, plot, chart, heatmap, or draw a diagram (2D data charts, calendar/matrix heatmaps, stock/crypto/FX price & comparison charts, or Mermaid flowcharts/sequence/architecture diagrams).
+    On-demand universal graphing, Monte Carlo simulation, and diagramming tool that renders dark-mode PNG charts, heatmaps, stochastic simulations, or diagrams and attaches them to the reply.
+    Use ONLY when the user explicitly asks to graph, plot, chart, heatmap, run a Monte Carlo price simulation, or draw a diagram.
 
     Args:
-        chart_type: One of 'line', 'bar', 'horizontal_bar', 'stacked_bar', 'area', 'scatter', 'pie', 'donut', 'heatmap', 'calendar_heatmap', 'market', or 'diagram' ('flowchart'/'sequence').
+        chart_type: One of 'line', 'bar', 'horizontal_bar', 'stacked_bar', 'area', 'scatter', 'pie', 'donut', 'heatmap', 'calendar_heatmap', 'market', 'monte_carlo', or 'diagram' ('flowchart'/'sequence').
         title: Title displayed at the top of the rendered graph or diagram.
         data: Series numbers ('120, 145, 160'), key-value pairs ('AWS: 31, Azure: 25'), multi-series ('Rev: 10, 20; Cost: 8, 12'), JSON dataset, or Mermaid/arrow diagram code.
         labels: Optional comma-separated X-axis categories, ISO dates ('2027-05-01, 2027-05-02'), or pie slice labels (e.g. 'Q1, Q2, Q3, Q4').
-        ticker: Optional market symbol(s) for financial graphs (e.g. 'SHOP.TO', 'NVDA, AMD', 'BTC-USD', 'CADEUR=X').
-        timeframe: Optional market graph window ('1d', '5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '3y', '5y', '10y', 'max').
+        ticker: Optional market symbol(s) for financial graphs or Monte Carlo simulations (e.g. 'SHOP.TO', 'NVDA, AMD', 'BTC-USD', 'CADEUR=X').
+        timeframe: Optional market graph window or forward simulation horizon ('1d', '3d', '5d', '7d', '14d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '3y', '5y', '10y', 'max'; supports interval suffix like '7d 1h' or '1mo 1h').
         x_label: Optional X-axis label.
         y_label: Optional Y-axis label.
         diagram: Optional Mermaid syntax or shorthand arrow chain ('Node A -> Node B -> Node C') for flowcharts/diagrams.
@@ -380,7 +430,9 @@ def skill_graphing_info(
     title_clean = (title or "").strip()
 
     resolved_type = CHART_TYPE_ALIASES.get(ct_raw, "")
-    if not resolved_type:
+    if any(w in q_raw.lower() for w in ("monte carlo", "montecarlo", "gbm simulation", "stochastic simulation")):
+        resolved_type = ChartType.MONTE_CARLO
+    elif not resolved_type:
         if ct_raw in DIAGRAM_TYPE_ALIASES or any(
             w in q_raw.lower() for w in ("flowchart", "sequence diagram", "architecture diagram", "mermaid", "state diagram", "er diagram")
         ) or ("->" in d_raw or "-->" in d_raw or d_raw.lower().startswith(("flowchart", "graph ", "sequencediagram"))):
@@ -420,7 +472,26 @@ def skill_graphing_info(
             diagram_code=code_input,
         )
 
-    # 2. Financial / Market Time-Series Mode
+    # 2. Monte Carlo GBM Simulation Mode
+    elif resolved_type == ChartType.MONTE_CARLO:
+        targets = _extract_market_tickers(q_raw, t_raw)
+        if not targets:
+            prev_st = get_channel_chart_state()
+            if prev_st and prev_st.last_tickers:
+                targets = list(prev_st.last_tickers)
+        tf_code = _extract_chart_timeframe(q_raw, timeframe or "1y")
+        if targets:
+            mc_res = submit_to_worker(_market_agg.run_monte_carlo, targets[0], tf_code).result()
+            if mc_res is not None:
+                visual = _mpl_agg.render_monte_carlo_chart(mc_res)
+                update_channel_chart_state(
+                    chart_type=ChartType.MONTE_CARLO,
+                    title=visual.title,
+                    tickers=[mc_res.symbol],
+                    timeframe=tf_code,
+                )
+
+    # 3. Financial / Market Time-Series Mode
     elif resolved_type == ChartType.MARKET or (t_raw and not d_raw):
         targets = _extract_market_tickers(q_raw, t_raw)
         if not targets:
@@ -450,7 +521,7 @@ def skill_graphing_info(
 
     # 3. Universal 2D Data Chart & Heatmap Mode (bar, horizontal_bar, stacked_bar, line, area, scatter, pie, donut, heatmap, calendar_heatmap)
     if visual is None:
-        effective_ctype = resolved_type if resolved_type not in (ChartType.MARKET, ChartType.DIAGRAM) else ChartType.LINE
+        effective_ctype = resolved_type if resolved_type not in (ChartType.MARKET, ChartType.MONTE_CARLO, ChartType.DIAGRAM) else ChartType.LINE
         spec = _parse_chart_spec(
             chart_type=effective_ctype,
             title=title_clean or q_raw[:60] or "Data Visualization",

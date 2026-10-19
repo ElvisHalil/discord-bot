@@ -220,6 +220,69 @@ class TestGraphingSkill(unittest.TestCase):
         self.assertEqual(enriched["timeframe"], "6mo")
         self.assertIn("NVDA", enriched["ticker"])
 
+    def test_flexible_timeframes_hourly_intervals_and_stale_override(self):
+        from src.skills.graphing.aggregators.market_series import _resolve_timeframe_and_interval
+
+        # 7d and 3d must never silently fall back to 1y
+        r_7d, i_7d, lbl_7d, cut_7d = _resolve_timeframe_and_interval("7d")
+        self.assertEqual((r_7d, i_7d, cut_7d), ("1mo", "1h", 7))
+        self.assertIn("7D", lbl_7d)
+
+        r_3d_hr, i_3d_hr, lbl_3d_hr, cut_3d_hr = _resolve_timeframe_and_interval("3d 1h")
+        self.assertEqual((r_3d_hr, i_3d_hr, cut_3d_hr), ("5d", "1h", 3))
+        self.assertIn("1H Bars", lbl_3d_hr)
+
+        r_1mo_hr, i_1mo_hr, lbl_1mo_hr, _ = _resolve_timeframe_and_interval("1mo 1h")
+        self.assertEqual((r_1mo_hr, i_1mo_hr), ("1mo", "1h"))
+        self.assertIn("1H Bars", lbl_1mo_hr)
+
+        # Follow-up prompt must override stale LLM timeframe="1y" and inherit last_tickers
+        from src.skills.graphing.context import update_channel_chart_state
+        update_channel_chart_state(chart_type="market", tickers=["BTC-USD"], timeframe="1mo", channel_id=self.channel_id)
+        hist_followup = [{"role": "user", "content": "User jubkill says: last 3 days by hr"}]
+        enriched = enrich_graphing_tool_args({"timeframe": "1y"}, hist_followup, active_channel_id=self.channel_id)
+        self.assertEqual(enriched["ticker"], "BTC-USD")
+        self.assertEqual(enriched["timeframe"], "3d 1h")
+
+    def test_monte_carlo_simulation_and_fan_chart(self):
+        base_ts = 1714521600
+        fake_btc = MarketBarSeries(
+            symbol="BTC-USD",
+            name="Bitcoin USD",
+            currency="USD",
+            timeframe_label="2-Year (2Y)",
+            timestamps=[base_ts + i * 86400 for i in range(120)],
+            opens=[60000.0 + i * 180.0 for i in range(120)],
+            highs=[61000.0 + i * 180.0 for i in range(120)],
+            lows=[59000.0 + i * 180.0 for i in range(120)],
+            closes=[60000.0 + i * 180.0 + ((-1) ** i) * 450.0 for i in range(120)],
+            volumes=[25_000_000_000.0 for _ in range(120)],
+            pct_change=35.0,
+            period_high=82000.0,
+            period_low=59000.0,
+        )
+        hist_mc = [{"role": "user", "content": "can you do Monte Carlo simulation on btc 2 years into future?"}]
+        missed_mc = detect_missed_graphing_tool_call(hist_mc, active_channel_id=self.channel_id)
+        self.assertIsNotNone(missed_mc)
+        self.assertEqual(missed_mc[0], "skill_graphing_info")
+        self.assertEqual(missed_mc[1]["chart_type"], "monte_carlo")
+        self.assertEqual(missed_mc[1]["timeframe"], "2y")
+
+        with patch.object(
+            type(skill_graphing_info.__globals__["_market_agg"]),
+            "fetch_bar_series",
+            return_value=fake_btc,
+        ):
+            out_mc = skill_graphing_info(**missed_mc[1])
+        self.assertIn("Monte Carlo GBM Simulation", out_mc)
+        self.assertIn("Terminal Price Percentiles", out_mc)
+        self.assertIn("Probability Metrics", out_mc)
+        atts = pop_channel_attachments(self.channel_id)
+        self.assertEqual(len(atts), 1)
+        self.assertTrue(atts[0]["filename"].startswith("monte_carlo_btc-usd"))
+        self.assertTrue(atts[0]["data"].startswith(PNG_MAGIC))
+
 
 if __name__ == "__main__":
     unittest.main()
+

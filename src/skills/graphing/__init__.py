@@ -25,6 +25,7 @@ from src.skills.graphing.models import (
     ChartSeries,
     ChartSpec,
     MarketBarSeries,
+    MonteCarloResult,
     RenderedVisual,
 )
 
@@ -42,6 +43,7 @@ __all__ = [
     "MarketSeriesAggregator",
     "MatplotlibChartAggregator",
     "MermaidDiagramAggregator",
+    "MonteCarloResult",
     "RenderedVisual",
     "clear_channel_chart_state",
     "clear_graphing_cache",

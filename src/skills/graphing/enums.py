@@ -17,6 +17,7 @@ class ChartType(StrEnum):
     HEATMAP = "heatmap"
     CALENDAR_HEATMAP = "calendar_heatmap"
     MARKET = "market"
+    MONTE_CARLO = "monte_carlo"
     DIAGRAM = "diagram"
 
 
