@@ -9,13 +9,19 @@ from typing import Dict, List, Optional, Tuple
 
 from src.context import get_active_channel_id
 from src.skills.markets.models import MarketChannelState
-from src.utils.domain_vocab import (
-    FLIGHTS_DOMAIN_WORDS,
-    SPORTS_DOMAIN_WORDS,
-    contains_domain_terms,
-)
+from src.utils.domain_vocab import contains_domain_terms
 
 _CHANNEL_MARKET_STATE: Dict[int, MarketChannelState] = {}
+
+# Unambiguous sports/aviation operational terms (excludes words like 'tesla', 'economy', 'business', 'boeing', 'delta' that also appear in stock/macro queries)
+_NON_MARKET_SPORT_FLIGHT_WORDS: frozenset[str] = frozenset({
+    "match", "matches", "game", "games", "tournament", "playoffs", "score", "scores",
+    "scoreboard", "goalie", "quarterback", "striker", "midfielder", "defender", "pitcher",
+    "skater", "hltv", "liquipedia", "esports", "csgo", "cs2", "qualifying", "pitstop",
+    "flight", "flights", "airport", "airports", "airfare", "layover", "layovers",
+    "stopover", "nonstop", "roundtrip", "oneway", "boarding", "baggage", "luggage",
+    "itinerary", "itineraries", "callsign",
+})
 
 _EXPLICIT_MARKET_PHRASES: Tuple[str, ...] = (
     "stock market", "global markets", "market overview", "market pulse",
@@ -110,8 +116,8 @@ def enrich_markets_tool_args(
         q_val = str(enriched.get("query") or latest_user_text).strip()
         if t_val.lower() in ("it", "its", "them", "they", "same"):
             enriched["ticker"] = ", ".join(state.last_tickers)
-        elif not t_val and re.search(r"\b(?:it|its|them|they)\b", q_val, re.IGNORECASE):
-            # If user says "compare it with NVDA", prepend the channel's primary ticker
+        elif re.search(r"\b(?:it|its|them|they)\b", q_val, re.IGNORECASE):
+            # If user says "compare it with NVDA", replace pronoun with the channel's primary ticker
             if re.search(r"\b(?:vs\.?|versus|against|compare|with)\b", q_val, re.IGNORECASE):
                 enriched["query"] = re.sub(
                     r"\b(?:it|them)\b",
@@ -119,8 +125,13 @@ def enrich_markets_tool_args(
                     q_val,
                     flags=re.IGNORECASE,
                 )
-            else:
+                if t_val and state.last_tickers[0].lower() not in t_val.lower():
+                    enriched["ticker"] = f"{state.last_tickers[0]}, {t_val}"
+                enriched.setdefault("view", "compare")
+            elif not t_val:
                 enriched["ticker"] = state.last_tickers[0]
+        elif not t_val and _FOLLOWUP_TIMEFRAME_RE.search(q_val):
+            enriched["ticker"] = ", ".join(state.last_tickers) if len(state.last_tickers) > 1 else state.last_tickers[0]
 
     return enriched
 
@@ -150,7 +161,7 @@ def detect_missed_markets_tool_call(
         return None
 
     # Avoid intercepting sports or aviation queries
-    if contains_domain_terms(q_low, SPORTS_DOMAIN_WORDS | FLIGHTS_DOMAIN_WORDS):
+    if contains_domain_terms(q_low, _NON_MARKET_SPORT_FLIGHT_WORDS):
         return None
 
     # 1. Cashtag like $NVDA, $SHOP.TO, $BTC

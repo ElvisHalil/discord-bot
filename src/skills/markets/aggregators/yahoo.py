@@ -21,13 +21,15 @@ from src.skills.markets.catalogs import (
     TSX_60_LEADERS,
 )
 from src.skills.markets.models import HistoricalSummary, TickerQuote
+from src.utils.workers import map_in_workers
 
 logger = logging.getLogger(__name__)
 
-_SESSION_LOCK = threading.Lock()
 _CACHE_LOCK = threading.Lock()
+_CRUMB_LOCK = threading.Lock()
 
 _SESSION: Optional[creq.Session] = None
+_THREAD_LOCAL = threading.local()
 _CRUMB: Optional[str] = None
 _CRUMB_TS: float = 0.0
 _CRUMB_TTL: float = 900.0  # 15 minutes
@@ -63,31 +65,38 @@ def clear_yahoo_market_cache() -> None:
         _NEWS_CACHE.clear()
         _CHART_SERIES_CACHE.clear()
         _CHART_EVENTS_CACHE.clear()
-    with _SESSION_LOCK:
+    with _CRUMB_LOCK:
         _CRUMB = None
         _CRUMB_TS = 0.0
 
 
 def _get_session_and_crumb(force_refresh: bool = False) -> Tuple[creq.Session, str]:
-    """Return a Chrome-impersonated curl_cffi session and a valid Yahoo Finance crumb (thread-safe)."""
+    """Return a thread-safe Chrome-impersonated curl_cffi session and a valid Yahoo Finance crumb."""
     global _SESSION, _CRUMB, _CRUMB_TS
-    with _SESSION_LOCK:
-        now = time.time()
+    now = time.time()
+    sess = getattr(_THREAD_LOCAL, "session", None)
+    if sess is None:
+        sess = creq.Session(impersonate="chrome")
+        _THREAD_LOCAL.session = sess
         if _SESSION is None:
-            _SESSION = creq.Session(impersonate="chrome")
-        if not force_refresh and _CRUMB and (now - _CRUMB_TS) < _CRUMB_TTL:
-            return _SESSION, _CRUMB
+            _SESSION = sess
 
+    if not force_refresh and _CRUMB and (now - _CRUMB_TS) < _CRUMB_TTL:
+        return sess, _CRUMB
+
+    with _CRUMB_LOCK:
+        if not force_refresh and _CRUMB and (time.time() - _CRUMB_TS) < _CRUMB_TTL:
+            return sess, _CRUMB
         try:
-            _SESSION.get("https://fc.yahoo.com", timeout=5)
-            resp = _SESSION.get("https://query1.finance.yahoo.com/v1/test/getcrumb", timeout=5)
+            sess.get("https://fc.yahoo.com", timeout=5)
+            resp = sess.get("https://query1.finance.yahoo.com/v1/test/getcrumb", timeout=5)
             if resp.status_code == 200 and resp.text and "<" not in resp.text:
                 _CRUMB = resp.text.strip()
-                _CRUMB_TS = now
+                _CRUMB_TS = time.time()
         except Exception as e:
             logger.debug("Yahoo crumb fetch failed: %s", e)
 
-        return _SESSION, (_CRUMB or "")
+    return sess, (_CRUMB or "")
 
 
 def _parse_quote_dict(q: dict) -> TickerQuote:
@@ -194,11 +203,10 @@ class YahooFinanceAggregator(BaseMarketAggregator):
                 logger.debug("Yahoo v7 batch quote failed: %s", e)
 
         # Fallback to v8/finance/chart for any symbol not returned by v7/finance/quote
-        # (Executed sequentially inside the current worker to prevent nested SUB_WORKER_POOL starvation)
         still_missing = [s for s in missing if s not in results]
-        if still_missing and (not fetched_any or len(still_missing) <= 6):
-            for sym in still_missing[:8]:
-                cq = self._fetch_single_v8_chart(sym)
+        if still_missing:
+            chart_quotes = map_in_workers(self._fetch_single_v8_chart, still_missing)
+            for cq in chart_quotes:
                 if cq and cq.symbol:
                     with _CACHE_LOCK:
                         _QUOTE_CACHE[cq.symbol.upper()] = (now, cq)
@@ -207,21 +215,40 @@ class YahooFinanceAggregator(BaseMarketAggregator):
         return results
 
     def _fetch_single_v8_chart(self, symbol: str) -> Optional[TickerQuote]:
-        """Fallback keyless quote fetcher using Yahoo Finance v8/finance/chart."""
+        """Fallback keyless quote fetcher using Yahoo Finance v8/finance/chart with full technical reconstruction."""
         try:
             session, _ = _get_session_and_crumb()
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote_plus(symbol)}?interval=1d&range=5d"
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote_plus(symbol)}?interval=1d&range=1y"
             resp = session.get(url, timeout=5)
             if resp.status_code != 200:
                 return None
             res_list = (resp.json().get("chart") or {}).get("result") or []
             if not res_list:
                 return None
-            meta = res_list[0].get("meta") or {}
-            price = float(meta.get("regularMarketPrice") or 0.0)
-            prev_close = float(meta.get("chartPreviousClose") or meta.get("previousClose") or price)
+            res0 = res_list[0]
+            meta = res0.get("meta") or {}
+            quotes_list = (res0.get("indicators") or {}).get("quote") or []
+            q0 = quotes_list[0] if quotes_list else {}
+            closes = [float(c) for c in (q0.get("close") or []) if c is not None and float(c) > 0]
+            vols = [int(v) for v in (q0.get("volume") or []) if v is not None and int(v) >= 0]
+
+            price = float(meta.get("regularMarketPrice") or (closes[-1] if closes else 0.0))
+            if meta.get("previousClose") is not None:
+                prev_close = float(meta["previousClose"])
+            elif len(closes) >= 2:
+                prev_close = closes[-2]
+            else:
+                prev_close = float(meta.get("chartPreviousClose") or price)
+
             change = price - prev_close if prev_close else 0.0
             change_pct = (change / prev_close * 100.0) if prev_close else 0.0
+
+            ma_prec = 8 if price < 0.01 else 4
+            ma50 = round(sum(closes[-50:]) / len(closes[-50:]), ma_prec) if len(closes) >= 20 else None
+            ma200 = round(sum(closes[-200:]) / len(closes[-200:]), ma_prec) if len(closes) >= 100 else None
+            avg_vol_3m = int(sum(vols[-63:]) / len(vols[-63:])) if len(vols) >= 10 else None
+            vol = int(meta["regularMarketVolume"]) if meta.get("regularMarketVolume") is not None else (vols[-1] if vols else None)
+
             return TickerQuote(
                 symbol=str(meta.get("symbol") or symbol).upper(),
                 name=str(meta.get("longName") or meta.get("shortName") or symbol),
@@ -233,22 +260,55 @@ class YahooFinanceAggregator(BaseMarketAggregator):
                 change_percent=change_pct,
                 day_low=float(meta["regularMarketDayLow"]) if meta.get("regularMarketDayLow") is not None else None,
                 day_high=float(meta["regularMarketDayHigh"]) if meta.get("regularMarketDayHigh") is not None else None,
-                week52_low=float(meta["fiftyTwoWeekLow"]) if meta.get("fiftyTwoWeekLow") is not None else None,
-                week52_high=float(meta["fiftyTwoWeekHigh"]) if meta.get("fiftyTwoWeekHigh") is not None else None,
-                volume=int(meta["regularMarketVolume"]) if meta.get("regularMarketVolume") is not None else None,
+                week52_low=float(meta["fiftyTwoWeekLow"]) if meta.get("fiftyTwoWeekLow") is not None else (min(closes) if closes else None),
+                week52_high=float(meta["fiftyTwoWeekHigh"]) if meta.get("fiftyTwoWeekHigh") is not None else (max(closes) if closes else None),
+                ma50=ma50,
+                ma200=ma200,
+                volume=vol,
+                avg_volume_3m=avg_vol_3m,
             )
         except Exception as e:
             logger.debug("Yahoo v8 chart fallback failed for %s: %s", symbol, e)
             return None
 
+    def _resolve_crypto_symbol_via_coingecko(self, raw_query: str) -> Optional[str]:
+        """Resolve a cryptocurrency name or ticker symbol via CoinGecko /api/v3/search into a Yahoo `<SYM>-USD` symbol."""
+        q_clean = (raw_query or "").strip()
+        if not q_clean:
+            return None
+        q_low = q_clean.lower()
+        try:
+            resp = creq.get(
+                f"https://api.coingecko.com/api/v3/search?query={quote_plus(q_clean)}",
+                impersonate="chrome",
+                timeout=4,
+            )
+            if resp.status_code == 200:
+                coins = (resp.json() or {}).get("coins") or []
+                for c in coins:
+                    sym = str(c.get("symbol") or "").strip().upper()
+                    name = str(c.get("name") or "").strip().lower()
+                    cid = str(c.get("id") or "").strip().lower()
+                    if sym and (sym.lower() == q_low or name == q_low or cid == q_low):
+                        return f"{sym}-USD"
+                if coins and coins[0].get("symbol"):
+                    return f"{str(coins[0]['symbol']).strip().upper()}-USD"
+        except Exception as e:
+            logger.debug("CoinGecko search failed for %s: %s", q_clean, e)
+        if re.fullmatch(r"[A-Za-z0-9]{2,8}", q_clean):
+            return f"{q_clean.upper()}-USD"
+        return None
+
     def resolve_ticker_and_news(
         self,
         raw_query: str,
         prefer_canada: bool = True,
+        prefer_crypto: bool = False,
     ) -> Tuple[Optional[str], Optional[str], List[str]]:
         """
-        Resolve a user's company name or ticker symbol into `(primary_symbol, dual_listed_symbol, headlines)`.
-        Defaults to TSX (.TO / CAD) for Canadian dual-listed companies when `prefer_canada=True`.
+        Resolve a user's company name, ticker symbol, or cryptocurrency into `(primary_symbol, dual_listed_symbol, headlines)`.
+        Defaults to TSX (.TO / CAD) for Canadian dual-listed companies when `prefer_canada=True`,
+        and prioritizes `<SYM>-USD` / `<SYM>-CAD` crypto pairs when `prefer_crypto=True`.
         """
         q_clean = (raw_query or "").strip()
         q_low = q_clean.lower()
@@ -256,16 +316,25 @@ class YahooFinanceAggregator(BaseMarketAggregator):
         primary_sym: Optional[str] = None
         dual_sym: Optional[str] = None
 
-        # 1. Check Canadian dual-listed map first (e.g. 'Shopify' -> ('SHOP.TO', 'SHOP'))
-        if prefer_canada and q_low in CANADIAN_DUAL_LISTED_MAP:
+        # 1. Check explicit aliases and Canadian dual-listed map
+        if prefer_crypto and q_low in COMMON_TICKER_ALIASES and COMMON_TICKER_ALIASES[q_low].endswith("-USD"):
+            primary_sym = COMMON_TICKER_ALIASES[q_low]
+        elif not prefer_crypto and prefer_canada and q_low in CANADIAN_DUAL_LISTED_MAP:
             primary_sym, dual_sym = CANADIAN_DUAL_LISTED_MAP[q_low]
-        elif q_low in COMMON_TICKER_ALIASES:
+        elif not prefer_crypto and q_low in COMMON_TICKER_ALIASES:
             primary_sym = COMMON_TICKER_ALIASES[q_low]
 
+        if primary_sym and primary_sym.endswith("-USD") and not dual_sym:
+            dual_sym = primary_sym.removesuffix("-USD") + "-CAD"
+
         # 2. Query Yahoo v1/finance/search for ticker resolution and breaking ticker news
-        # Note: Yahoo Search attaches news to the base symbol/company name rather than the '.TO' suffix.
+        # Note: Yahoo Search attaches news to the base symbol/company name rather than '.TO' or '-USD' suffixes.
         if primary_sym and primary_sym.endswith(".TO"):
             search_q = dual_sym or q_clean.removesuffix(".TO").removesuffix(".to")
+        elif primary_sym and primary_sym.endswith("-USD"):
+            search_q = {"BTC-USD": "IBIT", "ETH-USD": "ETHA"}.get(primary_sym, "COIN")
+        elif prefer_crypto:
+            search_q = f"{q_clean}-USD" if re.fullmatch(r"[A-Za-z]{2,6}", q_clean) else q_clean
         else:
             search_q = primary_sym or q_clean
         headlines: List[str] = []
@@ -280,29 +349,41 @@ class YahooFinanceAggregator(BaseMarketAggregator):
                 data = resp.json()
                 quotes = data.get("quotes") or []
                 if not primary_sym and quotes:
-                    # Prefer Toronto (.TO) if a Canadian listing exists for the same company name
-                    tor_quote = next(
-                        (
-                            item for item in quotes
-                            if str(item.get("symbol") or "").endswith(".TO")
-                            and item.get("quoteType") in ("EQUITY", "ETF")
-                        ),
-                        None,
-                    )
-                    us_quote = next(
-                        (
-                            item for item in quotes
-                            if item.get("quoteType") in ("EQUITY", "ETF", "INDEX", "FUTURE", "CRYPTOCURRENCY", "CURRENCY")
-                            and not str(item.get("symbol") or "").endswith(".TO")
-                        ),
-                        None,
-                    )
-                    if prefer_canada and tor_quote:
-                        primary_sym = str(tor_quote["symbol"]).upper()
-                        if us_quote and str(us_quote.get("shortname") or "")[:6].lower() == str(tor_quote.get("shortname") or "")[:6].lower():
-                            dual_sym = str(us_quote["symbol"]).upper()
-                    elif quotes[0].get("symbol"):
-                        primary_sym = str(quotes[0]["symbol"]).upper()
+                    if prefer_crypto:
+                        crypto_quote = next(
+                            (
+                                item for item in quotes
+                                if item.get("quoteType") == "CRYPTOCURRENCY"
+                                or str(item.get("symbol") or "").upper().endswith("-USD")
+                            ),
+                            None,
+                        )
+                        if crypto_quote and crypto_quote.get("symbol"):
+                            primary_sym = str(crypto_quote["symbol"]).upper()
+                    else:
+                        # Prefer Toronto (.TO) if a Canadian listing exists for the same company name
+                        tor_quote = next(
+                            (
+                                item for item in quotes
+                                if str(item.get("symbol") or "").endswith(".TO")
+                                and item.get("quoteType") in ("EQUITY", "ETF")
+                            ),
+                            None,
+                        )
+                        us_quote = next(
+                            (
+                                item for item in quotes
+                                if item.get("quoteType") in ("EQUITY", "ETF", "INDEX", "FUTURE", "CRYPTOCURRENCY", "CURRENCY")
+                                and not str(item.get("symbol") or "").endswith(".TO")
+                            ),
+                            None,
+                        )
+                        if prefer_canada and tor_quote:
+                            primary_sym = str(tor_quote["symbol"]).upper()
+                            if us_quote and str(us_quote.get("shortname") or "")[:6].lower() == str(tor_quote.get("shortname") or "")[:6].lower():
+                                dual_sym = str(us_quote["symbol"]).upper()
+                        elif quotes[0].get("symbol"):
+                            primary_sym = str(quotes[0]["symbol"]).upper()
 
                 for n in (data.get("news") or [])[:4]:
                     title = str(n.get("title") or "").strip()
@@ -321,13 +402,19 @@ class YahooFinanceAggregator(BaseMarketAggregator):
         except Exception as e:
             logger.debug("Yahoo v1 search failed for %s: %s", search_q, e)
 
+        if not primary_sym and prefer_crypto:
+            primary_sym = self._resolve_crypto_symbol_via_coingecko(q_clean)
+
         if not primary_sym and q_clean:
             primary_sym = q_clean.upper()
+
+        if primary_sym and primary_sym.endswith("-USD") and not dual_sym:
+            dual_sym = primary_sym.removesuffix("-USD") + "-CAD"
 
         return primary_sym, dual_sym, headlines
 
     def fetch_us_movers(self, count: int = 5) -> Dict[str, List[TickerQuote]]:
-        """Fetch US Day Gainers, Day Losers, and Most Actives from Yahoo Finance predefined screeners."""
+        """Fetch US Day Gainers, Day Losers, and Most Actives in parallel via SUB_WORKER_POOL."""
         now = time.time()
         out: Dict[str, List[TickerQuote]] = {"gainers": [], "losers": [], "actives": []}
         screener_map = {
@@ -335,14 +422,22 @@ class YahooFinanceAggregator(BaseMarketAggregator):
             "losers": "day_losers",
             "actives": "most_actives",
         }
-        session, _ = _get_session_and_crumb()
-        for key, scr_id in screener_map.items():
-            with _CACHE_LOCK:
+        to_fetch: List[Tuple[str, str]] = []
+        with _CACHE_LOCK:
+            for key, scr_id in screener_map.items():
                 cached = _SCREENER_CACHE.get(scr_id)
                 if cached and (now - cached[0]) < _SCREENER_CACHE_TTL:
                     out[key] = cached[1][:count]
-                    continue
+                else:
+                    to_fetch.append((key, scr_id))
+
+        if not to_fetch:
+            return out
+
+        def _fetch_one_screener(pair: Tuple[str, str]) -> Tuple[str, str, List[TickerQuote]]:
+            key, scr_id = pair
             try:
+                session, _ = _get_session_and_crumb()
                 url = (
                     f"https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
                     f"?scrIds={scr_id}&count={max(count, 6)}"
@@ -353,11 +448,16 @@ class YahooFinanceAggregator(BaseMarketAggregator):
                     if res_list:
                         quotes_raw = res_list[0].get("quotes") or []
                         parsed = [_parse_quote_dict(q) for q in quotes_raw if q.get("symbol")]
-                        with _CACHE_LOCK:
-                            _SCREENER_CACHE[scr_id] = (now, parsed)
-                        out[key] = parsed[:count]
+                        return key, scr_id, parsed
             except Exception as e:
                 logger.debug("Yahoo screener %s failed: %s", scr_id, e)
+            return key, scr_id, []
+
+        for key, scr_id, parsed in map_in_workers(_fetch_one_screener, to_fetch):
+            if parsed:
+                with _CACHE_LOCK:
+                    _SCREENER_CACHE[scr_id] = (now, parsed)
+                out[key] = parsed[:count]
         return out
 
     def fetch_tsx_movers(
@@ -381,7 +481,7 @@ class YahooFinanceAggregator(BaseMarketAggregator):
         return {"gainers": gainers, "losers": losers}
 
     def fetch_macro_market_headlines(self, limit: int = 5) -> List[str]:
-        """Fetch top macro/financial market-moving headlines from Yahoo Finance news feeds."""
+        """Fetch top macro/financial market-moving headlines in parallel via SUB_WORKER_POOL."""
         now = time.time()
         cache_key = "macro_market_news"
         with _CACHE_LOCK:
@@ -389,29 +489,36 @@ class YahooFinanceAggregator(BaseMarketAggregator):
             if cached and (now - cached[0]) < _NEWS_CACHE_TTL:
                 return cached[1][:limit]
 
-        headlines: List[str] = []
-        seen_titles: set[str] = set()
-        session, _ = _get_session_and_crumb()
-        for q_term in ("stock market economy", "TSX Canada economy"):
+        def _fetch_query_news(q_term: str) -> List[Tuple[str, str]]:
+            items: List[Tuple[str, str]] = []
             try:
+                session, _ = _get_session_and_crumb()
                 url = f"https://query1.finance.yahoo.com/v1/finance/search?q={quote_plus(q_term)}&quotesCount=0&newsCount=5"
                 resp = session.get(url, timeout=5)
                 if resp.status_code == 200:
                     for n in resp.json().get("news") or []:
                         title = str(n.get("title") or "").strip()
-                        if not title or title.lower() in seen_titles:
+                        if not title:
                             continue
-                        seen_titles.add(title.lower())
                         pub = str(n.get("publisher") or "").strip()
                         link = str(n.get("link") or "").strip()
                         line = f"{title} [{pub}]" if pub else title
                         if link:
                             line += f" (<{link}>)"
-                        headlines.append(line)
-                        if len(headlines) >= limit:
-                            break
+                        items.append((title.lower(), line))
             except Exception as e:
                 logger.debug("Macro headline fetch failed for %s: %s", q_term, e)
+            return items
+
+        headlines: List[str] = []
+        seen_titles: set[str] = set()
+        for batch in map_in_workers(_fetch_query_news, ("stock market economy", "TSX Canada economy")):
+            for norm_title, line in batch:
+                if norm_title not in seen_titles:
+                    seen_titles.add(norm_title)
+                    headlines.append(line)
+                    if len(headlines) >= limit:
+                        break
             if len(headlines) >= limit:
                 break
 
@@ -621,13 +728,14 @@ class YahooFinanceAggregator(BaseMarketAggregator):
             tb_ts, tb_o, tb_h, tb_l, tb_c = target_bar[:5]
             tb_date_str = datetime.fromtimestamp(tb_ts, tz=timezone.utc).strftime("%b %d, %Y")
             ret_since = round((latest_close - tb_c) / tb_c * 100.0, 2) if tb_c > 0 else 0.0
+            eb_prec = 8 if tb_c < 0.01 else 4
             exact_date_bar = {
                 "requested_date": target_ymd,
                 "date": tb_date_str,
-                "open": round(tb_o, 4),
-                "high": round(tb_h, 4),
-                "low": round(tb_l, 4),
-                "close": round(tb_c, 4),
+                "open": round(tb_o, eb_prec),
+                "high": round(tb_h, eb_prec),
+                "low": round(tb_l, eb_prec),
+                "close": round(tb_c, eb_prec),
                 "return_since_pct": ret_since,
             }
             since_bars = [b for b in source_bars if b[0] >= tb_ts]
@@ -756,7 +864,8 @@ class YahooFinanceAggregator(BaseMarketAggregator):
         start_date_str = datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime(header_date_fmt)
         end_date_str = datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime(header_date_fmt)
 
-        abs_change = round(end_price - start_price, 4)
+        prec = 8 if min(start_price, end_price) < 0.01 else 4
+        abs_change = round(end_price - start_price, prec)
         pct_change = round((end_price - start_price) / start_price * 100.0, 2) if start_price > 0 else 0.0
 
         span_years = (end_ts - start_ts) / (365.25 * 86400.0)
@@ -790,9 +899,9 @@ class YahooFinanceAggregator(BaseMarketAggregator):
         # Period Peak, Trough, and Max Drawdown
         high_bar = max(window_bars, key=lambda b: b[2])
         low_bar = min(window_bars, key=lambda b: b[3])
-        period_high = round(high_bar[2], 4)
+        period_high = round(high_bar[2], prec)
         period_high_date = datetime.fromtimestamp(high_bar[0], tz=timezone.utc).strftime(header_date_fmt)
-        period_low = round(low_bar[3], 4)
+        period_low = round(low_bar[3], prec)
         period_low_date = datetime.fromtimestamp(low_bar[0], tz=timezone.utc).strftime(header_date_fmt)
 
         running_peak = window_bars[0][4]
@@ -829,7 +938,14 @@ class YahooFinanceAggregator(BaseMarketAggregator):
         for i in indices:
             b_ts, _, _, _, b_close = window_bars[i][:5]
             d_str = datetime.fromtimestamp(b_ts, tz=timezone.utc).strftime(date_fmt)
-            p_str = f"{b_close:,.2f}" if b_close >= 1 else f"{b_close:.4f}"
+            if b_close >= 1:
+                p_str = f"{b_close:,.2f}"
+            elif b_close >= 0.01:
+                p_str = f"{b_close:.4f}"
+            elif b_close >= 0.0001:
+                p_str = f"{b_close:.6f}"
+            else:
+                p_str = f"{b_close:.8f}"
             checkpoints.append(f"{d_str}: **{p_str}**")
 
         return HistoricalSummary(
@@ -838,8 +954,8 @@ class YahooFinanceAggregator(BaseMarketAggregator):
             timeframe_label=tf_label,
             start_date=start_date_str,
             end_date=end_date_str,
-            start_price=round(start_price, 4),
-            end_price=round(end_price, 4),
+            start_price=round(start_price, prec),
+            end_price=round(end_price, prec),
             abs_change=abs_change,
             pct_change=pct_change,
             cagr_pct=cagr_pct,

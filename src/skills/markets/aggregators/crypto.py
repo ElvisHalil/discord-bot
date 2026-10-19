@@ -37,12 +37,21 @@ def clear_crypto_market_cache() -> None:
         _CRYPTO_CACHE = None
 
 
+def _round_cad(price_usd: float, usdcad_rate: float) -> float:
+    val = price_usd * usdcad_rate
+    if price_usd < 0.01:
+        return round(val, 8)
+    if price_usd < 1.0:
+        return round(val, 4)
+    return round(val, 2)
+
+
 def _apply_cad_rate(coins: List[CryptoAssetQuote], usdcad_rate: float) -> List[CryptoAssetQuote]:
     """Return a new list of CryptoAssetQuote copies with `price_cad` computed for `usdcad_rate`."""
     if usdcad_rate <= 0:
         return [replace(c) for c in coins]
     return [
-        replace(c, price_cad=round(c.price_usd * usdcad_rate, 2) if c.price_usd > 0 else c.price_cad)
+        replace(c, price_cad=_round_cad(c.price_usd, usdcad_rate) if c.price_usd > 0 else c.price_cad)
         for c in coins
     ]
 
@@ -78,7 +87,7 @@ class CryptoAggregator(BaseMarketAggregator):
                                 symbol=sym,
                                 name=str(item.get("name") or sym),
                                 price_usd=price_usd,
-                                price_cad=round(price_usd * usdcad_rate, 2) if usdcad_rate > 0 else None,
+                                price_cad=_round_cad(price_usd, usdcad_rate) if usdcad_rate > 0 else None,
                                 change_24h_pct=float(chg_24h or 0.0),
                                 change_7d_pct=float(chg_7d) if chg_7d is not None else None,
                                 market_cap_usd=float(item["market_cap"]) if item.get("market_cap") is not None else None,
@@ -94,27 +103,39 @@ class CryptoAggregator(BaseMarketAggregator):
                 _CRYPTO_CACHE = (now, coins)
             return _apply_cad_rate(coins, usdcad_rate)
 
-        # Fallback to Yahoo Finance crypto symbols if CoinGecko is unreachable
+        # Fallback to Yahoo Finance crypto symbols if CoinGecko is unreachable or rate-limited
         from src.skills.markets.aggregators.yahoo import YahooFinanceAggregator
 
         yf = YahooFinanceAggregator()
-        yf_quotes = yf.fetch_quotes([b.symbol for b in CRYPTO_BENCHMARKS])
-        for idx, b in enumerate(CRYPTO_BENCHMARKS, start=1):
-            q = yf_quotes.get(b.symbol.upper())
+        extra_fallback_syms = [
+            ("AVAX-USD", "Avalanche"),
+            ("LINK-USD", "Chainlink"),
+            ("DOT-USD", "Polkadot"),
+            ("HBAR-USD", "Hedera"),
+            ("ZEC-USD", "Zcash"),
+            ("LTC-USD", "Litecoin"),
+        ]
+        all_specs = [(b.symbol, b.label) for b in CRYPTO_BENCHMARKS] + extra_fallback_syms
+        yf_quotes = yf.fetch_quotes([sym for sym, _ in all_specs])
+        for idx, (sym_code, lbl) in enumerate(all_specs, start=1):
+            q = yf_quotes.get(sym_code.upper())
             if q and q.price > 0:
-                sym_clean = b.symbol.split("-")[0]
+                sym_clean = sym_code.split("-")[0]
                 coins.append(
                     CryptoAssetQuote(
                         symbol=sym_clean,
-                        name=b.label,
+                        name=lbl,
                         price_usd=q.price,
-                        price_cad=round(q.price * usdcad_rate, 2) if usdcad_rate > 0 else None,
+                        price_cad=_round_cad(q.price, usdcad_rate) if usdcad_rate > 0 else None,
                         change_24h_pct=q.change_percent,
                         market_cap_usd=float(q.market_cap) if q.market_cap else None,
                         volume_24h_usd=float(q.volume) if q.volume else None,
                         rank=idx,
                     )
                 )
+        if coins:
+            with _CRYPTO_LOCK:
+                _CRYPTO_CACHE = (now, coins)
         return coins
 
     def get_crypto_movers(

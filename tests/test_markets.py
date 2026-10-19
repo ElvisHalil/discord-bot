@@ -15,6 +15,7 @@ from src.skills.markets import (
 from src.skills.markets.enums import MarketRegion, MarketView
 from src.skills.markets.markets import (
     _compute_macro_regime_signals,
+    _crypto_agg,
     _extract_candidate_ticker_query,
     _extract_comparison_tickers,
     _extract_timeframe,
@@ -300,6 +301,11 @@ class TestMarketsSkill(unittest.TestCase):
             _extract_comparison_tickers("", "SHOP.TO, NVDA, AAPL"),
             ["shop.to", "nvda", "aapl"],
         )
+        # Ensure broad non-comparison queries with 'and' do not falsely hijack overview into comparison mode
+        self.assertEqual(
+            _extract_comparison_tickers("how are bitcoin and ethereum and crypto markets doing today", ""),
+            [],
+        )
 
         shop_q = _make_quote("SHOP.TO", "Shopify Inc.", 148.50, 2.10, currency="CAD", exchange="TOR", beta=1.85, target_mean_price=168.0)
         nvda_q = _make_quote("NVDA", "NVIDIA Corp.", 138.20, 4.10, currency="USD", exchange="NMS", beta=1.65, target_mean_price=160.0)
@@ -344,7 +350,7 @@ class TestMarketsSkill(unittest.TestCase):
             horizon_returns={"1Y": 168.4, "5Y": 528.18},
         )
 
-        def fake_bundle(target, prefer_ca, tf):
+        def fake_bundle(target, prefer_ca, tf, prefer_crypto=False):
             if "shop" in target.lower():
                 return (shop_q, None, shop_hist, ["Shopify expands enterprise merchants"])
             return (nvda_q, None, nvda_hist, ["NVIDIA Blackwell demand surges"])
@@ -353,9 +359,9 @@ class TestMarketsSkill(unittest.TestCase):
             out = skill_markets_info(query="Compare Shopify vs NVDA over 5 years")
 
         self.assertIn("MULTI-ASSET HEAD-TO-HEAD COMPARISON", out)
-        self.assertIn("Relative Outperformer (5-Year (5Y)): **NVIDIA Corp. (`NVDA`)** at **+528.18%**", out)
+        self.assertIn("**Relative Outperformer (5-Year (5Y)):** **NVIDIA Corp. (`NVDA`)** at **+528.18%**", out)
         self.assertIn("outperforming **Shopify Inc. (`SHOP.TO`)** (+85.62%) by **+442.56%**", out)
-        self.assertIn("Total Return (w/ Divs): +530.10%", out)
+        self.assertIn("**Total Return (w/ Divs):** +530.10%", out)
 
     def test_custom_date_range_single_date_and_intraday_timeframes(self):
         """Verify intraday ('1d'), single historical date ('on Oct 15, 2025'), custom range, and standalone year extraction."""
@@ -368,7 +374,11 @@ class TestMarketsSkill(unittest.TestCase):
         self.assertEqual(_extract_timeframe("NVDA 2024 return", ""), "2024")
         self.assertEqual(
             _extract_candidate_ticker_query("Palantir five years", "", has_timeframe=True),
-            "Palantir",
+            "palantir",
+        )
+        self.assertEqual(
+            _extract_candidate_ticker_query("CrowdStrike five years", "", has_timeframe=True),
+            "CrowdStrike",
         )
 
         # Build synthetic daily series across 2025
@@ -409,6 +419,14 @@ class TestMarketsSkill(unittest.TestCase):
             {"role": "user", "content": "what about over 5 years?"}
         ])
         self.assertEqual(enriched.get("query"), "what about over 5 years?")
+        self.assertEqual(enriched.get("ticker"), "SHOP.TO")
+
+        # Follow-up comparison when LLM passed only the new ticker
+        enriched_cmp = enrich_markets_tool_args({"query": "compare it with NVDA", "ticker": "NVDA"}, [
+            {"role": "user", "content": "compare it with NVDA"}
+        ])
+        self.assertEqual(enriched_cmp.get("ticker"), "SHOP.TO, NVDA")
+        self.assertEqual(enriched_cmp.get("view"), "compare")
 
         # Follow-up missed tool call detection when channel has active market state
         missed_followup = detect_missed_markets_tool_call([
@@ -425,6 +443,13 @@ class TestMarketsSkill(unittest.TestCase):
         self.assertIsNotNone(missed_cashtag)
         self.assertEqual(missed_cashtag[0], "skill_markets_info")
         self.assertEqual(missed_cashtag[1].get("ticker"), "NVDA, AMD")
+
+        # Broad market query containing 'economy' or 'business' must NOT be blocked by flight cabin words
+        missed_econ = detect_missed_markets_tool_call([
+            {"role": "user", "content": "how is the stock market and economy doing today?"}
+        ])
+        self.assertIsNotNone(missed_econ)
+        self.assertEqual(missed_econ[0], "skill_markets_info")
 
         # Ensure sports/flight queries are never intercepted by detect_missed_markets_tool_call
         self.assertIsNone(detect_missed_markets_tool_call([
@@ -458,8 +483,200 @@ class TestMarketsSkill(unittest.TestCase):
             self.assertIn("EUROPEAN MARKETS", eu_out)
             self.assertNotIn("ASIAN & PACIFIC MARKETS", eu_out)
 
+    def test_yahoo_v7_to_v8_chart_fallback_preserves_all_symbols_and_technicals(self):
+        """When Yahoo v7/finance/quote fails (e.g. 429/500), v8/finance/chart fallback must recover all symbols and reconstruct MAs/volume."""
+        class _DummyResp:
+            def __init__(self, status_code: int, payload: dict):
+                self.status_code = status_code
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        class _DummySession:
+            def get(self, url: str, timeout: int = 5):
+                if "/v7/finance/quote" in url:
+                    return _DummyResp(429, {})
+                if "/v8/finance/chart/" in url:
+                    # Extract symbol from URL path
+                    sym = url.split("/v8/finance/chart/")[1].split("?")[0].replace("%5E", "^").replace("%3D", "=")
+                    closes = [100.0 + i * 0.5 for i in range(220)]  # ends at 209.5, prev_close = 209.0
+                    vols = [1_000_000 + (i * 1000) for i in range(220)]
+                    return _DummyResp(
+                        200,
+                        {
+                            "chart": {
+                                "result": [
+                                    {
+                                        "meta": {
+                                            "symbol": sym,
+                                            "longName": f"{sym} Asset",
+                                            "fullExchangeName": "TOR" if sym.endswith(".TO") else "NMS",
+                                            "currency": "CAD" if sym.endswith(".TO") else "USD",
+                                            "regularMarketPrice": 210.0,
+                                            "regularMarketDayLow": 208.0,
+                                            "regularMarketDayHigh": 211.5,
+                                            "fiftyTwoWeekLow": 95.0,
+                                            "fiftyTwoWeekHigh": 215.0,
+                                            "regularMarketVolume": 1_500_000,
+                                        },
+                                        "indicators": {
+                                            "quote": [{"close": closes, "volume": vols}]
+                                        },
+                                    }
+                                ]
+                            }
+                        },
+                    )
+                return _DummyResp(404, {})
+
+        symbols = [f"SYM{i}" for i in range(12)] + ["SHOP.TO"]
+        with patch(
+            "src.skills.markets.aggregators.yahoo._get_session_and_crumb",
+            return_value=(_DummySession(), "testcrumb"),
+        ):
+            fetched = _yahoo_agg.fetch_quotes(symbols)
+
+        # Verify zero symbols were dropped (even >8 symbols) and all technicals were reconstructed
+        self.assertEqual(len(fetched), 13)
+        shop_q = fetched["SHOP.TO"]
+        self.assertEqual(shop_q.currency, "CAD")
+        self.assertEqual(shop_q.price, 210.0)
+        # 1-day change vs closes[-2] (209.0) -> +1.0 (+0.48%)
+        self.assertAlmostEqual(shop_q.change, 1.0, places=2)
+        self.assertIsNotNone(shop_q.ma50)
+        self.assertIsNotNone(shop_q.ma200)
+        self.assertIsNotNone(shop_q.avg_volume_3m)
+        self.assertEqual(shop_q.week52_low, 95.0)
+        self.assertEqual(shop_q.week52_high, 215.0)
+
+    def test_yahoo_crumb_401_auto_refresh_recovery(self):
+        """When Yahoo v7 returns 401/403 due to an expired crumb, fetch_quotes refreshes the crumb and succeeds on retry."""
+        calls = []
+
+        class _DummyResp:
+            def __init__(self, status_code: int, payload: dict):
+                self.status_code = status_code
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        class _DummySession:
+            def get(self, url: str, timeout: int = 6):
+                calls.append(url)
+                if len(calls) == 1:
+                    return _DummyResp(401, {})
+                return _DummyResp(
+                    200,
+                    {
+                        "quoteResponse": {
+                            "result": [
+                                {
+                                    "symbol": "GC=F",
+                                    "longName": "Gold Futures",
+                                    "currency": "USD",
+                                    "regularMarketPrice": 4195.0,
+                                    "regularMarketChange": 15.0,
+                                    "regularMarketChangePercent": 0.36,
+                                }
+                            ]
+                        }
+                    },
+                )
+
+        sess = _DummySession()
+        with patch(
+            "src.skills.markets.aggregators.yahoo._get_session_and_crumb",
+            side_effect=[(sess, "stale_crumb"), (sess, "fresh_crumb")],
+        ):
+            res = _yahoo_agg.fetch_quotes(["GC=F"])
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("GC=F", res)
+        self.assertEqual(res["GC=F"].price, 4195.0)
+
+    def test_coingecko_rate_limit_fallback_to_yahoo_preserves_crypto_and_movers(self):
+        """When CoinGecko returns 429 or times out, CryptoAggregator falls back to Yahoo Finance with full USD/CAD & movers."""
+        class _DummyResp429:
+            status_code = 429
+
+        fake_yf_quotes = {
+            "BTC-USD": _make_quote("BTC-USD", "Bitcoin", 82500.0, 1.85),
+            "ETH-USD": _make_quote("ETH-USD", "Ethereum", 2420.0, 0.95),
+            "SOL-USD": _make_quote("SOL-USD", "Solana", 105.0, 3.40),
+            "XRP-USD": _make_quote("XRP-USD", "XRP", 1.31, -1.20),
+            "DOGE-USD": _make_quote("DOGE-USD", "Dogecoin", 0.085, -2.80),
+            "ZEC-USD": _make_quote("ZEC-USD", "Zcash", 1165.0, 4.50),
+        }
+
+        with (
+            patch("src.skills.markets.aggregators.crypto.creq.get", return_value=_DummyResp429()),
+            patch("src.skills.markets.aggregators.yahoo.YahooFinanceAggregator.fetch_quotes", return_value=fake_yf_quotes),
+        ):
+            coins = _crypto_agg.fetch_top_coins(usdcad_rate=1.40)
+
+        self.assertGreaterEqual(len(coins), 6)
+        btc = next(c for c in coins if c.symbol == "BTC")
+        self.assertEqual(btc.price_usd, 82500.0)
+        self.assertEqual(btc.price_cad, round(82500.0 * 1.40, 2))
+        self.assertIsNotNone(btc.market_cap_usd)
+        self.assertIsNotNone(btc.volume_24h_usd)
+
+        movers = _crypto_agg.get_crypto_movers(coins, count=2)
+        self.assertEqual(movers["gainers"][0].symbol, "ZEC")
+        self.assertEqual(movers["losers"][0].symbol, "DOGE")
+
+    def test_crypto_qualifier_extraction_and_sub_cent_snapshot(self):
+        """Verify queries like 'conflux crypto', 'no crypto rxd', and 'raditan (RDX)' resolve to crypto pairs with sub-cent precision and CAD dual quote."""
+        self.assertEqual(_extract_candidate_ticker_query("conflux crypto", ""), "conflux")
+        self.assertEqual(_extract_candidate_ticker_query("no crypto rxd", ""), "rxd")
+        self.assertEqual(_extract_candidate_ticker_query("no it's a crpyro currency raditan (RDX)", ""), "rdx")
+
+        rxd_usd = TickerQuote(
+            symbol="RXD-USD",
+            name="Radiant USD",
+            exchange="CCC",
+            currency="USD",
+            market_state="REGULAR",
+            price=0.00002968,
+            change=0.00000071,
+            change_percent=2.45,
+            day_low=0.00002850,
+            day_high=0.00003020,
+            week52_low=0.00001800,
+            week52_high=0.00009500,
+            ma50=0.00002710,
+            ma200=0.00003420,
+            volume=185000,
+            avg_volume_3m=140000,
+        )
+        usdcad = _make_quote("USDCAD=X", "USD/CAD", 1.40, 0.10)
+
+        with (
+            patch(
+                "src.skills.markets.markets._yahoo_agg.resolve_ticker_and_news",
+                return_value=("RXD-USD", "RXD-CAD", ["Radiant network hash rate update [CoinDesk] (<https://example.com/rxd>)"]),
+            ) as mock_resolve,
+            patch(
+                "src.skills.markets.markets._yahoo_agg.fetch_quotes",
+                return_value={"RXD-USD": rxd_usd, "USDCAD=X": usdcad},
+            ),
+            patch(
+                "src.skills.markets.markets._yahoo_agg.fetch_historical_summary",
+                return_value=None,
+            ),
+        ):
+            out = skill_markets_info(query="no crypto rxd")
+
+        mock_resolve.assert_called_once_with("rxd", prefer_canada=True, prefer_crypto=True)
+        self.assertIn("Radiant USD (RXD-USD)", out)
+        self.assertIn("0.00002968 USD", out)
+        self.assertIn("Dual-Listed Quote (`RXD-CAD`", out)
+        self.assertIn("0.00004155 CAD", out)
+        self.assertIn("50-Day MA: **0.00002710**", out)
+
 
 if __name__ == "__main__":
     unittest.main()
-
 

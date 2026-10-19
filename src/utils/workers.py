@@ -104,8 +104,11 @@ def map_in_workers(
     items = list(iterable)
     if not items:
         return []
-    if len(items) == 1:
-        return [func(items[0])]
+    if len(items) == 1 or (
+        threading.current_thread().name.startswith("BotSubWorker")
+        and len(SUB_WORKER_POOL._threads) >= SUB_WORKER_POOL._max_workers - 4
+    ):
+        return [func(item) for item in items]
     futures = [submit_to_worker(func, item) for item in items]
     return [fut.result(timeout=timeout) for fut in futures]
 
