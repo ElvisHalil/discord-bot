@@ -211,7 +211,8 @@ def extract_wake_word_command(
 ) -> Tuple[bool, str]:
     """
     Check whether a transcribed utterance triggers the voice co-host and strip any leading wake phrase.
-    Returns `(is_triggered, cleaned_query)`.
+    Returns `(is_triggered, cleaned_query)`. When the utterance is ONLY the wake word (e.g. `"Hey bot?"`),
+    returns `(True, "")` so the caller can arm a follow-up listening window without sending `"Hey bot"` to the LLM.
     """
     clean = (transcript or "").strip()
     if not clean:
@@ -219,25 +220,30 @@ def extract_wake_word_command(
 
     # Strip leading punctuation or filler words ("um", "uh")
     clean = re.sub(r"^(?:um+|uh+|er+|ah+|so)[,\s]+", "", clean, flags=re.IGNORECASE).strip()
-    low = clean.lower()
 
     sorted_wakes = sorted((w.strip().lower() for w in wake_words if w and w.strip()), key=len, reverse=True)
     for wake in sorted_wakes:
         wake_pat = r"[\s,.:;!?-]+".join(re.escape(part) for part in wake.split())
         # Match wake word at the start or after a short greeting ("hey", "yo", "ok", "okay")
-        pat = rf"^(?:(?:hey|yo|ok|okay|hi|hello)[\s,.:;!?-]+)?{wake_pat}\b[\s,.:;!?-]*(.*)$"
+        pat = rf"^(?:(?:hey|yo|ok|okay|hi|hello)[\s,.:;!?-]+)*{wake_pat}\b[\s,.:;!?-]*(.*)$"
         m = re.match(pat, clean, flags=re.IGNORECASE)
         if m:
-            remainder = m.group(1).strip()
-            return True, (remainder or clean)
+            remainder = m.group(1).lstrip(" ,.:;!?-").strip()
+            remainder = re.sub(r"^(?:hey\s+bot|bot)\b[\s,.:;!?-]*", "", remainder, flags=re.IGNORECASE).lstrip(" ,.:;!?-").strip()
+            if not re.search(r"[A-Za-z0-9]", remainder):
+                remainder = ""
+            return True, remainder
 
         # Also catch wake word mid-sentence ("what's the weather hey bot")
         m_mid = re.search(rf"\b{wake_pat}\b[\s,.:;!?-]*(.*)$", clean, flags=re.IGNORECASE)
         if m_mid:
             before = clean[: m_mid.start()].strip(" ,.:;!?-")
-            after = m_mid.group(1).strip(" ,.:;!?-")
+            before = re.sub(r"^(?:hey|yo|ok|okay|hi|hello|um+|uh+|er+|ah+|so)$", "", before, flags=re.IGNORECASE).strip()
+            after = m_mid.group(1).lstrip(" ,.:;!?-").strip()
             combined = f"{before} {after}".strip()
-            return True, (combined or clean)
+            if not re.search(r"[A-Za-z0-9]", combined):
+                combined = ""
+            return True, combined
 
     if not require_wake_word:
         return True, clean

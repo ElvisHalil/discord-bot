@@ -72,9 +72,20 @@ class VoiceCohostService:
         self._author_voice_channels: Dict[int, Any] = {}
         # { channel_id: str }
         self._connect_errors: Dict[int, str] = {}
+        # { channel_id: float } monotonic timestamp until which a bare "Hey bot" arms follow-up speech
+        self._wake_armed_until: Dict[int, float] = {}
+        # { channel_id: asyncio.Lock } serializes LLM/TTS turns per voice channel
+        self._turn_locks: Dict[int, asyncio.Lock] = {}
         self._utterance_callback: Optional[Callable[[VoiceSessionRecord, SpeakerUtterance, str], Awaitable[Optional[str]]]] = None
         self._loop_task: Optional[asyncio.Task] = None
         self._stop_event = threading.Event()
+
+    def _on_ssrc_mapped(self, channel_id: int, ssrc: int, user_id: int, display_name: str) -> None:
+        """Merge any initial audio frames buffered under `ssrc` into `user_id` once Discord maps SSRC -> User."""
+        with self._lock:
+            acc = self._accumulators.get(channel_id)
+        if acc is not None:
+            acc.merge_speaker_key(ssrc, user_id, display_name)
 
     def register_author_voice_channel(self, channel_id: int, author_voice_channel: Any) -> None:
         """Record the message author's active Discord `VoiceChannel` so natural-language join calls can connect."""
@@ -148,6 +159,7 @@ class VoiceCohostService:
             attach_discord_voice_receiver(
                 vc_client,
                 lambda uid, uname, pcm: self.ingest_pcm_frame(channel_id, uid, uname, pcm),
+                on_ssrc_mapped=lambda ssrc, uid, uname: self._on_ssrc_mapped(channel_id, ssrc, uid, uname),
             )
         return vc_client
 
@@ -216,6 +228,7 @@ class VoiceCohostService:
         with self._lock:
             self._sessions[channel_id] = record
             self._accumulators[channel_id] = accumulator
+            self._wake_armed_until.pop(channel_id, None)
             if voice_client is not None:
                 self._voice_clients[channel_id] = voice_client
 
@@ -225,6 +238,7 @@ class VoiceCohostService:
             attach_discord_voice_receiver(
                 voice_client,
                 lambda uid, uname, pcm: self.ingest_pcm_frame(channel_id, uid, uname, pcm),
+                on_ssrc_mapped=lambda ssrc, uid, uname: self._on_ssrc_mapped(channel_id, ssrc, uid, uname),
             )
 
         if hasattr(self._stt, "warmup_whisper_model"):
@@ -238,6 +252,7 @@ class VoiceCohostService:
             with self._lock:
                 cids = list(self._sessions.keys())
                 self._author_voice_channels.clear()
+                self._wake_armed_until.clear()
             for cid in cids:
                 self.stop_session(cid)
             clear_channel_voice_state(None)
@@ -248,6 +263,7 @@ class VoiceCohostService:
             acc = self._accumulators.pop(channel_id, None)
             vc = self._voice_clients.pop(channel_id, None)
             self._author_voice_channels.pop(channel_id, None)
+            self._wake_armed_until.pop(channel_id, None)
 
         if acc is not None:
             acc.clear()
@@ -352,16 +368,15 @@ class VoiceCohostService:
         if sess is None or not wav_bytes:
             return None
 
-        sess.state = str(VoiceSessionState.THINKING)
         transcript, backend_used = self._stt.transcribe_audio(
             wav_bytes,
             backend=sess.stt_backend,
             model=model,
         )
-        sess.state = str(VoiceSessionState.MUTED if sess.is_muted else VoiceSessionState.LISTENING)
         if not transcript:
             return None
 
+        now_mono = time.monotonic()
         require_wake = sess.mode == str(VoiceMode.WAKE_WORD)
         if sess.mode == str(VoiceMode.LISTEN_ONLY):
             is_triggered, cleaned_query = False, transcript
@@ -371,6 +386,26 @@ class VoiceCohostService:
                 wake_words=DEFAULT_WAKE_WORDS,
                 require_wake_word=require_wake,
             )
+            if is_triggered and not cleaned_query:
+                # Speaker said ONLY "Hey bot" and paused. Arm an 8-second follow-up window for
+                # the rest of their sentence instead of sending "Hey bot" to the LLM!
+                with self._lock:
+                    self._wake_armed_until[channel_id] = now_mono + 8.0
+                print(
+                    f"🎙️ [Voice Wake Armed] {display_name or f'User-{user_id}'} said \"{transcript}\" — "
+                    f"listening for follow-up command (8s window)"
+                )
+                return None
+            if not is_triggered and require_wake:
+                with self._lock:
+                    armed_until = self._wake_armed_until.get(channel_id, 0.0)
+                    if now_mono <= armed_until:
+                        self._wake_armed_until[channel_id] = 0.0
+                        is_triggered = True
+                        cleaned_query = transcript.strip()
+            elif is_triggered and cleaned_query:
+                with self._lock:
+                    self._wake_armed_until[channel_id] = 0.0
 
         utterance = SpeakerUtterance(
             user_id=user_id,
@@ -414,26 +449,34 @@ class VoiceCohostService:
         """Invoke the registered agent callback for a voice utterance and speak the reply aloud."""
         if self._utterance_callback is None:
             return None
-        try:
-            session.state = str(VoiceSessionState.THINKING)
-            reply_text = await self._utterance_callback(session, utterance, cleaned_query)
-            if reply_text:
-                utterance.bot_reply = sanitize_text_for_speech(reply_text, max_chars=240)
-                if not session.is_muted:
-                    await self.speak_async(session.channel_id, reply_text, profile_or_mode=session.voice_profile)
-            return reply_text
-        except Exception as e:
-            print(f"⚠️ [Voice Co-Host Turn Error]: {e}")
-            logger.debug("Voice utterance callback error: %s", e)
-            return None
-        finally:
-            session.state = str(VoiceSessionState.MUTED if session.is_muted else VoiceSessionState.LISTENING)
+        with self._lock:
+            turn_lock = self._turn_locks.get(session.channel_id)
+            if turn_lock is None:
+                turn_lock = asyncio.Lock()
+                self._turn_locks[session.channel_id] = turn_lock
+
+        async with turn_lock:
+            try:
+                session.state = str(VoiceSessionState.THINKING)
+                reply_text = await self._utterance_callback(session, utterance, cleaned_query)
+                if reply_text:
+                    utterance.bot_reply = sanitize_text_for_speech(reply_text, max_chars=200)
+                    if not session.is_muted:
+                        await self.speak_async(session.channel_id, reply_text, profile_or_mode=session.voice_profile)
+                return reply_text
+            except Exception as e:
+                print(f"⚠️ [Voice Co-Host Turn Error]: {e}")
+                logger.debug("Voice utterance callback error: %s", e)
+                return None
+            finally:
+                session.state = str(VoiceSessionState.MUTED if session.is_muted else VoiceSessionState.LISTENING)
 
     def synthesize_and_play(
         self,
         channel_id: int,
         text: str,
         profile_or_mode: Optional[str] = None,
+        interrupt: bool = False,
     ) -> Tuple[TtsAudioClip, bool]:
         """
         Synthesize `text` via `VoiceTtsAggregator` and play it on the active Discord `VoiceClient`
@@ -453,10 +496,21 @@ class VoiceCohostService:
             if vc is not None and hasattr(vc, "play"):
                 try:
                     if hasattr(vc, "is_playing") and vc.is_playing():
-                        if hasattr(vc, "stop_playing"):
-                            vc.stop_playing()
-                        elif hasattr(vc, "stop"):
-                            vc.stop()
+                        if interrupt:
+                            if hasattr(vc, "stop_playing"):
+                                vc.stop_playing()
+                            elif hasattr(vc, "stop"):
+                                vc.stop()
+                        else:
+                            # Wait up to 6s for current spoken reply to finish so we don't cut off our own answer
+                            wait_deadline = time.monotonic() + 6.0
+                            while vc.is_playing() and time.monotonic() < wait_deadline:
+                                time.sleep(0.05)
+                            if vc.is_playing():
+                                if hasattr(vc, "stop_playing"):
+                                    vc.stop_playing()
+                                elif hasattr(vc, "stop"):
+                                    vc.stop()
                     pcm_source = build_discord_pcm_source(clip.audio_bytes)
                     if pcm_source is not None:
                         sess.state = str(VoiceSessionState.SPEAKING)
@@ -622,6 +676,7 @@ class VoiceCohostService:
                             attach_discord_voice_receiver(
                                 vc,
                                 lambda uid, uname, pcm, _cid=cid: self.ingest_pcm_frame(_cid, uid, uname, pcm),
+                                on_ssrc_mapped=lambda ssrc, uid, uname, _cid=cid: self._on_ssrc_mapped(_cid, ssrc, uid, uname),
                             )
             except Exception as e:
                 logger.debug("Voice background flush loop error: %s", e)

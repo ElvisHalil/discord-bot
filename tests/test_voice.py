@@ -297,6 +297,34 @@ class TestVoiceCohostServiceAndSkill(unittest.IsolatedAsyncioTestCase):
             ("skill_youtube_search", {"query": "Strobe by deadmau5", "max_results": 1, "is_music": True}),
         )
 
+    def test_bare_wake_word_arms_followup_and_ssrc_merge(self):
+        # 1. Bare "Hey bot?" returns (True, "") instead of sending "Hey bot?" to the LLM
+        trig, rem = extract_wake_word_command("Hey bot?", require_wake_word=True)
+        self.assertTrue(trig)
+        self.assertEqual(rem, "")
+
+        # 2. Bare "Hey bot" arms 8s window on VOICE_COHOST so follow-up speech without wake word triggers
+        VOICE_COHOST.start_session(channel_id=777888, voice_channel_id=555111, mode="wake_word")
+        wav_bytes, _, _ = pcm_48k_stereo_to_16k_mono_wav(_make_pcm_48k_stereo(duration_sec=0.4, amplitude=10000))
+        with patch.object(VOICE_COHOST._stt, "transcribe_audio", return_value=("Hey bot", "faster_whisper")):
+            utt_bare = VOICE_COHOST.process_utterance_wav(777888, 42, "Elvis", wav_bytes)
+            self.assertIsNone(utt_bare)
+
+        with patch.object(VOICE_COHOST._stt, "transcribe_audio", return_value=("what time is the game?", "faster_whisper")):
+            utt_follow = VOICE_COHOST.process_utterance_wav(777888, 42, "Elvis", wav_bytes)
+            self.assertIsNotNone(utt_follow)
+            self.assertTrue(utt_follow.is_wake_word_triggered)
+
+        # 3. SSRC buffer merge combines initial unmapped SSRC audio into resolved user_id
+        acc = PerSpeakerVoiceAccumulator(silence_gap_sec=0.55, min_speech_sec=0.25)
+        chunk = _make_pcm_48k_stereo(duration_sec=0.2, amplitude=12000)
+        acc.push_pcm_frame(99999, "Speaker-99999", chunk, now=1.0)
+        acc.merge_speaker_key(99999, 42, "Elvis")
+        self.assertNotIn(99999, acc._buffers)
+        self.assertIn(42, acc._buffers)
+        self.assertEqual(acc._buffers[42]["display_name"], "Elvis")
+        VOICE_COHOST.stop_session(777888)
+
 
 if __name__ == "__main__":
     unittest.main()

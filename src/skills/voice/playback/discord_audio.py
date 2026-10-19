@@ -69,8 +69,8 @@ class PerSpeakerVoiceAccumulator:
     def __init__(
         self,
         speech_threshold_dbfs: float = -42.0,
-        silence_gap_sec: float = 0.35,
-        min_speech_sec: float = 0.20,
+        silence_gap_sec: float = 0.55,
+        min_speech_sec: float = 0.25,
         max_utterance_sec: float = 12.0,
     ) -> None:
         self.speech_threshold_dbfs = speech_threshold_dbfs
@@ -80,6 +80,29 @@ class PerSpeakerVoiceAccumulator:
         self._lock = threading.Lock()
         # { user_id: { "display_name": str, "chunks": bytearray, "speech_bytes": int, "first_ts": float, "last_speech_ts": float } }
         self._buffers: Dict[int, Dict[str, Any]] = {}
+
+    def merge_speaker_key(self, old_id: int, new_id: int, display_name: str = "") -> None:
+        """Merge any buffered audio recorded under an unmapped SSRC (`old_id`) into the resolved Discord `new_id`."""
+        if not old_id or not new_id or old_id == new_id:
+            return
+        with self._lock:
+            old_state = self._buffers.pop(old_id, None)
+            if old_state is None:
+                return
+            target = self._buffers.get(new_id)
+            if target is None:
+                if display_name:
+                    old_state["display_name"] = display_name
+                self._buffers[new_id] = old_state
+            else:
+                combined = bytearray(old_state["chunks"])
+                combined.extend(target["chunks"])
+                target["chunks"] = combined
+                target["speech_bytes"] += old_state["speech_bytes"]
+                target["first_ts"] = min(old_state["first_ts"], target["first_ts"])
+                target["last_speech_ts"] = max(old_state["last_speech_ts"], target["last_speech_ts"])
+                if display_name:
+                    target["display_name"] = display_name
 
     def push_pcm_frame(
         self,
@@ -391,6 +414,7 @@ def _install_voice_recv_dave_patch() -> None:
 def attach_discord_voice_receiver(
     voice_client: Any,
     on_pcm_chunk: Callable[[int, str, bytes], None],
+    on_ssrc_mapped: Optional[Callable[[int, int, str], None]] = None,
 ) -> bool:
     """
     Attach a per-speaker live audio receive sink to `voice_client` if `discord-ext-voice-recv`
@@ -406,6 +430,7 @@ def attach_discord_voice_receiver(
         if importlib.util.find_spec("discord.ext.voice_recv") is not None:
             _install_voice_recv_dave_patch()
             voice_recv = importlib.import_module("discord.ext.voice_recv")
+            ssrc_resolved_uids: Dict[int, int] = {}
 
             def _sink_callback(user: Any, data: Any) -> None:
                 if user is not None and getattr(user, "bot", False):
@@ -413,16 +438,41 @@ def attach_discord_voice_receiver(
                 pcm = getattr(data, "pcm", None)
                 if not pcm:
                     return
+                ssrc = int(getattr(getattr(data, "packet", None), "ssrc", 0) or 0)
                 if user is not None:
                     uid = int(getattr(user, "id", 0) or 0)
                     uname = str(getattr(user, "display_name", None) or getattr(user, "name", f"User-{uid}"))
                 else:
-                    ssrc = int(getattr(getattr(data, "packet", None), "ssrc", 0) or 0)
                     uid = 0
                     if ssrc and hasattr(voice_client, "_get_id_from_ssrc"):
                         uid = int(voice_client._get_id_from_ssrc(ssrc) or 0)
-                    uid = uid or ssrc or 1
-                    uname = f"Speaker-{uid}"
+                    guild = getattr(voice_client, "guild", None)
+                    vc_chan = getattr(voice_client, "channel", None)
+                    member = None
+                    if uid and guild is not None and hasattr(guild, "get_member"):
+                        member = guild.get_member(uid)
+                    if member is None and vc_chan is not None:
+                        human_members = [
+                            m for m in (getattr(vc_chan, "members", None) or [])
+                            if not getattr(m, "bot", False)
+                        ]
+                        if uid:
+                            member = next((m for m in human_members if int(getattr(m, "id", 0) or 0) == uid), None)
+                        elif len(human_members) == 1:
+                            member = human_members[0]
+                            uid = int(getattr(member, "id", 0) or 0)
+                    if member is not None:
+                        uname = str(getattr(member, "display_name", None) or getattr(member, "name", f"User-{uid}"))
+                    else:
+                        uid = uid or ssrc or 1
+                        uname = f"Speaker-{uid}"
+
+                if ssrc and uid and uid != ssrc:
+                    prev = ssrc_resolved_uids.get(ssrc)
+                    if prev != uid:
+                        ssrc_resolved_uids[ssrc] = uid
+                        if on_ssrc_mapped is not None:
+                            on_ssrc_mapped(ssrc, uid, uname)
                 on_pcm_chunk(uid, uname, bytes(pcm))
 
             if hasattr(voice_client, "is_listening") and voice_client.is_listening():
