@@ -69,8 +69,8 @@ class PerSpeakerVoiceAccumulator:
     def __init__(
         self,
         speech_threshold_dbfs: float = -42.0,
-        silence_gap_sec: float = 0.45,
-        min_speech_sec: float = 0.25,
+        silence_gap_sec: float = 0.35,
+        min_speech_sec: float = 0.20,
         max_utterance_sec: float = 12.0,
     ) -> None:
         self.speech_threshold_dbfs = speech_threshold_dbfs

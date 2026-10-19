@@ -309,7 +309,8 @@ async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
 
     voice_prompt_hint = (
         f"[Spoken in Discord Voice Channel '{session.voice_channel_name}' — "
-        f"reply immediately in 1-2 short, natural spoken sentences for live TTS]"
+        f"use your normal tools as needed (including skill_music_discovery / skill_youtube_search with the verified YouTube Music URL for song requests); "
+        f"keep your spoken prose intro concise (1-2 short sentences) for live TTS]"
     )
     if current_mode == "chat":
         user_msg = f"{utterance.display_name} (User ID: {utterance.user_id}) {voice_prompt_hint}: {cleaned_query}"
@@ -317,13 +318,12 @@ async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
         user_msg = f"User {utterance.display_name} says {voice_prompt_hint}: {cleaned_query}"
 
     async with channel_locks[channel_id]:
-        system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
         if channel_id not in chat_history:
+            system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
             chat_history[channel_id] = [system_msg]
         else:
-            chat_history[channel_id][0] = system_msg
-        recent_tail = chat_history[channel_id][1:][-8:]
-        turn_history = [system_msg] + list(recent_tail)
+            system_msg = chat_history[channel_id][0]
+        turn_history = list(chat_history[channel_id])
 
     turn_start_idx = len(turn_history)
     turn_history.append({"role": "user", "content": user_msg})
@@ -337,6 +337,24 @@ async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
     )
     if not reply or not reply.strip():
         return None
+
+    # If a music tool ran during this voice turn and returned a verified YouTube Music URL
+    # that the model omitted from its concise spoken reply, append it so standardize_song_reply
+    # formats the full Song Card in the text channel while TTS speaks only the natural intro.
+    if "youtube.com" not in reply.lower() and "youtu.be" not in reply.lower():
+        for msg in reversed(turn_history[turn_start_idx:]):
+            role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+            t_name = msg.get("name") if isinstance(msg, dict) else getattr(msg, "name", None)
+            if role == "tool" and t_name in ("skill_music_discovery", "skill_youtube_search"):
+                t_content = str(msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "") or "")
+                m_yt = re.search(
+                    r"(https:\/\/(?:music|www)\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})",
+                    t_content,
+                )
+                if m_yt:
+                    yt_url = m_yt.group(1).replace("www.youtube.com", "music.youtube.com")
+                    reply = f"{reply.rstrip()}\n\n{yt_url}"
+                    break
 
     if is_research:
         reply = join_orphan_bullets(reply)
@@ -576,7 +594,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
 
     turn_options = dict(mode_config["ollama_options"])
     if fast_voice_turn:
-        turn_options["num_ctx"] = min(int(turn_options.get("num_ctx", 8192)), 4096)
+        # Keep num_ctx identical to mode_config so Ollama reuses its warm 8,500-token system+tools
+        # KV cache in 0ms and never truncates tool schemas (like skill_music_discovery).
         turn_options["num_predict"] = min(int(turn_options.get("num_predict", 1024)), 320)
 
     base_kwargs = {
@@ -703,6 +722,11 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                         "name": forced_tool_name,
                         "content": enrich_tool_output_with_time_context(str(tool_output)),
                     })
+                    if fast_voice_turn and (
+                        forced_tool_name in _TERMINAL_SKILLS
+                        or "youtube.com/watch?v=" in str(tool_output)
+                    ):
+                        hide_tools_next_step = True
                     iterations += 1
                     continue
 
@@ -828,14 +852,21 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
             "",
         )
         has_compound_media_intent = bool(re.search(r"\b(play|song|track|music|video)\b", latest_user_text, re.IGNORECASE))
+        has_verified_music_link = any(
+            r["name"] in ("skill_music_discovery", "skill_youtube_search") and "youtube.com/watch?v=" in r["content"]
+            for r in tool_results
+        )
         if (
-            called_names.issubset(_TERMINAL_SKILLS)
-            and (
-                len(tool_calls) >= 2
-                or (called_names.issubset({"skill_news_headlines", "skill_markets_info", "skill_graphing_info", "skill_voice_info"}) and not has_compound_media_intent)
+            (
+                called_names.issubset(_TERMINAL_SKILLS)
+                and (
+                    len(tool_calls) >= 2
+                    or (called_names.issubset({"skill_news_headlines", "skill_markets_info", "skill_graphing_info", "skill_voice_info"}) and not has_compound_media_intent)
+                    or (fast_voice_turn and not has_compound_media_intent)
+                )
             )
-            and all("PARALLEL_EXECUTION_BLOCKED" not in r["content"] and not r["content"].startswith("⚠️") for r in tool_results)
-        ):
+            or (fast_voice_turn and has_verified_music_link)
+        ) and all("PARALLEL_EXECUTION_BLOCKED" not in r["content"] and not r["content"].startswith("⚠️") for r in tool_results):
             hide_tools_next_step = True
         iterations += 1
 

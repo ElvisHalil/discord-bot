@@ -260,10 +260,33 @@ def enrich_music_tool_args(args: dict, history: list) -> dict:
     return enriched
 
 
+_GENERIC_PLAY_SONG_RE = re.compile(
+    r"^\s*(?:can\s+you\s+|could\s+you\s+|please\s+|yo\s+|hey\s+)?(?:play|put\s+on|queue|drop|recommend|give\s+me)\s+(?:me\s+|us\s+)?"
+    r"(?:(?:a|some|any|another)\s+)?(?:([a-z0-9\s&-]{2,30}?)\s+)?(?:song|track|music|tune|banger)s?(?:\s+for\s+(?:me|us))?\s*[.?!]*$",
+    re.IGNORECASE,
+)
+_PLAY_BY_ARTIST_RE = re.compile(
+    r"^\s*(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:play|put\s+on|recommend)\s+(?:me\s+)?"
+    r"(?:a\s+|some\s+)?(?:song|track|music)s?\s+by\s+([A-Za-z0-9\s.&'-]{2,40}?)\s*[.?!]*$",
+    re.IGNORECASE,
+)
+_PLAY_SPECIFIC_BY_ARTIST_RE = re.compile(
+    r"^\s*(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:play|put\s+on)\s+(?:the\s+song\s+)?"
+    r"([A-Za-z0-9\s'&-]{2,45}\s+by\s+[A-Za-z0-9\s.&'-]{2,40}?)\s*[.?!]*$",
+    re.IGNORECASE,
+)
+_GENERIC_QUALIFIER_STOPWORDS = frozenset({
+    "a", "an", "some", "any", "another", "good", "great", "nice", "cool", "random", "new", "me", "us", "the", "your", "favorite",
+})
+
+
 def detect_missed_music_shift_tool_call(history: list) -> Optional[Tuple[str, dict]]:
-    """Detect when an 8B model skips calling skill_music_discovery on a valid 3-Tier music spectrum shift
-    (e.g. replying 'faster' to a song card or typing 'go harder' right after a song card)."""
-    from src.skills.music.engine.spectrum import is_valid_music_shift_context
+    """Detect when a model skips calling skill_music_discovery / skill_youtube_search on a valid
+    3-Tier music spectrum shift or an explicit 'play a song' / 'play <genre> music' request."""
+    from src.skills.music.engine.spectrum import (
+        has_non_music_domain_context,
+        is_valid_music_shift_context,
+    )
 
     if not history:
         return None
@@ -284,6 +307,30 @@ def detect_missed_music_shift_tool_call(history: list) -> Optional[Tuple[str, di
     if is_valid_music_shift_context(raw_content, history):
         args = enrich_music_tool_args({"shift": clean_user}, history)
         return ("skill_music_discovery", args)
+
+    if has_non_music_domain_context(clean_user):
+        return None
+
+    m_by = _PLAY_BY_ARTIST_RE.match(clean_user)
+    if m_by:
+        artist = m_by.group(1).strip(" .,!?")
+        if artist:
+            return ("skill_music_discovery", {"artist": artist})
+
+    m_spec = _PLAY_SPECIFIC_BY_ARTIST_RE.match(clean_user)
+    if m_spec:
+        query = m_spec.group(1).strip(" .,!?")
+        if query:
+            return ("skill_youtube_search", {"query": query, "max_results": 1, "is_music": True})
+
+    m_gen = _GENERIC_PLAY_SONG_RE.match(clean_user)
+    if m_gen:
+        qualifier = (m_gen.group(1) or "").strip(" .,!?").lower()
+        words = [w for w in qualifier.split() if w not in _GENERIC_QUALIFIER_STOPWORDS]
+        clean_genre = " ".join(words).strip()
+        if clean_genre:
+            return ("skill_music_discovery", {"genre": clean_genre})
+        return ("skill_music_discovery", {})
 
     return None
 

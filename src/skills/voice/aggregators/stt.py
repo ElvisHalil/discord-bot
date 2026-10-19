@@ -70,12 +70,16 @@ class VoiceSttAggregator(BaseVoiceAggregator):
         )
 
         if preferred in (SttBackend.FASTER_WHISPER, SttBackend.AUTO):
-            whisper_text = self._transcribe_with_faster_whisper(audio_bytes)
+            whisper_text, whisper_ran = self._transcribe_with_faster_whisper(audio_bytes)
             if whisper_text:
                 res = (whisper_text, str(SttBackend.FASTER_WHISPER))
                 with _STT_CACHE_LOCK:
                     _STT_CACHE[digest] = res
                 return res
+            if whisper_ran and preferred == SttBackend.AUTO:
+                # faster-whisper ran cleanly and found no intelligible speech in this clip;
+                # return immediately instead of making a slow fallback HTTP call to Ollama.
+                return "", str(SttBackend.FASTER_WHISPER)
             if preferred == SttBackend.FASTER_WHISPER:
                 logger.debug("faster-whisper unavailable or returned empty; falling back to gemma4a native STT")
 
@@ -157,19 +161,26 @@ class VoiceSttAggregator(BaseVoiceAggregator):
                 if _WHISPER_MODEL is None:
                     model_size = os.getenv("WHISPER_MODEL_SIZE", "base.en")
                     device = os.getenv("WHISPER_DEVICE", "cpu")
-                    _WHISPER_MODEL = fw_mod.WhisperModel(model_size, device=device, compute_type="int8")
+                    _WHISPER_MODEL = fw_mod.WhisperModel(
+                        model_size,
+                        device=device,
+                        compute_type="int8",
+                        cpu_threads=4,
+                    )
         except Exception as e:
             logger.debug("faster-whisper warmup failed: %s", e)
 
-    def _transcribe_with_faster_whisper(self, audio_bytes: bytes) -> str:
-        """Optional local faster-whisper transcription if `faster_whisper` is installed."""
+    def _transcribe_with_faster_whisper(self, audio_bytes: bytes) -> Tuple[str, bool]:
+        """Optional local faster-whisper transcription if `faster_whisper` is installed. Returns `(transcript, model_ran)`."""
         global _WHISPER_MODEL
         try:
             self.warmup_whisper_model()
             if _WHISPER_MODEL is None:
-                return ""
+                return "", False
+            lang = os.getenv("WHISPER_LANGUAGE", "en").strip() or None
             segments, _ = _WHISPER_MODEL.transcribe(
                 io.BytesIO(audio_bytes),
+                language=lang,
                 beam_size=1,
                 best_of=1,
                 temperature=0.0,
@@ -178,10 +189,10 @@ class VoiceSttAggregator(BaseVoiceAggregator):
                 condition_on_previous_text=False,
             )
             joined = " ".join(seg.text.strip() for seg in segments if seg.text and seg.text.strip())
-            return self._clean_transcript(joined)
+            return self._clean_transcript(joined), True
         except Exception as e:
             logger.debug("faster-whisper transcription failed: %s", e)
-            return ""
+            return "", False
 
     @staticmethod
     def _clean_transcript(raw: str) -> str:

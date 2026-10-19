@@ -5,7 +5,12 @@ LLM-facing tool entrypoint for the Discord Voice-Channel AI Co-Host skill (`src/
 from typing import Optional
 
 from src.context import get_active_channel_id
-from src.skills.voice.catalogs import VOICE_ACTION_ALIASES, VOICE_MODE_ALIASES, VOICE_PROFILES
+from src.skills.voice.catalogs import (
+    VOICE_ACTION_ALIASES,
+    VOICE_MODE_ALIASES,
+    VOICE_PROFILE_ALIASES,
+    VOICE_PROFILES,
+)
 from src.skills.voice.enums import VoiceAction, VoiceMode
 from src.skills.voice.templates import build_voice_llm_instructions
 from src.skills.voice.tracker import VOICE_COHOST
@@ -23,7 +28,7 @@ def skill_voice_info(
     - `action="leave"`: Disconnect the bot from the active Discord voice channel.
     - `action="speak"`: Synthesize `query` via Neural TTS and speak it out loud in the voice channel.
     - `action="recap"`: Retrieve a speaker-attributed chronological transcript of the voice call.
-    - `action="mode"`: Switch listening mode between `wake_word`, `conversational` (open mic), and `listen_only`.
+    - `action="mode"`: Switch listening mode (`wake_word`, `conversational`, `listen_only`) or voice profile (`british`, `sportscaster`, `ava`, `deep`, etc.).
     - `action="mute"` / `"unmute"`: Mute or unmute spoken voice responses.
     - `action="status"`: View current voice channel connection, active mode, voice profile, and utterance stats.
 
@@ -31,18 +36,20 @@ def skill_voice_info(
         action: One of 'join', 'leave', 'speak', 'recap', 'mode', 'mute', 'unmute', or 'status'.
         query: Text to speak aloud (when action='speak') or channel/query context.
         mode: Listening mode ('wake_word', 'conversational', or 'listen_only').
-        voice_profile: Persona voice preset ('research', 'chat', or 'sportscaster').
+        voice_profile: Persona voice preset ('research', 'chat', 'sportscaster', 'british', 'sonia', 'ava', 'clara', 'deep', 'australian').
     """
     cid = get_active_channel_id() or 0
     raw_act = (action or VoiceAction.STATUS).strip().lower()
     act = VOICE_ACTION_ALIASES.get(raw_act, raw_act)
     clean_q = (query or "").strip()
+    raw_prof = (voice_profile or "").strip()
+    resolved_prof = VOICE_PROFILE_ALIASES.get(raw_prof.lower(), raw_prof.lower()) if raw_prof else ""
 
     if act == VoiceAction.JOIN:
         sess = VOICE_COHOST.get_session(cid)
         target_mode = VOICE_MODE_ALIASES.get((mode or "").strip().lower(), str(VoiceMode.WAKE_WORD))
-        prof_key = (voice_profile or (sess.voice_profile if sess else "research")).strip().lower()
-        if prof_key not in VOICE_PROFILES:
+        prof_key = resolved_prof or (sess.voice_profile if sess else "research")
+        if prof_key not in VOICE_PROFILES and not raw_prof.endswith("Neural"):
             prof_key = "research"
 
         if sess is None:
@@ -56,8 +63,8 @@ def skill_voice_info(
         else:
             if mode:
                 VOICE_COHOST.set_mode(cid, target_mode)
-            if voice_profile and prof_key in VOICE_PROFILES:
-                sess.voice_profile = prof_key
+            if voice_profile:
+                VOICE_COHOST.set_voice_profile(cid, raw_prof)
 
         status_block = VOICE_COHOST.format_session_status(cid)
         return status_block + build_voice_llm_instructions(action=VoiceAction.JOIN)
@@ -80,6 +87,8 @@ def skill_voice_info(
     if act == VoiceAction.SPEAK:
         if not clean_q:
             return "Please provide the text or announcement to speak in `query`."
+        if voice_profile:
+            VOICE_COHOST.set_voice_profile(cid, raw_prof)
         clip, played = VOICE_COHOST.synthesize_and_play(cid, clean_q, profile_or_mode=voice_profile or None)
         delivery_state = "Streamed live to Discord VoiceClient" if played else "Synthesized audio clip ready"
         return (
@@ -94,13 +103,20 @@ def skill_voice_info(
         return VOICE_COHOST.format_session_recap(cid) + build_voice_llm_instructions(action=VoiceAction.RECAP)
 
     if act == VoiceAction.MODE:
-        target_mode = VOICE_MODE_ALIASES.get(
-            (mode or clean_q).strip().lower(),
-            str(VoiceMode.CONVERSATIONAL if "open" in clean_q.lower() or "conversational" in clean_q.lower() else VoiceMode.WAKE_WORD),
-        )
-        sess = VOICE_COHOST.set_mode(cid, target_mode)
-        if sess is None:
-            sess = VOICE_COHOST.start_session(channel_id=cid, voice_channel_id=cid or 1, mode=target_mode)
+        sess = VOICE_COHOST.get_session(cid)
+        if voice_profile:
+            if sess is not None:
+                VOICE_COHOST.set_voice_profile(cid, raw_prof)
+            else:
+                sess = VOICE_COHOST.start_session(channel_id=cid, voice_channel_id=cid or 1, voice_profile=raw_prof)
+        if mode or not voice_profile:
+            target_mode = VOICE_MODE_ALIASES.get(
+                (mode or clean_q).strip().lower(),
+                str(VoiceMode.CONVERSATIONAL if "open" in clean_q.lower() or "conversational" in clean_q.lower() else VoiceMode.WAKE_WORD),
+            )
+            sess = VOICE_COHOST.set_mode(cid, target_mode)
+            if sess is None:
+                sess = VOICE_COHOST.start_session(channel_id=cid, voice_channel_id=cid or 1, mode=target_mode)
         return VOICE_COHOST.format_session_status(cid) + build_voice_llm_instructions(action=VoiceAction.MODE)
 
     if act in (VoiceAction.MUTE, VoiceAction.UNMUTE):
@@ -110,5 +126,7 @@ def skill_voice_info(
             return "No active voice session in this channel to mute/unmute."
         return VOICE_COHOST.format_session_status(cid) + build_voice_llm_instructions(action=act)
 
+    if voice_profile:
+        VOICE_COHOST.set_voice_profile(cid, raw_prof)
     return VOICE_COHOST.format_session_status(cid) + build_voice_llm_instructions(action=VoiceAction.STATUS)
 

@@ -9,7 +9,12 @@ import re
 from typing import Dict, Optional, Tuple
 
 from src.context import get_active_channel_id
-from src.skills.voice.catalogs import VOICE_ACTION_ALIASES, VOICE_MODE_ALIASES
+from src.skills.voice.catalogs import (
+    VOICE_ACTION_ALIASES,
+    VOICE_MODE_ALIASES,
+    VOICE_PROFILE_ALIASES,
+    VOICE_PROFILES,
+)
 from src.skills.voice.enums import VoiceAction, VoiceMode
 from src.skills.voice.models import VoiceSessionRecord
 from src.utils.cache import BoundedCache
@@ -32,6 +37,32 @@ _EXPLICIT_VOICE_SPEAK_RE = re.compile(
     r"\b(?:say|announce|speak|read)\s+(?:in(?:to)?\s+(?:the\s+)?(?:voice(?:\s+channel|\s+chat)?|vc)\s+)(.+)$",
     re.IGNORECASE,
 )
+_EXPLICIT_VOICE_PROFILE_RE = re.compile(
+    r"\b(?:change|switch|set|use)\s+(?:your\s+|the\s+|a\s+)?(?:voice|accent|tone|persona)\b|"
+    r"\b(?:sound\s+like|speak\s+in|talk\s+in)\s+(?:a\s+|an\s+)?(?:british|uk|english|australian|aussie|female|woman|girl|deep|sportscaster|announcer|canadian|casual)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_voice_profile_from_text(text: str) -> Optional[str]:
+    """Extract a canonical voice_profile preset from a natural-language prompt if mentioned."""
+    # Strip 'voice chat' / 'voice channel' / 'voice call' phrases before matching preset names like 'chat'
+    low = re.sub(r"\bvoice\s+(?:chat|channel|call)\b", "", (text or "").lower())
+    if "british" in low and ("female" in low or "woman" in low or "sonia" in low):
+        return "sonia"
+    if "canadian" in low and ("female" in low or "woman" in low or "clara" in low):
+        return "clara"
+    for alias, target in sorted(VOICE_PROFILE_ALIASES.items(), key=lambda kv: -len(kv[0])):
+        if alias in ("chat", "research") and not _EXPLICIT_VOICE_PROFILE_RE.search(text or ""):
+            continue
+        if re.search(rf"\b{re.escape(alias)}\b", low):
+            return target
+    for prof_id in VOICE_PROFILES:
+        if prof_id in ("chat", "research") and not _EXPLICIT_VOICE_PROFILE_RE.search(text or ""):
+            continue
+        if re.search(rf"\b{re.escape(prof_id)}\b", low):
+            return prof_id
+    return None
 
 
 def _resolve_cid(channel_id: Optional[int] = None) -> int:
@@ -86,6 +117,14 @@ def enrich_voice_tool_args(
     if raw_mode in VOICE_MODE_ALIASES:
         enriched["mode"] = str(VOICE_MODE_ALIASES[raw_mode])
 
+    raw_prof = str(enriched.get("voice_profile") or "").strip().lower()
+    if raw_prof in VOICE_PROFILE_ALIASES:
+        enriched["voice_profile"] = VOICE_PROFILE_ALIASES[raw_prof]
+    elif not raw_prof and latest_user_text:
+        inferred_prof = _extract_voice_profile_from_text(latest_user_text)
+        if inferred_prof:
+            enriched["voice_profile"] = inferred_prof
+
     if latest_user_text and not enriched.get("action"):
         q_low = latest_user_text.lower()
         if _EXPLICIT_VOICE_JOIN_RE.search(q_low):
@@ -112,7 +151,7 @@ def detect_missed_voice_tool_call(
 ) -> Optional[Tuple[str, dict]]:
     """
     Detect when a 4B/8B model forgets to call `skill_voice_info` on turn 0 for an explicit
-    voice-channel join, leave, speak, or voice recap request.
+    voice-channel join, leave, speak, voice profile switch, or voice recap request.
     """
     if not history:
         return None
@@ -132,7 +171,11 @@ def detect_missed_voice_tool_call(
     q_low = latest_user_text.lower()
     if _EXPLICIT_VOICE_JOIN_RE.search(q_low):
         mode = str(VoiceMode.CONVERSATIONAL) if ("open mic" in q_low or "conversational" in q_low) else str(VoiceMode.WAKE_WORD)
-        return ("skill_voice_info", {"action": str(VoiceAction.JOIN), "query": latest_user_text, "mode": mode})
+        args = {"action": str(VoiceAction.JOIN), "query": latest_user_text, "mode": mode}
+        prof = _extract_voice_profile_from_text(latest_user_text)
+        if prof:
+            args["voice_profile"] = prof
+        return ("skill_voice_info", args)
 
     if _EXPLICIT_VOICE_LEAVE_RE.search(q_low):
         return ("skill_voice_info", {"action": str(VoiceAction.LEAVE), "query": latest_user_text})
@@ -143,6 +186,11 @@ def detect_missed_voice_tool_call(
     m_speak = _EXPLICIT_VOICE_SPEAK_RE.search(latest_user_text)
     if m_speak:
         return ("skill_voice_info", {"action": str(VoiceAction.SPEAK), "query": m_speak.group(1).strip()})
+
+    if _EXPLICIT_VOICE_PROFILE_RE.search(latest_user_text):
+        prof = _extract_voice_profile_from_text(latest_user_text)
+        if prof:
+            return ("skill_voice_info", {"action": str(VoiceAction.STATUS), "voice_profile": prof, "query": latest_user_text})
 
     return None
 

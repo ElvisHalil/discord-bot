@@ -17,7 +17,13 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from src.context import get_active_channel_id, get_bound_event_loop
 from src.skills.voice.aggregators.stt import VoiceSttAggregator, clear_voice_stt_cache
 from src.skills.voice.aggregators.tts import VoiceTtsAggregator, clear_voice_tts_cache
-from src.skills.voice.catalogs import DEFAULT_WAKE_WORDS, VOICE_ACTION_ALIASES, VOICE_MODE_ALIASES, VOICE_PROFILES
+from src.skills.voice.catalogs import (
+    DEFAULT_WAKE_WORDS,
+    VOICE_ACTION_ALIASES,
+    VOICE_MODE_ALIASES,
+    VOICE_PROFILE_ALIASES,
+    VOICE_PROFILES,
+)
 from src.skills.voice.context import (
     clear_channel_voice_state,
     get_channel_voice_session,
@@ -175,8 +181,9 @@ class VoiceCohostService:
         """Create and register a live `VoiceSessionRecord` and per-speaker VAD accumulator for `channel_id`."""
         now = time.time()
         norm_mode = VOICE_MODE_ALIASES.get((mode or "").strip().lower(), str(VoiceMode.WAKE_WORD))
-        prof_key = (voice_profile or "research").strip().lower()
-        if prof_key not in VOICE_PROFILES:
+        raw_prof = (voice_profile or "research").strip().lower()
+        prof_key = VOICE_PROFILE_ALIASES.get(raw_prof, raw_prof)
+        if prof_key not in VOICE_PROFILES and not (voice_profile or "").strip().endswith("Neural"):
             prof_key = "research"
 
         with self._lock:
@@ -265,6 +272,21 @@ class VoiceCohostService:
         if sess is None:
             return None
         sess.mode = norm_mode
+        sess.last_activity_at = time.time()
+        return sess
+
+    def set_voice_profile(self, channel_id: int, voice_profile: str) -> Optional[VoiceSessionRecord]:
+        """Update the spoken neural TTS voice profile/persona for `channel_id`."""
+        raw_prof = (voice_profile or "research").strip()
+        prof_key = VOICE_PROFILE_ALIASES.get(raw_prof.lower(), raw_prof.lower())
+        if prof_key not in VOICE_PROFILES and not raw_prof.endswith("Neural"):
+            prof_key = "research"
+        else:
+            prof_key = raw_prof if raw_prof.endswith("Neural") else prof_key
+        sess = self.get_session(channel_id)
+        if sess is None:
+            return None
+        sess.voice_profile = prof_key
         sess.last_activity_at = time.time()
         return sess
 
@@ -504,7 +526,7 @@ class VoiceCohostService:
                 "live sports/flight audio break-ins, and rolling voice call recaps."
             )
 
-        prof = VOICE_PROFILES.get(sess.voice_profile, VOICE_PROFILES["research"])
+        prof = self._tts.resolve_voice_profile(sess.voice_profile)
         uptime_sec = max(0, int(time.time() - sess.started_at)) if sess.started_at else 0
         mins, secs = divmod(uptime_sec, 60)
         wake_list = ", ".join(f'`"{w}"`' for w in DEFAULT_WAKE_WORDS[:4])
@@ -567,7 +589,7 @@ class VoiceCohostService:
         """Periodically flush speaker buffers whose silence gap has elapsed and keep voice receivers alive."""
         last_watchdog_ts = time.monotonic()
         while not self._stop_event.is_set():
-            await asyncio.sleep(0.12)
+            await asyncio.sleep(0.06)
             try:
                 with self._lock:
                     items = list(self._accumulators.items())

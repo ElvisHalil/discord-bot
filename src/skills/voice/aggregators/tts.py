@@ -21,7 +21,7 @@ import threading
 from typing import Optional
 
 from src.skills.voice.aggregators.base import BaseVoiceAggregator
-from src.skills.voice.catalogs import VOICE_PROFILES
+from src.skills.voice.catalogs import VOICE_PROFILE_ALIASES, VOICE_PROFILES
 from src.skills.voice.engine.vad import sanitize_text_for_speech, synthesize_tone_envelope_wav
 from src.skills.voice.enums import TtsBackend
 from src.skills.voice.models import TtsAudioClip, VoiceProfileSpec
@@ -45,16 +45,52 @@ class VoiceTtsAggregator(BaseVoiceAggregator):
     """Multi-backend Text-to-Speech synthesizer with persona-matched voice profiles and bounded LRU caching."""
 
     def resolve_voice_profile(self, profile_or_mode: Optional[str] = None) -> VoiceProfileSpec:
-        """Resolve a mode or profile key (`research`, `chat`, `sportscaster`) to a VoiceProfileSpec."""
-        key = (profile_or_mode or "research").strip().lower()
-        return VOICE_PROFILES.get(key, VOICE_PROFILES["research"])
+        """Resolve a mode, preset alias, or Edge Neural voice ID to a `VoiceProfileSpec`."""
+        raw = (profile_or_mode or os.getenv("VOICE_TTS_PROFILE", "research")).strip()
+        key = VOICE_PROFILE_ALIASES.get(raw.lower(), raw.lower())
+        base = VOICE_PROFILES.get(key, VOICE_PROFILES["research"])
+
+        # Allow direct Edge Neural voice IDs (e.g. `en-GB-RyanNeural`) or `.env` overrides
+        env_voice = os.getenv("VOICE_TTS_VOICE", "").strip()
+        env_rate = os.getenv("VOICE_TTS_RATE", "").strip()
+        env_pitch = os.getenv("VOICE_TTS_PITCH", "").strip()
+
+        custom_voice = env_voice or (raw if raw.endswith("Neural") else base.edge_voice)
+        custom_rate = base.rate_pct
+        if env_rate:
+            try:
+                custom_rate = int(env_rate.replace("%", "").replace("+", "").strip())
+            except ValueError:
+                pass
+        custom_pitch = base.pitch_hz
+        if env_pitch:
+            try:
+                custom_pitch = int(env_pitch.lower().replace("hz", "").replace("+", "").strip())
+            except ValueError:
+                pass
+
+        if (
+            custom_voice != base.edge_voice
+            or custom_rate != base.rate_pct
+            or custom_pitch != base.pitch_hz
+        ):
+            return VoiceProfileSpec(
+                profile_id=base.profile_id if key in VOICE_PROFILES else raw.lower(),
+                display_name=base.display_name if key in VOICE_PROFILES else f"Custom ({custom_voice})",
+                edge_voice=custom_voice,
+                kokoro_voice=base.kokoro_voice,
+                rate_pct=custom_rate,
+                pitch_hz=custom_pitch,
+                speaking_style=base.speaking_style,
+            )
+        return base
 
     def synthesize_speech(
         self,
         text: str,
         profile_or_mode: Optional[str] = "research",
         backend: str = TtsBackend.AUTO,
-        max_chars: int = 240,
+        max_chars: int = 200,
     ) -> TtsAudioClip:
         """
         Sanitize `text` for spoken delivery and synthesize it into a `TtsAudioClip`.

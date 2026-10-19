@@ -262,6 +262,29 @@ async def dispatch_voice_command(
         res = await run_in_worker(voice_info_fn, action="mode", mode=mode_arg)
         return _strip_llm_instructions(res)
 
+    if low == "!voice" or low.startswith("!voice ") or low == "!vprofile" or low.startswith("!vprofile "):
+        prof_arg = text.split(None, 1)[1].strip() if " " in text.strip() else ""
+        set_active_channel_id(channel_id)
+        if prof_arg:
+            if hasattr(voice_cohost_service, "set_voice_profile"):
+                voice_cohost_service.set_voice_profile(channel_id, prof_arg)
+            res = await run_in_worker(voice_info_fn, action="status", voice_profile=prof_arg)
+            return _strip_llm_instructions(res)
+        res = await run_in_worker(voice_info_fn, action="status")
+        presets_help = (
+            "\n\n=== 🎛️ AVAILABLE VOICE & TONE PRESETS (`!voice <preset>`) ===\n"
+            "- `research` / `liam`: Calm, articulate Canadian male (`en-CA-LiamNeural`)\n"
+            "- `chat` / `andrew`: Warm, conversational US male (`en-US-AndrewMultilingualNeural`)\n"
+            "- `sportscaster` / `hype`: Fast, energetic broadcast announcer (`en-US-GuyNeural`)\n"
+            "- `british` / `ryan`: Crisp, composed British male (`en-GB-RyanNeural`)\n"
+            "- `sonia` / `british_female`: Warm, articulate British female (`en-GB-SoniaNeural`)\n"
+            "- `ava` / `female`: Expressive, natural US female (`en-US-AvaMultilingualNeural`)\n"
+            "- `clara` / `canadian_female`: Bright, friendly Canadian female (`en-CA-ClaraNeural`)\n"
+            "- `deep` / `christopher`: Deep, resonant authoritative US male (`en-US-ChristopherNeural`)\n"
+            "- `australian` / `william`: Relaxed, upbeat Australian male (`en-AU-WilliamNeural`)"
+        )
+        return _strip_llm_instructions(res) + presets_help
+
     if low in ("!vrecap", "!voicerecap"):
         set_active_channel_id(channel_id)
         res = await run_in_worker(voice_info_fn, action="recap")

@@ -257,7 +257,45 @@ class TestVoiceCohostServiceAndSkill(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Squad Hangout", nl_join)
         connected_vc = await VOICE_COHOST.ensure_discord_voice_connected(777888)
         self.assertIs(connected_vc, mock_vc)
+
+        # 8. Switch speaking voice & tone via !voice <preset>
+        voice_switch = await dispatch_voice_command(
+            text="!voice british",
+            channel_id=777888,
+            voice_info_fn=skill_voice_info,
+            voice_cohost_service=VOICE_COHOST,
+        )
+        self.assertIn("en-GB-RyanNeural", voice_switch)
+        self.assertEqual(VOICE_COHOST.get_session(777888).voice_profile, "british")
+
+        voice_help = await dispatch_voice_command(
+            text="!voice",
+            channel_id=777888,
+            voice_info_fn=skill_voice_info,
+            voice_cohost_service=VOICE_COHOST,
+        )
+        self.assertIn("AVAILABLE VOICE & TONE PRESETS", voice_help)
         VOICE_COHOST.stop_session(777888)
+
+    def test_explicit_music_play_missed_tool_detection(self):
+        from src.skills.music.context import detect_missed_music_shift_tool_call
+
+        self.assertEqual(
+            detect_missed_music_shift_tool_call([{"role": "user", "content": "User Elvis says: play me a song"}]),
+            ("skill_music_discovery", {}),
+        )
+        self.assertEqual(
+            detect_missed_music_shift_tool_call([{"role": "user", "content": "User Elvis says: play some house music"}]),
+            ("skill_music_discovery", {"genre": "house"}),
+        )
+        self.assertEqual(
+            detect_missed_music_shift_tool_call([{"role": "user", "content": "User Elvis says: play a song by Daft Punk"}]),
+            ("skill_music_discovery", {"artist": "Daft Punk"}),
+        )
+        self.assertEqual(
+            detect_missed_music_shift_tool_call([{"role": "user", "content": "User Elvis says: play Strobe by deadmau5"}]),
+            ("skill_youtube_search", {"query": "Strobe by deadmau5", "max_results": 1, "is_music": True}),
+        )
 
 
 if __name__ == "__main__":
