@@ -666,7 +666,9 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     try:
                         tool_output = await run_in_worker(func, **forced_args)
                         if forced_tool_name == "skill_voice_info" and VOICE_COHOST.get_session(channel_id) is not None:
-                            await VOICE_COHOST.ensure_discord_voice_connected(channel_id)
+                            vc_conn = await VOICE_COHOST.ensure_discord_voice_connected(channel_id)
+                            if vc_conn is None and VOICE_COHOST.get_session(channel_id) is None:
+                                tool_output = VOICE_COHOST.format_session_status(channel_id)
                     except Exception as e:
                         print(f"  └─ ❌ Forced tool {forced_tool_name} crashed: {e}")
                         tool_output = f"Tool execution failed: {e}"
@@ -772,7 +774,9 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                     else:
                         tool_output = await run_in_worker(func, **args)
                         if tool_name == "skill_voice_info" and VOICE_COHOST.get_session(channel_id) is not None:
-                            await VOICE_COHOST.ensure_discord_voice_connected(channel_id)
+                            vc_conn = await VOICE_COHOST.ensure_discord_voice_connected(channel_id)
+                            if vc_conn is None and VOICE_COHOST.get_session(channel_id) is None:
+                                tool_output = VOICE_COHOST.format_session_status(channel_id)
                 except Exception as e:
                     print(f"  └─ ❌ Tool {tool_name} crashed: {e}")
                     tool_output = f"Tool execution failed: {e}"
@@ -912,6 +916,16 @@ async def on_message(message):
     # Direct Voice Co-Host Commands (!join, !leave, !speak, !vmode, !vrecap, !vstatus, !vmute, !vunmute)
     author_voice_state = getattr(message.author, "voice", None)
     author_voice_channel = getattr(author_voice_state, "channel", None) if author_voice_state else None
+    if author_voice_channel is None:
+        guild = getattr(message, "guild", None)
+        guild_vcs = list(getattr(guild, "voice_channels", None) or [])
+        if guild_vcs:
+            low_in = user_input.lower()
+            author_voice_channel = (
+                next((vc for vc in guild_vcs if str(getattr(vc, "name", "") or "").lower() in low_in), None)
+                or next((vc for vc in guild_vcs if getattr(vc, "voice_states", None) or getattr(vc, "members", None)), None)
+                or guild_vcs[0]
+            )
     VOICE_COHOST.register_author_voice_channel(message.channel.id, author_voice_channel)
     voice_res = await dispatch_voice_command(
         text=user_input,

@@ -64,6 +64,8 @@ class VoiceCohostService:
         self._voice_clients: Dict[int, Any] = {}
         # { channel_id: discord.VoiceChannel }
         self._author_voice_channels: Dict[int, Any] = {}
+        # { channel_id: str }
+        self._connect_errors: Dict[int, str] = {}
         self._utterance_callback: Optional[Callable[[VoiceSessionRecord, SpeakerUtterance, str], Awaitable[Optional[str]]]] = None
         self._loop_task: Optional[asyncio.Task] = None
         self._stop_event = threading.Event()
@@ -78,15 +80,19 @@ class VoiceCohostService:
 
     async def ensure_discord_voice_connected(self, channel_id: int) -> Any:
         """
-        Ensure that if a `VoiceSessionRecord` is active for `channel_id` and the author was in a
-        Discord `VoiceChannel`, the underlying `discord.VoiceClient` is connected and receiving audio.
+        Ensure that if a `VoiceSessionRecord` is active for `channel_id` and a target Discord `VoiceChannel`
+        is registered, the underlying `discord.VoiceClient` is connected and receiving audio.
         """
         with self._lock:
             sess = self._sessions.get(channel_id)
             vc = self._voice_clients.get(channel_id)
             author_vc = self._author_voice_channels.get(channel_id)
 
-        if sess is None or vc is not None or author_vc is None or not hasattr(author_vc, "connect"):
+        if sess is None:
+            return vc
+        if vc is not None and getattr(vc, "is_connected", lambda: True)():
+            return vc
+        if author_vc is None or not hasattr(author_vc, "connect"):
             return vc
 
         vc_client = None
@@ -109,14 +115,30 @@ class VoiceCohostService:
                 if importlib.util.find_spec("discord.ext.voice_recv") is not None:
                     voice_recv = importlib.import_module("discord.ext.voice_recv")
                     connect_kwargs["cls"] = voice_recv.VoiceRecvClient
-                vc_client = await author_vc.connect(**connect_kwargs)
+                try:
+                    vc_client = await author_vc.connect(**connect_kwargs)
+                except Exception:
+                    if connect_kwargs:
+                        vc_client = await author_vc.connect()
+                    else:
+                        raise
         except Exception as e:
-            logger.debug("Discord voice channel connect failed: %s", e)
+            err_msg = f"{type(e).__name__}: {e}"
+            print(f"⚠️ [Voice Co-Host] Discord voice channel connect failed: {err_msg}")
+            logger.warning("Discord voice channel connect failed: %s", err_msg)
+            with self._lock:
+                self._connect_errors[channel_id] = err_msg
+            self.stop_session(channel_id)
             return None
 
         if vc_client is not None:
             with self._lock:
+                self._connect_errors.pop(channel_id, None)
                 self._voice_clients[channel_id] = vc_client
+                if sess is not None:
+                    sess.voice_channel_id = int(getattr(author_vc, "id", sess.voice_channel_id) or sess.voice_channel_id)
+                    sess.voice_channel_name = str(getattr(author_vc, "name", sess.voice_channel_name) or sess.voice_channel_name)
+            print(f"🎙️ [Voice Co-Host] Connected to Discord voice channel '{getattr(author_vc, 'name', 'Voice')}' (ID: {getattr(author_vc, 'id', '?')})")
             attach_discord_voice_receiver(
                 vc_client,
                 lambda uid, uname, pcm: self.ingest_pcm_frame(channel_id, uid, uname, pcm),
@@ -454,10 +476,14 @@ class VoiceCohostService:
         """Format a structured status block for the active voice co-host session."""
         cid = channel_id if channel_id is not None else (get_active_channel_id() or 0)
         sess = self.get_session(cid)
+        with self._lock:
+            last_err = self._connect_errors.get(cid)
         if sess is None or sess.state == str(VoiceSessionState.DISCONNECTED):
+            err_line = f"- **Last Connection Error:** `{last_err}` (Check bot **Connect** / **Speak** voice permissions and `PyNaCl` installation)\n" if last_err else ""
             return (
                 "=== 🎙️ DISCORD VOICE AI CO-HOST STATUS ===\n"
                 "- **Status:** Disconnected (No active voice session in this channel)\n"
+                f"{err_line}"
                 "- **How to Start:** Join a Discord voice channel and type `!join` (or ask me to *\"hop in the voice channel\"*).\n"
                 "- **Capabilities:** Per-speaker voice recognition (`gemma4:e4b` native `gemma4a` audio + `faster-whisper`), "
                 "wake-word & open-mic conversational modes, live tool execution, Neural TTS voice replies, "

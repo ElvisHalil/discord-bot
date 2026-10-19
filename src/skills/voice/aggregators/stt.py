@@ -62,7 +62,12 @@ class VoiceSttAggregator(BaseVoiceAggregator):
             if cached is not None:
                 return cached
 
-        preferred = (backend or os.getenv("VOICE_STT_BACKEND", SttBackend.AUTO)).strip().lower()
+        raw_backend = (backend or "").strip().lower()
+        preferred = (
+            os.getenv("VOICE_STT_BACKEND", SttBackend.AUTO).strip().lower()
+            if (not raw_backend or raw_backend == SttBackend.AUTO)
+            else raw_backend
+        )
 
         if preferred in (SttBackend.FASTER_WHISPER, SttBackend.AUTO):
             whisper_text = self._transcribe_with_faster_whisper(audio_bytes)

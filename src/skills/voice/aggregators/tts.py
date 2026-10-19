@@ -64,7 +64,12 @@ class VoiceTtsAggregator(BaseVoiceAggregator):
             spoken = "Ready."
 
         profile = self.resolve_voice_profile(profile_or_mode)
-        preferred = (backend or os.getenv("VOICE_TTS_BACKEND", TtsBackend.AUTO)).strip().lower()
+        raw_backend = (backend or "").strip().lower()
+        preferred = (
+            os.getenv("VOICE_TTS_BACKEND", TtsBackend.AUTO).strip().lower()
+            if (not raw_backend or raw_backend == TtsBackend.AUTO)
+            else raw_backend
+        )
 
         cache_key = hashlib.sha256(f"{profile.profile_id}|{preferred}|{spoken}".encode("utf-8")).hexdigest()[:24]
         with _TTS_CACHE_LOCK:

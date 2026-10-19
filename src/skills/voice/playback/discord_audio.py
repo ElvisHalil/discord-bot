@@ -33,6 +33,8 @@ def ensure_opus_loaded() -> bool:
     try:
         if discord.opus.is_loaded():
             return True
+        if hasattr(discord.opus, "_load_default") and discord.opus._load_default():
+            return True
         for lib_name in ("libopus.so.0", "libopus.so", "libopus.0.dylib", "opus"):
             try:
                 discord.opus.load_opus(lib_name)
@@ -179,17 +181,27 @@ def attach_discord_voice_receiver(
     try:
         import importlib
 
+        ensure_opus_loaded()
         if importlib.util.find_spec("discord.ext.voice_recv") is not None:
             voice_recv = importlib.import_module("discord.ext.voice_recv")
 
             def _sink_callback(user: Any, data: Any) -> None:
-                if user is None or getattr(user, "bot", False):
+                if user is not None and getattr(user, "bot", False):
                     return
                 pcm = getattr(data, "pcm", None)
-                if pcm:
+                if not pcm:
+                    return
+                if user is not None:
                     uid = int(getattr(user, "id", 0) or 0)
                     uname = str(getattr(user, "display_name", None) or getattr(user, "name", f"User-{uid}"))
-                    on_pcm_chunk(uid, uname, bytes(pcm))
+                else:
+                    ssrc = int(getattr(getattr(data, "packet", None), "ssrc", 0) or 0)
+                    uid = 0
+                    if ssrc and hasattr(voice_client, "_get_id_from_ssrc"):
+                        uid = int(voice_client._get_id_from_ssrc(ssrc) or 0)
+                    uid = uid or ssrc or 1
+                    uname = f"Speaker-{uid}"
+                on_pcm_chunk(uid, uname, bytes(pcm))
 
             sink = voice_recv.BasicSink(_sink_callback)
             voice_client.listen(sink)
