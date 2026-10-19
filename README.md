@@ -10,7 +10,7 @@ Designed specifically to give compact local LLMs (4B–8B parameters) **determin
 
 | Domain | Capabilities |
 | :--- | :--- |
-| 🎙️ **Real-Time Discord Voice-Channel AI Co-Host** | Joins live Discord voice channels (`!join` or *"hop in the voice channel"*) as an interactive AI co-host. Features **Per-Speaker Voice Activity Detection (VAD)** (`48 kHz` stereo $\rightarrow$ `16 kHz` mono), **Zero-Extra-VRAM Speech-to-Text** via **`gemma4:e4b` native `gemma4a` USM audio encoder** (plus optional `faster-whisper`), **Wake-Word / Open-Mic / Listen-Only modes**, **Persona-Matched Neural TTS playback** (`edge-tts` / local `VOICE_TTS_URL` / pure-Python `wave_synth` fallback), **Live Sports & Flight Tracker Voice Break-Ins**, **Speaker-Attributed Call Recaps (`!vrecap`)**, and **Discord Voice Message / Audio Attachment Transcription**. |
+| 🎙️ **Real-Time Discord Voice-Channel AI Co-Host** | Joins live Discord voice channels (`!join` or *"hop in the voice channel"*) as an interactive AI co-host. Features **Discord DAVE E2EE (`davey`) audio decryption**, **Per-Speaker Voice Activity Detection (VAD)** (`48 kHz` stereo $\rightarrow$ `16 kHz` mono with SSRC-to-user buffer merging), **Sub-Second Local Speech-to-Text** via **`faster-whisper` (`int8` pre-warmed)** + **`gemma4:e4b` native `gemma4a` USM audio encoder**, **Wake-Word (`"Hey bot"` with 8s follow-up window) / Open-Mic / Listen-Only modes**, **9 Neural Voice & Tone Presets (`!voice <preset>`)** (`edge-tts` / local `VOICE_TTS_URL` / pure-Python `wave_synth` fallback), **Spoken Song Discovery & Song Card Posting**, **Live Sports & Flight Tracker Voice Break-Ins**, **Speaker-Attributed Call Recaps (`!vrecap`)**, and **Discord Voice Message / Audio Attachment Transcription**. |
 | 📊 **On-Demand Graphing, Charts & Diagrams** | Deterministic, dark-themed high-DPI PNG rendering for **Arbitrary 2D Data Graphs** (`bar`, `horizontal_bar`, `stacked_bar`, `line`, `area`, `scatter`, `pie`, `donut`), **Financial & Multi-Ticker Market Plots** (single-ticker price + 50d/200d SMA + volume, or `%` return comparisons), and **Architecture Diagrams & Flowcharts** (`flowchart`, `sequence`, `architecture`, `state`, `mindmap` via **Kroki** with offline **Matplotlib Directed-DAG & Sequence** fallback). |
 | 📈 **Global Markets, TSX/Stocks & Crypto** | Real-time global macro benchmarks (**S&P/TSX**, **S&P 500**, **Nasdaq 100**, **Dow**, **FTSE**, **DAX**, **Nikkei**, **VIX**, **Gold**, **Silver**, **WTI Crude**, **USD/CAD**, **10Y Yields**), **Risk-On / Risk-Off Regime Classification**, **Yahoo Finance v8 + TradingView Scanner fallback** for US/Canadian TSX equities & ETFs, **CoinGecko Top Movers & DeFi TVL**, **Historical Chart Summaries (`1d`–`5y`)** with annualized volatility & max drawdown, **Fundamentals & Earnings Dates**, **Side-by-Side Comparison Matrix**, and **Portfolio / Watchlist Valuation**. |
 | 🎵 **Music Discovery & Audio DSP** | Multi-source chart & underground discovery (**Last.fm**, **Deezer**, **Beatport**, **FreqBlog**, **iTunes RSS / Billboard**), **Genre × Mood Matrix**, **3×3 Tempo × Intensity Spectrum Shifting** (`faster`, `slower`, `harder`, `softer`), **In-Memory DSP (`miniaudio` + `numpy`) BPM/Key/Gain Analysis**, native **`gemma4:e4b` Audio Listening**, and **👍 Song-Card Reaction Similar-Track Discovery**. |
@@ -169,17 +169,28 @@ The bot can join any Discord voice channel and participate as a real-time, voice
 
 ### How It Works
 1. **Join a Voice Channel**: Hop into any Discord voice channel and type **`!join`** (or **`!join conversational`**), or simply ask in chat: *"@Bot hop into the voice channel"*.
-2. **Per-Speaker Listening & Native `gemma4:e4b` Speech-to-Text**:
-   - The bot demultiplexes incoming `48 kHz` stereo voice streams **per speaker** (so it knows whether *Elvis*, *Alex*, or *Sam* is talking), detects speech boundaries using RMS dBFS Voice Activity Detection (`0.45s` silence gap), resamples to `16 kHz` mono WAV in memory, and transcribes speech via **`gemma4:e4b`'s native `gemma4a` USM audio encoder** (zero extra VRAM required) or local `faster-whisper`.
+2. **DAVE E2EE Decryption, Per-Speaker VAD & Sub-Second STT**:
+   - Decrypts Discord's **DAVE End-to-End Encrypted (`davey`)** Opus frames in real time, demultiplexes incoming `48 kHz` stereo voice streams **per speaker** (merging initial SSRC packets into the resolved Discord `user_id` so sentences are never split), detects speech boundaries via RMS dBFS Voice Activity Detection (`0.55s` silence gap), resamples to `16 kHz` mono WAV in memory, and transcribes speech via pre-warmed local **`faster-whisper` (`int8`)** or **`gemma4:e4b`'s native `gemma4a` USM audio encoder**.
 3. **Choose Your Listening Mode (`!vmode <mode>`)**:
-   - **`wake_word` *(Default)***: Transcribes all utterances into the rolling call log for context, but **only speaks back** when someone says the wake word (`"hey bot"`).
-   - **`conversational` *(Open Mic)***: Replies to every spoken question or statement ($\ge 2$ words) without requiring a wake word.
+   - **`wake_word` *(Default)***: Transcribes all utterances into the rolling call log for context, and **speaks back** when someone says `"hey bot"`. Pausing after saying `"Hey bot"` automatically arms an **8-second follow-up listening window** for the rest of your question.
+   - **`conversational` *(Open Mic)***: Replies to every spoken question or statement without requiring a wake word.
    - **`listen_only` *(Passive Scribe)***: Silently logs the conversation in the background so you can generate a speaker-attributed call recap (`!vrecap`) at any time.
-4. **Dual Text + Persona-Matched Neural TTS Replies**:
-   - When triggered in voice chat, the bot executes any needed tools (sports scores, stock quotes, flights, web search, music), posts the full formatted answer with links in the text channel, and speaks a concise, natural spoken summary out loud into the Discord voice channel using a persona-matched Neural voice (`Research Co-Host`, `Casual Hangout Co-Host`, or `Live Sportscaster Voice`).
-5. **Live Sports & Flight Tracker Voice Break-Ins**:
+4. **9 Neural Voice & Tone Presets (`!voice <preset>`)**:
+   - Switch the bot's speaking voice, accent, speed, and pitch on the fly with **`!voice <preset>`** (or by asking *"Hey bot, switch to a British accent"*):
+     - `research` / `liam` (`en-CA-LiamNeural` — calm Canadian male)
+     - `chat` / `andrew` (`en-US-AndrewMultilingualNeural` — warm conversational US male)
+     - `sportscaster` / `hype` (`en-US-GuyNeural` — energetic broadcast announcer)
+     - `british` / `ryan` (`en-GB-RyanNeural` — crisp British male)
+     - `sonia` / `british_female` (`en-GB-SoniaNeural` — warm British female)
+     - `ava` / `female` (`en-US-AvaMultilingualNeural` — expressive US female)
+     - `clara` / `canadian_female` (`en-CA-ClaraNeural` — bright Canadian female)
+     - `deep` / `christopher` (`en-US-ChristopherNeural` — deep authoritative US male)
+     - `australian` / `william` (`en-AU-WilliamNeural` — relaxed Australian male)
+5. **Dual Text + Spoken Replies (Including Song Requests)**:
+   - When triggered in voice chat, the bot executes any needed tools (sports scores, stock quotes, flights, web search, or music discovery), posts the full formatted answer or **verified YouTube Music Song Card** in the text channel, and speaks a concise 1–2 sentence summary out loud in the voice channel.
+6. **Live Sports & Flight Tracker Voice Break-Ins**:
    - While connected to a voice channel (and unmuted), any live goal, score change, red card, halftime, final whistle (`!track`), or flight status alert (`!trackflight`) is automatically announced out loud in the voice call in real time.
-6. **Discord Voice Messages & Audio Attachments**:
+7. **Discord Voice Messages & Audio Attachments**:
    - Uploading or recording a Discord voice message (`.ogg`, `.wav`, `.mp3`, `.m4a`, `.flac`) while mentioning the bot automatically transcribes the audio and answers your spoken prompt.
 
 ---
@@ -193,6 +204,7 @@ The bot can join any Discord voice channel and participate as a real-time, voice
 | `!reset` | `/reset` | Wipe conversation history, tool caches, and active voice session for the current channel. |
 | `!join [mode]` | — | Join your current Discord voice channel (`!join`, `!join conversational`, `!join listen_only`). |
 | `!leave` / `!disconnect` | — | Disconnect the AI co-host from the active Discord voice channel. |
+| `!voice [preset]` | — | List available neural voice presets or switch speaking voice/accent (`british`, `ava`, `deep`, `sportscaster`, `australian`, etc.). |
 | `!speak <text>` | — | Synthesize `<text>` via Neural TTS and speak it out loud in the active voice channel. |
 | `!vmode <mode>` | — | Switch voice listening mode (`wake_word`, `conversational`, `listen_only`). |
 | `!vrecap` | — | Post a chronological, speaker-attributed transcript recap of the voice call. |
@@ -206,7 +218,8 @@ The bot can join any Discord voice channel and participate as a real-time, voice
 - **Discord Voice Co-Host (`skill_voice_info`)**:
   - *"Hop into the voice channel in conversational mode"*
   - *(Spoken in voice chat)*: *"Hey bot, what is Shopify stock trading at right now?"*
-  - *(Spoken in voice chat)*: *"Hey bot, when do the Oilers play next and what are the odds?"*
+  - *(Spoken in voice chat)*: *"Hey bot, play some house music"*
+  - *(Spoken in voice chat)*: *"Hey bot, switch to a British accent"*
   - *"Give me a recap of what everyone talked about in the voice call"*
   - *"Announce in the voice channel that we're starting the match in 5 minutes"*
 - **On-Demand Graphing, Charts & Diagrams (`skill_graphing_info`)**:
