@@ -64,6 +64,8 @@ from src.skills.music.engine.spectrum import (
     record_channel_played_song,
     step_spectrum_zone,
 )
+from src.skills.markets.enums import AssetClass, MarketRegion, MarketView
+from src.skills.markets.models import BenchmarkSpec, CryptoAssetQuote, TickerQuote
 from src.skills.news.catalogs import NEWS_EDITIONS, NEWS_TOPICS_MAP
 from src.skills.news.enums import NewsTopic
 from src.skills.news.models import NewsEdition
@@ -96,7 +98,7 @@ from src.utils.timezones import FixedTimezoneSpec
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src"
 SKILLS_ROOT = SRC_ROOT / "src" / "skills" if not (SRC_ROOT / "skills").exists() else SRC_ROOT / "skills"
-DOMAIN_SKILLS = {"music", "sports", "flights", "news", "weather"}
+DOMAIN_SKILLS = {"music", "sports", "flights", "news", "weather", "markets"}
 
 
 class TestArchitectureAndBoundaries(unittest.TestCase):
@@ -199,7 +201,7 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
 
     def test_strict_separation_of_enums_models_and_catalogs(self):
         """Verify each domain skill strictly separates StrEnums (enums.py), dataclasses (models.py), and static tables (catalogs.py)."""
-        for skill in ("music", "sports", "flights", "news", "weather", "youtube"):
+        for skill in ("music", "sports", "flights", "news", "weather", "youtube", "markets"):
             enums_mod = importlib.import_module(f"src.skills.{skill}.enums")
             models_mod = importlib.import_module(f"src.skills.{skill}.models")
             catalogs_mod = importlib.import_module(f"src.skills.{skill}.catalogs")
@@ -263,6 +265,9 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
             TripType,
             SortPreference,
             NewsTopic,
+            MarketView,
+            MarketRegion,
+            AssetClass,
         )
         for enum_cls in enum_types:
             self.assertTrue(issubclass(enum_cls, StrEnum), f"{enum_cls.__name__} must inherit from StrEnum")
@@ -286,6 +291,9 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
             TrackedPriceWatch,
             NewsEdition,
             FixedTimezoneSpec,
+            BenchmarkSpec,
+            TickerQuote,
+            CryptoAssetQuote,
         )
         for dc_cls in dataclass_types:
             self.assertTrue(is_dataclass(dc_cls), f"{dc_cls.__name__} must be a @dataclass")
@@ -434,12 +442,13 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
         skill_names = {d.name for d in skill_dirs}
         self.assertEqual(
             skill_names,
-            {".example", "flights", "music", "news", "sports", "weather", "youtube"},
+            {".example", "flights", "markets", "music", "news", "sports", "weather", "youtube"},
         )
 
         expected_base_aggregators = {
             ".example": "BaseExampleAggregator",
             "flights": "BaseFlightAggregator",
+            "markets": "BaseMarketAggregator",
             "music": "BaseMusicAggregator",
             "news": "BaseNewsAggregator",
             "sports": "BaseSportsAggregator",

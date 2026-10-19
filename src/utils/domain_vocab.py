@@ -324,6 +324,12 @@ TOOL_ARG_ALIASES: Dict[str, Dict[str, str]] = {
         "ret_date": "return_date", "return": "return_date",
         "price": "target_price", "max_price": "target_price", "threshold": "target_price",
     },
+    "skill_markets_info": {
+        "q": "query", "search": "query", "topic": "query", "prompt": "query",
+        "symbol": "ticker", "stock": "ticker", "asset": "ticker", "coin": "ticker", "company": "ticker",
+        "market": "region", "country": "region", "area": "region",
+        "mode": "view", "type": "view", "category": "view", "section": "view",
+    },
     "evaluate_math": {
         "math": "expression", "expr": "expression", "equation": "expression",
         "formula": "expression", "query": "expression", "q": "expression",

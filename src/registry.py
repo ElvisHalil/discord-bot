@@ -37,6 +37,7 @@ from src.skills import (
     skill_news_headlines,
     skill_flight_info,
     skill_flight_tracker,
+    skill_markets_info,
 )
 
 # Combined registries for mode execution
@@ -54,6 +55,7 @@ RESEARCH_TOOLS = {
     "skill_sports_tracker": skill_sports_tracker,
     "skill_flight_info": skill_flight_info,
     "skill_flight_tracker": skill_flight_tracker,
+    "skill_markets_info": skill_markets_info,
 }
 
 # Chat mode is a casual persona on a small model: keep the tool list short so the
@@ -65,4 +67,5 @@ CHAT_TOOLS = {
     "skill_sports_tracker": skill_sports_tracker,
     "skill_flight_info": skill_flight_info,
     "skill_flight_tracker": skill_flight_tracker,
+    "skill_markets_info": skill_markets_info,
 }

@@ -128,6 +128,7 @@ def clear_tool_caches(channel_id: int = None):
         from src.skills.sports.aggregators.kashrock import clear_kashrock_cache
         from src.skills.sports.aggregators.espn_utils import clear_espn_cache
         from src.skills.weather.aggregators import clear_weather_cache
+        from src.skills.markets import clear_markets_cache
         clear_channel_played_songs(channel_id)
         clear_recently_played_tracks(channel_id)
         clear_channel_last_match_query(channel_id)
@@ -143,6 +144,7 @@ def clear_tool_caches(channel_id: int = None):
             clear_kashrock_cache()
             clear_espn_cache()
             clear_weather_cache()
+            clear_markets_cache()
     except Exception:
         pass
 
@@ -560,6 +562,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
         "skill_sports_tracker",
         "skill_flight_info",
         "skill_flight_tracker",
+        "skill_markets_info",
         "skill_weather_info",
         "skill_news_headlines",
         "skill_music_analysis",
@@ -639,6 +642,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
 
         print(f"⚡ [{current_mode.upper()}] Model requested {len(tool_calls)} tools simultaneously!")
         has_top_music = any(call.function.name == "skill_music_discovery" for call in tool_calls)
+        has_explicit_markets = any(call.function.name == "skill_markets_info" for call in tool_calls)
         per_tool_char_budget = 10000 if len(tool_calls) == 1 else max(4000, 18000 // len(tool_calls))
 
         async def run_tool(call):
@@ -672,7 +676,20 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None):
                 set_active_channel_id(channel_id)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
                 try:
-                    tool_output = await run_in_worker(func, **args)
+                    topic_arg = str(args.get("topic") or "").strip().lower()
+                    if (
+                        tool_name == "skill_news_headlines"
+                        and not has_explicit_markets
+                        and topic_arg not in ("entertainment", "sports", "science", "health")
+                    ):
+                        from src.skills.markets import get_daily_market_pulse
+                        news_res, pulse_res = await asyncio.gather(
+                            run_in_worker(func, **args),
+                            run_in_worker(get_daily_market_pulse),
+                        )
+                        tool_output = f"{news_res}\n{pulse_res}" if pulse_res else news_res
+                    else:
+                        tool_output = await run_in_worker(func, **args)
                 except Exception as e:
                     print(f"  └─ ❌ Tool {tool_name} crashed: {e}")
                     tool_output = f"Tool execution failed: {e}"
