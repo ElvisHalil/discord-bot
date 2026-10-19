@@ -26,6 +26,8 @@ from src.skills.graphing.catalogs import (
     CHART_TICKER_ALIASES,
     CHART_TYPE_ALIASES,
     DIAGRAM_TYPE_ALIASES,
+    extract_fx_pairs_from_text,
+    resolve_fx_pair_symbol,
 )
 from src.skills.graphing.context import (
     clear_channel_chart_state,
@@ -83,14 +85,32 @@ def _extract_market_tickers(query: str, ticker: str) -> List[str]:
         s = sym.strip().strip("$")
         if not s:
             return
+        fx_canon = resolve_fx_pair_symbol(s)
+        if fx_canon:
+            s = fx_canon
         canon = CHART_TICKER_ALIASES.get(s.lower(), s.upper())
         if canon not in [CHART_TICKER_ALIASES.get(c.lower(), c.upper()) for c in candidates]:
             candidates.append(s)
 
     if ticker and ticker.strip():
-        for part in re.split(r"\s*(?:,|\bvs\.?\b|\bversus\b|\band\b|\/)\s*", ticker.strip(), flags=re.IGNORECASE):
-            if part.strip():
-                _add(part.strip())
+        t_clean = ticker.strip()
+        fx_direct = resolve_fx_pair_symbol(t_clean)
+        if fx_direct and "," not in t_clean:
+            _add(fx_direct)
+            return candidates[:5]
+        for part in re.split(r"\s*(?:,|\bvs\.?\b|\bversus\b|\band\b)\s*", t_clean, flags=re.IGNORECASE):
+            p = part.strip()
+            if not p:
+                continue
+            fx_part = resolve_fx_pair_symbol(p)
+            if fx_part:
+                _add(fx_part)
+            elif "/" in p and p.lower() not in CHART_TICKER_ALIASES:
+                for sub in p.split("/"):
+                    if sub.strip():
+                        _add(sub.strip())
+            else:
+                _add(p)
         if candidates:
             return candidates[:5]
 
@@ -99,7 +119,11 @@ def _extract_market_tickers(query: str, ticker: str) -> List[str]:
         return []
     q_low = q_clean.lower()
 
-    # Check cashtags first
+    # Check explicit FX pairs in query first (e.g. 'CAD/EURO', 'CAD-EUR', 'Canadian dollar to Euro')
+    for fx_sym in extract_fx_pairs_from_text(q_clean):
+        _add(fx_sym)
+
+    # Check cashtags
     for m_ct in re.finditer(r"(?<![A-Za-z0-9])\$([A-Za-z]{1,6}(?:\.TO|-USD)?)\b", q_clean):
         _add(m_ct.group(1))
 
@@ -114,7 +138,7 @@ def _extract_market_tickers(query: str, ticker: str) -> List[str]:
     # Match explicit uppercase symbols like NVDA, SHOP.TO, BTC-USD
     for m in re.finditer(r"\b([A-Z]{2,5}(?:\.TO|-USD|-CAD)?)\b", q_clean):
         tok = m.group(1)
-        if tok.lower() not in CHART_QUERY_STOPWORDS and tok not in ("USD", "CAD", "YTD", "MAX", "CEO", "IPO", "ETF"):
+        if tok.lower() not in CHART_QUERY_STOPWORDS and tok not in ("USD", "CAD", "EUR", "GBP", "YTD", "MAX", "CEO", "IPO", "ETF"):
             s_idx, e_idx = m.start(), m.end()
             if not any(not (e_idx <= a or s_idx >= b) for a, b, _ in spans):
                 spans.append((s_idx, e_idx, tok))

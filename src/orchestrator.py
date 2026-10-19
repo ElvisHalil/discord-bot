@@ -169,6 +169,7 @@ def enrich_flight_tool_args(args: dict, history: list) -> dict:
 # ---------------------------------------------------------------------------
 
 OLD_TOOL_OUTPUT_CHARS = 800
+MAX_HISTORY_CHARS = 12000
 
 
 def _role(msg):
@@ -177,13 +178,65 @@ def _role(msg):
     return getattr(msg, "role", None)
 
 
-def trim_history(history: list, limit: int, old_tool_chars: int = OLD_TOOL_OUTPUT_CHARS) -> list:
-    """Keep the system prompt plus at most `limit` recent messages.
+def _msg_char_len(msg) -> int:
+    if isinstance(msg, dict):
+        c_len = len(str(msg.get("content") or ""))
+        t_calls = msg.get("tool_calls")
+        if t_calls:
+            c_len += len(str(t_calls))
+        return c_len
+    c_len = len(str(getattr(msg, "content", "") or ""))
+    t_calls = getattr(msg, "tool_calls", None)
+    if t_calls:
+        c_len += len(str(t_calls))
+    return c_len
+
+
+def _strip_old_thinking(msg):
+    """Normalize older history entries to plain dicts without `.thinking` traces."""
+    if isinstance(msg, dict):
+        if "thinking" in msg:
+            cleaned = dict(msg)
+            cleaned.pop("thinking", None)
+            return cleaned
+        return msg
+    role = getattr(msg, "role", "assistant")
+    content = getattr(msg, "content", "") or ""
+    tool_calls = getattr(msg, "tool_calls", None)
+    out = {"role": role, "content": content}
+    if tool_calls:
+        norm_calls = []
+        for tc in tool_calls:
+            fn = getattr(tc, "function", None)
+            if fn is not None:
+                norm_calls.append(
+                    {
+                        "function": {
+                            "name": getattr(fn, "name", ""),
+                            "arguments": dict(getattr(fn, "arguments", {}) or {}),
+                        }
+                    }
+                )
+            elif isinstance(tc, dict):
+                norm_calls.append(tc)
+        if norm_calls:
+            out["tool_calls"] = norm_calls
+    return out
+
+
+def trim_history(
+    history: list,
+    limit: int,
+    old_tool_chars: int = OLD_TOOL_OUTPUT_CHARS,
+    max_history_chars: int = MAX_HISTORY_CHARS,
+) -> list:
+    """Keep the system prompt plus at most `limit` recent messages and `max_history_chars` characters.
 
     - Tool outputs from earlier turns (anything before the latest user message)
       are shortened, since the model has already summarized them.
-    - Earlier turns' live sports tool outputs are explicitly marked as expired
-      snapshots so 8B models never regurgitate a stale minute clock or score.
+    - Earlier turns' live sports/flight/market/graphing tool outputs are explicitly marked as expired
+      snapshots so models never regurgitate stale data.
+    - Historical `.thinking` traces from earlier turns are stripped.
     - The window always starts on a user message, so an assistant tool call is
       never separated from its tool results.
     """
@@ -194,7 +247,8 @@ def trim_history(history: list, limit: int, old_tool_chars: int = OLD_TOOL_OUTPU
 
     last_user = max((i for i, m in enumerate(rest) if _role(m) == "user"), default=-1)
     for i in range(max(last_user, 0)):
-        msg = rest[i]
+        msg = _strip_old_thinking(rest[i])
+        rest[i] = msg
         if isinstance(msg, dict) and msg.get("role") == "tool":
             tool_name = msg.get("name", "")
             content = str(msg.get("content") or "")
@@ -246,6 +300,17 @@ def trim_history(history: list, limit: int, old_tool_chars: int = OLD_TOOL_OUTPU
         if forward is None:
             forward = max((i for i in range(start) if _role(rest[i]) == "user"), default=0)
         rest = rest[forward:]
+
+    # Enforce character budget across history so accumulated turns never saturate Ollama's num_ctx
+    if max_history_chars and max_history_chars > 0 and len(rest) > 1:
+        total_chars = sum(_msg_char_len(m) for m in rest)
+        if total_chars > max_history_chars:
+            user_indices = [i for i, m in enumerate(rest) if _role(m) == "user"]
+            for u_idx in user_indices[1:]:
+                candidate = rest[u_idx:]
+                if sum(_msg_char_len(m) for m in candidate) <= max_history_chars or u_idx == user_indices[-1]:
+                    rest = candidate
+                    break
 
     return [system] + rest
 

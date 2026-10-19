@@ -8,7 +8,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from src.context import get_active_channel_id
-from src.skills.graphing.catalogs import CHART_TICKER_ALIASES
+from src.skills.graphing.catalogs import CHART_TICKER_ALIASES, extract_fx_pairs_from_text
 from src.skills.graphing.enums import ChartType, DiagramType
 from src.skills.graphing.models import ChartChannelState, ChartSpec
 from src.utils.cache import BoundedCache
@@ -17,13 +17,15 @@ from src.utils.domain_vocab import MUSIC_DOMAIN_WORDS, contains_domain_terms
 _CHANNEL_CHART_STATE: Dict[int, ChartChannelState] = BoundedCache(maxsize=128)
 
 _EXPLICIT_DIAGRAM_RE = re.compile(
-    r"\b(?:draw|create|make|generate|render|show)\s+(?:me\s+)?(?:a\s+|an\s+|the\s+)?"
-    r"(?:flowchart|sequence\s+diagram|architecture\s+diagram|state\s+diagram|class\s+diagram|er\s+diagram|mermaid\s+diagram|diagram)\b",
+    r"(?:\b(?:draw|create|make|generate|render|show|build|give|zeig\w*|mach\w*|erstell\w*)\b.*"
+    r"\b(?:flow\s*chart|flowchart|sequence\s+diagram|architecture\s+diagram|state\s+diagram|class\s+diagram|er\s+diagram|mermaid\s+diagram|diagram|flussdiagramm|ablaufdiagramm)\b"
+    r"|\b(?:example|sample|demo|beispiel)\s+(?:flow\s*chart|flowchart|sequence\s+diagram|architecture\s+diagram|mermaid\s+diagram|diagram)\b"
+    r"|\b(?:flow\s*chart|flowchart|sequence\s+diagram|architecture\s+diagram|mermaid\s+diagram)\b.*\b(?:draw|create|make|generate|render|show|machen|erstellen|zeigen)\b)",
     re.IGNORECASE,
 )
 
 _EXPLICIT_MARKET_PLOT_RE = re.compile(
-    r"\b(?:plot|graph|visualize|draw\s+a\s+chart|chart\s+the\s+price|price\s+chart|candlestick\s+chart)\b",
+    r"\b(?:plot|graph|visualize|chart\s+out|chart\s+of|draw\s+a\s+chart|graph\s+a\s+chart|chart\s+the\s+price|price\s+chart|candlestick\s+chart)\b",
     re.IGNORECASE,
 )
 
@@ -73,14 +75,16 @@ def clear_channel_chart_state(channel_id: Optional[int] = None) -> None:
 
 
 _TIMEFRAME_PATTERNS: Tuple[Tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\b(?:5\s*d(?:ays?)?|1\s*w(?:eek)?|past\s+week)\b", re.IGNORECASE), "5d"),
-    (re.compile(r"\b(?:1\s*mo(?:nth)?|past\s+month|30\s*days?)\b", re.IGNORECASE), "1mo"),
-    (re.compile(r"\b(?:3\s*mo(?:nths?)?|past\s+3\s+months?|quarter)\b", re.IGNORECASE), "3mo"),
-    (re.compile(r"\b(?:6\s*mo(?:nths?)?|past\s+6\s+months?|half\s+year)\b", re.IGNORECASE), "6mo"),
+    (re.compile(r"\b(?:5\s*d(?:ays?)?|1\s*w(?:eek)?|(?:past|last)\s+week)\b", re.IGNORECASE), "5d"),
+    (re.compile(r"\b(?:1\s*mo(?:nth)?|(?:past|last)\s+month|30\s*days?)\b", re.IGNORECASE), "1mo"),
+    (re.compile(r"\b(?:3\s*mo(?:nths?)?|(?:past|last)\s+3\s+months?|quarter)\b", re.IGNORECASE), "3mo"),
+    (re.compile(r"\b(?:6\s*mo(?:nths?)?|(?:past|last)\s+6\s+months?|half\s+year)\b", re.IGNORECASE), "6mo"),
     (re.compile(r"\b(?:ytd|year\s+to\s+date)\b", re.IGNORECASE), "ytd"),
-    (re.compile(r"\b(?:1\s*y(?:ear|r)?|past\s+year|12\s*months?)\b", re.IGNORECASE), "1y"),
-    (re.compile(r"\b(?:5\s*y(?:ears?|rs?)?|past\s+5\s+years?)\b", re.IGNORECASE), "5y"),
-    (re.compile(r"\b(?:10\s*y(?:ears?|rs?)?|past\s+10\s+years?|decade)\b", re.IGNORECASE), "10y"),
+    (re.compile(r"\b(?:1\s*y(?:ear|r)?|(?:past|last)\s+year|12\s*months?)\b", re.IGNORECASE), "1y"),
+    (re.compile(r"\b(?:2\s*y(?:ears?|rs?)?|(?:past|last)\s+2\s+years?)\b", re.IGNORECASE), "2y"),
+    (re.compile(r"\b(?:3\s*y(?:ears?|rs?)?|(?:past|last)\s+3\s+years?)\b", re.IGNORECASE), "3y"),
+    (re.compile(r"\b(?:5\s*y(?:ears?|rs?)?|(?:past|last)\s+5\s+years?)\b", re.IGNORECASE), "5y"),
+    (re.compile(r"\b(?:10\s*y(?:ears?|rs?)?|(?:past|last)\s+10\s+years?|decade)\b", re.IGNORECASE), "10y"),
     (re.compile(r"\b(?:all\s+time|max\s+history)\b", re.IGNORECASE), "max"),
 )
 
@@ -97,16 +101,28 @@ def _extract_timeframe_from_text(text: str) -> Optional[str]:
 def _extract_tickers_from_text(text: str) -> List[str]:
     if not text:
         return []
-    q_low = text.lower()
     found: List[str] = []
+    # 1. Extract explicit FX currency pairs first (e.g. "CAD/EURO", "CAD-EUR", "USD/JPY")
+    for fx_sym in extract_fx_pairs_from_text(text):
+        if fx_sym not in found:
+            found.append(fx_sym)
+
+    q_low = text.lower()
+    # Scrub matched FX pair substrings before scanning general aliases so "euro" inside "cad/euro"
+    # doesn't also trigger a second standalone EURUSD=X ticker.
+    q_low_scrubbed = re.sub(
+        r"\b[a-z]{3,10}\s*[/\-]\s*[a-z]{3,10}\b",
+        " ",
+        q_low,
+    )
     for alias in sorted(CHART_TICKER_ALIASES.keys(), key=len, reverse=True):
-        if re.search(rf"\b{re.escape(alias)}\b", q_low):
+        if re.search(rf"\b{re.escape(alias)}\b", q_low_scrubbed):
             sym = CHART_TICKER_ALIASES[alias]
             if sym not in found:
                 found.append(sym)
     for m in re.finditer(r"\b([A-Z]{2,5}(?:\.[A-Z]{1,2})?)\b", text):
         tok = m.group(1)
-        if tok not in ("USD", "CAD", "EUR", "GBP", "YTD", "PNG", "API", "LLM", "CPU", "GPU"):
+        if tok not in ("USD", "CAD", "EUR", "EURO", "GBP", "JPY", "CHF", "AUD", "NZD", "YTD", "PNG", "API", "LLM", "CPU", "GPU"):
             mapped = CHART_TICKER_ALIASES.get(tok.lower(), tok)
             if mapped not in found:
                 found.append(mapped)
@@ -137,13 +153,25 @@ def enrich_graphing_tool_args(
         if inferred_tf:
             enriched["timeframe"] = inferred_tf
 
-    if latest_user_text and not enriched.get("ticker") and not enriched.get("data") and not enriched.get("diagram"):
+    ct_low = str(enriched.get("chart_type") or "").strip().lower()
+    is_market_compatible = ct_low in (
+        "", "market", "stock", "stocks", "crypto", "price", "candlestick", "ohlc", "line", "compare", "comparison",
+    )
+
+    if latest_user_text and not enriched.get("ticker") and not enriched.get("data") and not enriched.get("diagram") and is_market_compatible:
         extracted_tickers = _extract_tickers_from_text(latest_user_text)
         if extracted_tickers:
             enriched["ticker"] = ", ".join(extracted_tickers)
 
     state = get_channel_chart_state(active_channel_id)
-    if state and state.last_tickers and not enriched.get("ticker") and not enriched.get("data"):
+    if (
+        state
+        and state.last_tickers
+        and not enriched.get("ticker")
+        and not enriched.get("data")
+        and not enriched.get("diagram")
+        and is_market_compatible
+    ):
         q_low = (latest_user_text or "").lower()
         if re.search(r"\b(?:it|them|same|instead)\b", q_low):
             enriched["ticker"] = ", ".join(state.last_tickers)
@@ -179,19 +207,21 @@ def detect_missed_graphing_tool_call(
     if contains_domain_terms(q_low, MUSIC_DOMAIN_WORDS):
         return None
 
-    # 1. Explicit diagram request containing arrow notation or Mermaid block
-    if _EXPLICIT_DIAGRAM_RE.search(q_low) and ("->" in latest_user_text or "```" in latest_user_text):
-        diag_type = DiagramType.FLOWCHART if "flowchart" in q_low else ChartType.DIAGRAM
-        return (
-            "skill_graphing_info",
-            {
-                "chart_type": str(diag_type),
-                "query": latest_user_text,
-                "diagram": latest_user_text,
-            },
-        )
+    # 1. Explicit diagram request (with arrow notation, Mermaid fence, or explicit flowchart/diagram creation prompt)
+    if _EXPLICIT_DIAGRAM_RE.search(q_low):
+        is_flowchart = bool(re.search(r"\b(?:flow\s*chart|flowchart|flussdiagramm|ablaufdiagramm)\b", q_low))
+        if is_flowchart or "->" in latest_user_text or "```" in latest_user_text:
+            diag_type = DiagramType.FLOWCHART if is_flowchart else ChartType.DIAGRAM
+            return (
+                "skill_graphing_info",
+                {
+                    "chart_type": str(diag_type),
+                    "query": latest_user_text,
+                    "diagram": latest_user_text,
+                },
+            )
 
-    # 2. Explicit market plot request ("plot NVDA vs SHOP.TO over 5 years")
+    # 2. Explicit market plot request ("plot NVDA vs SHOP.TO over 5 years", "graph a chart based on last 5 years of cad/Euro")
     if _EXPLICIT_MARKET_PLOT_RE.search(q_low):
         tickers = _extract_tickers_from_text(latest_user_text)
         if tickers:

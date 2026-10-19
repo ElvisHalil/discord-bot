@@ -1955,6 +1955,176 @@ class TestMidGenerationTruncationRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertIn("### 📈 Daily Market & Macro Pulse", reply)
         self.assertIn("https://apnews.com/article/levine-full-url", reply)
 
+    async def test_step0_thinking_truncation_retries_with_tools_and_executes_tool(self):
+        """When Step 0 hits done_reason='length' inside <thought> before emitting a tool call,
+        run_agent_turn must retry Step 0 with think=False and tools enabled so the tool call succeeds."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        import main
+
+        step0_truncated = SimpleNamespace(
+            done_reason="length",
+            message=SimpleNamespace(
+                role="assistant",
+                content="",
+                thinking="User wants a flowchart showing how I make one. I should call skill_graphing_info...",
+                tool_calls=None,
+            ),
+        )
+        call_obj = SimpleNamespace(
+            function=SimpleNamespace(
+                name="skill_graphing_info",
+                arguments={"chart_type": "flowchart", "diagram": "A[Start] --> B[End]", "title": "Example Flowchart"},
+            )
+        )
+        step0_retry_ok = SimpleNamespace(
+            done_reason="stop",
+            message=SimpleNamespace(
+                role="assistant",
+                content="",
+                thinking="",
+                tool_calls=[call_obj],
+            ),
+        )
+        step1_final = SimpleNamespace(
+            done_reason="stop",
+            message=SimpleNamespace(
+                role="assistant",
+                content="Here is your example flowchart!",
+                thinking="",
+                tool_calls=None,
+            ),
+        )
+
+        mock_chat = AsyncMock(side_effect=[step0_truncated, step0_retry_ok, step1_final])
+        turn_history = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "zeig mir mal wie du ein flowchart machen kannst"},
+        ]
+        mode_cfg = dict(main.MODES["research-gemma"])
+        mode_cfg["tools"] = {
+            "skill_graphing_info": lambda chart_type=None, query=None, title=None, diagram=None, **kw: "=== 📊 VISUAL CHART & DIAGRAM ENGINE ===\n- **Status:** PNG image rendered",
+        }
+
+        with patch.object(main.ollama_client, "chat", mock_chat):
+            reply = await main.run_agent_turn(999112, mode_cfg, turn_history=turn_history)
+
+        self.assertEqual(mock_chat.call_count, 3)
+        # Second call is the Step 0 retry with think=False AND tools still passed
+        self.assertIs(mock_chat.call_args_list[1].kwargs.get("think"), False)
+        self.assertIn("tools", mock_chat.call_args_list[1].kwargs)
+        self.assertEqual(reply, "Here is your example flowchart!")
+
+    async def test_final_answer_without_tools_strips_tool_tags_from_history(self):
+        """Ensure final_answer_without_tools converts role='tool' and assistant tool_calls into plain
+        messages so Gemma 4's template never triggers raw <|tool_call> emission when tools are omitted."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        import main
+
+        step0_truncated = SimpleNamespace(
+            done_reason="length",
+            message=SimpleNamespace(role="assistant", content="", thinking="thinking...", tool_calls=None),
+        )
+        step0_retry_still_empty = SimpleNamespace(
+            done_reason="length",
+            message=SimpleNamespace(role="assistant", content="", thinking="still thinking...", tool_calls=None),
+        )
+        fallback_resp = SimpleNamespace(
+            done_reason="stop",
+            message=SimpleNamespace(role="assistant", content="Clean final answer without tool tags.", thinking="", tool_calls=None),
+        )
+        mock_chat = AsyncMock(side_effect=[step0_truncated, step0_retry_still_empty, fallback_resp])
+
+        turn_history = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "prior question"},
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "search_web", "arguments": {"query": "x"}}}]},
+            {"role": "tool", "name": "search_web", "content": "search result data"},
+            {"role": "assistant", "content": "⚠️ Generated an empty response."},
+            {"role": "user", "content": "tell me a summary"},
+        ]
+        mode_cfg = dict(main.MODES["research-gemma"])
+        mode_cfg["tools"] = {"search_web": lambda query=None: "res"}
+
+        with patch.object(main.ollama_client, "chat", mock_chat):
+            reply = await main.run_agent_turn(999113, mode_cfg, turn_history=turn_history)
+
+        self.assertEqual(reply, "Clean final answer without tool tags.")
+        fallback_msgs = mock_chat.call_args_list[2].kwargs["messages"]
+        for m in fallback_msgs:
+            self.assertNotEqual(m.get("role"), "tool")
+            self.assertFalse(m.get("tool_calls"))
+            self.assertNotEqual(m.get("content"), "⚠️ Generated an empty response.")
+
+    def test_fx_pair_resolution_and_graphing_missed_call_detection(self):
+        from src.skills.graphing.catalogs import extract_fx_pairs_from_text, resolve_fx_pair_symbol
+        from src.skills.graphing.aggregators.market_series import resolve_chart_ticker
+        from src.skills.graphing.context import _extract_tickers_from_text, detect_missed_graphing_tool_call
+        from src.skills.graphing.aggregators.mermaid_engine import extract_nodes_and_edges, normalize_and_sanitize_mermaid
+
+        self.assertEqual(resolve_fx_pair_symbol("CAD-EUR"), "CADEUR=X")
+        self.assertEqual(resolve_fx_pair_symbol("cad/Euro"), "CADEUR=X")
+        self.assertEqual(resolve_fx_pair_symbol("USD/CAD"), "USDCAD=X")
+        self.assertEqual(resolve_chart_ticker("USD/CAD"), "USDCAD=X")
+        self.assertEqual(resolve_chart_ticker("CAD-EUR"), "CADEUR=X")
+        self.assertEqual(resolve_chart_ticker("cad/Euro"), "CADEUR=X")
+        self.assertEqual(extract_fx_pairs_from_text("can you graph a chart based on last 5 years of cad/Euro"), ["CADEUR=X"])
+        self.assertEqual(_extract_tickers_from_text("can you graph a chart based on last 5 years of cad/Euro"), ["CADEUR=X"])
+
+        # Missed graphing tool call detection on German flowchart, English "flow chart", and CAD/Euro 5Y chart
+        missed_de = detect_missed_graphing_tool_call([{"role": "user", "content": "zeig mir mal wie du ein flowchart machen kannst"}])
+        self.assertIsNotNone(missed_de)
+        self.assertEqual(missed_de[0], "skill_graphing_info")
+
+        missed_en = detect_missed_graphing_tool_call([{"role": "user", "content": "make a flow chart to show how you make one"}])
+        self.assertIsNotNone(missed_en)
+        self.assertEqual(missed_en[0], "skill_graphing_info")
+
+        missed_fx = detect_missed_graphing_tool_call([{"role": "user", "content": "can you graph a chart based on last 5 years of cad/Euro"}])
+        self.assertIsNotNone(missed_fx)
+        self.assertEqual(missed_fx[0], "skill_graphing_info")
+        self.assertEqual(missed_fx[1].get("ticker"), "CADEUR=X")
+        self.assertEqual(missed_fx[1].get("timeframe"), "5y")
+
+        # Mermaid single-line semicolon and headerless node syntax normalization
+        semicolon_code = "graph TD; A[Start: Define Goal] --> B{Choose Tool}; B -->|Yes| C[Render PNG];"
+        sanitized = normalize_and_sanitize_mermaid(semicolon_code)
+        nodes, edges, _ = extract_nodes_and_edges(sanitized)
+        self.assertGreaterEqual(len(nodes), 3)
+        self.assertGreaterEqual(len(edges), 2)
+
+        headerless = "start((User Query)) --> decide{Need Diagram?}\ndecide -- Yes --> tool[Call skill_graphing_info]"
+        sanitized_hl = normalize_and_sanitize_mermaid(headerless)
+        nodes_hl, edges_hl, _ = extract_nodes_and_edges(sanitized_hl)
+        self.assertEqual(len(nodes_hl), 3)
+        self.assertEqual(len(edges_hl), 2)
+
+    def test_trim_history_enforces_character_budget_and_strips_thinking(self):
+        from types import SimpleNamespace
+
+        h = [{"role": "system", "content": "sys"}]
+        for i in range(10):
+            h.append({"role": "user", "content": f"user question {i} " + ("x" * 1500)})
+            h.append(
+                SimpleNamespace(
+                    role="assistant",
+                    content=f"assistant answer {i} " + ("y" * 1500),
+                    thinking="T" * 2000,
+                    tool_calls=None,
+                )
+            )
+        h.append({"role": "user", "content": "latest user question"})
+        trimmed = trim_history(h, limit=40, max_history_chars=8000)
+        self.assertEqual(trimmed[0]["role"], "system")
+        self.assertEqual(trimmed[1]["role"], "user")
+        self.assertEqual(trimmed[-1]["content"], "latest user question")
+        total_rest_chars = sum(len(str(m.get("content") or "")) for m in trimmed[1:])
+        self.assertLessEqual(total_rest_chars, 8000)
+        for m in trimmed[1:-1]:
+            self.assertIsInstance(m, dict)
+            self.assertNotIn("thinking", m)
+
 
 if __name__ == "__main__":
     unittest.main()

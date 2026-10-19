@@ -584,8 +584,9 @@ async def handle_telegram_update(
             main_mod.chat_history[internal_cid][0] = system_msg
         turn_history = list(main_mod.chat_history[internal_cid])
 
-    turn_start_idx = len(turn_history)
     turn_history.append({"role": "user", "content": user_msg})
+    turn_history = trim_history(turn_history, mode_config.get("history_limit", 40))
+    turn_start_idx = len(turn_history) - 1
 
     # Phase 2: Lock-free execution & post-processing
     await run_in_worker(
@@ -602,7 +603,15 @@ async def handle_telegram_update(
             reply = await main_mod.run_agent_turn(internal_cid, mode_config, turn_history=turn_history)
         except TypeError:
             reply = await main_mod.run_agent_turn(internal_cid, mode_config)
+        attachments = pop_channel_attachments(internal_cid)
+
+        if not reply.strip() and attachments:
+            captions = [str(att.get("caption") or "").strip() for att in attachments if att.get("caption")]
+            reply = f"📊 **{captions[0]}**" if captions else "📊 Here is your rendered chart."
+
+        is_empty_fallback = False
         if not reply.strip():
+            is_empty_fallback = main_mod.current_mode != "chat"
             reply = (
                 "Don't leave me hanging—what's on your mind?"
                 if main_mod.current_mode == "chat"
@@ -617,23 +626,23 @@ async def handle_telegram_update(
         reply = sanitize_agent_reply(reply)
 
         # Phase 3: Atomic commit (<1ms under channel lock)
-        turn_delta = turn_history[turn_start_idx:]
-        if len(turn_delta) == 1:
-            turn_delta.append({"role": "assistant", "content": reply})
-        else:
-            turn_delta[-1] = {"role": "assistant", "content": reply}
+        if not is_empty_fallback:
+            turn_delta = turn_history[turn_start_idx:]
+            if len(turn_delta) == 1:
+                turn_delta.append({"role": "assistant", "content": reply})
+            else:
+                turn_delta[-1] = {"role": "assistant", "content": reply}
 
-        async with main_mod.channel_locks[internal_cid]:
-            if internal_cid not in main_mod.chat_history:
-                main_mod.chat_history[internal_cid] = [system_msg]
-            main_mod.chat_history[internal_cid].extend(turn_delta)
-            main_mod.chat_history[internal_cid] = trim_history(
-                main_mod.chat_history[internal_cid],
-                mode_config.get("history_limit", 40),
-            )
+            async with main_mod.channel_locks[internal_cid]:
+                if internal_cid not in main_mod.chat_history:
+                    main_mod.chat_history[internal_cid] = [system_msg]
+                main_mod.chat_history[internal_cid].extend(turn_delta)
+                main_mod.chat_history[internal_cid] = trim_history(
+                    main_mod.chat_history[internal_cid],
+                    mode_config.get("history_limit", 40),
+                )
 
         await send_telegram_message(internal_cid, reply, token=bot_token)
-        attachments = pop_channel_attachments(internal_cid)
         for att in attachments:
             if att.get("data"):
                 await send_telegram_photo(

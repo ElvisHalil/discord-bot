@@ -615,7 +615,23 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                 break
 
         compact_intra_turn_tool_history(history)
-        fallback_messages = history + [{"role": "user", "content": nudge}]
+        # Convert tool_calls / role="tool" messages into plain text context so Gemma 4's template
+        # never primes the model to emit raw <|tool_call> tags while `tools` is omitted.
+        clean_messages = []
+        for m in history:
+            m_role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+            m_content = str((m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or "")
+            m_tools = m.get("tool_calls") if isinstance(m, dict) else getattr(m, "tool_calls", None)
+            if m_role == "tool":
+                t_name = (m.get("name") if isinstance(m, dict) else getattr(m, "name", None)) or "tool"
+                clean_messages.append({"role": "user", "content": f"[Tool result from {t_name}]:\n{m_content}"})
+            elif m_role == "assistant":
+                if m_content.strip() and m_content.strip() != "⚠️ Generated an empty response.":
+                    clean_messages.append({"role": "assistant", "content": m_content})
+            else:
+                clean_messages.append({"role": m_role or "user", "content": m_content})
+
+        fallback_messages = clean_messages + [{"role": "user", "content": nudge}]
         try:
             response = await ollama_client.chat(
                 **base_kwargs,
@@ -671,6 +687,23 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
         history.append(response.message)
 
         tool_calls = getattr(response.message, "tool_calls", None)
+        if not tool_calls and iterations == 0 and supports_tools and tool_functions and not hide_tools_next_step:
+            step0_reply = response.message.content or ""
+            step0_done = str(getattr(response, "done_reason", "") or "").lower()
+            step0_thinking = len(getattr(response.message, "thinking", "") or "")
+            if (not step0_reply.strip() or step0_done == "length") and step0_thinking > 0:
+                print(
+                    f"⚠️ [{current_mode.upper()}] Step 0 thinking truncated before tool/reply emission "
+                    f"(done_reason={step0_done or 'n/a'}, thinking_chars={step0_thinking}); retrying step 0 with think=False and tools enabled."
+                )
+                history.pop()
+                try:
+                    response = await ollama_client.chat(**chat_kwargs, think=False)
+                except TypeError:
+                    response = await ollama_client.chat(**chat_kwargs)
+                history.append(response.message)
+                tool_calls = getattr(response.message, "tool_calls", None)
+
         if not tool_calls:
             if iterations == 0 and supports_tools:
                 missed = (
@@ -1049,16 +1082,24 @@ async def on_message(message):
             chat_history[channel_id][0] = system_msg
         turn_history = list(chat_history[channel_id])
 
-    turn_start_idx = len(turn_history)
     turn_history.append({"role": "user", "content": user_msg})
+    turn_history = trim_history(turn_history, mode_config.get("history_limit", 40))
+    turn_start_idx = len(turn_history) - 1
 
     # Phase 2: Lock-free turn execution and reply post-processing
     async with message.channel.typing():
         try:
             clear_channel_attachments(channel_id)
             reply = await run_agent_turn(channel_id, mode_config, turn_history=turn_history)
+            attachments = pop_channel_attachments(channel_id)
 
+            if not reply.strip() and attachments:
+                captions = [str(att.get("caption") or "").strip() for att in attachments if att.get("caption")]
+                reply = f"📊 **{captions[0]}**" if captions else "📊 Here is your rendered chart."
+
+            is_empty_fallback = False
             if not reply.strip():
+                is_empty_fallback = current_mode != "chat"
                 reply = "Don't leave me hanging—what's on your mind?" if current_mode == "chat" else "⚠️ Generated an empty response."
 
             # Auto-ping fix for chat mode
@@ -1080,22 +1121,22 @@ async def on_message(message):
             reply = sanitize_agent_reply(reply)
 
             # Phase 3: Atomically commit this turn's completed message block (<1ms)
-            turn_delta = turn_history[turn_start_idx:]
-            if len(turn_delta) == 1:
-                turn_delta.append({"role": "assistant", "content": reply})
-            else:
-                turn_delta[-1] = {"role": "assistant", "content": reply}
+            if not is_empty_fallback:
+                turn_delta = turn_history[turn_start_idx:]
+                if len(turn_delta) == 1:
+                    turn_delta.append({"role": "assistant", "content": reply})
+                else:
+                    turn_delta[-1] = {"role": "assistant", "content": reply}
 
-            async with channel_locks[channel_id]:
-                if channel_id not in chat_history:
-                    chat_history[channel_id] = [system_msg]
-                chat_history[channel_id].extend(turn_delta)
-                chat_history[channel_id] = trim_history(
-                    chat_history[channel_id], mode_config.get("history_limit", 40)
-                )
+                async with channel_locks[channel_id]:
+                    if channel_id not in chat_history:
+                        chat_history[channel_id] = [system_msg]
+                    chat_history[channel_id].extend(turn_delta)
+                    chat_history[channel_id] = trim_history(
+                        chat_history[channel_id], mode_config.get("history_limit", 40)
+                    )
 
             chunks = [c for c in chunk_message(reply) if c]
-            attachments = pop_channel_attachments(channel_id)
             discord_files = [
                 discord.File(io.BytesIO(att["data"]), filename=att["filename"])
                 for att in attachments

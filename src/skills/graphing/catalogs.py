@@ -2,7 +2,8 @@
 Static color palettes, chart-type alias mappings, and ticker catalogs for `src/skills/graphing/`.
 """
 
-from typing import Dict, Tuple
+from typing import Dict, List, Optional, Tuple
+import re
 
 from src.skills.graphing.enums import ChartType, DiagramType
 
@@ -88,7 +89,87 @@ DIAGRAM_TYPE_ALIASES: Dict[str, str] = {
     "timeline": DiagramType.TIMELINE,
 }
 
-# Common ticker aliases for quick resolution when charting stocks/crypto/commodities directly
+CURRENCY_NAME_TO_ISO: Dict[str, str] = {
+    "usd": "USD",
+    "us dollar": "USD",
+    "us dollars": "USD",
+    "american dollar": "USD",
+    "cad": "CAD",
+    "canadian dollar": "CAD",
+    "canadian dollars": "CAD",
+    "loonie": "CAD",
+    "eur": "EUR",
+    "euro": "EUR",
+    "euros": "EUR",
+    "gbp": "GBP",
+    "british pound": "GBP",
+    "pound": "GBP",
+    "sterling": "GBP",
+    "jpy": "JPY",
+    "japanese yen": "JPY",
+    "yen": "JPY",
+    "chf": "CHF",
+    "swiss franc": "CHF",
+    "franc": "CHF",
+    "aud": "AUD",
+    "australian dollar": "AUD",
+    "nzd": "NZD",
+    "new zealand dollar": "NZD",
+    "cny": "CNY",
+    "rmb": "CNY",
+    "chinese yuan": "CNY",
+    "yuan": "CNY",
+    "hkd": "HKD",
+    "sgd": "SGD",
+    "sek": "SEK",
+    "nok": "NOK",
+    "mxn": "MXN",
+    "inr": "INR",
+    "brl": "BRL",
+    "krw": "KRW",
+    "zar": "ZAR",
+    "try": "TRY",
+}
+
+_CCY_PATTERN = "|".join(sorted((re.escape(k) for k in CURRENCY_NAME_TO_ISO), key=len, reverse=True))
+_FX_PAIR_RE = re.compile(
+    rf"\b(?P<base>{_CCY_PATTERN})\s*(?:/|-|\bto\b|\bvs\.?\b|\bversus\b|\bagainst\b)\s*(?P<quote>{_CCY_PATTERN})\b",
+    re.IGNORECASE,
+)
+
+
+def resolve_fx_pair_symbol(raw_text: str) -> Optional[str]:
+    """If `raw_text` represents a currency pair (e.g. 'CAD-EUR', 'CAD/EURO', 'Canadian dollar to Euro'), return `<BASE><QUOTE>=X`."""
+    if not raw_text:
+        return None
+    cleaned = raw_text.strip().upper()
+    if re.fullmatch(r"[A-Z]{6}=X", cleaned):
+        return cleaned
+    m = _FX_PAIR_RE.search(raw_text.strip())
+    if m:
+        base_iso = CURRENCY_NAME_TO_ISO.get(m.group("base").lower())
+        quote_iso = CURRENCY_NAME_TO_ISO.get(m.group("quote").lower())
+        if base_iso and quote_iso and base_iso != quote_iso:
+            return f"{base_iso}{quote_iso}=X"
+    return None
+
+
+def extract_fx_pairs_from_text(text: str) -> List[str]:
+    """Extract all FX pair symbols (`<BASE><QUOTE>=X`) mentioned in natural language or slash/hyphen notation."""
+    if not text:
+        return []
+    found: List[str] = []
+    for m in _FX_PAIR_RE.finditer(text):
+        base_iso = CURRENCY_NAME_TO_ISO.get(m.group("base").lower())
+        quote_iso = CURRENCY_NAME_TO_ISO.get(m.group("quote").lower())
+        if base_iso and quote_iso and base_iso != quote_iso:
+            sym = f"{base_iso}{quote_iso}=X"
+            if sym not in found:
+                found.append(sym)
+    return found
+
+
+# Common ticker aliases for quick resolution when charting stocks/crypto/commodities/FX directly
 CHART_TICKER_ALIASES: Dict[str, str] = {
     "shopify": "SHOP.TO",
     "royal bank": "RY.TO",
@@ -148,6 +229,24 @@ CHART_TICKER_ALIASES: Dict[str, str] = {
     "tsx": "^GSPTSE",
     "s&p/tsx": "^GSPTSE",
     "vix": "^VIX",
+    "dxy": "DX-Y.NYB",
+    "cad/usd": "CADUSD=X",
+    "cad-usd": "CADUSD=X",
+    "usd/cad": "USDCAD=X",
+    "usd-cad": "USDCAD=X",
+    "cad/eur": "CADEUR=X",
+    "cad-eur": "CADEUR=X",
+    "cad/euro": "CADEUR=X",
+    "cad-euro": "CADEUR=X",
+    "eur/cad": "EURCAD=X",
+    "eur-cad": "EURCAD=X",
+    "euro/cad": "EURCAD=X",
+    "eur/usd": "EURUSD=X",
+    "eur-usd": "EURUSD=X",
+    "gbp/usd": "GBPUSD=X",
+    "gbp-usd": "GBPUSD=X",
+    "usd/jpy": "USDJPY=X",
+    "usd-jpy": "USDJPY=X",
 }
 
 CHART_QUERY_STOPWORDS: frozenset[str] = frozenset({
@@ -157,5 +256,7 @@ CHART_QUERY_STOPWORDS: frozenset[str] = frozenset({
     "versus", "compare", "comparing", "comparison", "between", "from", "to", "past",
     "last", "history", "historical", "price", "prices", "performance", "return", "returns",
     "stock", "stocks", "share", "shares", "crypto", "cryptocurrency", "line", "bar", "pie",
+    "pair", "based", "years", "year", "months", "month", "days", "day",
 })
+
 

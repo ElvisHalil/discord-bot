@@ -15,7 +15,7 @@ from typing import Dict, Optional, Tuple
 from urllib.parse import quote_plus
 
 from src.skills.graphing.aggregators.base import BaseGraphingAggregator
-from src.skills.graphing.catalogs import CHART_TICKER_ALIASES
+from src.skills.graphing.catalogs import CHART_TICKER_ALIASES, resolve_fx_pair_symbol
 from src.skills.graphing.models import MarketBarSeries
 from src.utils.cache import BoundedCache
 from src.utils.http import DEFAULT_UA, ThreadLocalRequestsSession
@@ -44,16 +44,10 @@ _TIMEFRAME_SPECS: Dict[str, Tuple[str, str, str]] = {
 }
 
 
-def resolve_chart_ticker(raw_target: str) -> str:
-    """Resolve a company/asset alias or cashtag into a canonical Yahoo Finance symbol."""
-    cleaned = (raw_target or "").strip().lstrip("$")
-    low = cleaned.lower()
-    if low in CHART_TICKER_ALIASES:
-        return CHART_TICKER_ALIASES[low]
-    if re.fullmatch(r"[A-Za-z0-9.^=\-]+", cleaned) and len(cleaned) <= 10:
-        return cleaned.upper()
+def _search_yahoo_symbol(query_text: str) -> Optional[str]:
+    """Query Yahoo Finance v1 search to resolve an unmapped company name, ticker, or FX pair."""
     try:
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={quote_plus(cleaned)}&quotesCount=5&newsCount=0"
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={quote_plus(query_text)}&quotesCount=5&newsCount=0"
         resp = _HTTP_SESSION.get(url, timeout=5)
         if resp.status_code == 200:
             quotes = (resp.json() or {}).get("quotes") or []
@@ -63,6 +57,25 @@ def resolve_chart_ticker(raw_target: str) -> str:
                     return str(sym).upper()
     except Exception:
         pass
+    return None
+
+
+def resolve_chart_ticker(raw_target: str) -> str:
+    """Resolve a company/asset alias, FX pair, or cashtag into a canonical Yahoo Finance symbol."""
+    cleaned = (raw_target or "").strip().lstrip("$")
+    if not cleaned:
+        return ""
+    fx_sym = resolve_fx_pair_symbol(cleaned)
+    if fx_sym:
+        return fx_sym
+    low = cleaned.lower()
+    if low in CHART_TICKER_ALIASES:
+        return CHART_TICKER_ALIASES[low]
+    if re.fullmatch(r"[A-Za-z0-9.^=\-]+", cleaned) and len(cleaned) <= 10:
+        return cleaned.upper()
+    searched = _search_yahoo_symbol(cleaned)
+    if searched:
+        return searched
     return cleaned.upper()
 
 
@@ -95,9 +108,17 @@ class MarketSeriesAggregator(BaseGraphingAggregator):
                 f"?range={yf_range}&interval={yf_interval}&includePrePost=false"
             )
             resp = _HTTP_SESSION.get(url, timeout=7)
-            if resp.status_code != 200:
-                return None
-            results = ((resp.json() or {}).get("chart") or {}).get("result") or []
+            results = ((resp.json() or {}).get("chart") or {}).get("result") if resp.status_code == 200 else None
+            if not results:
+                alt_sym = _search_yahoo_symbol(target)
+                if alt_sym and alt_sym != sym:
+                    sym = alt_sym
+                    url = (
+                        f"https://query1.finance.yahoo.com/v8/finance/chart/{quote_plus(sym)}"
+                        f"?range={yf_range}&interval={yf_interval}&includePrePost=false"
+                    )
+                    resp = _HTTP_SESSION.get(url, timeout=7)
+                    results = ((resp.json() or {}).get("chart") or {}).get("result") if resp.status_code == 200 else None
             if not results:
                 return None
             res0 = results[0]

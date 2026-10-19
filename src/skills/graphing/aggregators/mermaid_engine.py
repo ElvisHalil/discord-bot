@@ -31,10 +31,31 @@ _MERMAID_HEADER_RE = re.compile(
 )
 
 
+def _split_mermaid_statements(code: str) -> List[str]:
+    """Split Mermaid code into individual statement lines on newlines and top-level semicolons."""
+    out: List[str] = []
+    for raw_line in code.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # If header is followed by semicolon on the same line (e.g. "graph TD; A --> B; B --> C;")
+        m_hdr = re.match(
+            r"^((?:flowchart|graph)\s+(?:TD|TB|BT|RL|LR)|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram)\s*;\s*(.+)$",
+            line,
+            re.IGNORECASE,
+        )
+        if m_hdr:
+            out.append(m_hdr.group(1).strip())
+            line = m_hdr.group(2).strip()
+        parts = [p.strip() for p in line.split(";") if p.strip()]
+        out.extend(parts)
+    return out
+
+
 def normalize_and_sanitize_mermaid(raw_code: str, diagram_type: str = "flowchart") -> str:
     """
-    Convert shorthand arrow notation or fenced Mermaid blocks into clean, valid Mermaid syntax,
-    automatically quoting node labels that contain parentheses.
+    Convert shorthand arrow notation, headerless Mermaid node definitions, or fenced Mermaid blocks
+    into clean, valid Mermaid syntax, automatically quoting node labels that contain parentheses.
     """
     code = (raw_code or "").strip()
     # Strip markdown fences if present
@@ -46,9 +67,23 @@ def normalize_and_sanitize_mermaid(raw_code: str, diagram_type: str = "flowchart
         code = code.replace("\\n", "\n")
 
     if not code:
-        return 'flowchart TD\n    N1["Start"] --> N2["End"]'
+        return (
+            'flowchart TD\n'
+            '    N1["User Prompt"] --> N2["Build Mermaid Spec"]\n'
+            '    N2 --> N3["Sanitize Nodes & Edges"]\n'
+            '    N3 --> N4["Render Dark-Mode PNG"]\n'
+            '    N4 --> N5["Deliver Flowchart in Chat"]'
+        )
 
-    # If the user/model passed a simple arrow chain like "User -> Gateway -> Orchestrator -> Ollama"
+    # Convert inline "-- label -->" edge labels into standard "-->|label|" syntax
+    code = re.sub(r"--\s+([^-\n|>]+?)\s+-->", lambda m: f"-->|{m.group(1).strip()}|", code)
+
+    # Expand single-line semicolon-separated Mermaid statements into multi-line format
+    stmt_lines = _split_mermaid_statements(code)
+    if stmt_lines:
+        code = "\n".join(stmt_lines)
+
+    # If the user/model passed a simple arrow chain or headerless Mermaid
     if not _MERMAID_HEADER_RE.match(code):
         dtype = (diagram_type or "flowchart").lower().strip()
         if dtype == "sequence" or (":" in code and ("->" in code or "->>" in code)):
@@ -62,35 +97,50 @@ def normalize_and_sanitize_mermaid(raw_code: str, diagram_type: str = "flowchart
                     lines.append(f"    {seg}")
             return "\n".join(lines)
 
-        # Convert arrow chains (e.g. "Step 1 -> Step 2 -> Step 3; Step 2 -> Step 4") into flowchart TD
         direction = "LR" if dtype in ("architecture", "lr", "horizontal", "timeline") else "TD"
-        lines = [f"flowchart {direction}"]
-        node_ids: dict[str, str] = {}
 
-        def _get_nid(label: str) -> str:
-            lbl = label.strip().strip('"').strip("'")
-            if lbl not in node_ids:
-                nid = f"N{len(node_ids) + 1}"
-                node_ids[lbl] = nid
-            return node_ids[lbl]
+        # Check if the code already uses Mermaid node syntax (e.g. `A[Start] --> B{Decision}`) without a header
+        has_mermaid_nodes = bool(re.search(r"\b[A-Za-z0-9_]+\s*(?:\[|\(|\{)", code)) and bool(
+            re.search(r"-->|---|-\.->|==>", code)
+        )
+        if has_mermaid_nodes:
+            indented = "\n".join(f"    {ln.strip()}" for ln in code.splitlines() if ln.strip())
+            code = f"flowchart {direction}\n{indented}"
+        else:
+            # Convert plain arrow chains (e.g. "Step 1 -> Step 2 -> Step 3; Step 2 -> Step 4") into flowchart TD
+            lines = [f"flowchart {direction}"]
+            node_ids: dict[str, str] = {}
 
-        clauses = [c.strip() for c in re.split(r"[\n;]+", code) if c.strip()]
-        has_edges = False
-        for clause in clauses:
-            parts = [p.strip() for p in re.split(r"\s*(?:-->|->|==>)\s*", clause) if p.strip()]
-            if len(parts) >= 2:
-                has_edges = True
-                for i in range(len(parts) - 1):
-                    src_lbl, dst_lbl = parts[i], parts[i + 1]
-                    src_id, dst_id = _get_nid(src_lbl), _get_nid(dst_lbl)
-                    safe_src = src_lbl.replace('"', "'")
-                    safe_dst = dst_lbl.replace('"', "'")
-                    lines.append(f'    {src_id}["{safe_src}"] --> {dst_id}["{safe_dst}"]')
-        if has_edges:
-            return "\n".join(lines)
+            def _get_nid(label: str) -> str:
+                lbl = label.strip().strip('"').strip("'")
+                if lbl not in node_ids:
+                    nid = f"N{len(node_ids) + 1}"
+                    node_ids[lbl] = nid
+                return node_ids[lbl]
 
-        # Fallback: wrap raw Mermaid body in flowchart TD
-        code = f"flowchart TD\n    {code}"
+            clauses = [c.strip() for c in re.split(r"[\n;]+", code) if c.strip()]
+            has_edges = False
+            for clause in clauses:
+                parts = [p.strip() for p in re.split(r"\s*(?:-->|->|==>)\s*", clause) if p.strip()]
+                if len(parts) >= 2:
+                    has_edges = True
+                    for i in range(len(parts) - 1):
+                        src_lbl, dst_lbl = parts[i], parts[i + 1]
+                        src_id, dst_id = _get_nid(src_lbl), _get_nid(dst_lbl)
+                        safe_src = src_lbl.replace('"', "'")
+                        safe_dst = dst_lbl.replace('"', "'")
+                        lines.append(f'    {src_id}["{safe_src}"] --> {dst_id}["{safe_dst}"]')
+            if has_edges:
+                return "\n".join(lines)
+
+            # Natural-language prompt fallback (e.g. "make a flow chart to show how you make one")
+            return (
+                f"flowchart {direction}\n"
+                '    N1["1. User Flowchart Request"] --> N2["2. Build Mermaid Graph Spec"]\n'
+                '    N2 --> N3["3. Sanitize Nodes & Directed Edges"]\n'
+                '    N3 --> N4["4. Render High-DPI Dark PNG"]\n'
+                '    N4 --> N5["5. Send Flowchart Image to Chat"]'
+            )
 
     # Sanitize unquoted square-bracket labels containing parentheses or slashes: id[Text (Info)] -> id["Text (Info)"]
     def _quote_bracket_label(match: re.Match) -> str:
@@ -119,10 +169,20 @@ def extract_nodes_and_edges(mermaid_code: str) -> Tuple[List[Tuple[str, str]], L
 
     def _parse_node_token(token: str) -> Tuple[str, str]:
         tok = token.strip()
-        m = re.match(r'^([A-Za-z0-9_]+)\s*(?:\[\s*"?([^"\]\n]+)"?\s*\]|\(\s*"?([^"\)\n]+)"?\s*\)|\{\s*"?([^"\}\n]+)"?\s*\})?$', tok)
+        m = re.match(
+            r'^([A-Za-z0-9_]+)\s*(?:'
+            r'\[\[\s*"?([^"\]\n]+)"?\s*\]\]'
+            r'|\[\s*"?([^"\]\n]+)"?\s*\]'
+            r'|\(\(\s*"?([^"\)\n]+)"?\s*\)\)'
+            r'|\(\s*"?([^"\)\n]+)"?\s*\)'
+            r'|\{\{\s*"?([^"\}\n]+)"?\s*\}\}'
+            r'|\{\s*"?([^"\}\n]+)"?\s*\}'
+            r')?$',
+            tok,
+        )
         if m:
             nid = m.group(1)
-            lbl = (m.group(2) or m.group(3) or m.group(4) or "").strip()
+            lbl = next((g.strip() for g in m.groups()[1:] if g and g.strip()), "")
             if lbl:
                 nodes_map[nid] = lbl
             elif nid not in nodes_map:
@@ -134,10 +194,11 @@ def extract_nodes_and_edges(mermaid_code: str) -> Tuple[List[Tuple[str, str]], L
             nodes_map[nid] = clean
         return nid, clean
 
-    for raw_line in mermaid_code.splitlines():
+    for raw_line in _split_mermaid_statements(mermaid_code):
         line = raw_line.strip()
         if not line or line.startswith("%%") or _MERMAID_HEADER_RE.match(line) or line.lower().startswith(("subgraph", "end", "style", "classdef", "class ")):
             continue
+        line = re.sub(r"--\s+([^-\n|>]+?)\s+-->", lambda m: f"-->|{m.group(1).strip()}|", line)
         # Sequence diagram line: A->>B: Message
         m_seq = re.match(r"^([A-Za-z0-9_ \"']+?)\s*-+>>?\s*([A-Za-z0-9_ \"']+?)\s*:\s*(.+)$", line)
         if m_seq:
