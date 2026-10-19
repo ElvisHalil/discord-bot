@@ -60,6 +60,32 @@ class RenderedVisual:
 
 
 @dataclass(slots=True)
+class CalendarDayCell:
+    """Single dated cell in a monthly/window Calendar Heatmap (e.g. flight fare calendar or daily metric grid)."""
+    date_str: str
+    value: float
+    label: str = ""
+    sublabel: str = ""
+    is_best: bool = False
+    is_direct: bool = False
+
+
+@dataclass(slots=True)
+class CalendarHeatmapSpec:
+    """Specification for rendering a 7-column Mon-Sun calendar heatmap card."""
+    title: str
+    subtitle: str = ""
+    cells: List[CalendarDayCell] = field(default_factory=list)
+    value_prefix: str = "$"
+    value_suffix: str = ""
+    currency: str = ""
+    footer_notes: List[str] = field(default_factory=list)
+    low_threshold: Optional[float] = None
+    high_threshold: Optional[float] = None
+    higher_is_better: bool = False
+
+
+@dataclass(slots=True)
 class ChartChannelState:
     """Per-channel state remembering the most recent chart or diagram rendered."""
     last_chart_type: str = ""

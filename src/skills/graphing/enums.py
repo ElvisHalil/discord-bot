@@ -14,6 +14,8 @@ class ChartType(StrEnum):
     SCATTER = "scatter"
     PIE = "pie"
     DONUT = "donut"
+    HEATMAP = "heatmap"
+    CALENDAR_HEATMAP = "calendar_heatmap"
     MARKET = "market"
     DIAGRAM = "diagram"
 

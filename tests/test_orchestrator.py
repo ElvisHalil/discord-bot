@@ -2125,6 +2125,66 @@ class TestMidGenerationTruncationRecovery(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(m, dict)
             self.assertNotIn("thinking", m)
 
+    def test_calendar_and_matrix_heatmap_rendering_and_flight_delegation(self):
+        from src.context import pop_channel_attachments, set_active_channel_id
+        from src.skills.graphing import (
+            CalendarDayCell,
+            CalendarHeatmapSpec,
+            clear_graphing_cache,
+            render_and_queue_calendar_heatmap,
+            skill_graphing_info,
+        )
+
+        clear_graphing_cache()
+        set_active_channel_id(888777)
+
+        # 1. Direct CalendarHeatmapSpec rendering & attachment queueing
+        cal_spec = CalendarHeatmapSpec(
+            title="Calgary (YYC) → London (LHR) — Fare Calendar (CAD)",
+            subtitle="Round-Trip (May 2027)  •  Cabin: Economy",
+            cells=[
+                CalendarDayCell(date_str="2027-05-04", value=742, sublabel="↔ May 18", is_best=True, is_direct=True),
+                CalendarDayCell(date_str="2027-05-05", value=785, sublabel="↔ May 19", is_direct=False),
+                CalendarDayCell(date_str="2027-05-06", value=820, sublabel="↔ May 20", is_direct=True),
+                CalendarDayCell(date_str="2027-05-07", value=960, sublabel="↔ May 21", is_direct=True),
+                CalendarDayCell(date_str="2027-05-08", value=1095, sublabel="↔ May 22", is_direct=True),
+            ],
+            value_prefix="$",
+            currency="CAD",
+            footer_notes=["**Direct Flight Days:** Tue, Thu, Fri, Sat"],
+        )
+        visual = render_and_queue_calendar_heatmap(cal_spec)
+        self.assertTrue(visual.png_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertTrue(any("742" in line for line in visual.summary_lines))
+        atts = pop_channel_attachments(888777)
+        self.assertEqual(len(atts), 1)
+        self.assertTrue(atts[0]["data"].startswith(b"\x89PNG\r\n\x1a\n"))
+
+        # 2. Universal skill_graphing_info(chart_type='heatmap') with ISO dates auto-promotes to calendar heatmap
+        out_iso = skill_graphing_info(
+            chart_type="calendar_heatmap",
+            title="May 2027 Price Grid",
+            labels="2027-05-10, 2027-05-11, 2027-05-12, 2027-05-13",
+            data="810, 735, 890, 940",
+        )
+        self.assertIn("VISUALIZATION RENDERED & ATTACHED", out_iso)
+        atts_iso = pop_channel_attachments(888777)
+        self.assertEqual(len(atts_iso), 1)
+        self.assertTrue(atts_iso[0]["data"].startswith(b"\x89PNG\r\n\x1a\n"))
+
+        # 3. Universal 2D Matrix Heatmap via skill_graphing_info(chart_type='heatmap')
+        out_mat = skill_graphing_info(
+            chart_type="heatmap",
+            title="Regional Latency Matrix (ms)",
+            labels="US-East, EU-West, AP-South",
+            data="Edge A: 18, 72, 145; Edge B: 64, 14, 110",
+        )
+        self.assertIn("VISUALIZATION RENDERED & ATTACHED", out_mat)
+        atts_mat = pop_channel_attachments(888777)
+        self.assertEqual(len(atts_mat), 1)
+        self.assertTrue(atts_mat[0]["data"].startswith(b"\x89PNG\r\n\x1a\n"))
+        clear_graphing_cache()
+
 
 if __name__ == "__main__":
     unittest.main()

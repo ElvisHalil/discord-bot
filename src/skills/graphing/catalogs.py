@@ -28,6 +28,14 @@ DARK_MUTED_TEXT_COLOR = "#8B949E"
 BULLISH_GREEN = "#2EA043"
 BEARISH_RED = "#F85149"
 
+# Dark-mode Calendar & Matrix Heatmap color tiers (Fill, Border, Accent Text)
+HEATMAP_TIER_DEAL = ("#123824", "#3FB950", "#7EE787")      # Emerald Green (Lowest / Best Deal)
+HEATMAP_TIER_GOOD = ("#143340", "#39C5CF", "#A5D6FF")      # Cyan / Teal (Below Median)
+HEATMAP_TIER_TYPICAL = ("#1B2738", "#58A6FF", "#E6EDF3")   # Slate Blue (Typical / Average)
+HEATMAP_TIER_ELEVATED = ("#3D2E14", "#E3B341", "#F2CC60")  # Amber Gold (Above Typical)
+HEATMAP_TIER_PEAK = ("#421B20", "#F85149", "#FFA198")      # Coral Red (High / Peak Price)
+HEATMAP_EMPTY_TILE = ("#11161D", "#21262D", "#484F58")     # Recessed Empty Day Tile
+
 CHART_TYPE_ALIASES: Dict[str, str] = {
     "line": ChartType.LINE,
     "lines": ChartType.LINE,
@@ -50,6 +58,14 @@ CHART_TYPE_ALIASES: Dict[str, str] = {
     "pie": ChartType.PIE,
     "donut": ChartType.DONUT,
     "doughnut": ChartType.DONUT,
+    "heatmap": ChartType.HEATMAP,
+    "heat_map": ChartType.HEATMAP,
+    "matrix": ChartType.HEATMAP,
+    "grid": ChartType.HEATMAP,
+    "calendar": ChartType.CALENDAR_HEATMAP,
+    "calendar_heatmap": ChartType.CALENDAR_HEATMAP,
+    "fare_calendar": ChartType.CALENDAR_HEATMAP,
+    "price_calendar": ChartType.CALENDAR_HEATMAP,
     "market": ChartType.MARKET,
     "stock": ChartType.MARKET,
     "stocks": ChartType.MARKET,

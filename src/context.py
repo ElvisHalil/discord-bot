@@ -81,3 +81,33 @@ def clear_channel_attachments(channel_id: Optional[int] = None) -> None:
             _PENDING_CHANNEL_ATTACHMENTS.pop(int(channel_id), None)
 
 
+_CALENDAR_HEATMAP_RENDERER: Optional[Any] = None
+
+
+def set_calendar_heatmap_renderer(renderer_fn: Any) -> None:
+    """Register the calendar heatmap renderer callback from `src.skills.graphing`."""
+    global _CALENDAR_HEATMAP_RENDERER
+    _CALENDAR_HEATMAP_RENDERER = renderer_fn
+
+
+def queue_calendar_heatmap(
+    title: str,
+    subtitle: str = "",
+    cells: Optional[List[Dict[str, Any]]] = None,
+    value_prefix: str = "$",
+    currency: str = "",
+    footer_notes: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Render and queue a calendar heatmap attachment via the registered renderer, returning the filename."""
+    if _CALENDAR_HEATMAP_RENDERER is None or not cells:
+        return None
+    return _CALENDAR_HEATMAP_RENDERER(
+        title=title,
+        subtitle=subtitle,
+        cells=cells,
+        value_prefix=value_prefix,
+        currency=currency,
+        footer_notes=footer_notes or [],
+    )
+
+

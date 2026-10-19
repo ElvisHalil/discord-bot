@@ -1,5 +1,6 @@
 from src.skills.graphing.aggregators import (
     BaseGraphingAggregator,
+    HeatmapAggregator,
     MarketSeriesAggregator,
     MatplotlibChartAggregator,
     MermaidDiagramAggregator,
@@ -12,8 +13,14 @@ from src.skills.graphing.context import (
     update_channel_chart_state,
 )
 from src.skills.graphing.enums import ChartType, DiagramType
-from src.skills.graphing.graphing import clear_graphing_cache, skill_graphing_info
+from src.skills.graphing.graphing import (
+    clear_graphing_cache,
+    render_and_queue_calendar_heatmap,
+    skill_graphing_info,
+)
 from src.skills.graphing.models import (
+    CalendarDayCell,
+    CalendarHeatmapSpec,
     ChartChannelState,
     ChartSeries,
     ChartSpec,
@@ -23,11 +30,14 @@ from src.skills.graphing.models import (
 
 __all__ = [
     "BaseGraphingAggregator",
+    "CalendarDayCell",
+    "CalendarHeatmapSpec",
     "ChartChannelState",
     "ChartSeries",
     "ChartSpec",
     "ChartType",
     "DiagramType",
+    "HeatmapAggregator",
     "MarketBarSeries",
     "MarketSeriesAggregator",
     "MatplotlibChartAggregator",
@@ -38,6 +48,7 @@ __all__ = [
     "detect_missed_graphing_tool_call",
     "enrich_graphing_tool_args",
     "get_channel_chart_state",
+    "render_and_queue_calendar_heatmap",
     "skill_graphing_info",
     "update_channel_chart_state",
 ]
