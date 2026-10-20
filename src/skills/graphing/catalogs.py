@@ -261,7 +261,7 @@ def resolve_fx_pair_symbol(raw_text: str) -> Optional[str]:
         return cleaned
     if re.fullmatch(r"SATS-[A-Z]{3}", cleaned) and cleaned[5:] in CURRENCY_NAME_TO_ISO.values():
         return cleaned
-    if re.fullmatch(r"BTC-[A-Z]{3}", cleaned) and cleaned[4:] in CURRENCY_NAME_TO_ISO.values():
+    if re.fullmatch(r"BTC-[A-Z]{3}", cleaned) and cleaned != "BTC-USD" and cleaned[4:] in CURRENCY_NAME_TO_ISO.values():
         return cleaned
     m = _FX_PAIR_RE.search(raw_text.strip())
     if m:
