@@ -419,22 +419,28 @@ class MarketSeriesAggregator(BaseGraphingAggregator):
         ann_vol = daily_vol * math.sqrt(days_per_year)
 
         n_sims = max(100, min(100000, int(num_simulations)))
-        rng = np.random.default_rng(seed=abs(hash((hist_series.symbol, horizon_days, len(closes), round(spot_price, 2)))) % (2**32))
-        # Antithetic variates (half Z, half -Z) for lower variance & cleaner percentile convergence
+        rng = np.random.default_rng(
+            seed=abs(hash((hist_series.symbol, horizon_days, len(closes), round(spot_price, 2), n_sims))) % (2**32)
+        )
+        # Antithetic variates (half Z, half -Z) in-place float32 for fast execution up to 100,000 paths
         half_n = n_sims // 2
-        z_half = rng.standard_normal((half_n, horizon_days))
+        z_half = rng.standard_normal((half_n, horizon_days), dtype=np.float32)
         z_shocks = np.vstack([z_half, -z_half])
         if z_shocks.shape[0] < n_sims:
-            z_shocks = np.vstack([z_shocks, rng.standard_normal((1, horizon_days))])
+            z_shocks = np.vstack([z_shocks, rng.standard_normal((1, horizon_days), dtype=np.float32)])
 
-        daily_log_steps = eff_daily_log_drift + daily_vol * z_shocks
-        cum_log_returns = np.cumsum(daily_log_steps, axis=1)
-        sim_paths = np.empty((n_sims, horizon_days + 1), dtype=np.float64)
-        sim_paths[:, 0] = spot_price
-        sim_paths[:, 1:] = spot_price * np.exp(cum_log_returns)
+        np.multiply(z_shocks, np.float32(daily_vol), out=z_shocks)
+        np.add(z_shocks, np.float32(eff_daily_log_drift), out=z_shocks)
+        np.cumsum(z_shocks, axis=1, out=z_shocks)
+        np.exp(z_shocks, out=z_shocks)
+        np.multiply(z_shocks, np.float32(spot_price), out=z_shocks)
+
+        sim_paths = np.empty((n_sims, horizon_days + 1), dtype=np.float32)
+        sim_paths[:, 0] = np.float32(spot_price)
+        sim_paths[:, 1:] = z_shocks
 
         percentiles = np.percentile(sim_paths, [5, 25, 50, 75, 95], axis=0)
-        mean_curve = np.mean(sim_paths, axis=0)
+        mean_curve = np.mean(sim_paths, axis=0, dtype=np.float64)
         terminal = sim_paths[:, -1]
 
         prob_profit = float(np.mean(terminal > spot_price) * 100.0)
@@ -452,6 +458,7 @@ class MarketSeriesAggregator(BaseGraphingAggregator):
 
         sample_count = min(60, n_sims)
         sample_paths = [[float(v) for v in sim_paths[i]] for i in range(sample_count)]
+        term_step = max(1, len(terminal) // 10000)
 
         return MonteCarloResult(
             symbol=hist_series.symbol,
@@ -474,7 +481,7 @@ class MarketSeriesAggregator(BaseGraphingAggregator):
             p75_path=[float(x) for x in percentiles[3]],
             p95_path=[float(x) for x in percentiles[4]],
             mean_path=[float(x) for x in mean_curve],
-            terminal_prices=[float(x) for x in terminal],
+            terminal_prices=[float(x) for x in terminal[::term_step]],
             prob_profit_pct=round(prob_profit, 1),
             prob_double_pct=round(prob_double, 1),
             prob_drawdown_20_pct=round(prob_dd20, 1),

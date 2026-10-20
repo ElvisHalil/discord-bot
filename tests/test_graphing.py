@@ -245,7 +245,10 @@ class TestGraphingSkill(unittest.TestCase):
         self.assertEqual(enriched["timeframe"], "3d 1h")
 
     def test_monte_carlo_simulation_and_fan_chart(self):
-        from src.skills.graphing.graphing import _extract_monte_carlo_horizon_and_lookback
+        from src.skills.graphing.graphing import (
+            _extract_monte_carlo_horizon_and_lookback,
+            _extract_monte_carlo_paths,
+        )
 
         base_ts = 1714521600
         fake_btc = MarketBarSeries(
@@ -344,6 +347,12 @@ class TestGraphingSkill(unittest.TestCase):
         self.assertIn("10-Year (10Y) History", out_mc_custom)
         self.assertNotIn("5-Year History (Default)", out_mc_custom)
         pop_channel_attachments(self.channel_id)
+
+        # 4. On-demand custom path counts (default 10,000; up to 100,000)
+        self.assertEqual(_extract_monte_carlo_paths("can you do Monte Carlo simulation on btc 2 years into future?"), 10000)
+        self.assertEqual(_extract_monte_carlo_paths("Monte Carlo simulation on BTC with 50k paths"), 50000)
+        self.assertEqual(_extract_monte_carlo_paths("Run 100,000 simulations on NVDA for 2 years"), 100000)
+        self.assertEqual(_extract_monte_carlo_paths("do it again with 25k"), 25000)
 
 
 if __name__ == "__main__":

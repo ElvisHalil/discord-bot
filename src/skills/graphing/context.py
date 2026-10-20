@@ -235,7 +235,8 @@ def enrich_graphing_tool_args(
 
     _mc_followup_re = re.compile(
         r"\b(?:base(?:d)?\s+(?:it\s+)?(?:on|off|of)|calibrated\s+on|use(?:d|ing)?\s+(?:the\s+)?(?:last|past|\d+|all)|"
-        r"(?:into|in)\s+(?:the\s+)?future|do\s+it\s+again|all[- ]time\s+history|\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?)\s+of\s+history)\b",
+        r"(?:into|in)\s+(?:the\s+)?future|do\s+it\s+again|all[- ]time\s+history|\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?)\s+of\s+history|"
+        r"\d[\d,]*(?:\.\d+)?\s*k?\s*[- ]?(?:paths?|simulations?|sims?|runs?|trials?)|(?:with|use|try|do|run)\s+\d[\d,]*\s*k)\b",
         re.IGNORECASE,
     )
     if latest_user_text and (
@@ -323,7 +324,8 @@ def detect_missed_graphing_tool_call(
         and state.last_chart_type == ChartType.MONTE_CARLO
         and re.search(
             r"\b(?:base(?:d)?\s+(?:it\s+)?(?:on|off|of)|calibrated\s+on|use(?:d|ing)?\s+(?:the\s+)?(?:last|past|\d+|all)|"
-            r"(?:into|in)\s+(?:the\s+)?future|do\s+it\s+again|all[- ]time\s+history|\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?)\s+of\s+history)\b",
+            r"(?:into|in)\s+(?:the\s+)?future|do\s+it\s+again|all[- ]time\s+history|\d+\s*(?:y(?:ears?|rs?)?|mo(?:nths?)?)\s+of\s+history|"
+            r"\d[\d,]*(?:\.\d+)?\s*k?\s*[- ]?(?:paths?|simulations?|sims?|runs?|trials?)|(?:with|use|try|do|run)\s+\d[\d,]*\s*k)\b",
             q_low,
         )
     )

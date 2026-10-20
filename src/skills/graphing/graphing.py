@@ -281,6 +281,34 @@ def _extract_monte_carlo_horizon_and_lookback(
     return horizon_code, lookback_code
 
 
+_MC_PATHS_RE = re.compile(
+    r"\b(?:(\d[\d,]*(?:\.\d+)?)\s*(k)?\s*[- ]?(?:paths?|simulations?|sims?|runs?|trials?|trajectories)|"
+    r"(?:paths?|simulations?|sims?|runs?|trials?)\s*[:=]?\s*(\d[\d,]*(?:\.\d+)?)\s*(k)?|"
+    r"(?:with|use|using|do|try|run)\s+(\d[\d,]*(?:\.\d+)?)\s*(k))\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_monte_carlo_paths(query: str, default_paths: int = 10000) -> int:
+    """Extract custom Monte Carlo path count from natural language (e.g. '50k paths', '100,000 simulations')."""
+    if not query:
+        return default_paths
+    m = _MC_PATHS_RE.search(query)
+    if not m:
+        return default_paths
+    num_str = m.group(1) or m.group(3) or m.group(5)
+    k_str = m.group(2) or m.group(4) or m.group(6)
+    if not num_str:
+        return default_paths
+    try:
+        val = float(num_str.replace(",", ""))
+        if k_str:
+            val *= 1000.0
+        return max(100, min(100000, int(round(val))))
+    except ValueError:
+        return default_paths
+
+
 def _extract_market_tickers(query: str, ticker: str) -> List[str]:
     candidates: List[str] = []
 
@@ -577,8 +605,9 @@ def skill_graphing_info(
             timeframe or "",
             prev_horizon=prev_mc_horizon,
         )
+        num_paths = _extract_monte_carlo_paths(q_raw, default_paths=10000)
         if targets:
-            mc_res = submit_to_worker(_market_agg.run_monte_carlo, targets[0], horizon_code, 10000, lookback_code).result()
+            mc_res = submit_to_worker(_market_agg.run_monte_carlo, targets[0], horizon_code, num_paths, lookback_code).result()
             if mc_res is not None:
                 visual = _mpl_agg.render_monte_carlo_chart(mc_res)
                 update_channel_chart_state(
