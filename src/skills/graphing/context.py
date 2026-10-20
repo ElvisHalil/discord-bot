@@ -25,7 +25,14 @@ _EXPLICIT_DIAGRAM_RE = re.compile(
 )
 
 _EXPLICIT_MARKET_PLOT_RE = re.compile(
-    r"\b(?:plot|graph|visualize|chart\s+out|chart\s+of|draw\s+a\s+chart|graph\s+a\s+chart|chart\s+the\s+price|price\s+chart|candlestick\s+chart)\b",
+    r"\b(?:plot|graph|visualize|overlay|chart\s+out|chart\s+of|draw\s+a\s+chart|graph\s+a\s+chart|"
+    r"chart\s+the\s+price|price\s+chart|candlestick\s+chart|in\s+a\s+chart|on\s+a\s+chart|chart|charts)\b",
+    re.IGNORECASE,
+)
+
+_NON_MARKET_CHART_RE = re.compile(
+    r"\b(?:depth\s+chart|seating\s+chart|size\s+chart|sizing\s+chart|natal\s+chart|birth\s+chart|"
+    r"star\s+chart|org\s+chart|organization\s+chart|chore\s+chart|eye\s+chart|color\s+chart|gantt\s+chart)\b",
     re.IGNORECASE,
 )
 
@@ -198,6 +205,32 @@ def _extract_tickers_from_text(text: str) -> List[str]:
     return found
 
 
+def _extract_prior_history_context(history: list) -> Tuple[List[str], Optional[str]]:
+    """Scan up to 3 prior user messages in `history` (excluding the latest user message) for tickers and timeframe."""
+    if not history:
+        return [], None
+    seen_latest_user = False
+    checked = 0
+    for msg in reversed(history):
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        if role != "user":
+            continue
+        if not seen_latest_user:
+            seen_latest_user = True
+            continue
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+        text = _strip_user_prefix(str(content or ""))
+        if not text:
+            continue
+        checked += 1
+        tickers = _extract_tickers_from_text(text)
+        if tickers:
+            return tickers, _extract_timeframe_from_text(text)
+        if checked >= 3:
+            break
+    return [], None
+
+
 def enrich_graphing_tool_args(
     args: dict,
     history: list,
@@ -219,6 +252,8 @@ def enrich_graphing_tool_args(
             enriched["query"] = latest_user_text
 
     state = get_channel_chart_state(active_channel_id)
+    prior_tickers, prior_tf = _extract_prior_history_context(history or [])
+    fallback_tf = (state.last_timeframe if state and state.last_timeframe else None) or prior_tf
 
     if latest_user_text:
         inferred_tf = _extract_timeframe_from_text(latest_user_text)
@@ -227,11 +262,11 @@ def enrich_graphing_tool_args(
         if inferred_tf:
             enriched["timeframe"] = f"{inferred_tf} {inferred_int}".strip() if inferred_int else inferred_tf
         elif inferred_int:
-            base_tf = str(enriched.get("timeframe") or (state.last_timeframe if state else "") or "7d").strip()
+            base_tf = str(enriched.get("timeframe") or fallback_tf or "7d").strip()
             base_tf_clean = re.sub(r"\b(?:1h|15m|5m|30m|1d|1wk)\b", "", base_tf).strip() or "7d"
             enriched["timeframe"] = f"{base_tf_clean} {inferred_int}".strip()
-        elif not enriched.get("timeframe") and state and state.last_timeframe:
-            enriched["timeframe"] = state.last_timeframe
+        elif not enriched.get("timeframe") and fallback_tf:
+            enriched["timeframe"] = fallback_tf
 
     _mc_followup_re = re.compile(
         r"\b(?:base(?:d)?\s+(?:it\s+)?(?:on|off|of)|calibrated\s+on|use(?:d|ing)?\s+(?:the\s+)?(?:last|past|\d+|all)|"
@@ -251,14 +286,28 @@ def enrich_graphing_tool_args(
         "monte_carlo", "montecarlo", "monte carlo", "gbm", "simulation", "price_simulation",
     )
 
-    if latest_user_text and not enriched.get("ticker") and not enriched.get("data") and not enriched.get("diagram") and is_market_compatible:
+    if latest_user_text and not enriched.get("data") and not enriched.get("diagram") and is_market_compatible:
         extracted_tickers = _extract_tickers_from_text(latest_user_text)
-        if extracted_tickers:
+        cur_ticker = str(enriched.get("ticker") or "").strip()
+        if not cur_ticker and extracted_tickers:
             enriched["ticker"] = ", ".join(extracted_tickers)
+        elif cur_ticker and len(extracted_tickers) >= 2:
+            merged: List[str] = []
+            for raw_t in re.split(r"\s*(?:,|\bvs\.?\b|\bversus\b|\band\b)\s*", cur_ticker, flags=re.IGNORECASE):
+                rt = raw_t.strip().lstrip("$")
+                if rt:
+                    canon_rt = CHART_TICKER_ALIASES.get(rt.lower(), rt.upper())
+                    if canon_rt not in merged:
+                        merged.append(canon_rt)
+            for ext_t in extracted_tickers:
+                canon_ext = CHART_TICKER_ALIASES.get(ext_t.lower(), ext_t.upper())
+                if canon_ext not in merged:
+                    merged.append(canon_ext)
+            enriched["ticker"] = ", ".join(merged[:5])
 
+    fallback_tickers = (list(state.last_tickers) if state and state.last_tickers else None) or prior_tickers
     if (
-        state
-        and state.last_tickers
+        fallback_tickers
         and not enriched.get("ticker")
         and not enriched.get("data")
         and not enriched.get("diagram")
@@ -270,7 +319,7 @@ def enrich_graphing_tool_args(
             re.search(r"\b(?:it|them|same|instead|past|last|hourly|daily|weekly|graph|chart|plot|monte\s*carlo|base|based|history|use|future)\b", q_low)
             or has_tf_or_int
         ):
-            enriched["ticker"] = ", ".join(state.last_tickers)
+            enriched["ticker"] = ", ".join(fallback_tickers)
 
     return enriched
 
@@ -317,6 +366,8 @@ def detect_missed_graphing_tool_call(
             )
 
     state = get_channel_chart_state(active_channel_id)
+    prior_tickers, _ = _extract_prior_history_context(history)
+    fallback_tickers = (list(state.last_tickers) if state and state.last_tickers else None) or prior_tickers
 
     # 2. Explicit Monte Carlo simulation request or follow-up lookback/horizon adjustment
     is_mc_followup = bool(
@@ -330,7 +381,7 @@ def detect_missed_graphing_tool_call(
         )
     )
     if _EXPLICIT_MONTE_CARLO_RE.search(q_low) or is_mc_followup:
-        tickers = _extract_tickers_from_text(latest_user_text) or (list(state.last_tickers) if state and state.last_tickers else [])
+        tickers = _extract_tickers_from_text(latest_user_text) or fallback_tickers
         if tickers:
             raw_args = enrich_graphing_tool_args(
                 {
@@ -343,9 +394,9 @@ def detect_missed_graphing_tool_call(
             )
             return ("skill_graphing_info", raw_args)
 
-    # 3. Explicit market plot request ("plot NVDA vs SHOP.TO over 5 years", "graph last 3 days", "hourly chart btc last 7 days")
-    if _EXPLICIT_MARKET_PLOT_RE.search(q_low):
-        tickers = _extract_tickers_from_text(latest_user_text) or (list(state.last_tickers) if state and state.last_tickers else [])
+    # 3. Explicit market plot request ("plot NVDA vs SHOP.TO over 5 years", "give last 9 years of dxy chart", "graph it")
+    if _EXPLICIT_MARKET_PLOT_RE.search(q_low) and not _NON_MARKET_CHART_RE.search(q_low):
+        tickers = _extract_tickers_from_text(latest_user_text) or fallback_tickers
         if tickers:
             raw_args = enrich_graphing_tool_args(
                 {

@@ -342,7 +342,7 @@ def _extract_market_tickers(query: str, ticker: str) -> List[str]:
                         _add(sub.strip())
             else:
                 _add(p)
-        if candidates:
+        if candidates and not re.search(r"\b(?:vs\.?|versus|compare|comparing|comparison|overlay|against|and|with|between)\b", str(query or ""), re.IGNORECASE):
             return candidates[:5]
 
     q_clean = (query or "").strip()

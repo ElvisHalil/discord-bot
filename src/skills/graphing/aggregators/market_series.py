@@ -59,7 +59,7 @@ _TIMEFRAME_SPECS: Dict[str, Tuple[str, str, str, Optional[int]]] = {
     "2y": ("2y", "1d", "2-Year (2Y)", None),
     "3y": ("5y", "1wk", "3-Year (3Y)", 3 * 365),
     "5y": ("5y", "1wk", "5-Year (5Y)", None),
-    "10y": ("10y", "1mo", "10-Year (10Y)", None),
+    "10y": ("10y", "1wk", "10-Year (10Y)", None),
     "max": ("max", "1mo", "All-Time (MAX)", None),
 }
 
@@ -97,7 +97,9 @@ def _resolve_timeframe_and_interval(
     bar intervals ('1h', '15m', '1d') into `(yf_range, yf_interval, tf_label, cutoff_days)`.
     """
     tf_raw = (timeframe or "1y").strip().lower()
-    inferred_int = normalize_chart_interval(interval) or normalize_chart_interval(tf_raw)
+    inferred_int = normalize_chart_interval(interval)
+    if not inferred_int and tf_raw not in _TIMEFRAME_SPECS:
+        inferred_int = normalize_chart_interval(tf_raw)
 
     # Strip interval tokens from tf_raw if combined (e.g. "7d 1h" -> "7d")
     tf_clean = re.sub(

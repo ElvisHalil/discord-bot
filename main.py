@@ -5,10 +5,12 @@ import sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
 import re
+import types
 import io
 import asyncio
 import random
-import requests
+import re
+import typesquests
 from collections import defaultdict
 from dotenv import load_dotenv
 from ollama import AsyncClient
@@ -851,6 +853,25 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                 reply = v_query
                 history.append({"role": "assistant", "content": reply})
                 break
+
+        if (
+            iterations == 0
+            and supports_tools
+            and "skill_graphing_info" in active_tools
+            and not any(c.function.name == "skill_graphing_info" for c in tool_calls)
+            and any(c.function.name == "skill_markets_info" for c in tool_calls)
+        ):
+            missed_graph = detect_missed_graphing_tool_call(history, active_channel_id=channel_id)
+            if missed_graph and missed_graph[0] == "skill_graphing_info":
+                print(f"⚡ [{current_mode.upper()}] Co-executing missed skill_graphing_info alongside skill_markets_info: {missed_graph[1]}")
+                tool_calls = list(tool_calls) + [
+                    types.SimpleNamespace(
+                        function=types.SimpleNamespace(
+                            name="skill_graphing_info",
+                            arguments=missed_graph[1],
+                        )
+                    )
+                ]
 
         print(f"⚡ [{current_mode.upper()}] Model requested {len(tool_calls)} tools simultaneously!")
         has_top_music = any(call.function.name == "skill_music_discovery" for call in tool_calls)

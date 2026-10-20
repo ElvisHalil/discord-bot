@@ -315,6 +315,10 @@ COMMON_TICKER_ALIASES: Dict[str, str] = {
     "gbp/usd": "GBPUSD=X",
     "usd/jpy": "USDJPY=X",
     "dxy": "DX-Y.NYB",
+    "dx-y.nyb": "DX-Y.NYB",
+    "us dollar index": "DX-Y.NYB",
+    "dollar index": "DX-Y.NYB",
+    "usd index": "DX-Y.NYB",
 }
 
 MARKET_QUERY_STOPWORDS: frozenset[str] = frozenset({

@@ -251,16 +251,21 @@ class MatplotlibChartAggregator(BaseGraphingAggregator):
         )
 
     def render_single_market_chart(self, bar_series: MarketBarSeries) -> RenderedVisual:
-        """Render a dual-panel dark-mode price + moving-averages + volume chart for a single market ticker."""
-        fig = Figure(figsize=(10.5, 6.4), dpi=140, facecolor=DARK_BG_COLOR)
-        gs = fig.add_gridspec(2, 1, height_ratios=[3.2, 1.0], hspace=0.08)
-        ax_price = fig.add_subplot(gs[0])
-        ax_vol = fig.add_subplot(gs[1], sharex=ax_price)
-
+        """Render a dark-mode price + moving-averages (+ volume when available) chart for a single market ticker."""
         closes = bar_series.closes
         timestamps = bar_series.timestamps
         volumes = bar_series.volumes
         n = len(closes)
+        has_volume = any(v > 0 for v in volumes)
+
+        fig = Figure(figsize=(10.5, 6.4 if has_volume else 5.8), dpi=140, facecolor=DARK_BG_COLOR)
+        if has_volume:
+            gs = fig.add_gridspec(2, 1, height_ratios=[3.2, 1.0], hspace=0.08)
+            ax_price = fig.add_subplot(gs[0])
+            ax_vol = fig.add_subplot(gs[1], sharex=ax_price)
+        else:
+            ax_price = fig.add_subplot(111)
+            ax_vol = None
 
         is_up = closes[-1] >= closes[0] if n >= 2 else True
         main_color = BULLISH_GREEN if is_up else BEARISH_RED
@@ -275,8 +280,9 @@ class MatplotlibChartAggregator(BaseGraphingAggregator):
         )
 
         _style_dark_axes(ax_price, title=title_str, subtitle=subtitle_str, y_label=f"Price ({bar_series.currency})")
-        _style_dark_axes(ax_vol, y_label="Volume")
-        ax_price.tick_params(labelbottom=False)
+        if ax_vol is not None:
+            _style_dark_axes(ax_vol, y_label="Volume")
+            ax_price.tick_params(labelbottom=False)
 
         xs = list(range(n))
         ax_price.plot(xs, closes, color=main_color, linewidth=2.1, label=f"{bar_series.symbol} Close")
@@ -302,17 +308,18 @@ class MatplotlibChartAggregator(BaseGraphingAggregator):
         for txt in leg.get_texts():
             txt.set_color(DARK_TEXT_COLOR)
 
-        # Volume bars
-        vol_colors = [
-            BULLISH_GREEN if (i == 0 or closes[i] >= closes[i - 1]) else BEARISH_RED
-            for i in range(n)
-        ]
-        ax_vol.bar(xs, volumes, color=vol_colors, width=0.75, alpha=0.7)
-        ax_vol.yaxis.set_major_formatter(
-            mticker.FuncFormatter(
-                lambda v, _: f"{v / 1e6:.1f}M" if v >= 1e6 else (f"{v / 1e3:.0f}K" if v >= 1e3 else f"{v:.0f}")
+        if ax_vol is not None:
+            # Volume bars
+            vol_colors = [
+                BULLISH_GREEN if (i == 0 or closes[i] >= closes[i - 1]) else BEARISH_RED
+                for i in range(n)
+            ]
+            ax_vol.bar(xs, volumes, color=vol_colors, width=0.75, alpha=0.7)
+            ax_vol.yaxis.set_major_formatter(
+                mticker.FuncFormatter(
+                    lambda v, _: f"{v / 1e6:.1f}M" if v >= 1e6 else (f"{v / 1e3:.0f}K" if v >= 1e3 else f"{v:.0f}")
+                )
             )
-        )
 
         # Date tick labels
         step = max(1, math.ceil(n / 8))
@@ -322,8 +329,11 @@ class MatplotlibChartAggregator(BaseGraphingAggregator):
         span_days = (timestamps[-1] - timestamps[0]) / 86400.0 if n >= 2 else 30
         fmt_str = "%H:%M" if span_days <= 2 else ("%b %d" if span_days <= 370 else "%b '%y")
         tick_labels = [datetime.fromtimestamp(timestamps[i], tz=timezone.utc).strftime(fmt_str) for i in tick_idxs]
-        ax_vol.set_xticks(tick_idxs)
-        ax_vol.set_xticklabels(tick_labels, rotation=0)
+        target_ax = ax_vol if ax_vol is not None else ax_price
+        target_ax.set_xticks(tick_idxs)
+        target_ax.set_xticklabels(tick_labels, rotation=0)
+        if ax_vol is None:
+            fig.tight_layout(pad=1.3)
 
         png_bytes = _figure_to_png_bytes(fig)
         summary_lines = [
@@ -347,36 +357,84 @@ class MatplotlibChartAggregator(BaseGraphingAggregator):
         tf_label = series_list[0].timeframe_label if series_list else "1-Year (1Y)"
         sym_names = " vs. ".join(s.symbol for s in series_list)
         title_str = f"Normalized Return Comparison: {sym_names} ({tf_label})"
-        _style_dark_axes(
-            ax,
-            title=title_str,
-            subtitle="Cumulative percentage return indexed to 0.0% at period start",
-            y_label="Cumulative Return (%)",
-        )
-        ax.axhline(0.0, color=DARK_MUTED_TEXT_COLOR, linestyle=":", linewidth=1.1, alpha=0.8)
 
         ranked = sorted(series_list, key=lambda s: s.pct_change, reverse=True)
         longest_s = max(series_list, key=lambda s: len(s.timestamps))
 
-        for idx, s in enumerate(ranked):
+        # Check if 2-asset comparison has a massive return-amplitude disparity (>=4x, e.g. BTC-USD vs DXY)
+        curves: List[Tuple[MarketBarSeries, List[float], List[float], float]] = []
+        for s in ranked:
             if not s.closes or s.closes[0] <= 0:
                 continue
             base = s.closes[0]
             pct_curve = [((c - base) / base) * 100.0 for c in s.closes]
-            # Normalize X positions to [0, 100] so slight bar-count differences (e.g. TSX vs US holidays vs 24/7 crypto) align cleanly
             n_pts = len(pct_curve)
             xs = [i * (100.0 / max(1, n_pts - 1)) for i in range(n_pts)]
-            color = DARK_THEME_PALETTE[idx % len(DARK_THEME_PALETTE)]
-            sign = "+" if s.pct_change > 0 else ""
-            ax.plot(
-                xs,
-                pct_curve,
-                color=color,
-                linewidth=2.3,
-                label=f"{s.symbol} ({sign}{s.pct_change:.2f}%)",
-            )
+            span = max(pct_curve) - min(pct_curve) if pct_curve else 0.0
+            curves.append((s, xs, pct_curve, span))
 
-        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{'+' if v > 0 else ''}{v:.1f}%"))
+        use_dual_axis = False
+        if len(curves) == 2:
+            hi_span = max(curves[0][3], curves[1][3])
+            lo_span = max(0.5, min(curves[0][3], curves[1][3]))
+            if hi_span / lo_span >= 4.0:
+                use_dual_axis = True
+
+        if use_dual_axis:
+            s_left, xs_left, pct_left, _ = curves[0]
+            s_right, xs_right, pct_right, _ = curves[1]
+            c_left = DARK_THEME_PALETTE[0]
+            c_right = DARK_THEME_PALETTE[1]
+            _style_dark_axes(
+                ax,
+                title=title_str,
+                subtitle="Dual-axis cumulative % return (scaled per asset to reveal macro co-movement)",
+                y_label=f"{s_left.symbol} Return (%)",
+            )
+            ax2 = ax.twinx()
+            ax2.set_facecolor("none")
+            for spine in ax2.spines.values():
+                spine.set_color(DARK_GRID_COLOR)
+            ax2.set_ylabel(f"{s_right.symbol} Return (%)", color=c_right, fontsize=10, fontweight="bold")
+            ax.yaxis.label.set_color(c_left)
+            ax.tick_params(axis="y", colors=c_left, labelsize=9.5)
+            ax2.tick_params(axis="y", colors=c_right, labelsize=9.5)
+            ax2.grid(False)
+
+            ax.axhline(0.0, color=DARK_MUTED_TEXT_COLOR, linestyle=":", linewidth=1.0, alpha=0.6)
+            sign_l = "+" if s_left.pct_change > 0 else ""
+            sign_r = "+" if s_right.pct_change > 0 else ""
+            l1 = ax.plot(xs_left, pct_left, color=c_left, linewidth=2.3, label=f"{s_left.symbol} ({sign_l}{s_left.pct_change:.2f}%) [Left]")
+            l2 = ax2.plot(xs_right, pct_right, color=c_right, linewidth=2.3, label=f"{s_right.symbol} ({sign_r}{s_right.pct_change:.2f}%) [Right]")
+            ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{'+' if v > 0 else ''}{v:.1f}%"))
+            ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{'+' if v > 0 else ''}{v:.1f}%"))
+            lines_all = l1 + l2
+            labels_all = [ln.get_label() for ln in lines_all]
+            leg = ax.legend(lines_all, labels_all, facecolor=DARK_PANEL_COLOR, edgecolor=DARK_GRID_COLOR, fontsize=10, loc="upper left")
+            for txt in leg.get_texts():
+                txt.set_color(DARK_TEXT_COLOR)
+        else:
+            _style_dark_axes(
+                ax,
+                title=title_str,
+                subtitle="Cumulative percentage return indexed to 0.0% at period start",
+                y_label="Cumulative Return (%)",
+            )
+            ax.axhline(0.0, color=DARK_MUTED_TEXT_COLOR, linestyle=":", linewidth=1.1, alpha=0.8)
+            for idx, (s, xs, pct_curve, _) in enumerate(curves):
+                color = DARK_THEME_PALETTE[idx % len(DARK_THEME_PALETTE)]
+                sign = "+" if s.pct_change > 0 else ""
+                ax.plot(
+                    xs,
+                    pct_curve,
+                    color=color,
+                    linewidth=2.3,
+                    label=f"{s.symbol} ({sign}{s.pct_change:.2f}%)",
+                )
+            ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{'+' if v > 0 else ''}{v:.1f}%"))
+            leg = ax.legend(facecolor=DARK_PANEL_COLOR, edgecolor=DARK_GRID_COLOR, fontsize=10, loc="upper left")
+            for txt in leg.get_texts():
+                txt.set_color(DARK_TEXT_COLOR)
 
         if longest_s.timestamps:
             n_ts = len(longest_s.timestamps)
@@ -392,10 +450,6 @@ class MatplotlibChartAggregator(BaseGraphingAggregator):
             ]
             ax.set_xticks(tick_positions)
             ax.set_xticklabels(tick_labels)
-
-        leg = ax.legend(facecolor=DARK_PANEL_COLOR, edgecolor=DARK_GRID_COLOR, fontsize=10, loc="upper left")
-        for txt in leg.get_texts():
-            txt.set_color(DARK_TEXT_COLOR)
 
         fig.tight_layout(pad=1.4)
         png_bytes = _figure_to_png_bytes(fig)

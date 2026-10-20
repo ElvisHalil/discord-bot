@@ -354,6 +354,46 @@ class TestGraphingSkill(unittest.TestCase):
         self.assertEqual(_extract_monte_carlo_paths("Run 100,000 simulations on NVDA for 2 years"), 100000)
         self.assertEqual(_extract_monte_carlo_paths("do it again with 25k"), 25000)
 
+    def test_dxy_charting_overlay_and_short_timeframe_intervals(self):
+        from src.skills.graphing.aggregators.market_series import _resolve_timeframe_and_interval
+        from src.skills.graphing.graphing import _extract_market_tickers
+
+        # 1. Bare timeframes '1d', '5d', '1mo', '10y' must use their spec intervals ('5m', '15m', '1d', '1wk')
+        self.assertEqual(_resolve_timeframe_and_interval("1d")[:2], ("1d", "5m"))
+        self.assertEqual(_resolve_timeframe_and_interval("5d")[:2], ("5d", "15m"))
+        self.assertEqual(_resolve_timeframe_and_interval("1mo")[:2], ("1mo", "1d"))
+        self.assertEqual(_resolve_timeframe_and_interval("10y")[:2], ("10y", "1wk"))
+
+        # 2. Natural DXY chart prompts trigger turn-0 recovery and follow-up 'graph it' recovers from prior history
+        clear_channel_chart_state(self.channel_id)
+        h_dxy = [{"role": "user", "content": "give last 9 years of dxy chart"}]
+        m_dxy = detect_missed_graphing_tool_call(h_dxy, active_channel_id=self.channel_id)
+        self.assertIsNotNone(m_dxy)
+        self.assertEqual(m_dxy[1]["ticker"], "DX-Y.NYB")
+        self.assertEqual(m_dxy[1]["timeframe"], "9y")
+
+        h_followup = h_dxy + [
+            {"role": "assistant", "content": "Here is the DXY summary."},
+            {"role": "user", "content": "graph it"},
+        ]
+        m_follow = detect_missed_graphing_tool_call(h_followup, active_channel_id=self.channel_id)
+        self.assertIsNotNone(m_follow)
+        self.assertEqual(m_follow[1]["ticker"], "DX-Y.NYB")
+        self.assertEqual(m_follow[1]["timeframe"], "9y")
+
+        # 3. Multi-ticker overlay preserves both BTC-USD and DX-Y.NYB even if LLM only passes ticker='BTC-USD'
+        h_overlay = [{"role": "user", "content": "overlay btc and dxy in a chart last 9 years of history for each"}]
+        enriched_overlay = enrich_graphing_tool_args(
+            {"ticker": "BTC-USD", "timeframe": "9y"},
+            h_overlay,
+            active_channel_id=self.channel_id,
+        )
+        self.assertEqual(enriched_overlay["ticker"], "BTC-USD, DX-Y.NYB")
+        self.assertEqual(
+            _extract_market_tickers("overlay btc and dxy in a chart last 9 years of history for each", "BTC-USD"),
+            ["BTC-USD", "dxy"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
