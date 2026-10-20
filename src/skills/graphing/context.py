@@ -8,7 +8,11 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from src.context import get_active_channel_id
-from src.skills.graphing.catalogs import CHART_TICKER_ALIASES, extract_fx_pairs_from_text
+from src.skills.graphing.catalogs import (
+    CHART_TICKER_ALIASES,
+    CURRENCY_NAME_TO_ISO,
+    extract_fx_pairs_from_text,
+)
 from src.skills.graphing.enums import ChartType, DiagramType
 from src.skills.graphing.models import ChartChannelState, ChartSpec
 from src.utils.cache import BoundedCache
@@ -178,27 +182,34 @@ def _extract_tickers_from_text(text: str) -> List[str]:
         return []
     cleaned_text = _strip_user_prefix(text)
     found: List[str] = []
-    # 1. Extract explicit FX currency pairs first (e.g. "CAD/EURO", "CAD-EUR", "USD/JPY")
-    for fx_sym in extract_fx_pairs_from_text(cleaned_text):
+    # 1. Extract explicit FX / Currency-vs-BTC / SATS pairs first (e.g. "CAD/EURO", "CAD/BTC", "$1 in BTC", "SATS/CAD")
+    fx_pairs = extract_fx_pairs_from_text(cleaned_text)
+    for fx_sym in fx_pairs:
         if fx_sym not in found:
             found.append(fx_sym)
+    has_btc_fx_pair = any(s.endswith("-BTC") or s.startswith(("BTC-", "SATS-")) for s in fx_pairs)
+    all_ccy_codes = set(CURRENCY_NAME_TO_ISO.values()) | {"EURO", "SATS", "SAT"}
 
     q_low = cleaned_text.lower()
     # Scrub matched FX pair substrings before scanning general aliases so "euro" inside "cad/euro"
     # doesn't also trigger a second standalone EURUSD=X ticker.
     q_low_scrubbed = re.sub(
-        r"\b[a-z]{3,10}\s*[/\-]\s*[a-z]{3,10}\b",
+        r"\b[a-z]{3,10}\s*(?:/|-|\bto\b|\bin\b|\bper\b)\s*[a-z]{3,10}\b",
         " ",
         q_low,
     )
     for alias in sorted(CHART_TICKER_ALIASES.keys(), key=len, reverse=True):
+        if has_btc_fx_pair and alias in ("btc", "bitcoin"):
+            continue
         if re.search(rf"\b{re.escape(alias)}\b", q_low_scrubbed):
             sym = CHART_TICKER_ALIASES[alias]
             if sym not in found:
                 found.append(sym)
     for m in re.finditer(r"\b([A-Z]{2,5}(?:\.[A-Z]{1,2})?)\b", cleaned_text):
         tok = m.group(1)
-        if tok not in ("USD", "CAD", "EUR", "EURO", "GBP", "JPY", "CHF", "AUD", "NZD", "YTD", "PNG", "API", "LLM", "CPU", "GPU", "MAX", "GBM"):
+        if has_btc_fx_pair and tok == "BTC":
+            continue
+        if tok not in all_ccy_codes and tok not in ("YTD", "PNG", "API", "LLM", "CPU", "GPU", "MAX", "GBM"):
             mapped = CHART_TICKER_ALIASES.get(tok.lower(), tok)
             if mapped not in found:
                 found.append(mapped)
@@ -291,6 +302,17 @@ def enrich_graphing_tool_args(
         cur_ticker = str(enriched.get("ticker") or "").strip()
         if not cur_ticker and extracted_tickers:
             enriched["ticker"] = ", ".join(extracted_tickers)
+        elif (
+            cur_ticker
+            and len(extracted_tickers) == 1
+            and (
+                extracted_tickers[0].endswith(("=X", "-BTC"))
+                or extracted_tickers[0].startswith("SATS-")
+                or (extracted_tickers[0].startswith("BTC-") and extracted_tickers[0] != "BTC-USD")
+            )
+            and cur_ticker.upper() in ({"BTC", "BTC-USD"} | set(CURRENCY_NAME_TO_ISO.values()))
+        ):
+            enriched["ticker"] = extracted_tickers[0]
         elif cur_ticker and len(extracted_tickers) >= 2:
             merged: List[str] = []
             for raw_t in re.split(r"\s*(?:,|\bvs\.?\b|\bversus\b|\band\b)\s*", cur_ticker, flags=re.IGNORECASE):

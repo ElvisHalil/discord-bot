@@ -394,6 +394,20 @@ class TestGraphingSkill(unittest.TestCase):
             ["BTC-USD", "dxy"],
         )
 
+        # 4. Any currency vs. BTC ('USD-BTC', 'CAD-BTC', 'CHF-BTC', 'SATS-CAD') resolves without duplicate 'BTC-USD'
+        from src.skills.graphing.catalogs import extract_fx_pairs_from_text, resolve_fx_pair_symbol
+        self.assertEqual(resolve_fx_pair_symbol("CAD/BTC"), "CAD-BTC")
+        self.assertEqual(resolve_fx_pair_symbol("Swiss franc to Bitcoin"), "CHF-BTC")
+        self.assertEqual(resolve_fx_pair_symbol("SATS/CAD"), "SATS-CAD")
+        self.assertEqual(
+            extract_fx_pairs_from_text("price history for $1 on how much btc that can buy"),
+            ["USD-BTC"],
+        )
+        self.assertEqual(
+            _extract_market_tickers("chart CAD/BTC over 5 years", "BTC-USD"),
+            ["CAD-BTC"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

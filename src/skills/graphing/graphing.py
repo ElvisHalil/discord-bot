@@ -30,6 +30,7 @@ from src.skills.graphing.catalogs import (
     CHART_QUERY_STOPWORDS,
     CHART_TICKER_ALIASES,
     CHART_TYPE_ALIASES,
+    CURRENCY_NAME_TO_ISO,
     DIAGRAM_TYPE_ALIASES,
     extract_fx_pairs_from_text,
     resolve_fx_pair_symbol,
@@ -323,11 +324,27 @@ def _extract_market_tickers(query: str, ticker: str) -> List[str]:
         if canon not in [CHART_TICKER_ALIASES.get(c.lower(), c.upper()) for c in candidates]:
             candidates.append(s)
 
+    q_clean = (query or "").strip()
+    q_fx_pairs = extract_fx_pairs_from_text(q_clean) if q_clean else []
+    has_q_btc_pair = any(s.endswith("-BTC") or s.startswith(("BTC-", "SATS-")) for s in q_fx_pairs)
+
     if ticker and ticker.strip():
         t_clean = ticker.strip()
         fx_direct = resolve_fx_pair_symbol(t_clean)
         if fx_direct and "," not in t_clean:
             _add(fx_direct)
+            return candidates[:5]
+        # If the user's query explicitly requests an FX / Currency-vs-BTC / SATS pair and the LLM only passed 'BTC' / 'BTC-USD', use the pair
+        if (
+            len(q_fx_pairs) == 1
+            and (
+                q_fx_pairs[0].endswith(("=X", "-BTC"))
+                or q_fx_pairs[0].startswith("SATS-")
+                or (q_fx_pairs[0].startswith("BTC-") and q_fx_pairs[0] != "BTC-USD")
+            )
+            and t_clean.upper() in ({"BTC", "BTC-USD"} | set(CURRENCY_NAME_TO_ISO.values()))
+        ):
+            _add(q_fx_pairs[0])
             return candidates[:5]
         for part in re.split(r"\s*(?:,|\bvs\.?\b|\bversus\b|\band\b)\s*", t_clean, flags=re.IGNORECASE):
             p = part.strip()
@@ -345,13 +362,12 @@ def _extract_market_tickers(query: str, ticker: str) -> List[str]:
         if candidates and not re.search(r"\b(?:vs\.?|versus|compare|comparing|comparison|overlay|against|and|with|between)\b", str(query or ""), re.IGNORECASE):
             return candidates[:5]
 
-    q_clean = (query or "").strip()
     if not q_clean:
-        return []
+        return candidates[:5]
     q_low = q_clean.lower()
 
-    # Check explicit FX pairs in query first (e.g. 'CAD/EURO', 'CAD-EUR', 'Canadian dollar to Euro')
-    for fx_sym in extract_fx_pairs_from_text(q_clean):
+    # Check explicit FX / Currency-vs-BTC / SATS pairs in query first (e.g. 'CAD/EURO', 'CAD/BTC', '$1 in BTC', 'SATS/USD')
+    for fx_sym in q_fx_pairs:
         _add(fx_sym)
 
     # Check cashtags
@@ -361,15 +377,20 @@ def _extract_market_tickers(query: str, ticker: str) -> List[str]:
     # Match known ticker aliases in query order
     spans: List[tuple[int, int, str]] = []
     for alias in sorted(CHART_TICKER_ALIASES.keys(), key=len, reverse=True):
+        if has_q_btc_pair and alias in ("btc", "bitcoin"):
+            continue
         for m in re.finditer(rf"\b{re.escape(alias)}\b", q_low):
             s_idx, e_idx = m.start(), m.end()
             if not any(not (e_idx <= a or s_idx >= b) for a, b, _ in spans):
                 spans.append((s_idx, e_idx, alias))
 
+    all_ccy_codes = set(CURRENCY_NAME_TO_ISO.values()) | {"EURO", "SATS", "SAT"}
     # Match explicit uppercase symbols like NVDA, SHOP.TO, BTC-USD
     for m in re.finditer(r"\b([A-Z]{2,5}(?:\.TO|-USD|-CAD)?)\b", q_clean):
         tok = m.group(1)
-        if tok.lower() not in CHART_QUERY_STOPWORDS and tok not in ("USD", "CAD", "EUR", "GBP", "YTD", "MAX", "CEO", "IPO", "ETF", "GBM"):
+        if has_q_btc_pair and tok == "BTC":
+            continue
+        if tok.lower() not in CHART_QUERY_STOPWORDS and tok not in all_ccy_codes and tok not in ("YTD", "MAX", "CEO", "IPO", "ETF", "GBM"):
             s_idx, e_idx = m.start(), m.end()
             if not any(not (e_idx <= a or s_idx >= b) for a, b, _ in spans):
                 spans.append((s_idx, e_idx, tok))

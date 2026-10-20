@@ -116,6 +116,8 @@ CURRENCY_NAME_TO_ISO: Dict[str, str] = {
     "us dollar": "USD",
     "us dollars": "USD",
     "american dollar": "USD",
+    "dollar": "USD",
+    "dollars": "USD",
     "cad": "CAD",
     "canadian dollar": "CAD",
     "canadian dollars": "CAD",
@@ -126,6 +128,7 @@ CURRENCY_NAME_TO_ISO: Dict[str, str] = {
     "gbp": "GBP",
     "british pound": "GBP",
     "pound": "GBP",
+    "pounds": "GBP",
     "sterling": "GBP",
     "jpy": "JPY",
     "japanese yen": "JPY",
@@ -135,59 +138,155 @@ CURRENCY_NAME_TO_ISO: Dict[str, str] = {
     "franc": "CHF",
     "aud": "AUD",
     "australian dollar": "AUD",
+    "aussie dollar": "AUD",
     "nzd": "NZD",
     "new zealand dollar": "NZD",
+    "kiwi dollar": "NZD",
     "cny": "CNY",
     "rmb": "CNY",
     "chinese yuan": "CNY",
     "yuan": "CNY",
+    "renminbi": "CNY",
     "hkd": "HKD",
+    "hong kong dollar": "HKD",
     "sgd": "SGD",
+    "singapore dollar": "SGD",
     "sek": "SEK",
+    "swedish krona": "SEK",
+    "krona": "SEK",
     "nok": "NOK",
+    "norwegian krone": "NOK",
+    "krone": "NOK",
     "mxn": "MXN",
+    "mexican peso": "MXN",
+    "peso": "MXN",
     "inr": "INR",
+    "indian rupee": "INR",
+    "rupee": "INR",
     "brl": "BRL",
+    "brazilian real": "BRL",
+    "real": "BRL",
     "krw": "KRW",
+    "korean won": "KRW",
+    "south korean won": "KRW",
+    "won": "KRW",
     "zar": "ZAR",
+    "south african rand": "ZAR",
+    "rand": "ZAR",
     "try": "TRY",
+    "turkish lira": "TRY",
+    "lira": "TRY",
+    "pln": "PLN",
+    "polish zloty": "PLN",
+    "zloty": "PLN",
+    "aed": "AED",
+    "uae dirham": "AED",
+    "dirham": "AED",
+    "sar": "SAR",
+    "saudi riyal": "SAR",
+    "riyal": "SAR",
+    "thb": "THB",
+    "thai baht": "THB",
+    "baht": "THB",
+    "twd": "TWD",
+    "taiwan dollar": "TWD",
 }
 
+_BTC_SATS_TO_ISO: Dict[str, str] = {
+    "btc": "BTC",
+    "bitcoin": "BTC",
+    "sats": "SATS",
+    "sat": "SATS",
+    "satoshi": "SATS",
+    "satoshis": "SATS",
+}
+
+_ALL_PAIR_UNITS: Dict[str, str] = {**CURRENCY_NAME_TO_ISO, **_BTC_SATS_TO_ISO}
 _CCY_PATTERN = "|".join(sorted((re.escape(k) for k in CURRENCY_NAME_TO_ISO), key=len, reverse=True))
+_UNIT_PATTERN = "|".join(sorted((re.escape(k) for k in _ALL_PAIR_UNITS), key=len, reverse=True))
 _FX_PAIR_RE = re.compile(
-    rf"\b(?P<base>{_CCY_PATTERN})\s*(?:/|-|\bto\b|\bvs\.?\b|\bversus\b|\bagainst\b)\s*(?P<quote>{_CCY_PATTERN})\b",
+    rf"\b(?P<base>{_UNIT_PATTERN})\s*(?:/|-|\bto\b|\bin\b|\bper\b|\bvs\.?\b|\bversus\b|\bagainst\b)\s*(?P<quote>{_UNIT_PATTERN})\b",
+    re.IGNORECASE,
+)
+_BTC_PURCHASING_POWER_RE = re.compile(
+    r"\b(?:how\s+much\s+(?:btc|bitcoin)\b.*?\b(?:buy|buys|bought|get|gets|worth)\b|"
+    r"purchasing\s+power\b.*?\b(?:btc|bitcoin)\b|"
+    r"(?:\$\s*1\b|1\s+(?:dollar|usd|cad|eur|euro|gbp|pound|yen|jpy|chf|franc|aud|nzd|yuan|cny|peso|mxn|rupee|inr|real|brl|won|krw|rand|zar|lira|try|zloty|pln|krona|sek|krone|nok))\b.*?\b(?:btc|bitcoin)\b)",
     re.IGNORECASE,
 )
 
 
+def _pair_tokens_to_symbol(base_tok: str, quote_tok: str) -> Optional[str]:
+    b_low = (base_tok or "").strip().lower()
+    q_low = (quote_tok or "").strip().lower()
+    b_fiat = CURRENCY_NAME_TO_ISO.get(b_low)
+    q_fiat = CURRENCY_NAME_TO_ISO.get(q_low)
+    b_crypto = _BTC_SATS_TO_ISO.get(b_low)
+    q_crypto = _BTC_SATS_TO_ISO.get(q_low)
+
+    if b_fiat and q_fiat and b_fiat != q_fiat:
+        return f"{b_fiat}{q_fiat}=X"
+    if b_fiat and q_crypto == "BTC":
+        return f"{b_fiat}-BTC"
+    if b_crypto == "BTC" and q_fiat:
+        return f"BTC-{q_fiat}"
+    if (b_crypto == "SATS" and q_fiat) or (b_fiat and q_crypto == "SATS"):
+        fiat_iso = q_fiat or b_fiat
+        return f"SATS-{fiat_iso}"
+    return None
+
+
+def _detect_btc_purchasing_power_ccy(text: str) -> Optional[str]:
+    """Detect natural-language 'how much BTC can $1 / 1 <currency> buy' queries for any currency."""
+    if not text or not _BTC_PURCHASING_POWER_RE.search(text):
+        return None
+    low = text.lower()
+    # Check specific currencies first (excluding generic 'dollar'/'dollars' so '$1 CAD' or '1 Canadian dollar' resolves to CAD)
+    for k in sorted(CURRENCY_NAME_TO_ISO.keys(), key=len, reverse=True):
+        if k in ("dollar", "dollars"):
+            continue
+        if re.search(rf"\b{re.escape(k)}\b", low):
+            return f"{CURRENCY_NAME_TO_ISO[k]}-BTC"
+    return "USD-BTC"
+
+
 def resolve_fx_pair_symbol(raw_text: str) -> Optional[str]:
-    """If `raw_text` represents a currency pair (e.g. 'CAD-EUR', 'CAD/EURO', 'Canadian dollar to Euro'), return `<BASE><QUOTE>=X`."""
+    """If `raw_text` represents a currency pair ('CAD-EUR', 'CAD/BTC', 'SATS/USD', '$1 in BTC'), return its canonical symbol."""
     if not raw_text:
         return None
     cleaned = raw_text.strip().upper()
     if re.fullmatch(r"[A-Z]{6}=X", cleaned):
         return cleaned
+    if re.fullmatch(r"[A-Z]{3}-BTC", cleaned) and cleaned[:3] in CURRENCY_NAME_TO_ISO.values():
+        return cleaned
+    if re.fullmatch(r"SATS-[A-Z]{3}", cleaned) and cleaned[5:] in CURRENCY_NAME_TO_ISO.values():
+        return cleaned
+    if re.fullmatch(r"BTC-[A-Z]{3}", cleaned) and cleaned[4:] in CURRENCY_NAME_TO_ISO.values():
+        return cleaned
     m = _FX_PAIR_RE.search(raw_text.strip())
     if m:
-        base_iso = CURRENCY_NAME_TO_ISO.get(m.group("base").lower())
-        quote_iso = CURRENCY_NAME_TO_ISO.get(m.group("quote").lower())
-        if base_iso and quote_iso and base_iso != quote_iso:
-            return f"{base_iso}{quote_iso}=X"
+        sym = _pair_tokens_to_symbol(m.group("base"), m.group("quote"))
+        if sym:
+            return sym
+    pp_sym = _detect_btc_purchasing_power_ccy(raw_text)
+    if pp_sym:
+        return pp_sym
     return None
 
 
 def extract_fx_pairs_from_text(text: str) -> List[str]:
-    """Extract all FX pair symbols (`<BASE><QUOTE>=X`) mentioned in natural language or slash/hyphen notation."""
+    """Extract all FX pair symbols (`<BASE><QUOTE>=X`, `<CCY>-BTC`, `SATS-<CCY>`, `BTC-<CCY>`) mentioned in natural language."""
     if not text:
         return []
     found: List[str] = []
     for m in _FX_PAIR_RE.finditer(text):
-        base_iso = CURRENCY_NAME_TO_ISO.get(m.group("base").lower())
-        quote_iso = CURRENCY_NAME_TO_ISO.get(m.group("quote").lower())
-        if base_iso and quote_iso and base_iso != quote_iso:
-            sym = f"{base_iso}{quote_iso}=X"
-            if sym not in found:
-                found.append(sym)
+        sym = _pair_tokens_to_symbol(m.group("base"), m.group("quote"))
+        if sym and sym not in found:
+            found.append(sym)
+    if not found:
+        pp_sym = _detect_btc_purchasing_power_ccy(text)
+        if pp_sym:
+            found.append(pp_sym)
     return found
 
 

@@ -8,6 +8,7 @@ cross-importing `src.skills.markets`.
 
 from __future__ import annotations
 
+import bisect
 from datetime import datetime, timezone
 import math
 import re
@@ -243,6 +244,39 @@ class MarketSeriesAggregator(BaseGraphingAggregator):
             if now - ts_cached < _SERIES_TTL:
                 return series_obj
 
+        # Inverse Currency-in-BTC ('USD-BTC', 'CAD-BTC', 'EUR-BTC', 'CHF-BTC', ...) or Satoshis-per-Currency ('SATS-USD', 'SATS-CAD', ...)
+        m_inv_btc = re.fullmatch(r"([A-Z]{3})-BTC", sym)
+        m_sats = re.fullmatch(r"SATS-([A-Z]{3})", sym)
+        if m_inv_btc or m_sats:
+            ccy = m_inv_btc.group(1) if m_inv_btc else m_sats.group(1)
+            is_sats = bool(m_sats)
+            scale = 100_000_000.0 if is_sats else 1.0
+            btc_ccy = self.fetch_bar_series(f"BTC-{ccy}", timeframe=timeframe, interval=interval)
+            if btc_ccy is None or len(btc_ccy.closes) < 2:
+                return None
+            inv_opens = [scale / o if o > 0 else 0.0 for o in btc_ccy.opens]
+            inv_highs = [scale / l if l > 0 else 0.0 for l in btc_ccy.lows]
+            inv_lows = [scale / h if h > 0 else 0.0 for h in btc_ccy.highs]
+            inv_closes = [scale / c if c > 0 else 0.0 for c in btc_ccy.closes]
+            pct_chg = ((inv_closes[-1] - inv_closes[0]) / inv_closes[0]) * 100.0 if inv_closes[0] > 0 else 0.0
+            series_obj = MarketBarSeries(
+                symbol=sym,
+                name=f"Satoshis per 1 {ccy} (SATS/{ccy})" if is_sats else f"1 {ccy} Purchasing Power in Bitcoin ({ccy}/BTC)",
+                currency="SATS" if is_sats else "BTC",
+                timeframe_label=btc_ccy.timeframe_label,
+                timestamps=list(btc_ccy.timestamps),
+                opens=inv_opens,
+                highs=inv_highs,
+                lows=inv_lows,
+                closes=inv_closes,
+                volumes=[0.0] * len(inv_closes),
+                pct_change=round(pct_chg, 2),
+                period_high=max(inv_highs),
+                period_low=min(inv_lows),
+            )
+            _SERIES_CACHE[cache_key] = (now, series_obj)
+            return series_obj
+
         try:
             url = (
                 f"https://query1.finance.yahoo.com/v8/finance/chart/{quote_plus(sym)}"
@@ -250,6 +284,40 @@ class MarketSeriesAggregator(BaseGraphingAggregator):
             )
             resp = _HTTP_SESSION.get(url, timeout=7)
             results = ((resp.json() or {}).get("chart") or {}).get("result") if resp.status_code == 200 else None
+            # Synthetic BTC-<CCY> cross-rate fallback for currencies without a direct Yahoo Finance BTC-<CCY> pair (e.g. BTC-CHF, BTC-TRY, BTC-MXN)
+            if not results and re.fullmatch(r"BTC-([A-Z]{3})", sym) and sym != "BTC-USD":
+                ccy = sym[4:]
+                btc_usd = self.fetch_bar_series("BTC-USD", timeframe=timeframe, interval=interval)
+                fx_usd_ccy = self.fetch_bar_series(f"USD{ccy}=X", timeframe=timeframe, interval=interval)
+                if btc_usd and fx_usd_ccy and len(btc_usd.closes) >= 2 and len(fx_usd_ccy.closes) >= 1:
+                    fx_ts = fx_usd_ccy.timestamps
+                    fx_cl = fx_usd_ccy.closes
+                    syn_opens, syn_highs, syn_lows, syn_closes = [], [], [], []
+                    for i, ts in enumerate(btc_usd.timestamps):
+                        pos = min(len(fx_ts) - 1, max(0, bisect.bisect_left(fx_ts, ts)))
+                        rate = fx_cl[pos]
+                        syn_opens.append(btc_usd.opens[i] * rate)
+                        syn_highs.append(btc_usd.highs[i] * rate)
+                        syn_lows.append(btc_usd.lows[i] * rate)
+                        syn_closes.append(btc_usd.closes[i] * rate)
+                    pct_chg = ((syn_closes[-1] - syn_closes[0]) / syn_closes[0]) * 100.0 if syn_closes[0] > 0 else 0.0
+                    series_obj = MarketBarSeries(
+                        symbol=sym,
+                        name=f"Bitcoin {ccy} ({sym})",
+                        currency=ccy,
+                        timeframe_label=btc_usd.timeframe_label,
+                        timestamps=list(btc_usd.timestamps),
+                        opens=syn_opens,
+                        highs=syn_highs,
+                        lows=syn_lows,
+                        closes=syn_closes,
+                        volumes=list(btc_usd.volumes),
+                        pct_change=round(pct_chg, 2),
+                        period_high=max(syn_highs),
+                        period_low=min(syn_lows),
+                    )
+                    _SERIES_CACHE[cache_key] = (now, series_obj)
+                    return series_obj
             if not results:
                 alt_sym = _search_yahoo_symbol(target)
                 if alt_sym and alt_sym != sym:

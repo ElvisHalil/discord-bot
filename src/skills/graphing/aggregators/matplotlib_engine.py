@@ -274,12 +274,16 @@ class MatplotlibChartAggregator(BaseGraphingAggregator):
         start_dt = datetime.fromtimestamp(timestamps[0], tz=timezone.utc).strftime("%b %d, %Y") if timestamps else ""
         end_dt = datetime.fromtimestamp(timestamps[-1], tz=timezone.utc).strftime("%b %d, %Y") if timestamps else ""
         title_str = f"{bar_series.name} ({bar_series.symbol}) — {bar_series.timeframe_label}"
+        is_inv_btc = bar_series.currency == "BTC" and max(closes) < 0.05
+        sats_tag = f" (~{closes[-1] * 1e8:,.0f} Sats)" if is_inv_btc else ""
         subtitle_str = (
-            f"Latest: {_fmt_price_val(closes[-1])} {bar_series.currency} ({sign}{bar_series.pct_change:.2f}%)  |  "
+            f"Latest: {_fmt_price_val(closes[-1])} {bar_series.currency}{sats_tag} ({sign}{bar_series.pct_change:.2f}%)  |  "
             f"Window: {start_dt} → {end_dt}  |  High: {_fmt_price_val(bar_series.period_high)} / Low: {_fmt_price_val(bar_series.period_low)}"
         )
 
         _style_dark_axes(ax_price, title=title_str, subtitle=subtitle_str, y_label=f"Price ({bar_series.currency})")
+        if max(closes) < 0.05:
+            ax_price.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: _fmt_price_val(v)))
         if ax_vol is not None:
             _style_dark_axes(ax_vol, y_label="Volume")
             ax_price.tick_params(labelbottom=False)
@@ -336,9 +340,10 @@ class MatplotlibChartAggregator(BaseGraphingAggregator):
             fig.tight_layout(pad=1.3)
 
         png_bytes = _figure_to_png_bytes(fig)
+        start_sats = f" (~{closes[0] * 1e8:,.0f} Sats)" if is_inv_btc else ""
         summary_lines = [
             f"**Asset:** {bar_series.name} (`{bar_series.symbol}`) — {bar_series.timeframe_label}",
-            f"**Price Trajectory:** {_fmt_price_val(closes[0])} {bar_series.currency} → **{_fmt_price_val(closes[-1])} {bar_series.currency}** (**{sign}{bar_series.pct_change:.2f}%**)",
+            f"**Price Trajectory:** {_fmt_price_val(closes[0])} {bar_series.currency}{start_sats} → **{_fmt_price_val(closes[-1])} {bar_series.currency}{sats_tag}** (**{sign}{bar_series.pct_change:.2f}%**)",
             f"**Period Range:** Low **{_fmt_price_val(bar_series.period_low)}** — High **{_fmt_price_val(bar_series.period_high)} {bar_series.currency}** ({n} bars plotted)",
         ]
         return RenderedVisual(
