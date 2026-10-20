@@ -339,7 +339,7 @@ class MarketSeriesAggregator(BaseGraphingAggregator):
         self,
         target: str,
         horizon: str = "1y",
-        num_simulations: int = 1000,
+        num_simulations: int = 10000,
         lookback: Optional[str] = None,
     ) -> Optional[MonteCarloResult]:
         """
@@ -418,7 +418,7 @@ class MarketSeriesAggregator(BaseGraphingAggregator):
         eff_daily_log_drift = eff_ann_drift / days_per_year
         ann_vol = daily_vol * math.sqrt(days_per_year)
 
-        n_sims = max(100, min(5000, int(num_simulations)))
+        n_sims = max(100, min(100000, int(num_simulations)))
         rng = np.random.default_rng(seed=abs(hash((hist_series.symbol, horizon_days, len(closes), round(spot_price, 2)))) % (2**32))
         # Antithetic variates (half Z, half -Z) for lower variance & cleaner percentile convergence
         half_n = n_sims // 2

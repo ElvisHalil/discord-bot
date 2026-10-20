@@ -578,7 +578,7 @@ def skill_graphing_info(
             prev_horizon=prev_mc_horizon,
         )
         if targets:
-            mc_res = submit_to_worker(_market_agg.run_monte_carlo, targets[0], horizon_code, 1000, lookback_code).result()
+            mc_res = submit_to_worker(_market_agg.run_monte_carlo, targets[0], horizon_code, 10000, lookback_code).result()
             if mc_res is not None:
                 visual = _mpl_agg.render_monte_carlo_chart(mc_res)
                 update_channel_chart_state(
