@@ -1,5 +1,6 @@
 import logging
 import random
+import re
 from typing import Optional
 
 from src.skills.music.aggregators.freqblog import FreqBlogAggregator

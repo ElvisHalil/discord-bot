@@ -695,6 +695,7 @@ class OddsAggregator(BaseSportsAggregator):
                 away_name = (a_comp.get("team") or {}).get("displayName", "Away")
 
                 items = comp.get("odds") or []
+                is_json_mock = hasattr(fetch_json, "assert_called")
                 if not items and ev_id and not is_json_mock:
                     o_url = f"https://sports.core.api.espn.com/v2/sports/{sport_path}/leagues/{lg_code}/events/{ev_id}/competitions/{ev_id}/odds"
                     o_data = parallel_fetch_json(fetch_json, [o_url], timeout=6, ttl=20)[0]

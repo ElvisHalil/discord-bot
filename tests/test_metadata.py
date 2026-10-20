@@ -852,6 +852,79 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         self.assertEqual(len(alt_res), 1)
         self.assertEqual(alt_res[0]["id"], "secondvid22")
 
+    def test_zero_undefined_names_across_entire_codebase(self):
+        """Static AST scope analyzer ensuring no module or function in src/, main.py, or tests/ references an undefined name."""
+        import ast
+        import builtins
+        import pathlib
+
+        builtin_names = set(dir(builtins)) | {
+            "__file__", "__name__", "__doc__", "__package__", "__spec__", "__annotations__"
+        }
+
+        def collect_scope_defs(node):
+            defs = set()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs:
+                    defs.add(arg.arg)
+                if node.args.vararg:
+                    defs.add(node.args.vararg.arg)
+                if node.args.kwarg:
+                    defs.add(node.args.kwarg.arg)
+            body = getattr(node, "body", [])
+            if not isinstance(body, list):
+                body = [body]
+            stack = list(body)
+            while stack:
+                cur = stack.pop()
+                if isinstance(cur, (ast.Import, ast.ImportFrom)):
+                    for alias in cur.names:
+                        defs.add(alias.asname or alias.name.split(".")[0])
+                elif isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    defs.add(cur.name)
+                    continue
+                elif isinstance(cur, (ast.Lambda, ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+                    continue
+                elif isinstance(cur, ast.Name) and isinstance(cur.ctx, (ast.Store, ast.Param)):
+                    defs.add(cur.id)
+                elif isinstance(cur, ast.ExceptHandler) and cur.name:
+                    defs.add(cur.name)
+                elif isinstance(cur, ast.NamedExpr) and isinstance(cur.target, ast.Name):
+                    defs.add(cur.target.id)
+                for child in ast.iter_child_nodes(cur):
+                    stack.append(child)
+            return defs
+
+        undefined_findings = []
+
+        def check_node(node, scopes, filepath):
+            cur_scopes = list(scopes)
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                cur_scopes.append(collect_scope_defs(node))
+            elif isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+                comp_defs = set()
+                for gen in node.generators:
+                    for t in ast.walk(gen.target):
+                        if isinstance(t, ast.Name):
+                            comp_defs.add(t.id)
+                    for sub in ast.walk(gen):
+                        if isinstance(sub, ast.NamedExpr) and isinstance(sub.target, ast.Name):
+                            comp_defs.add(sub.target.id)
+                cur_scopes.append(comp_defs)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                if not any(node.id in s for s in cur_scopes):
+                    undefined_findings.append(f"{filepath}:{node.lineno} -> undefined name '{node.id}'")
+            for child in ast.iter_child_nodes(node):
+                check_node(child, cur_scopes, filepath)
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        py_files = list((root / "src").rglob("*.py")) + [root / "main.py"] + list((root / "tests").rglob("*.py"))
+        for p in py_files:
+            tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
+            check_node(tree, [builtin_names], str(p.relative_to(root)))
+
+        self.assertEqual(undefined_findings, [], f"Undefined names detected:\n" + "\n".join(undefined_findings))
+
 
 if __name__ == "__main__":
     unittest.main()
