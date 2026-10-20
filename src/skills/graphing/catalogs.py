@@ -228,7 +228,7 @@ def _pair_tokens_to_symbol(base_tok: str, quote_tok: str) -> Optional[str]:
         return f"{b_fiat}{q_fiat}=X"
     if b_fiat and q_crypto == "BTC":
         return f"{b_fiat}-BTC"
-    if b_crypto == "BTC" and q_fiat:
+    if b_crypto == "BTC" and q_fiat and q_fiat != "USD":
         return f"BTC-{q_fiat}"
     if (b_crypto == "SATS" and q_fiat) or (b_fiat and q_crypto == "SATS"):
         fiat_iso = q_fiat or b_fiat
