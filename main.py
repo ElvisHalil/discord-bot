@@ -9,8 +9,7 @@ import types
 import io
 import asyncio
 import random
-import re
-import typesquests
+import requests
 from collections import defaultdict
 from dotenv import load_dotenv
 from ollama import AsyncClient
