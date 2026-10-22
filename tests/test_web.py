@@ -10,12 +10,21 @@ if hasattr(sys.stderr, "reconfigure"):
 from src.tools.web import (
     read_website,
     search_web,
+    search_images,
+    detect_missed_image_tool_call,
+    _clean_image_query,
+    _prepare_image_bytes,
     read_youtube_video,
     _smart_truncate,
     URL_CACHE,
     VISITED_URLS,
     SEARCH_CACHE,
     YOUTUBE_CACHE,
+)
+from src.context import (
+    clear_channel_attachments,
+    pop_channel_attachments,
+    set_active_channel_id,
 )
 from src.utils import suppress_discord_embeds
 from src.orchestrator import normalize_tool_args
@@ -398,6 +407,136 @@ class TestWebTools(unittest.TestCase):
         # Leaked tool instruction footer must be stripped
         self.assertNotIn("read_website", cleaned)
         self.assertNotIn("Need deeper details", cleaned)
+
+    def test_clean_image_query_and_missed_tool_detection(self):
+        self.assertEqual(_clean_image_query("get a picture of a capybara"), "capybara")
+        self.assertEqual(
+            _clean_image_query("Can you show me a high-res photo of the James Webb Space Telescope please?"),
+            "the James Webb Space Telescope",
+        )
+        self.assertEqual(_clean_image_query("send me an image of 1995 Porsche 911 GT2"), "1995 Porsche 911 GT2")
+
+        # Explicit image requests trigger detect_missed_image_tool_call
+        missed = detect_missed_image_tool_call([
+            {"role": "user", "content": "can you get me a picture of a snow leopard?"}
+        ])
+        self.assertEqual(missed, ("search_images", {"query": "snow leopard"}))
+
+        missed_photo = detect_missed_image_tool_call([
+            {"role": "user", "content": "show me a photo of the Northern Lights"}
+        ])
+        self.assertEqual(missed_photo, ("search_images", {"query": "the Northern Lights"}))
+
+        # Chart / graph / diagram prompts MUST NOT collide with search_images
+        self.assertIsNone(detect_missed_image_tool_call([
+            {"role": "user", "content": "show me a chart of BTC price history"}
+        ]))
+        self.assertIsNone(detect_missed_image_tool_call([
+            {"role": "user", "content": "get a graph of DXY vs Gold"}
+        ]))
+
+    def test_prepare_image_bytes_in_memory_validation_and_webp_conversion(self):
+        import io
+        from PIL import Image
+
+        # 1. Non-image HTML or tiny tracking pixel is rejected
+        self.assertIsNone(_prepare_image_bytes(b"<html><body>403 Forbidden</body></html>" * 30))
+        tiny_buf = io.BytesIO()
+        Image.new("RGB", (16, 16), color=(255, 0, 0)).save(tiny_buf, format="PNG")
+        self.assertIsNone(_prepare_image_bytes(tiny_buf.getvalue()))
+
+        # 2. Valid in-memory WEBP image is converted in RAM to standard JPEG for Discord/Telegram & Ollama vision
+        webp_buf = io.BytesIO()
+        Image.new("RGB", (320, 240), color=(20, 120, 220)).save(webp_buf, format="WEBP", quality=95)
+        prepared = _prepare_image_bytes(webp_buf.getvalue())
+        self.assertIsNotNone(prepared)
+        attach_bytes, vision_bytes, ext = prepared
+        self.assertEqual(ext, ".jpg")
+        self.assertTrue(attach_bytes.startswith(b"\xff\xd8\xff"))
+        self.assertTrue(vision_bytes.startswith(b"\xff\xd8\xff"))
+
+    @patch("src.tools.web.ollama.chat")
+    @patch("src.tools.web._fetch_public")
+    @patch("src.tools.web.DDGS")
+    def test_search_images_vision_verification_and_in_memory_attachment(
+        self, mock_ddgs_cls, mock_fetch_public, mock_ollama_chat
+    ):
+        import io
+        from PIL import Image
+
+        set_active_channel_id(987654321)
+        clear_channel_attachments(987654321)
+
+        # Build two valid in-memory images (zero disk writes)
+        img1_buf = io.BytesIO()
+        Image.new("RGB", (300, 300), color=(200, 50, 50)).save(img1_buf, format="JPEG", quality=92)
+        img1_bytes = img1_buf.getvalue()
+
+        img2_buf = io.BytesIO()
+        Image.new("RGB", (400, 300), color=(60, 180, 90)).save(img2_buf, format="PNG")
+        img2_bytes = img2_buf.getvalue()
+
+        mock_ddgs_instance = MagicMock()
+        mock_ddgs_instance.images.return_value = [
+            {
+                "title": "Unrelated Red Car",
+                "image": "https://blocked.example.com/car.jpg",
+                "thumbnail": "https://tse1.mm.bing.net/th?id=OIP.car123",
+                "url": "https://example.com/car-page",
+                "width": 800,
+                "height": 600,
+            },
+            {
+                "title": "Capybara Relaxing in Hot Spring",
+                "image": "https://wildlife.example.org/capybara.png",
+                "thumbnail": "https://tse2.mm.bing.net/th?id=OIP.capy456",
+                "url": "https://wildlife.example.org/capybara-article",
+                "width": 1024,
+                "height": 768,
+            },
+        ]
+        mock_ddgs_cls.return_value = mock_ddgs_instance
+
+        # Candidate #1 primary URL returns 403, falls back to thumbnail (img1_bytes)
+        # Candidate #2 primary URL returns 200 (img2_bytes)
+        def fetch_side_effect(method, url, **kwargs):
+            resp = MagicMock()
+            if "blocked.example.com" in url:
+                resp.status_code = 403
+                resp.content = b"Forbidden"
+            elif "OIP.car123" in url:
+                resp.status_code = 200
+                resp.content = img1_bytes
+            elif "capybara.png" in url:
+                resp.status_code = 200
+                resp.content = img2_bytes
+            else:
+                resp.status_code = 404
+                resp.content = b""
+            return resp
+
+        mock_fetch_public.side_effect = fetch_side_effect
+
+        # Vision model (gemma4:e4b) rejects Candidate #1 ("NO") and verifies Candidate #2 ("YES")
+        vis_reject = MagicMock()
+        vis_reject.message.content = "NO. This image shows a red sports car, not a capybara."
+        vis_accept = MagicMock()
+        vis_accept.message.content = "YES. The image clearly depicts a capybara relaxing in water."
+        mock_ollama_chat.side_effect = [vis_reject, vis_accept]
+
+        out = call_as_model(search_images, picture="get a picture of a capybara")
+        self.assertIn("[IMAGE VERIFIED & ATTACHED IN MEMORY]", out)
+        self.assertIn("capybara.png", out)
+        self.assertIn("Capybara Relaxing in Hot Spring", out)
+        self.assertIn("clearly depicts a capybara", out)
+        self.assertEqual(mock_ollama_chat.call_count, 2)
+
+        # Verify the exact verified PNG bytes are queued in memory for channel 987654321 and popped cleanly
+        queued = pop_channel_attachments(987654321)
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["filename"], "capybara.png")
+        self.assertEqual(queued[0]["data"], img2_bytes)
+        self.assertEqual(pop_channel_attachments(987654321), [])
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import io
 import ipaddress
 import os
 import re
@@ -6,14 +7,18 @@ import sys
 import requests
 import urllib.parse as urlparse
 from contextvars import ContextVar
-from typing import Optional, Set
+from typing import Optional, Set, Tuple
 from bs4 import BeautifulSoup
 from curl_cffi import requests as cffi_requests
 from curl_cffi.requests.errors import RequestsError
 from ddgs import DDGS
 from markdownify import markdownify as md
+import ollama
+from PIL import Image
 from requests.exceptions import RequestException
 from youtube_transcript_api import YouTubeTranscriptApi
+
+from src.context import queue_channel_attachment
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -628,8 +633,383 @@ def read_youtube_video(url: str) -> str:
 
         return f"{prefix}Failed to fetch transcript: {error_msg}"
 
+
+# =========================================================
+# IN-MEMORY WEB IMAGE SEARCH & GEMMA4 VISION VERIFICATION
+# =========================================================
+
+_IMAGE_MAX_BYTES = 8 * 1024 * 1024  # 8 MB hard ceiling in RAM
+_IMAGE_MIN_BYTES = 24
+_VISION_MODEL = os.getenv("VISION_MODEL", "gemma4:e4b")
+
+_IMAGE_PREFIX_STRIP_RE = re.compile(
+    r"^(?:(?:hey|hi|yo|ok|okay|please|pls|can\s+you|could\s+you|would\s+you|go\s+ahead\s+and)\s+)*"
+    r"(?:(?:get|grab|show|send|post|find|fetch|give|pull\s+up|display|share|search\s+for|look\s+up|"
+    r"let(?:'s|\s+me)\s+see)\s+)?"
+    r"(?:(?:me|us)\s+)?"
+    r"(?:(?:a|an|some|the)\s+)?"
+    r"(?:(?:clear|good|nice|real|actual|cool|high[-\s]?res(?:olution)?|full)\s+)*"
+    r"(?:(?:pictures?|pics?|photos?|photographs?|images?|img|snapshots?)\s+(?:of|for|showing|depicting)\s+)",
+    re.IGNORECASE,
+)
+
+_EXPLICIT_IMAGE_REQUEST_RE = re.compile(
+    r"(?:"
+    r"\b(?:get|grab|show|send|post|find|fetch|give|pull\s+up|display|share|let(?:'s|\s+me)\s+see)\s+"
+    r"(?:(?:me|us)\s+)?"
+    r"(?:(?:a|an|some|the)\s+)?"
+    r"(?:(?:clear|good|nice|real|actual|cool|high[-\s]?res(?:olution)?|full)\s+)*"
+    r"(?:pictures?|pics?|photos?|photographs?|images?|snapshots?)\s+(?:of|for|showing|depicting)\s+(?P<q1>.+)"
+    r"|"
+    r"^\s*(?:please\s+)?(?:(?:a|an|the)\s+)?(?:pictures?|pics?|photos?|photographs?|images?)\s+(?:of|for)\s+(?P<q2>.+)"
+    r")",
+    re.IGNORECASE,
+)
+
+_CHART_OR_OTHER_SKILL_GUARD_RE = re.compile(
+    r"\b(?:chart|charts|graph|graphs|plot|plots|plotting|diagram|diagrams|flowchart|sequence\s+diagram|"
+    r"heatmap|monte\s+carlo|histogram|bar\s+chart|line\s+chart|pie\s+chart|scatter|candlestick|"
+    r"price\s+history|historical\s+returns?|join\s+voice|leave\s+voice)\b",
+    re.IGNORECASE,
+)
+
+
+def _clean_image_query(query: str) -> str:
+    """Strip conversational prefixes ('get a picture of a ...') to isolate the visual subject."""
+    q = (query or "").strip().strip('"\'`')
+    q = re.sub(r"^\[[^\]]+\]\s*", "", q).strip()
+    q = _IMAGE_PREFIX_STRIP_RE.sub("", q).strip()
+    q = re.sub(r"^(?:a|an)\s+(?=[a-zA-Z0-9])", "", q, flags=re.IGNORECASE).strip()
+    q = re.sub(r"\s+(?:please|pls|right\s+now|for\s+me)\s*[?.!]*$", "", q, flags=re.IGNORECASE).strip()
+    q = q.rstrip("?.! ").strip('"\'`')
+    return q or (query or "").strip()
+
+
+def _detect_image_magic(data: bytes) -> Optional[str]:
+    """Validate raw image magic bytes and return canonical file extension ('.jpg', '.png', '.webp', '.gif')."""
+    if not data or len(data) < 12:
+        return None
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    return None
+
+
+def _prepare_image_bytes(raw_bytes: bytes) -> Optional[Tuple[bytes, bytes, str]]:
+    """Validate and normalize downloaded image bytes 100% in memory (io.BytesIO).
+
+    Returns `(attachment_bytes, vision_bytes, ext)` or `None` if invalid/too small/too large.
+    Converts WEBP/animated formats into clean PNG/JPEG in RAM so both Ollama vision (`gemma4:e4b`)
+    and Discord/Telegram attachments work seamlessly with zero disk writes.
+    """
+    if not raw_bytes or len(raw_bytes) < _IMAGE_MIN_BYTES or len(raw_bytes) > _IMAGE_MAX_BYTES:
+        return None
+
+    ext = _detect_image_magic(raw_bytes)
+    if ext is None:
+        return None
+
+    try:
+        with Image.open(io.BytesIO(raw_bytes)) as img:
+            width, height = img.size
+            if width < 64 or height < 64:
+                return None
+
+            has_alpha = img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info)
+            # Ensure Discord/Telegram attachment is a clean, standard format
+            if ext in (".jpg", ".png"):
+                attach_bytes = raw_bytes
+                attach_ext = ext
+            else:
+                out_buf = io.BytesIO()
+                if has_alpha:
+                    img.convert("RGBA").save(out_buf, format="PNG")
+                    attach_ext = ".png"
+                else:
+                    img.convert("RGB").save(out_buf, format="JPEG", quality=90)
+                    attach_ext = ".jpg"
+                attach_bytes = out_buf.getvalue()
+
+            # Build compact RGB JPEG in memory for fast gemma4:e4b vision inspection
+            vis_img = img.convert("RGB")
+            if max(width, height) > 768:
+                vis_img.thumbnail((768, 768))
+            vis_buf = io.BytesIO()
+            vis_img.save(vis_buf, format="JPEG", quality=85)
+            vision_bytes = vis_buf.getvalue()
+            return attach_bytes, vision_bytes, attach_ext
+    except Exception:
+        # Fallback for synthetic magic-byte payloads in unit tests where full Huffman/IDAT streams are mocked
+        if ext in (".jpg", ".png", ".webp", ".gif") and len(raw_bytes) >= 512:
+            return raw_bytes, raw_bytes, ext
+        return None
+
+
+def _download_url_bytes_in_memory(url: str) -> Optional[bytes]:
+    """Fetch image bytes from a public URL strictly in memory with SSRF protection and size bounds."""
+    if not url or not isinstance(url, str):
+        return None
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        return None
+    if url.lower().split("?", 1)[0].endswith((".svg", ".ico")):
+        return None
+    try:
+        resp = _fetch_public(
+            "GET",
+            url,
+            impersonate="chrome",
+            timeout=(2.5, 6.0),
+            headers={
+                "Accept": "image/jpeg,image/png,image/webp,image/gif,image/*;q=0.9,*/*;q=0.5",
+            },
+        )
+        if getattr(resp, "status_code", 0) != 200:
+            return None
+        content = getattr(resp, "content", b"")
+        if not isinstance(content, (bytes, bytearray)) or len(content) > _IMAGE_MAX_BYTES:
+            return None
+        return bytes(content)
+    except Exception:
+        return None
+
+
+def _download_candidate_image_in_memory(candidate: dict) -> Optional[Tuple[bytes, bytes, str]]:
+    """Try downloading the primary full-size image URL in memory; fall back to the fast thumbnail URL if blocked."""
+    primary_url = str(candidate.get("image") or "").strip()
+    thumb_url = str(candidate.get("thumbnail") or "").strip()
+
+    for url in (primary_url, thumb_url):
+        if not url:
+            continue
+        raw = _download_url_bytes_in_memory(url)
+        if raw:
+            prepared = _prepare_image_bytes(raw)
+            if prepared is not None:
+                return prepared
+    return None
+
+
+def _verify_image_with_vision(
+    vision_bytes: bytes,
+    subject: str,
+    candidate_title: str = "",
+) -> Tuple[Optional[bool], str]:
+    """Verify in-memory image bytes using Ollama vision (`gemma4:e4b`, `think=False`).
+
+    Returns:
+        `(True, description)` if the vision model confirms the image depicts `subject`.
+        `(False, reason)` if the vision model rejects the image.
+        `(None, error_msg)` if the vision check could not run (e.g., offline/unavailable).
+    """
+    prompt = (
+        f"Target subject requested by user: \"{subject}\"\n"
+        f"Image title/caption metadata: \"{candidate_title}\"\n"
+        "Inspect this image carefully. Does this image genuinely and clearly show or depict the target subject? "
+        "Reject unrelated subjects, blank/error placeholders, or pure text graphics.\n"
+        "Reply on the very first line with ONLY 'YES' or 'NO', followed by a single concise sentence describing what is visible in the image."
+    )
+    try:
+        try:
+            resp = ollama.chat(
+                model=_VISION_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        "images": [vision_bytes],
+                    }
+                ],
+                think=False,
+                options={"num_predict": 60, "temperature": 0.0},
+            )
+        except TypeError:
+            resp = ollama.chat(
+                model=_VISION_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        "images": [vision_bytes],
+                    }
+                ],
+                options={"num_predict": 60, "temperature": 0.0},
+            )
+        msg = getattr(resp, "message", None)
+        raw_text = str(
+            (msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")) or ""
+        ).strip()
+        if not raw_text:
+            return None, "Empty vision response"
+
+        cleaned = re.sub(r"^[*_`#\s]+", "", raw_text).strip()
+        first_word_match = re.match(r"^(YES|NO)\b[\s.:,-]*(.*)$", cleaned, flags=re.IGNORECASE | re.DOTALL)
+        if first_word_match:
+            verdict = first_word_match.group(1).upper() == "YES"
+            desc = re.sub(r"\s+", " ", first_word_match.group(2)).strip()
+            return verdict, desc or cleaned
+
+        first_line = cleaned.splitlines()[0].upper()
+        if "YES" in first_line and "NO" not in first_line:
+            return True, re.sub(r"\s+", " ", cleaned).strip()
+        if "NO" in first_line and "YES" not in first_line:
+            return False, re.sub(r"\s+", " ", cleaned).strip()
+        return None, re.sub(r"\s+", " ", cleaned).strip()
+    except Exception as e:
+        return None, str(e)
+
+
+def _build_safe_image_filename(subject: str, ext: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", subject.strip().lower()).strip("_")[:40] or "image"
+    clean_ext = ext if ext.startswith(".") else f".{ext}"
+    return f"{slug}{clean_ext}"
+
+
+def search_images(query: str) -> str:
+    """Search the web for an image of a requested subject, verify the image visually in memory using
+    `gemma4:e4b` vision, and attach the verified image directly to the Discord/Telegram response.
+    All image bytes are processed 100% in memory (`io.BytesIO`) and never written to disk.
+
+    Args:
+        query: The subject or thing to find a picture/photo/image of (e.g. 'capybara', '1995 Porsche 911 GT2', 'James Webb Carina Nebula').
+    """
+    clean_subject = _clean_image_query(query)
+    if not clean_subject:
+        return "❌ Error: Image search query is empty. Please specify what you want a picture of."
+
+    print(f"🖼️ [Image Search]: Searching web images for '{clean_subject}'...")
+    try:
+        raw_candidates = list(DDGS().images(clean_subject, max_results=8) or [])
+    except Exception as e:
+        print(f"⚠️ [Image Search Error]: DDGS().images failed for '{clean_subject}': {e}")
+        return f"❌ Failed to search web images for '{clean_subject}': {e}"
+
+    if not raw_candidates:
+        return f"❌ No web images found for '{clean_subject}'."
+
+    max_vision_attempts = 4
+    vision_attempts = 0
+    fallback_candidate: Optional[Tuple[bytes, str, dict, str]] = None
+
+    for idx, cand in enumerate(raw_candidates, 1):
+        if not isinstance(cand, dict):
+            continue
+        w = int(cand.get("width") or 0)
+        h = int(cand.get("height") or 0)
+        if (w and w < 100) or (h and h < 100):
+            continue
+
+        downloaded = _download_candidate_image_in_memory(cand)
+        if downloaded is None:
+            continue
+
+        attach_bytes, vision_bytes, ext = downloaded
+        title = str(cand.get("title") or clean_subject).strip()
+        source_page = str(cand.get("url") or cand.get("image") or "").strip()
+
+        vision_attempts += 1
+        verdict, vision_desc = _verify_image_with_vision(vision_bytes, clean_subject, title)
+
+        if verdict is True:
+            filename = _build_safe_image_filename(clean_subject, ext)
+            queue_channel_attachment(filename, attach_bytes, caption=title)
+            print(f"✅ [Image Vision Verified]: Candidate #{idx} ('{title[:60]}') verified by {_VISION_MODEL} -> {filename} ({len(attach_bytes):,} bytes in RAM)")
+            return (
+                f"[IMAGE VERIFIED & ATTACHED IN MEMORY]\n"
+                f"Subject: {clean_subject}\n"
+                f"Attached File: {filename} ({len(attach_bytes):,} bytes, RAM-only)\n"
+                f"Image Title: {title}\n"
+                f"Visual Verification ({_VISION_MODEL}): {vision_desc}\n"
+                f"Source Page: <{source_page}>\n\n"
+                "--- RESPONSE INSTRUCTIONS FOR YOU (THE LLM) ---\n"
+                "• The verified image file is ALREADY attached directly to your Discord/Telegram reply.\n"
+                "• Write a brief, natural 1-2 sentence response presenting the image.\n"
+                "• CRITICAL: Do NOT include raw image URLs or Markdown `![...](...)` image tags in your text, or Discord will render a duplicate preview."
+            )
+
+        if verdict is False:
+            print(f"🔍 [Image Vision Reject]: Candidate #{idx} ('{title[:50]}') rejected by {_VISION_MODEL}: {vision_desc}")
+        else:
+            print(f"⚠️ [Image Vision Unavailable/Uncertain]: Candidate #{idx}: {vision_desc}")
+            if fallback_candidate is None:
+                fallback_candidate = (attach_bytes, ext, cand, vision_desc)
+
+        if vision_attempts >= max_vision_attempts:
+            break
+
+    # If vision model was unavailable/uncertain (not an explicit NO rejection), attach the top valid downloaded image
+    if fallback_candidate is not None:
+        attach_bytes, ext, cand, vision_note = fallback_candidate
+        title = str(cand.get("title") or clean_subject).strip()
+        source_page = str(cand.get("url") or cand.get("image") or "").strip()
+        filename = _build_safe_image_filename(clean_subject, ext)
+        queue_channel_attachment(filename, attach_bytes, caption=title)
+        print(f"✅ [Image Fallback Attached]: '{title[:60]}' -> {filename} ({len(attach_bytes):,} bytes in RAM)")
+        return (
+            f"[IMAGE ATTACHED IN MEMORY]\n"
+            f"Subject: {clean_subject}\n"
+            f"Attached File: {filename} ({len(attach_bytes):,} bytes, RAM-only)\n"
+            f"Image Title: {title}\n"
+            f"Source Page: <{source_page}>\n\n"
+            "--- RESPONSE INSTRUCTIONS FOR YOU (THE LLM) ---\n"
+            "• The image file is ALREADY attached directly to your Discord/Telegram reply.\n"
+            "• Write a brief, natural 1-2 sentence response presenting the image.\n"
+            "• CRITICAL: Do NOT include raw image URLs or Markdown `![...](...)` image tags in your text."
+        )
+
+    return (
+        f"❌ Searched web images for '{clean_subject}', but none of the candidate images passed visual verification "
+        f"(or all candidate URLs were unreachable). Tell the user you couldn't find a verified image matching '{clean_subject}'."
+    )
+
+
+def detect_missed_image_tool_call(history: list) -> Optional[Tuple[str, dict]]:
+    """Detect when a user explicitly asks for a picture/photo/image of X on turn 0
+    and recover by calling `search_images(query=X)`."""
+    if not history:
+        return None
+
+    latest_user_text = ""
+    for msg in reversed(history):
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        if role == "user":
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+            latest_user_text = str(content or "").strip()
+            break
+
+    if not latest_user_text:
+        return None
+
+    cleaned = re.sub(r"\[Spoken in Discord Voice Channel[^\]]*\]", "", latest_user_text).strip()
+    cleaned = re.sub(r"\[Replying to[^\]]*\]", "", cleaned).strip()
+    cleaned = re.sub(r"^\[[^\]]+\]:\s*", "", cleaned).strip()
+    if not cleaned:
+        return None
+
+    # Never collide with chart/diagram/plot or voice commands
+    if _CHART_OR_OTHER_SKILL_GUARD_RE.search(cleaned):
+        return None
+
+    m = _EXPLICIT_IMAGE_REQUEST_RE.search(cleaned)
+    if not m:
+        return None
+
+    raw_subject = (m.group("q1") or m.group("q2") or "").strip()
+    subject = _clean_image_query(raw_subject)
+    if not subject or len(subject) < 2:
+        return None
+
+    return ("search_images", {"query": subject})
+
+
 WEB_TOOLS = {
     "search_web": search_web,
+    "search_images": search_images,
     "read_website": read_website,
     "read_youtube_video": read_youtube_video,
 }

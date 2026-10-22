@@ -73,6 +73,7 @@ from src.orchestrator import (
     detect_missed_markets_tool_call,
     detect_missed_graphing_tool_call,
     detect_missed_voice_tool_call,
+    detect_missed_image_tool_call,
     trim_history,
     compact_intra_turn_tool_history,
     apply_auto_ping,
@@ -691,6 +692,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
         "skill_weather_info",
         "skill_news_headlines",
         "skill_music_analysis",
+        "search_images",
         "evaluate_math",
         "save_memory",
     }
@@ -752,6 +754,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     or detect_missed_flight_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_graphing_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_markets_tool_call(history, active_channel_id=channel_id)
+                    or detect_missed_image_tool_call(history)
                     or detect_missed_voice_tool_call(history, active_channel_id=channel_id)
                 )
                 if missed and missed[0] in active_tools:
@@ -869,6 +872,25 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                         function=types.SimpleNamespace(
                             name="skill_graphing_info",
                             arguments=missed_graph[1],
+                        )
+                    )
+                ]
+
+        if (
+            iterations == 0
+            and supports_tools
+            and "search_images" in active_tools
+            and not any(c.function.name in ("search_images", "skill_graphing_info") for c in tool_calls)
+            and any(c.function.name == "search_web" for c in tool_calls)
+        ):
+            missed_img = detect_missed_image_tool_call(history)
+            if missed_img and missed_img[0] == "search_images":
+                print(f"⚡ [{current_mode.upper()}] Co-executing missed search_images alongside search_web: {missed_img[1]}")
+                tool_calls = list(tool_calls) + [
+                    types.SimpleNamespace(
+                        function=types.SimpleNamespace(
+                            name="search_images",
+                            arguments=missed_img[1],
                         )
                     )
                 ]
@@ -991,7 +1013,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                 called_names.issubset(_TERMINAL_SKILLS)
                 and (
                     len(tool_calls) >= 2
-                    or (called_names.issubset({"skill_news_headlines", "skill_markets_info", "skill_graphing_info", "skill_voice_info"}) and not has_compound_media_intent)
+                    or (called_names.issubset({"skill_news_headlines", "skill_markets_info", "skill_graphing_info", "skill_voice_info", "search_images"}) and not has_compound_media_intent)
                     or (fast_voice_turn and not has_compound_media_intent)
                 )
             )

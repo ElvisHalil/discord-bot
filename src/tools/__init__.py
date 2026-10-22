@@ -7,6 +7,8 @@ from src.tools.system import (
 )
 from src.tools.web import (
     search_web,
+    search_images,
+    detect_missed_image_tool_call,
     read_website,
     read_youtube_video,
     WEB_TOOLS,
@@ -21,6 +23,8 @@ __all__ = [
     "save_memory",
     "recall_memories",
     "search_web",
+    "search_images",
+    "detect_missed_image_tool_call",
     "read_website",
     "read_youtube_video",
     "SYSTEM_TOOLS",

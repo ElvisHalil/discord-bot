@@ -926,6 +926,7 @@ class TestConversationWithAllToolsAndSkills(unittest.IsolatedAsyncioTestCase):
             "skill_markets_info",
             "skill_graphing_info",
             "skill_voice_info",
+            "search_images",
             "evaluate_math",
             "get_current_datetime",
             "save_memory",
@@ -935,6 +936,7 @@ class TestConversationWithAllToolsAndSkills(unittest.IsolatedAsyncioTestCase):
 
         sample_calls = [
             ("search_web", {"q": "quantum computing"}, {"query": "quantum computing"}),
+            ("search_images", {"picture": "capybara"}, {"query": "capybara"}),
             ("read_website", {"link": "https://example.com"}, {"url": "https://example.com"}),
             ("read_youtube_video", {"link": "https://www.youtube.com/watch?v=12345678901"}, {"url": "https://www.youtube.com/watch?v=12345678901"}),
             ("skill_weather_info", {"location": "Paris"}, {"city": "Paris"}),

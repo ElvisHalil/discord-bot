@@ -251,6 +251,11 @@ TOOL_ARG_ALIASES: Dict[str, Dict[str, str]] = {
         "q": "query", "search_query": "query", "keywords": "query",
         "keyword": "query", "prompt": "query", "text": "query", "search": "query",
     },
+    "search_images": {
+        "q": "query", "search_query": "query", "subject": "query", "image": "query",
+        "picture": "query", "photo": "query", "topic": "query", "prompt": "query",
+        "text": "query", "search": "query", "target": "query", "keyword": "query", "keywords": "query",
+    },
     "read_website": {
         "link": "url", "website": "url", "target_url": "url", "uri": "url",
         "site": "url", "href": "url", "page": "url",

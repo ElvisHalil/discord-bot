@@ -47,6 +47,7 @@ from src.skills.voice.context import (
     detect_missed_voice_tool_call,
     enrich_voice_tool_args,
 )
+from src.tools.web import detect_missed_image_tool_call
 from src.utils.domain_vocab import (
     EPHEMERAL_SPORTS_TOOLS as _EPHEMERAL_SPORTS_TOOLS,
     MONTH_MAP_SYNC as _MONTH_MAP_SYNC,
@@ -287,6 +288,14 @@ def trim_history(
                         "skill_graphing_info again if the user asks to render a new or updated chart or diagram.]"
                     ),
                 }
+            elif tool_name == "search_images":
+                rest[i] = {
+                    **msg,
+                    "content": (
+                        "[EXPIRED IMAGE ATTACHMENT SNAPSHOT FROM EARLIER TURN — You MUST call "
+                        "search_images again if the user asks for a new or different picture/photo/image.]"
+                    ),
+                }
             else:
                 eff_chars = 3200 if (tool_name == "skill_news_headlines" and old_tool_chars == OLD_TOOL_OUTPUT_CHARS) else old_tool_chars
                 if len(content) > eff_chars:
@@ -439,7 +448,7 @@ _DISCLAIMER_HEADER_RE = re.compile(
 )
 
 _TOOL_CALL_MENTION_RE = re.compile(
-    r'`?(?:search_web|read_website|read_youtube_video|skill_[a-z0-9_]+)`?',
+    r'`?(?:search_web|search_images|read_website|read_youtube_video|skill_[a-z0-9_]+)`?',
     re.IGNORECASE,
 )
 
@@ -712,6 +721,8 @@ def sanitize_agent_reply(reply: str) -> str:
             return t.replace('skill_', '').replace('_', ' ')
         if t == 'search_web':
             return 'web search'
+        if t == 'search_images':
+            return 'image search'
         if t == 'read_website':
             return 'web reading'
         return t

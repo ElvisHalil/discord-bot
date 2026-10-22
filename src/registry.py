@@ -15,6 +15,7 @@ from src.tools.system import (
 )
 from src.tools.web import (
     search_web,
+    search_images,
     read_website,
     read_youtube_video,
     WEB_TOOLS,
@@ -66,6 +67,7 @@ RESEARCH_TOOLS = {
 # schemas don't eat context and the model isn't tempted into niche tools.
 CHAT_TOOLS = {
     **SYSTEM_TOOLS,
+    "search_images": search_images,
     "skill_youtube_search": skill_youtube_search,
     "skill_voice_info": skill_voice_info,
 }
