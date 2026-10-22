@@ -12,6 +12,8 @@ from src.tools.web import (
     search_web,
     search_images,
     detect_missed_image_tool_call,
+    enrich_image_tool_args,
+    clear_image_channel_state,
     _clean_image_query,
     _prepare_image_bytes,
     read_youtube_video,
@@ -43,6 +45,7 @@ class TestWebTools(unittest.TestCase):
         VISITED_URLS.clear()
         SEARCH_CACHE.clear()
         YOUTUBE_CACHE.clear()
+        clear_image_channel_state()
 
     @patch("src.tools.web.cffi_requests.get")
     def test_read_website_jina_success(self, mock_get):
@@ -537,6 +540,68 @@ class TestWebTools(unittest.TestCase):
         self.assertEqual(queued[0]["filename"], "capybara.png")
         self.assertEqual(queued[0]["data"], img2_bytes)
         self.assertEqual(pop_channel_attachments(987654321), [])
+
+        # Follow-up Turn: user asks "get a different picture" or "show me another picture of the same thing"
+        # 1. detect_missed_image_tool_call & enrich_image_tool_args recover 'capybara' from channel 987654321
+        followup_missed = detect_missed_image_tool_call(
+            [{"role": "user", "content": "can you get a different picture?"}],
+            active_channel_id=987654321,
+        )
+        self.assertEqual(followup_missed, ("search_images", {"query": "capybara"}))
+
+        enriched = enrich_image_tool_args(
+            {"query": "different picture of the same thing"},
+            [{"role": "user", "content": "get a different picture of the same thing"}],
+            active_channel_id=987654321,
+        )
+        self.assertEqual(enriched["query"], "capybara")
+
+        # 2. Calling search_images again in the same channel automatically skips the already-sent
+        #    Candidate #2 ('capybara.png') and selects Candidate #3 ('capybara_swimming.jpg')
+        img3_buf = io.BytesIO()
+        Image.new("RGB", (360, 260), color=(30, 90, 210)).save(img3_buf, format="JPEG", quality=92)
+        img3_bytes = img3_buf.getvalue()
+
+        mock_ddgs_instance.images.return_value = [
+            {
+                "title": "Capybara Relaxing in Hot Spring",
+                "image": "https://wildlife.example.org/capybara.png",
+                "thumbnail": "https://tse2.mm.bing.net/th?id=OIP.capy456",
+                "url": "https://wildlife.example.org/capybara-article",
+                "width": 1024,
+                "height": 768,
+            },
+            {
+                "title": "Capybara Swimming in River",
+                "image": "https://wildlife.example.org/capybara_swimming.jpg",
+                "thumbnail": "https://tse3.mm.bing.net/th?id=OIP.capy789",
+                "url": "https://wildlife.example.org/capybara-river",
+                "width": 1200,
+                "height": 800,
+            },
+        ]
+
+        def fetch_side_effect_turn2(method, url, **kwargs):
+            resp = MagicMock()
+            if "capy789" in url or "capybara_swimming.jpg" in url:
+                resp.status_code = 200
+                resp.content = img3_bytes
+            else:
+                resp.status_code = 200
+                resp.content = img2_bytes
+            return resp
+
+        mock_fetch_public.side_effect = fetch_side_effect_turn2
+        vis_accept_2 = MagicMock()
+        vis_accept_2.message.content = "YES. A capybara swimming in a river."
+        mock_ollama_chat.side_effect = [vis_accept_2]
+
+        out2 = search_images("get a different picture")
+        self.assertIn("Capybara Swimming in River", out2)
+        queued2 = pop_channel_attachments(987654321)
+        self.assertEqual(len(queued2), 1)
+        self.assertEqual(queued2[0]["filename"], "capybara.jpg")
+        self.assertEqual(queued2[0]["data"], img3_bytes)
 
 
 if __name__ == "__main__":

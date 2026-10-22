@@ -6,6 +6,7 @@ import socket
 import sys
 import requests
 import urllib.parse as urlparse
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from typing import Optional, Set, Tuple
 from bs4 import BeautifulSoup
@@ -18,7 +19,7 @@ from PIL import Image
 from requests.exceptions import RequestException
 from youtube_transcript_api import YouTubeTranscriptApi
 
-from src.context import queue_channel_attachment
+from src.context import get_active_channel_id, queue_channel_attachment
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -641,14 +642,49 @@ def read_youtube_video(url: str) -> str:
 _IMAGE_MAX_BYTES = 8 * 1024 * 1024  # 8 MB hard ceiling in RAM
 _IMAGE_MIN_BYTES = 24
 _VISION_MODEL = os.getenv("VISION_MODEL", "gemma4:e4b")
+_VISION_OPTIONS = {
+    "num_ctx": 16384,  # Match research-gemma num_ctx so Ollama never reallocates GPU KV cache
+    "num_predict": 45,
+    "temperature": 0.0,
+    "num_gpu": 99,
+}
+
+# Per-channel image memory: tracks {"last_subject": str, "seen_urls": BoundedSet}
+IMAGE_CHANNEL_STATE = BoundedCache(maxsize=128)
+
+
+def _get_channel_image_state(channel_id: Optional[int] = None) -> dict:
+    cid = int(channel_id if channel_id is not None else (get_active_channel_id() or 0))
+    state = IMAGE_CHANNEL_STATE.get(cid)
+    if state is None:
+        state = {
+            "last_subject": "",
+            "seen_urls": BoundedSet(maxsize=64),
+        }
+        IMAGE_CHANNEL_STATE[cid] = state
+    return state
+
+
+def clear_image_channel_state(channel_id: Optional[int] = None) -> None:
+    """Clear per-channel image history (for a specific channel or all channels when None)."""
+    if channel_id is None:
+        IMAGE_CHANNEL_STATE.clear()
+    else:
+        IMAGE_CHANNEL_STATE.pop(int(channel_id), None)
+
+
+_IMAGE_ADJECTIVES = (
+    r"(?:clear|good|nice|real|actual|cool|high[-\s]?res(?:olution)?|full|"
+    r"different|another|other|new|second|next|better|fresh|alternate|alternative)"
+)
 
 _IMAGE_PREFIX_STRIP_RE = re.compile(
     r"^(?:(?:hey|hi|yo|ok|okay|please|pls|can\s+you|could\s+you|would\s+you|go\s+ahead\s+and)\s+)*"
     r"(?:(?:get|grab|show|send|post|find|fetch|give|pull\s+up|display|share|search\s+for|look\s+up|"
     r"let(?:'s|\s+me)\s+see)\s+)?"
     r"(?:(?:me|us)\s+)?"
-    r"(?:(?:a|an|some|the)\s+)?"
-    r"(?:(?:clear|good|nice|real|actual|cool|high[-\s]?res(?:olution)?|full)\s+)*"
+    r"(?:(?:a|an|some|the|another)\s+)?"
+    rf"(?:{_IMAGE_ADJECTIVES}\s+)*"
     r"(?:(?:pictures?|pics?|photos?|photographs?|images?|img|snapshots?)\s+(?:of|for|showing|depicting)\s+)",
     re.IGNORECASE,
 )
@@ -657,14 +693,38 @@ _EXPLICIT_IMAGE_REQUEST_RE = re.compile(
     r"(?:"
     r"\b(?:get|grab|show|send|post|find|fetch|give|pull\s+up|display|share|let(?:'s|\s+me)\s+see)\s+"
     r"(?:(?:me|us)\s+)?"
-    r"(?:(?:a|an|some|the)\s+)?"
-    r"(?:(?:clear|good|nice|real|actual|cool|high[-\s]?res(?:olution)?|full)\s+)*"
+    r"(?:(?:a|an|some|the|another)\s+)?"
+    rf"(?:{_IMAGE_ADJECTIVES}\s+)*"
     r"(?:pictures?|pics?|photos?|photographs?|images?|snapshots?)\s+(?:of|for|showing|depicting)\s+(?P<q1>.+)"
     r"|"
-    r"^\s*(?:please\s+)?(?:(?:a|an|the)\s+)?(?:pictures?|pics?|photos?|photographs?|images?)\s+(?:of|for)\s+(?P<q2>.+)"
+    rf"^\s*(?:please\s+)?(?:(?:a|an|the|another)\s+)?(?:{_IMAGE_ADJECTIVES}\s+)*(?:pictures?|pics?|photos?|photographs?|images?)\s+(?:of|for)\s+(?P<q2>.+)"
     r")",
     re.IGNORECASE,
 )
+
+_DIFFERENT_IMAGE_FOLLOWUP_RE = re.compile(
+    r"(?:"
+    r"\b(?:get|grab|show|send|post|find|fetch|give|pull\s+up|display|share|let(?:'s|\s+me)\s+see)\s+"
+    r"(?:(?:me|us)\s+)?"
+    r"(?:(?:a|an|the)\s+)?"
+    r"(?:different|another|other|new|second|next|alternate|better)\s+"
+    r"(?:pictures?|pics?|photos?|photographs?|images?|snapshots?|ones?)"
+    r"(?:\s+(?:of\s+(?:it|that|this|them|the\s+same(?:\s+thing|\s+one)?)|instead|please|pls))?\s*[?.!]*$"
+    r"|"
+    r"^\s*(?:please\s+)?(?:(?:a|an)\s+)?(?:different|another|other|new)\s+"
+    r"(?:pictures?|pics?|photos?|photographs?|images?)"
+    r"(?:\s+(?:of\s+(?:it|that|this|them|the\s+same(?:\s+thing|\s+one)?)|instead|please|pls))?\s*[?.!]*$"
+    r")",
+    re.IGNORECASE,
+)
+
+_GENERIC_FOLLOWUP_SUBJECTS = frozenset({
+    "", "it", "that", "this", "them", "one", "another", "another one",
+    "different", "different one", "a different one", "the same", "same",
+    "same thing", "the same thing", "the same one", "same one",
+    "different picture", "another picture", "different photo", "another photo",
+    "different image", "another image", "picture", "photo", "image",
+})
 
 _CHART_OR_OTHER_SKILL_GUARD_RE = re.compile(
     r"\b(?:chart|charts|graph|graphs|plot|plots|plotting|diagram|diagrams|flowchart|sequence\s+diagram|"
@@ -675,14 +735,66 @@ _CHART_OR_OTHER_SKILL_GUARD_RE = re.compile(
 
 
 def _clean_image_query(query: str) -> str:
-    """Strip conversational prefixes ('get a picture of a ...') to isolate the visual subject."""
+    """Strip conversational prefixes ('get a picture of a ...', 'get a different picture of ...') to isolate the visual subject."""
     q = (query or "").strip().strip('"\'`')
     q = re.sub(r"^\[[^\]]+\]\s*", "", q).strip()
     q = _IMAGE_PREFIX_STRIP_RE.sub("", q).strip()
+    q = re.sub(
+        r"^(?:(?:a|an|another|different|other|new)\s+)*(?:pictures?|pics?|photos?|photographs?|images?)\s+(?:of|for)\s+",
+        "",
+        q,
+        flags=re.IGNORECASE,
+    ).strip()
     q = re.sub(r"^(?:a|an)\s+(?=[a-zA-Z0-9])", "", q, flags=re.IGNORECASE).strip()
-    q = re.sub(r"\s+(?:please|pls|right\s+now|for\s+me)\s*[?.!]*$", "", q, flags=re.IGNORECASE).strip()
+    q = re.sub(r"\s+(?:please|pls|right\s+now|for\s+me|instead)\s*[?.!]*$", "", q, flags=re.IGNORECASE).strip()
     q = q.rstrip("?.! ").strip('"\'`')
-    return q or (query or "").strip()
+    return q
+
+
+def _extract_last_image_subject_from_history(history: Optional[list], channel_id: Optional[int] = None) -> str:
+    """Recover the most recent image search subject from per-channel state or conversation history."""
+    state = _get_channel_image_state(channel_id)
+    if state.get("last_subject"):
+        return str(state["last_subject"])
+
+    for msg in reversed(history or []):
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        content = str((msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")) or "")
+        if role == "tool":
+            m_subj = re.search(r"(?m)^Subject:\s*(.+)$", content)
+            if m_subj:
+                subj = m_subj.group(1).strip()
+                if subj and subj.lower() not in _GENERIC_FOLLOWUP_SUBJECTS:
+                    return subj
+        t_calls = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
+        if t_calls:
+            for tc in t_calls:
+                fn = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
+                fn_name = (fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", "")) if fn else ""
+                if fn_name == "search_images":
+                    fn_args = (fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", {})) or {}
+                    cand_q = _clean_image_query(str(fn_args.get("query") or ""))
+                    if cand_q and cand_q.lower() not in _GENERIC_FOLLOWUP_SUBJECTS:
+                        return cand_q
+    return ""
+
+
+def enrich_image_tool_args(args: dict, history: list, active_channel_id: Optional[int] = None) -> dict:
+    """Resolve follow-up image queries ('get a different picture', 'another photo of the same thing')
+    using the channel's previous image subject."""
+    enriched = dict(args or {})
+    raw_q = str(enriched.get("query") or "").strip()
+    cleaned_q = _clean_image_query(raw_q)
+
+    if not cleaned_q or cleaned_q.lower() in _GENERIC_FOLLOWUP_SUBJECTS or _DIFFERENT_IMAGE_FOLLOWUP_RE.search(raw_q):
+        prior_subj = _extract_last_image_subject_from_history(history, active_channel_id)
+        if prior_subj:
+            enriched["query"] = prior_subj
+            return enriched
+
+    if cleaned_q:
+        enriched["query"] = cleaned_q
+    return enriched
 
 
 def _detect_image_magic(data: bytes) -> Optional[str]:
@@ -735,13 +847,16 @@ def _prepare_image_bytes(raw_bytes: bytes) -> Optional[Tuple[bytes, bytes, str]]
                     attach_ext = ".jpg"
                 attach_bytes = out_buf.getvalue()
 
-            # Build compact RGB JPEG in memory for fast gemma4:e4b vision inspection
-            vis_img = img.convert("RGB")
-            if max(width, height) > 768:
-                vis_img.thumbnail((768, 768))
-            vis_buf = io.BytesIO()
-            vis_img.save(vis_buf, format="JPEG", quality=85)
-            vision_bytes = vis_buf.getvalue()
+            # If already a compact JPEG <= 480px, reuse raw_bytes directly for vision with zero re-encoding overhead
+            if ext == ".jpg" and max(width, height) <= 480:
+                vision_bytes = raw_bytes
+            else:
+                vis_img = img.convert("RGB")
+                if max(width, height) > 384:
+                    vis_img.thumbnail((384, 384))
+                vis_buf = io.BytesIO()
+                vis_img.save(vis_buf, format="JPEG", quality=80)
+                vision_bytes = vis_buf.getvalue()
             return attach_bytes, vision_bytes, attach_ext
     except Exception:
         # Fallback for synthetic magic-byte payloads in unit tests where full Huffman/IDAT streams are mocked
@@ -750,7 +865,10 @@ def _prepare_image_bytes(raw_bytes: bytes) -> Optional[Tuple[bytes, bytes, str]]
         return None
 
 
-def _download_url_bytes_in_memory(url: str) -> Optional[bytes]:
+def _download_url_bytes_in_memory(
+    url: str,
+    timeout: Tuple[float, float] = (1.8, 3.0),
+) -> Optional[bytes]:
     """Fetch image bytes from a public URL strictly in memory with SSRF protection and size bounds."""
     if not url or not isinstance(url, str):
         return None
@@ -764,7 +882,7 @@ def _download_url_bytes_in_memory(url: str) -> Optional[bytes]:
             "GET",
             url,
             impersonate="chrome",
-            timeout=(2.5, 6.0),
+            timeout=timeout,
             headers={
                 "Accept": "image/jpeg,image/png,image/webp,image/gif,image/*;q=0.9,*/*;q=0.5",
             },
@@ -826,7 +944,7 @@ def _verify_image_with_vision(
                     }
                 ],
                 think=False,
-                options={"num_predict": 60, "temperature": 0.0},
+                options=_VISION_OPTIONS,
             )
         except TypeError:
             resp = ollama.chat(
@@ -838,7 +956,7 @@ def _verify_image_with_vision(
                         "images": [vision_bytes],
                     }
                 ],
-                options={"num_predict": 60, "temperature": 0.0},
+                options=_VISION_OPTIONS,
             )
         msg = getattr(resp, "message", None)
         raw_text = str(
@@ -878,13 +996,22 @@ def search_images(query: str) -> str:
     Args:
         query: The subject or thing to find a picture/photo/image of (e.g. 'capybara', '1995 Porsche 911 GT2', 'James Webb Carina Nebula').
     """
+    state = _get_channel_image_state()
+    seen_urls: BoundedSet = state["seen_urls"]
+
     clean_subject = _clean_image_query(query)
+    if (
+        not clean_subject
+        or clean_subject.lower() in _GENERIC_FOLLOWUP_SUBJECTS
+        or _DIFFERENT_IMAGE_FOLLOWUP_RE.search(query or "")
+    ):
+        clean_subject = str(state.get("last_subject") or "").strip()
     if not clean_subject:
         return "❌ Error: Image search query is empty. Please specify what you want a picture of."
 
     print(f"🖼️ [Image Search]: Searching web images for '{clean_subject}'...")
     try:
-        raw_candidates = list(DDGS().images(clean_subject, max_results=8) or [])
+        raw_candidates = list(DDGS().images(clean_subject, max_results=12) or [])
     except Exception as e:
         print(f"⚠️ [Image Search Error]: DDGS().images failed for '{clean_subject}': {e}")
         return f"❌ Failed to search web images for '{clean_subject}': {e}"
@@ -892,30 +1019,83 @@ def search_images(query: str) -> str:
     if not raw_candidates:
         return f"❌ No web images found for '{clean_subject}'."
 
+    # Filter out candidates already sent in this channel so 'get a different picture' always yields a fresh image
+    fresh_candidates = []
+    for c in raw_candidates:
+        if not isinstance(c, dict):
+            continue
+        p_url = str(c.get("image") or "").strip()
+        t_url = str(c.get("thumbnail") or "").strip()
+        if (p_url and p_url in seen_urls) or (t_url and t_url in seen_urls):
+            continue
+        fresh_candidates.append(c)
+
+    # If all 12 candidates were somehow already shown in this channel, reset seen_urls for fresh cycling
+    candidates_to_check = fresh_candidates if fresh_candidates else [c for c in raw_candidates if isinstance(c, dict)]
+
     max_vision_attempts = 4
     vision_attempts = 0
     fallback_candidate: Optional[Tuple[bytes, str, dict, str]] = None
 
-    for idx, cand in enumerate(raw_candidates, 1):
-        if not isinstance(cand, dict):
-            continue
+    for idx, cand in enumerate(candidates_to_check, 1):
         w = int(cand.get("width") or 0)
         h = int(cand.get("height") or 0)
         if (w and w < 100) or (h and h < 100):
             continue
 
-        downloaded = _download_candidate_image_in_memory(cand)
-        if downloaded is None:
-            continue
-
-        attach_bytes, vision_bytes, ext = downloaded
+        primary_url = str(cand.get("image") or "").strip()
+        thumb_url = str(cand.get("thumbnail") or "").strip()
         title = str(cand.get("title") or clean_subject).strip()
-        source_page = str(cand.get("url") or cand.get("image") or "").strip()
+        source_page = str(cand.get("url") or primary_url or thumb_url).strip()
+
+        # 1. Fetch the fast CDN thumbnail (~25 KB, ~70ms) first for vision verification so we never
+        # wait on slow/blocked origin servers for candidates that might fail verification.
+        thumb_prep = None
+        primary_prep = None
+
+        if thumb_url:
+            thumb_raw = _download_url_bytes_in_memory(thumb_url, timeout=(1.2, 2.0))
+            if thumb_raw:
+                thumb_prep = _prepare_image_bytes(thumb_raw)
+
+        if thumb_prep is not None:
+            vision_bytes = thumb_prep[1]
+        else:
+            if primary_url:
+                primary_raw = _download_url_bytes_in_memory(primary_url, timeout=(1.5, 2.5))
+                if primary_raw:
+                    primary_prep = _prepare_image_bytes(primary_raw)
+            if primary_prep is None:
+                continue
+            vision_bytes = primary_prep[1]
 
         vision_attempts += 1
         verdict, vision_desc = _verify_image_with_vision(vision_bytes, clean_subject, title)
 
+        if verdict is False:
+            print(f"🔍 [Image Vision Reject]: Candidate #{idx} ('{title[:50]}') rejected by {_VISION_MODEL}: {vision_desc}")
+            if vision_attempts >= max_vision_attempts:
+                break
+            continue
+
+        # 2. Candidate passed vision (or fallback needed): upgrade to full-res origin image if fast & unblocked,
+        # otherwise immediately use the already-verified CDN thumbnail in RAM.
+        if primary_prep is None and primary_url:
+            primary_raw = _download_url_bytes_in_memory(primary_url, timeout=(1.2, 2.0))
+            if primary_raw:
+                primary_prep = _prepare_image_bytes(primary_raw)
+
+        chosen_prep = primary_prep if primary_prep is not None else thumb_prep
+        if chosen_prep is None:
+            continue
+        attach_bytes, _, ext = chosen_prep
+
         if verdict is True:
+            state["last_subject"] = clean_subject
+            if primary_url:
+                seen_urls.add(primary_url)
+            if thumb_url:
+                seen_urls.add(thumb_url)
             filename = _build_safe_image_filename(clean_subject, ext)
             queue_channel_attachment(filename, attach_bytes, caption=title)
             print(f"✅ [Image Vision Verified]: Candidate #{idx} ('{title[:60]}') verified by {_VISION_MODEL} -> {filename} ({len(attach_bytes):,} bytes in RAM)")
@@ -932,12 +1112,9 @@ def search_images(query: str) -> str:
                 "• CRITICAL: Do NOT include raw image URLs or Markdown `![...](...)` image tags in your text, or Discord will render a duplicate preview."
             )
 
-        if verdict is False:
-            print(f"🔍 [Image Vision Reject]: Candidate #{idx} ('{title[:50]}') rejected by {_VISION_MODEL}: {vision_desc}")
-        else:
-            print(f"⚠️ [Image Vision Unavailable/Uncertain]: Candidate #{idx}: {vision_desc}")
-            if fallback_candidate is None:
-                fallback_candidate = (attach_bytes, ext, cand, vision_desc)
+        print(f"⚠️ [Image Vision Unavailable/Uncertain]: Candidate #{idx}: {vision_desc}")
+        if fallback_candidate is None:
+            fallback_candidate = (attach_bytes, ext, cand, vision_desc)
 
         if vision_attempts >= max_vision_attempts:
             break
@@ -945,8 +1122,15 @@ def search_images(query: str) -> str:
     # If vision model was unavailable/uncertain (not an explicit NO rejection), attach the top valid downloaded image
     if fallback_candidate is not None:
         attach_bytes, ext, cand, vision_note = fallback_candidate
+        primary_url = str(cand.get("image") or "").strip()
+        thumb_url = str(cand.get("thumbnail") or "").strip()
+        state["last_subject"] = clean_subject
+        if primary_url:
+            seen_urls.add(primary_url)
+        if thumb_url:
+            seen_urls.add(thumb_url)
         title = str(cand.get("title") or clean_subject).strip()
-        source_page = str(cand.get("url") or cand.get("image") or "").strip()
+        source_page = str(cand.get("url") or primary_url or thumb_url).strip()
         filename = _build_safe_image_filename(clean_subject, ext)
         queue_channel_attachment(filename, attach_bytes, caption=title)
         print(f"✅ [Image Fallback Attached]: '{title[:60]}' -> {filename} ({len(attach_bytes):,} bytes in RAM)")
@@ -968,9 +1152,12 @@ def search_images(query: str) -> str:
     )
 
 
-def detect_missed_image_tool_call(history: list) -> Optional[Tuple[str, dict]]:
-    """Detect when a user explicitly asks for a picture/photo/image of X on turn 0
-    and recover by calling `search_images(query=X)`."""
+def detect_missed_image_tool_call(
+    history: list,
+    active_channel_id: Optional[int] = None,
+) -> Optional[Tuple[str, dict]]:
+    """Detect when a user explicitly asks for a picture/photo/image of X (or 'get a different picture')
+    on turn 0 and recover by calling `search_images(query=X)`."""
     if not history:
         return None
 
@@ -995,12 +1182,20 @@ def detect_missed_image_tool_call(history: list) -> Optional[Tuple[str, dict]]:
     if _CHART_OR_OTHER_SKILL_GUARD_RE.search(cleaned):
         return None
 
+    # Check for 'get a different picture' / 'show me another photo' follow-ups first
+    if _DIFFERENT_IMAGE_FOLLOWUP_RE.search(cleaned):
+        prior_subj = _extract_last_image_subject_from_history(history, active_channel_id)
+        if prior_subj:
+            return ("search_images", {"query": prior_subj})
+
     m = _EXPLICIT_IMAGE_REQUEST_RE.search(cleaned)
     if not m:
         return None
 
     raw_subject = (m.group("q1") or m.group("q2") or "").strip()
     subject = _clean_image_query(raw_subject)
+    if not subject or subject.lower() in _GENERIC_FOLLOWUP_SUBJECTS:
+        subject = _extract_last_image_subject_from_history(history, active_channel_id)
     if not subject or len(subject) < 2:
         return None
 

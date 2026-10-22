@@ -61,13 +61,13 @@ RESEARCH_TOOLS = {
     "skill_markets_info": skill_markets_info,
     "skill_graphing_info": skill_graphing_info,
     "skill_voice_info": skill_voice_info,
+    "search_images": search_images,
 }
 
 # Chat mode is a casual persona on a small model: keep the tool list short so the
 # schemas don't eat context and the model isn't tempted into niche tools.
 CHAT_TOOLS = {
     **SYSTEM_TOOLS,
-    "search_images": search_images,
     "skill_youtube_search": skill_youtube_search,
     "skill_voice_info": skill_voice_info,
 }

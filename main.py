@@ -66,6 +66,7 @@ from src.orchestrator import (
     enrich_markets_tool_args,
     enrich_graphing_tool_args,
     enrich_voice_tool_args,
+    enrich_image_tool_args,
     enrich_tool_output_with_time_context,
     detect_missed_sports_tool_call,
     detect_missed_music_shift_tool_call,
@@ -697,6 +698,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
         "save_memory",
     }
     hide_tools_next_step = False
+    fast_image_caption_next_step = False
     iterations = 0
     reply = ""
     while iterations < max_iterations:
@@ -711,7 +713,13 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
         if supports_tools and tool_functions and (fast_voice_turn or not hide_tools_next_step):
             chat_kwargs["tools"] = tool_functions
 
-        if fast_voice_turn:
+        fast_image_step0 = (
+            iterations == 0
+            and supports_tools
+            and "search_images" in active_tools
+            and detect_missed_image_tool_call(history, active_channel_id=channel_id) is not None
+        )
+        if fast_voice_turn or fast_image_caption_next_step or fast_image_step0:
             try:
                 response = await ollama_client.chat(**chat_kwargs, think=False)
             except TypeError:
@@ -754,7 +762,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     or detect_missed_flight_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_graphing_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_markets_tool_call(history, active_channel_id=channel_id)
-                    or detect_missed_image_tool_call(history)
+                    or detect_missed_image_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_voice_tool_call(history, active_channel_id=channel_id)
                 )
                 if missed and missed[0] in active_tools:
@@ -768,6 +776,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                         forced_args = enrich_markets_tool_args(forced_args, history, active_channel_id=channel_id)
                     elif forced_tool_name == "skill_graphing_info":
                         forced_args = enrich_graphing_tool_args(forced_args, history, active_channel_id=channel_id)
+                    elif forced_tool_name == "search_images":
+                        forced_args = enrich_image_tool_args(forced_args, history, active_channel_id=channel_id)
                     elif forced_tool_name == "skill_voice_info":
                         forced_args = enrich_voice_tool_args(forced_args, history, active_channel_id=channel_id)
                         if (
@@ -802,7 +812,10 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                         "name": forced_tool_name,
                         "content": _format_tool_output_for_turn(str(tool_output)),
                     })
-                    if fast_voice_turn and (
+                    if forced_tool_name == "search_images":
+                        hide_tools_next_step = True
+                        fast_image_caption_next_step = True
+                    elif fast_voice_turn and (
                         forced_tool_name in _TERMINAL_SKILLS
                         or "youtube.com/watch?v=" in str(tool_output)
                     ):
@@ -883,7 +896,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
             and not any(c.function.name in ("search_images", "skill_graphing_info") for c in tool_calls)
             and any(c.function.name == "search_web" for c in tool_calls)
         ):
-            missed_img = detect_missed_image_tool_call(history)
+            missed_img = detect_missed_image_tool_call(history, active_channel_id=channel_id)
             if missed_img and missed_img[0] == "search_images":
                 print(f"⚡ [{current_mode.upper()}] Co-executing missed search_images alongside search_web: {missed_img[1]}")
                 tool_calls = list(tool_calls) + [
@@ -894,6 +907,18 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                         )
                     )
                 ]
+
+        # Single-image-per-turn guard: prevent duplicate parallel search_images calls in the same step
+        if sum(1 for c in tool_calls if c.function.name == "search_images") > 1:
+            seen_img_call = False
+            deduped_calls = []
+            for c in tool_calls:
+                if c.function.name == "search_images":
+                    if seen_img_call:
+                        continue
+                    seen_img_call = True
+                deduped_calls.append(c)
+            tool_calls = deduped_calls
 
         print(f"⚡ [{current_mode.upper()}] Model requested {len(tool_calls)} tools simultaneously!")
         has_top_music = any(call.function.name == "skill_music_discovery" for call in tool_calls)
@@ -932,6 +957,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     args = enrich_markets_tool_args(args, history, active_channel_id=channel_id)
                 elif tool_name == "skill_graphing_info":
                     args = enrich_graphing_tool_args(args, history, active_channel_id=channel_id)
+                elif tool_name == "search_images":
+                    args = enrich_image_tool_args(args, history, active_channel_id=channel_id)
                 elif tool_name == "skill_voice_info":
                     args = enrich_voice_tool_args(args, history, active_channel_id=channel_id)
                     if (
@@ -1020,6 +1047,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
             or (fast_voice_turn and has_verified_music_link)
         ) and all("PARALLEL_EXECUTION_BLOCKED" not in r["content"] and not r["content"].startswith("⚠️") for r in tool_results):
             hide_tools_next_step = True
+            if "search_images" in called_names:
+                fast_image_caption_next_step = True
         iterations += 1
 
     if iterations >= max_iterations and not reply.strip():

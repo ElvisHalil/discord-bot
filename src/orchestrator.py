@@ -47,7 +47,10 @@ from src.skills.voice.context import (
     detect_missed_voice_tool_call,
     enrich_voice_tool_args,
 )
-from src.tools.web import detect_missed_image_tool_call
+from src.tools.web import (
+    detect_missed_image_tool_call,
+    enrich_image_tool_args,
+)
 from src.utils.domain_vocab import (
     EPHEMERAL_SPORTS_TOOLS as _EPHEMERAL_SPORTS_TOOLS,
     MONTH_MAP_SYNC as _MONTH_MAP_SYNC,
