@@ -67,6 +67,11 @@ def _record_visited_url(url: str) -> None:
     turn_set = _TURN_VISITED_URLS.get()
     if turn_set is not None:
         turn_set.add(url)
+    try:
+        state = _get_channel_image_state()
+        state["last_page_url"] = url
+    except Exception:
+        pass
 
 # Generic words that add nothing to a keyword-matched news search.
 _NEWS_FILLER = re.compile(
@@ -649,7 +654,7 @@ _VISION_OPTIONS = {
     "num_gpu": 99,
 }
 
-# Per-channel image memory: tracks {"last_subject": str, "seen_urls": BoundedSet}
+# Per-channel image memory: tracks {"last_subject": str, "last_page_url": str, "seen_urls": BoundedSet}
 IMAGE_CHANNEL_STATE = BoundedCache(maxsize=128)
 
 
@@ -659,6 +664,7 @@ def _get_channel_image_state(channel_id: Optional[int] = None) -> dict:
     if state is None:
         state = {
             "last_subject": "",
+            "last_page_url": "",
             "seen_urls": BoundedSet(maxsize=64),
         }
         IMAGE_CHANNEL_STATE[cid] = state
@@ -675,17 +681,51 @@ def clear_image_channel_state(channel_id: Optional[int] = None) -> None:
 
 _IMAGE_ADJECTIVES = (
     r"(?:clear|good|nice|real|actual|cool|high[-\s]?res(?:olution)?|full|"
-    r"different|another|other|new|second|next|better|fresh|alternate|alternative)"
+    r"different|another|other|new|second|next|better|fresh|alternate|alternative|main|hero)"
 )
+
+_IMAGE_COUNT_WORDS = {
+    "2": 2, "two": 2,
+    "3": 3, "three": 3,
+    "4": 4, "four": 4,
+}
+
+_MULTI_IMAGE_COUNT_RE = re.compile(
+    r"(?:"
+    r"\b(?P<num>[2-4]|two|three|four)\s+(?:(?:\w+[-\s]+){0,2})?(?:pictures?|pics?|photos?|photographs?|images?|snapshots?)\b"
+    r"|"
+    r"\ba\s+couple(?:\s+of)?\s+(?:(?:\w+[-\s]+){0,2})?(?:pictures?|pics?|photos?|photographs?|images?|snapshots?)\b"
+    r"|"
+    r"\b(?:a\s+few|several|multiple)\s+(?:(?:\w+[-\s]+){0,2})?(?:pictures?|pics?|photos?|photographs?|images?|snapshots?)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _extract_requested_image_count(text: str) -> int:
+    """Return 2..4 ONLY when the user's prompt explicitly asks for multiple pictures; otherwise strictly 1."""
+    if not text:
+        return 1
+    m = _MULTI_IMAGE_COUNT_RE.search(text)
+    if not m:
+        return 1
+    num_tok = (m.group("num") or "").strip().lower()
+    if num_tok in _IMAGE_COUNT_WORDS:
+        return _IMAGE_COUNT_WORDS[num_tok]
+    low = m.group(0).lower()
+    if "couple" in low:
+        return 2
+    return 3
+
 
 _IMAGE_PREFIX_STRIP_RE = re.compile(
     r"^(?:(?:hey|hi|yo|ok|okay|please|pls|can\s+you|could\s+you|would\s+you|go\s+ahead\s+and)\s+)*"
     r"(?:(?:get|grab|show|send|post|find|fetch|give|pull\s+up|display|share|search\s+for|look\s+up|"
     r"let(?:'s|\s+me)\s+see)\s+)?"
     r"(?:(?:me|us)\s+)?"
-    r"(?:(?:a|an|some|the|another)\s+)?"
+    r"(?:(?:a\s+couple(?:\s+of)?|a\s+few|several|multiple|[1-4]|one|two|three|four|a|an|some|the|another)\s+)?"
     rf"(?:{_IMAGE_ADJECTIVES}\s+)*"
-    r"(?:(?:pictures?|pics?|photos?|photographs?|images?|img|snapshots?)\s+(?:of|for|showing|depicting)\s+)",
+    r"(?:(?:pictures?|pics?|photos?|photographs?|images?|img|snapshots?)\s+(?:of|for|from|on|in|showing|depicting)\s+)",
     re.IGNORECASE,
 )
 
@@ -693,11 +733,11 @@ _EXPLICIT_IMAGE_REQUEST_RE = re.compile(
     r"(?:"
     r"\b(?:get|grab|show|send|post|find|fetch|give|pull\s+up|display|share|let(?:'s|\s+me)\s+see)\s+"
     r"(?:(?:me|us)\s+)?"
-    r"(?:(?:a|an|some|the|another)\s+)?"
+    r"(?:(?:a\s+couple(?:\s+of)?|a\s+few|several|multiple|[1-4]|one|two|three|four|a|an|some|the|another)\s+)?"
     rf"(?:{_IMAGE_ADJECTIVES}\s+)*"
-    r"(?:pictures?|pics?|photos?|photographs?|images?|snapshots?)\s+(?:of|for|showing|depicting)\s+(?P<q1>.+)"
+    r"(?:pictures?|pics?|photos?|photographs?|images?|snapshots?)\s+(?:of|for|from|on|in|showing|depicting)\s+(?P<q1>.+)"
     r"|"
-    rf"^\s*(?:please\s+)?(?:(?:a|an|the|another)\s+)?(?:{_IMAGE_ADJECTIVES}\s+)*(?:pictures?|pics?|photos?|photographs?|images?)\s+(?:of|for)\s+(?P<q2>.+)"
+    rf"^\s*(?:please\s+)?(?:(?:a\s+couple(?:\s+of)?|a\s+few|several|multiple|[1-4]|one|two|three|four|a|an|the|another)\s+)?(?:{_IMAGE_ADJECTIVES}\s+)*(?:pictures?|pics?|photos?|photographs?|images?)\s+(?:of|for|from|on)\s+(?P<q2>.+)"
     r")",
     re.IGNORECASE,
 )
@@ -709,14 +749,21 @@ _DIFFERENT_IMAGE_FOLLOWUP_RE = re.compile(
     r"(?:(?:a|an|the)\s+)?"
     r"(?:different|another|other|new|second|next|alternate|better)\s+"
     r"(?:pictures?|pics?|photos?|photographs?|images?|snapshots?|ones?)"
-    r"(?:\s+(?:of\s+(?:it|that|this|them|the\s+same(?:\s+thing|\s+one)?)|instead|please|pls))?\s*[?.!]*$"
+    r"(?:\s+(?:of\s+(?:it|that|this|them|the\s+same(?:\s+thing|\s+one)?)|from\s+(?:it|that|this)\s*(?:page|article|link|site|website)?|instead|please|pls))?\s*[?.!]*$"
     r"|"
     r"^\s*(?:please\s+)?(?:(?:a|an)\s+)?(?:different|another|other|new)\s+"
     r"(?:pictures?|pics?|photos?|photographs?|images?)"
-    r"(?:\s+(?:of\s+(?:it|that|this|them|the\s+same(?:\s+thing|\s+one)?)|instead|please|pls))?\s*[?.!]*$"
+    r"(?:\s+(?:of\s+(?:it|that|this|them|the\s+same(?:\s+thing|\s+one)?)|from\s+(?:it|that|this)\s*(?:page|article|link|site|website)?|instead|please|pls))?\s*[?.!]*$"
     r")",
     re.IGNORECASE,
 )
+
+_PAGE_REFERENCE_RE = re.compile(
+    r"\b(?:from|on|in)\s+(?:this|that|the)\s+(?:web\s*page|page|article|site|website|link|url|post|story)\b",
+    re.IGNORECASE,
+)
+
+_INLINE_URL_RE = re.compile(r"https?://[^\s<>\"'`)]+", re.IGNORECASE)
 
 _GENERIC_FOLLOWUP_SUBJECTS = frozenset({
     "", "it", "that", "this", "them", "one", "another", "another one",
@@ -724,6 +771,9 @@ _GENERIC_FOLLOWUP_SUBJECTS = frozenset({
     "same thing", "the same thing", "the same one", "same one",
     "different picture", "another picture", "different photo", "another photo",
     "different image", "another image", "picture", "photo", "image",
+    "page", "the page", "this page", "that page", "article", "the article",
+    "this article", "that article", "website", "the website", "this website",
+    "link", "the link", "this link", "that link", "url", "the url", "main", "hero",
 })
 
 _CHART_OR_OTHER_SKILL_GUARD_RE = re.compile(
@@ -735,20 +785,43 @@ _CHART_OR_OTHER_SKILL_GUARD_RE = re.compile(
 
 
 def _clean_image_query(query: str) -> str:
-    """Strip conversational prefixes ('get a picture of a ...', 'get a different picture of ...') to isolate the visual subject."""
+    """Strip conversational prefixes ('get a picture of a ...', 'get a different picture of ...') and URLs to isolate the visual subject."""
     q = (query or "").strip().strip('"\'`')
     q = re.sub(r"^\[[^\]]+\]\s*", "", q).strip()
+    q = _INLINE_URL_RE.sub("", q).strip()
+    q = _PAGE_REFERENCE_RE.sub("", q).strip()
     q = _IMAGE_PREFIX_STRIP_RE.sub("", q).strip()
     q = re.sub(
-        r"^(?:(?:a|an|another|different|other|new)\s+)*(?:pictures?|pics?|photos?|photographs?|images?)\s+(?:of|for)\s+",
+        r"^(?:(?:a\s+couple(?:\s+of)?|a\s+few|several|multiple|[1-4]|one|two|three|four|a|an|another|different|other|new)\s+)*(?:pictures?|pics?|photos?|photographs?|images?)\s+(?:of|for|from|on|in)\s+",
         "",
         q,
         flags=re.IGNORECASE,
     ).strip()
+    q = re.sub(r"\s+(?:from|on|in)\s*$", "", q, flags=re.IGNORECASE).strip()
     q = re.sub(r"^(?:a|an)\s+(?=[a-zA-Z0-9])", "", q, flags=re.IGNORECASE).strip()
     q = re.sub(r"\s+(?:please|pls|right\s+now|for\s+me|instead)\s*[?.!]*$", "", q, flags=re.IGNORECASE).strip()
-    q = q.rstrip("?.! ").strip('"\'`')
+    q = q.rstrip("?.! <>()").strip('"\'`')
     return q
+
+
+def _extract_last_page_url_from_history(history: Optional[list], channel_id: Optional[int] = None) -> str:
+    """Recover the most recently read or referenced webpage URL in the channel."""
+    state = _get_channel_image_state(channel_id)
+    if state.get("last_page_url"):
+        return str(state["last_page_url"])
+
+    for msg in reversed(history or []):
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        content = str((msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")) or "")
+        if role == "tool":
+            m_src = re.search(r"\*\*SOURCE URL:\*\*\s*(https?://[^\s\n()]+)", content)
+            if m_src:
+                return m_src.group(1).strip()
+        elif role == "user":
+            m_url = _INLINE_URL_RE.search(content)
+            if m_url:
+                return m_url.group(0).rstrip(".,;)>")
+    return ""
 
 
 def _extract_last_image_subject_from_history(history: Optional[list], channel_id: Optional[int] = None) -> str:
@@ -780,20 +853,45 @@ def _extract_last_image_subject_from_history(history: Optional[list], channel_id
 
 
 def enrich_image_tool_args(args: dict, history: list, active_channel_id: Optional[int] = None) -> dict:
-    """Resolve follow-up image queries ('get a different picture', 'another photo of the same thing')
-    using the channel's previous image subject."""
+    """Resolve follow-up image queries ('get a different picture', 'another photo of the same thing'),
+    webpage URL references ('from this page', inline URLs), and lock `count` strictly to what the user requested."""
     enriched = dict(args or {})
+    latest_user_text = ""
+    for msg in reversed(history or []):
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        if role == "user":
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+            latest_user_text = str(content or "").strip()
+            break
+
+    # Lock `count` strictly to what the user explicitly requested (default 1, max 4)
+    enriched["count"] = _extract_requested_image_count(latest_user_text)
+
     raw_q = str(enriched.get("query") or "").strip()
+    raw_url = str(enriched.get("url") or "").strip().strip("<>\"'`")
+
+    # Auto-detect inline URL in query or user message, or resolve 'from that article/page'
+    if not raw_url:
+        m_inline = _INLINE_URL_RE.search(raw_q) or _INLINE_URL_RE.search(latest_user_text)
+        if m_inline:
+            raw_url = m_inline.group(0).rstrip(".,;)>")
+        elif _PAGE_REFERENCE_RE.search(latest_user_text) or _PAGE_REFERENCE_RE.search(raw_q):
+            raw_url = _extract_last_page_url_from_history(history, active_channel_id)
+
+    if raw_url:
+        enriched["url"] = raw_url
+
     cleaned_q = _clean_image_query(raw_q)
 
     if not cleaned_q or cleaned_q.lower() in _GENERIC_FOLLOWUP_SUBJECTS or _DIFFERENT_IMAGE_FOLLOWUP_RE.search(raw_q):
         prior_subj = _extract_last_image_subject_from_history(history, active_channel_id)
-        if prior_subj:
+        if prior_subj and not raw_url:
             enriched["query"] = prior_subj
             return enriched
+        enriched["query"] = cleaned_q or prior_subj or "article image"
+        return enriched
 
-    if cleaned_q:
-        enriched["query"] = cleaned_q
+    enriched["query"] = cleaned_q
     return enriched
 
 
@@ -982,42 +1080,241 @@ def _verify_image_with_vision(
         return None, str(e)
 
 
-def _build_safe_image_filename(subject: str, ext: str) -> str:
+def _build_safe_image_filename(subject: str, ext: str, index: Optional[int] = None) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", subject.strip().lower()).strip("_")[:40] or "image"
     clean_ext = ext if ext.startswith(".") else f".{ext}"
+    if index is not None and index > 1:
+        return f"{slug}_{index}{clean_ext}"
     return f"{slug}{clean_ext}"
 
 
-def search_images(query: str) -> str:
-    """Search the web for an image of a requested subject, verify the image visually in memory using
-    `gemma4:e4b` vision, and attach the verified image directly to the Discord/Telegram response.
-    All image bytes are processed 100% in memory (`io.BytesIO`) and never written to disk.
+_UI_CHROME_IMAGE_URL_RE = re.compile(
+    r"(?:^|/|[._-])(?:logo|icon|favicon|avatar|sprite|badge|button|emoji|1x1|pixel|spacer|spinner|loader|ad|ads|banner)(?:[._/-]|$)",
+    re.IGNORECASE,
+)
+
+
+def _pick_best_srcset_url(srcset: str) -> str:
+    """Parse an HTML `srcset` attribute and return the URL with the largest width/density descriptor."""
+    if not srcset:
+        return ""
+    best_url = ""
+    best_score = -1.0
+    for part in srcset.split(","):
+        tokens = part.strip().split()
+        if not tokens:
+            continue
+        cand_url = tokens[0].strip()
+        if not cand_url or cand_url.startswith("data:"):
+            continue
+        score = 1.0
+        if len(tokens) > 1:
+            desc = tokens[1].lower()
+            m_num = re.match(r"^(\d+(?:\.\d+)?)(w|x)$", desc)
+            if m_num:
+                val = float(m_num.group(1))
+                score = val if m_num.group(2) == "w" else val * 500.0
+        if score >= best_score:
+            best_score = score
+            best_url = cand_url
+    return best_url
+
+
+def _extract_image_candidates_from_webpage(page_url: str, subject: str = "") -> list[dict]:
+    """Scrape, filter, and rank candidate images from a specific webpage URL in memory."""
+    norm_url = (page_url or "").strip().strip('"\'`<>()')
+    if not norm_url:
+        return []
+    if not norm_url.startswith(("http://", "https://")):
+        norm_url = f"https://{norm_url}"
+
+    parsed = urlparse.urlparse(norm_url)
+    if _is_private_or_local_host(parsed.hostname):
+        return []
+
+    if parsed.netloc.lower().endswith("news.google.com"):
+        decoded = decode_google_news_url(norm_url)
+        if decoded:
+            norm_url = decoded
+            parsed = urlparse.urlparse(norm_url)
+            if _is_private_or_local_host(parsed.hostname):
+                return []
+
+    try:
+        resp = _fetch_public("GET", norm_url, impersonate="chrome", timeout=(3.0, 8.0))
+        if getattr(resp, "status_code", 0) != 200:
+            return []
+        encoding = getattr(resp, "charset_encoding", None) or getattr(resp, "apparent_encoding", None) or "utf-8"
+        try:
+            resp.encoding = encoding
+            raw_html = resp.text
+        except Exception:
+            raw_html = resp.content.decode("utf-8", errors="replace")
+        base_url = str(getattr(resp, "url", None) or norm_url)
+    except Exception as e:
+        print(f"⚠️ [Webpage Image Extractor]: Failed to fetch {norm_url}: {e}")
+        return []
+
+    _record_visited_url(base_url)
+    soup = BeautifulSoup(raw_html[:400000], "html.parser")
+    page_title = soup.title.string.strip() if soup.title and soup.title.string else ""
+
+    candidates: list[dict] = []
+    seen_img_urls: set[str] = set()
+
+    def _add_candidate(raw_img_url: str, caption: str, priority_bonus: int = 0, w: int = 0, h: int = 0) -> None:
+        if not raw_img_url:
+            return
+        u = raw_img_url.strip()
+        if not u or u.startswith(("data:", "javascript:", "blob:")):
+            return
+        full_u = urlparse.urljoin(base_url, u)
+        path_lower = urlparse.urlparse(full_u).path.lower()
+        if path_lower.endswith((".svg", ".ico", ".mp4", ".webm", ".pdf")):
+            return
+        if _UI_CHROME_IMAGE_URL_RE.search(path_lower):
+            return
+        if full_u in seen_img_urls:
+            return
+        seen_img_urls.add(full_u)
+        clean_cap = re.sub(r"\s+", " ", (caption or page_title or subject or "Webpage Image")).strip()[:160]
+        candidates.append({
+            "image": full_u,
+            "thumbnail": "",
+            "title": clean_cap,
+            "url": base_url,
+            "width": w,
+            "height": h,
+            "_priority": priority_bonus,
+        })
+
+    # 1. OpenGraph & Twitter Card hero images
+    for meta_prop in ("og:image", "og:image:secure_url", "twitter:image", "twitter:image:src"):
+        for tag in soup.find_all("meta", attrs={"property": meta_prop}) + soup.find_all("meta", attrs={"name": meta_prop}):
+            content = str(tag.get("content") or "").strip()
+            if content:
+                _add_candidate(content, page_title, priority_bonus=3)
+
+    # Strip structural chrome before scanning <img> and <picture> tags
+    for noisy in soup(["script", "style", "noscript", "svg", "nav", "footer", "header", "form"]):
+        noisy.decompose()
+
+    # 2. Content <img> and <picture><source> tags
+    for img in soup.find_all("img"):
+        w_str = str(img.get("width") or "").strip()
+        h_str = str(img.get("height") or "").strip()
+        w_val = int(w_str) if w_str.isdigit() else 0
+        h_val = int(h_str) if h_str.isdigit() else 0
+        if (w_val and w_val < 80) or (h_val and h_val < 80):
+            continue
+
+        best_u = (
+            _pick_best_srcset_url(str(img.get("srcset") or img.get("data-srcset") or ""))
+            or str(img.get("data-src") or img.get("data-original") or img.get("data-lazy-src") or img.get("src") or "").strip()
+        )
+        if not best_u:
+            parent_pic = img.find_parent("picture")
+            if parent_pic:
+                for src_tag in parent_pic.find_all("source"):
+                    best_u = _pick_best_srcset_url(str(src_tag.get("srcset") or src_tag.get("data-srcset") or ""))
+                    if best_u:
+                        break
+        if not best_u:
+            continue
+
+        alt_txt = str(img.get("alt") or img.get("title") or "").strip()
+        fig_txt = ""
+        fig_parent = img.find_parent("figure")
+        if fig_parent:
+            fig_cap = fig_parent.find("figcaption")
+            if fig_cap:
+                fig_txt = fig_cap.get_text(" ", strip=True)
+        heading_txt = ""
+        prev_h = img.find_previous(["h1", "h2", "h3", "h4"])
+        if prev_h:
+            heading_txt = prev_h.get_text(" ", strip=True)
+
+        caption_parts = [p for p in (alt_txt, fig_txt, heading_txt, page_title) if p]
+        combined_caption = " — ".join(dict.fromkeys(caption_parts))
+        in_figure_or_article = 2 if (fig_parent or img.find_parent(["article", "main"])) else 1
+        _add_candidate(best_u, combined_caption, priority_bonus=in_figure_or_article, w=w_val, h=h_val)
+
+    if not candidates:
+        return []
+
+    # 3. Rank webpage images by relevance to `subject` keywords (if specific subject provided)
+    subj_clean = (subject or "").strip().lower()
+    subj_tokens = [
+        tok for tok in re.findall(r"[a-z0-9]{2,}", subj_clean)
+        if tok not in _GENERIC_FOLLOWUP_SUBJECTS and tok not in {"from", "page", "article", "website", "link", "url", "image", "picture", "photo"}
+    ]
+    if subj_tokens:
+        def _score_cand(c: dict) -> Tuple[int, int]:
+            haystack = f"{c.get('title', '')} {urlparse.urlparse(c.get('image', '')).path}".lower()
+            kw_hits = sum(1 for tok in subj_tokens if tok in haystack)
+            return (kw_hits, int(c.get("_priority") or 0))
+
+        candidates.sort(key=_score_cand, reverse=True)
+
+    return candidates
+
+
+def search_images(query: str, url: Optional[str] = None, count: Optional[int] = None) -> str:
+    """Search for verified image(s) of a requested subject across the web OR from a specific webpage URL,
+    verify each image visually in memory using `gemma4:e4b` vision, and attach the verified image(s)
+    directly to the Discord/Telegram response. All image bytes stay 100% in memory (`io.BytesIO`).
 
     Args:
-        query: The subject or thing to find a picture/photo/image of (e.g. 'capybara', '1995 Porsche 911 GT2', 'James Webb Carina Nebula').
+        query: The subject or specific image to find (e.g. 'capybara', 'benchmark chart', 'rear wing photo').
+        url: Optional specific webpage URL to extract image(s) directly from. Leave empty for general web image search.
+        count: Number of images to return (default 1; only set >1 when the user explicitly requests multiple pictures, max 4).
     """
     state = _get_channel_image_state()
     seen_urls: BoundedSet = state["seen_urls"]
 
-    clean_subject = _clean_image_query(query)
+    try:
+        target_count = max(1, min(int(count or 1), 4))
+    except (ValueError, TypeError):
+        target_count = 1
+
+    raw_query = (query or "").strip()
+    target_url = (url or "").strip().strip('"\'`<>()')
+    if not target_url:
+        m_inline = _INLINE_URL_RE.search(raw_query)
+        if m_inline:
+            target_url = m_inline.group(0).rstrip(".,;)>")
+        elif _PAGE_REFERENCE_RE.search(raw_query) and state.get("last_page_url"):
+            target_url = str(state["last_page_url"]).strip()
+
+    clean_subject = _clean_image_query(raw_query)
     if (
         not clean_subject
         or clean_subject.lower() in _GENERIC_FOLLOWUP_SUBJECTS
-        or _DIFFERENT_IMAGE_FOLLOWUP_RE.search(query or "")
+        or _DIFFERENT_IMAGE_FOLLOWUP_RE.search(raw_query)
     ):
-        clean_subject = str(state.get("last_subject") or "").strip()
-    if not clean_subject:
+        if not target_url:
+            clean_subject = str(state.get("last_subject") or "").strip()
+
+    if not clean_subject and not target_url:
         return "❌ Error: Image search query is empty. Please specify what you want a picture of."
 
-    print(f"🖼️ [Image Search]: Searching web images for '{clean_subject}'...")
-    try:
-        raw_candidates = list(DDGS().images(clean_subject, max_results=12) or [])
-    except Exception as e:
-        print(f"⚠️ [Image Search Error]: DDGS().images failed for '{clean_subject}': {e}")
-        return f"❌ Failed to search web images for '{clean_subject}': {e}"
-
-    if not raw_candidates:
-        return f"❌ No web images found for '{clean_subject}'."
+    if target_url:
+        state["last_page_url"] = target_url
+        print(f"🖼️ [Webpage Image Search]: Extracting images from {target_url} (target: '{clean_subject or 'main article image'}', count={target_count})...")
+        raw_candidates = _extract_image_candidates_from_webpage(target_url, clean_subject)
+        if not raw_candidates:
+            return f"❌ Could not find any extractable content images on `{target_url}`."
+        effective_subject = clean_subject if (clean_subject and clean_subject.lower() not in _GENERIC_FOLLOWUP_SUBJECTS) else (raw_candidates[0].get("title") or "article image")
+    else:
+        effective_subject = clean_subject
+        print(f"🖼️ [Image Search]: Searching web images for '{effective_subject}' (count={target_count})...")
+        try:
+            raw_candidates = list(DDGS().images(effective_subject, max_results=max(12, target_count * 5)) or [])
+        except Exception as e:
+            print(f"⚠️ [Image Search Error]: DDGS().images failed for '{effective_subject}': {e}")
+            return f"❌ Failed to search web images for '{effective_subject}': {e}"
+        if not raw_candidates:
+            return f"❌ No web images found for '{effective_subject}'."
 
     # Filter out candidates already sent in this channel so 'get a different picture' always yields a fresh image
     fresh_candidates = []
@@ -1030,12 +1327,12 @@ def search_images(query: str) -> str:
             continue
         fresh_candidates.append(c)
 
-    # If all 12 candidates were somehow already shown in this channel, reset seen_urls for fresh cycling
     candidates_to_check = fresh_candidates if fresh_candidates else [c for c in raw_candidates if isinstance(c, dict)]
 
-    max_vision_attempts = 4
+    max_vision_attempts = max(4, target_count * 3)
     vision_attempts = 0
-    fallback_candidate: Optional[Tuple[bytes, str, dict, str]] = None
+    verified_items: list[dict] = []
+    fallback_items: list[Tuple[bytes, str, dict, str]] = []
 
     for idx, cand in enumerate(candidates_to_check, 1):
         w = int(cand.get("width") or 0)
@@ -1045,8 +1342,8 @@ def search_images(query: str) -> str:
 
         primary_url = str(cand.get("image") or "").strip()
         thumb_url = str(cand.get("thumbnail") or "").strip()
-        title = str(cand.get("title") or clean_subject).strip()
-        source_page = str(cand.get("url") or primary_url or thumb_url).strip()
+        title = str(cand.get("title") or effective_subject).strip()
+        source_page = str(cand.get("url") or target_url or primary_url or thumb_url).strip()
 
         # 1. Fetch the fast CDN thumbnail (~25 KB, ~70ms) first for vision verification so we never
         # wait on slow/blocked origin servers for candidates that might fail verification.
@@ -1070,7 +1367,7 @@ def search_images(query: str) -> str:
             vision_bytes = primary_prep[1]
 
         vision_attempts += 1
-        verdict, vision_desc = _verify_image_with_vision(vision_bytes, clean_subject, title)
+        verdict, vision_desc = _verify_image_with_vision(vision_bytes, effective_subject, title)
 
         if verdict is False:
             print(f"🔍 [Image Vision Reject]: Candidate #{idx} ('{title[:50]}') rejected by {_VISION_MODEL}: {vision_desc}")
@@ -1091,64 +1388,88 @@ def search_images(query: str) -> str:
         attach_bytes, _, ext = chosen_prep
 
         if verdict is True:
-            state["last_subject"] = clean_subject
+            state["last_subject"] = effective_subject
             if primary_url:
                 seen_urls.add(primary_url)
             if thumb_url:
                 seen_urls.add(thumb_url)
-            filename = _build_safe_image_filename(clean_subject, ext)
+            file_idx = len(verified_items) + 1 if target_count > 1 else None
+            filename = _build_safe_image_filename(effective_subject, ext, index=file_idx)
             queue_channel_attachment(filename, attach_bytes, caption=title)
             print(f"✅ [Image Vision Verified]: Candidate #{idx} ('{title[:60]}') verified by {_VISION_MODEL} -> {filename} ({len(attach_bytes):,} bytes in RAM)")
+            verified_items.append({
+                "filename": filename,
+                "size": len(attach_bytes),
+                "title": title,
+                "vision_desc": vision_desc,
+                "source_page": source_page,
+            })
+            if len(verified_items) >= target_count:
+                break
+        else:
+            print(f"⚠️ [Image Vision Unavailable/Uncertain]: Candidate #{idx}: {vision_desc}")
+            if len(fallback_items) < target_count:
+                fallback_items.append((attach_bytes, ext, cand, vision_desc))
+
+        if vision_attempts >= max_vision_attempts:
+            break
+
+    # If we need fallback items (when vision model was unavailable/uncertain, not an explicit NO rejection)
+    if not verified_items and fallback_items:
+        for f_idx, (attach_bytes, ext, cand, vision_note) in enumerate(fallback_items[:target_count], 1):
+            primary_url = str(cand.get("image") or "").strip()
+            thumb_url = str(cand.get("thumbnail") or "").strip()
+            state["last_subject"] = effective_subject
+            if primary_url:
+                seen_urls.add(primary_url)
+            if thumb_url:
+                seen_urls.add(thumb_url)
+            title = str(cand.get("title") or effective_subject).strip()
+            source_page = str(cand.get("url") or target_url or primary_url or thumb_url).strip()
+            filename = _build_safe_image_filename(effective_subject, ext, index=f_idx if target_count > 1 else None)
+            queue_channel_attachment(filename, attach_bytes, caption=title)
+            print(f"✅ [Image Fallback Attached]: '{title[:60]}' -> {filename} ({len(attach_bytes):,} bytes in RAM)")
+            verified_items.append({
+                "filename": filename,
+                "size": len(attach_bytes),
+                "title": title,
+                "vision_desc": vision_note,
+                "source_page": source_page,
+            })
+
+    if verified_items:
+        if len(verified_items) == 1:
+            it = verified_items[0]
             return (
                 f"[IMAGE VERIFIED & ATTACHED IN MEMORY]\n"
-                f"Subject: {clean_subject}\n"
-                f"Attached File: {filename} ({len(attach_bytes):,} bytes, RAM-only)\n"
-                f"Image Title: {title}\n"
-                f"Visual Verification ({_VISION_MODEL}): {vision_desc}\n"
-                f"Source Page: <{source_page}>\n\n"
+                f"Subject: {effective_subject}\n"
+                f"Attached File: {it['filename']} ({it['size']:,} bytes, RAM-only)\n"
+                f"Image Title: {it['title']}\n"
+                f"Visual Verification ({_VISION_MODEL}): {it['vision_desc']}\n"
+                f"Source Page: <{it['source_page']}>\n\n"
                 "--- RESPONSE INSTRUCTIONS FOR YOU (THE LLM) ---\n"
                 "• The verified image file is ALREADY attached directly to your Discord/Telegram reply.\n"
                 "• Write a brief, natural 1-2 sentence response presenting the image.\n"
                 "• CRITICAL: Do NOT include raw image URLs or Markdown `![...](...)` image tags in your text, or Discord will render a duplicate preview."
             )
-
-        print(f"⚠️ [Image Vision Unavailable/Uncertain]: Candidate #{idx}: {vision_desc}")
-        if fallback_candidate is None:
-            fallback_candidate = (attach_bytes, ext, cand, vision_desc)
-
-        if vision_attempts >= max_vision_attempts:
-            break
-
-    # If vision model was unavailable/uncertain (not an explicit NO rejection), attach the top valid downloaded image
-    if fallback_candidate is not None:
-        attach_bytes, ext, cand, vision_note = fallback_candidate
-        primary_url = str(cand.get("image") or "").strip()
-        thumb_url = str(cand.get("thumbnail") or "").strip()
-        state["last_subject"] = clean_subject
-        if primary_url:
-            seen_urls.add(primary_url)
-        if thumb_url:
-            seen_urls.add(thumb_url)
-        title = str(cand.get("title") or clean_subject).strip()
-        source_page = str(cand.get("url") or primary_url or thumb_url).strip()
-        filename = _build_safe_image_filename(clean_subject, ext)
-        queue_channel_attachment(filename, attach_bytes, caption=title)
-        print(f"✅ [Image Fallback Attached]: '{title[:60]}' -> {filename} ({len(attach_bytes):,} bytes in RAM)")
-        return (
-            f"[IMAGE ATTACHED IN MEMORY]\n"
-            f"Subject: {clean_subject}\n"
-            f"Attached File: {filename} ({len(attach_bytes):,} bytes, RAM-only)\n"
-            f"Image Title: {title}\n"
-            f"Source Page: <{source_page}>\n\n"
-            "--- RESPONSE INSTRUCTIONS FOR YOU (THE LLM) ---\n"
-            "• The image file is ALREADY attached directly to your Discord/Telegram reply.\n"
-            "• Write a brief, natural 1-2 sentence response presenting the image.\n"
-            "• CRITICAL: Do NOT include raw image URLs or Markdown `![...](...)` image tags in your text."
-        )
+        lines = [
+            f"[IMAGES VERIFIED & ATTACHED IN MEMORY ({len(verified_items)} images)]",
+            f"Subject: {effective_subject}",
+        ]
+        for i, it in enumerate(verified_items, 1):
+            lines.append(
+                f"{i}. {it['filename']} ({it['size']:,} bytes) — {it['title']} | "
+                f"Verified ({_VISION_MODEL}): {it['vision_desc']} | Source: <{it['source_page']}>"
+            )
+        lines.append("\n--- RESPONSE INSTRUCTIONS FOR YOU (THE LLM) ---")
+        lines.append(f"• All {len(verified_items)} verified image files are ALREADY attached directly to your Discord/Telegram reply.")
+        lines.append("• Write a brief, natural response presenting the images.")
+        lines.append("• CRITICAL: Do NOT include raw image URLs or Markdown `![...](...)` image tags in your text, or Discord will render duplicate previews.")
+        return "\n".join(lines)
 
     return (
-        f"❌ Searched web images for '{clean_subject}', but none of the candidate images passed visual verification "
-        f"(or all candidate URLs were unreachable). Tell the user you couldn't find a verified image matching '{clean_subject}'."
+        f"❌ Searched images for '{effective_subject}', but none of the candidate images passed visual verification "
+        f"(or all candidate URLs were unreachable). Tell the user you couldn't find a verified image matching '{effective_subject}'."
     )
 
 
@@ -1156,8 +1477,8 @@ def detect_missed_image_tool_call(
     history: list,
     active_channel_id: Optional[int] = None,
 ) -> Optional[Tuple[str, dict]]:
-    """Detect when a user explicitly asks for a picture/photo/image of X (or 'get a different picture')
-    on turn 0 and recover by calling `search_images(query=X)`."""
+    """Detect when a user explicitly asks for a picture/photo/image of X (or from a webpage URL,
+    or 'get a different picture') on turn 0 and recover by calling `search_images(...)`."""
     if not history:
         return None
 
@@ -1182,11 +1503,22 @@ def detect_missed_image_tool_call(
     if _CHART_OR_OTHER_SKILL_GUARD_RE.search(cleaned):
         return None
 
+    req_count = _extract_requested_image_count(cleaned)
+    inline_url_match = _INLINE_URL_RE.search(cleaned)
+    page_url = inline_url_match.group(0).rstrip(".,;)>") if inline_url_match else ""
+    if not page_url and _PAGE_REFERENCE_RE.search(cleaned):
+        page_url = _extract_last_page_url_from_history(history, active_channel_id)
+
     # Check for 'get a different picture' / 'show me another photo' follow-ups first
     if _DIFFERENT_IMAGE_FOLLOWUP_RE.search(cleaned):
         prior_subj = _extract_last_image_subject_from_history(history, active_channel_id)
-        if prior_subj:
-            return ("search_images", {"query": prior_subj})
+        if prior_subj or page_url:
+            out_args: dict = {"query": prior_subj or "article image"}
+            if page_url:
+                out_args["url"] = page_url
+            if req_count > 1:
+                out_args["count"] = req_count
+            return ("search_images", out_args)
 
     m = _EXPLICIT_IMAGE_REQUEST_RE.search(cleaned)
     if not m:
@@ -1195,11 +1527,19 @@ def detect_missed_image_tool_call(
     raw_subject = (m.group("q1") or m.group("q2") or "").strip()
     subject = _clean_image_query(raw_subject)
     if not subject or subject.lower() in _GENERIC_FOLLOWUP_SUBJECTS:
-        subject = _extract_last_image_subject_from_history(history, active_channel_id)
+        if page_url:
+            subject = "article image"
+        else:
+            subject = _extract_last_image_subject_from_history(history, active_channel_id)
     if not subject or len(subject) < 2:
         return None
 
-    return ("search_images", {"query": subject})
+    out_args = {"query": subject}
+    if page_url:
+        out_args["url"] = page_url
+    if req_count > 1:
+        out_args["count"] = req_count
+    return ("search_images", out_args)
 
 
 WEB_TOOLS = {

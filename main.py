@@ -894,7 +894,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
             and supports_tools
             and "search_images" in active_tools
             and not any(c.function.name in ("search_images", "skill_graphing_info") for c in tool_calls)
-            and any(c.function.name == "search_web" for c in tool_calls)
+            and any(c.function.name in ("search_web", "read_website") for c in tool_calls)
         ):
             missed_img = detect_missed_image_tool_call(history, active_channel_id=channel_id)
             if missed_img and missed_img[0] == "search_images":

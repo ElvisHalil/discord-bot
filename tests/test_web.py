@@ -603,6 +603,104 @@ class TestWebTools(unittest.TestCase):
         self.assertEqual(queued2[0]["filename"], "capybara.jpg")
         self.assertEqual(queued2[0]["data"], img3_bytes)
 
+    @patch("src.tools.web.ollama.chat")
+    @patch("src.tools.web._fetch_public")
+    def test_webpage_targeted_image_extraction_and_multi_image_count_guard(
+        self, mock_fetch_public, mock_ollama_chat
+    ):
+        import io
+        from PIL import Image
+
+        set_active_channel_id(112233)
+        clear_channel_attachments(112233)
+        clear_image_channel_state(112233)
+
+        hero_buf = io.BytesIO()
+        Image.new("RGB", (600, 400), color=(40, 40, 180)).save(hero_buf, format="JPEG", quality=90)
+        hero_bytes = hero_buf.getvalue()
+
+        wing_buf = io.BytesIO()
+        Image.new("RGB", (500, 350), color=(220, 80, 30)).save(wing_buf, format="PNG")
+        wing_bytes = wing_buf.getvalue()
+
+        page_html = """
+        <html>
+          <head>
+            <title>2026 F1 Technical Analysis</title>
+            <meta property="og:image" content="https://f1tech.example.com/images/full_car_hero.jpg" />
+          </head>
+          <body>
+            <nav><img src="/assets/logo.svg" width="120" height="40" /></nav>
+            <article>
+              <h2>Aerodynamic Upgrades</h2>
+              <figure>
+                <img srcset="/images/rear_wing_sm.png 480w, /images/rear_wing_hd.png 1200w" alt="Carbon Rear Wing Assembly" />
+                <figcaption>Detailed view of the new low-drag rear wing.</figcaption>
+              </figure>
+              <img src="/images/pixel.gif" width="1" height="1" />
+            </article>
+          </body>
+        </html>
+        """
+
+        def fetch_side_effect(method, url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.url = url
+            resp.charset_encoding = "utf-8"
+            if url == "https://f1tech.example.com/review":
+                resp.text = page_html
+                resp.content = page_html.encode("utf-8")
+            elif "rear_wing_hd.png" in url:
+                resp.content = wing_bytes
+            elif "full_car_hero.jpg" in url:
+                resp.content = hero_bytes
+            else:
+                resp.status_code = 404
+                resp.content = b""
+            return resp
+
+        mock_fetch_public.side_effect = fetch_side_effect
+        vis_ok = MagicMock()
+        vis_ok.message.content = "YES. Shows the carbon fiber rear wing assembly."
+        mock_ollama_chat.return_value = vis_ok
+
+        # 1. Targeted image from webpage: 'rear wing' ranks the <figure> srcset 1200w image first
+        res_wing = call_as_model(
+            search_images,
+            query="get the picture of the rear wing",
+            link="https://f1tech.example.com/review",
+        )
+        self.assertIn("[IMAGE VERIFIED & ATTACHED IN MEMORY]", res_wing)
+        self.assertIn("Carbon Rear Wing Assembly", res_wing)
+        atts = pop_channel_attachments(112233)
+        self.assertEqual(len(atts), 1)
+        self.assertEqual(atts[0]["data"], wing_bytes)
+
+        # 2. Guardrail: single-picture prompt locks count=1 even if model hallucinated count=3
+        single_enriched = enrich_image_tool_args(
+            {"query": "rear wing", "count": 3},
+            [{"role": "user", "content": "get a picture of the rear wing from that article"}],
+            active_channel_id=112233,
+        )
+        self.assertEqual(single_enriched["count"], 1)
+        self.assertEqual(single_enriched["url"], "https://f1tech.example.com/review")
+
+        # 3. Explicit multi-image prompt ('get 2 pictures from that page') sets count=2
+        multi_enriched = enrich_image_tool_args(
+            {"query": "car photos"},
+            [{"role": "user", "content": "get 2 pictures from that article"}],
+            active_channel_id=112233,
+        )
+        self.assertEqual(multi_enriched["count"], 2)
+        self.assertEqual(multi_enriched["url"], "https://f1tech.example.com/review")
+
+        clear_image_channel_state(112233)
+        res_multi = search_images(query="F1 car", url="https://f1tech.example.com/review", count=2)
+        self.assertIn("2 images", res_multi)
+        atts_multi = pop_channel_attachments(112233)
+        self.assertEqual(len(atts_multi), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
