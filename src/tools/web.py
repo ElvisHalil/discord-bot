@@ -654,7 +654,7 @@ _VISION_OPTIONS = {
     "num_gpu": 99,
 }
 
-# Per-channel image memory: tracks {"last_subject": str, "last_page_url": str, "seen_urls": BoundedSet}
+# Per-channel image memory: tracks {"last_subject": str, "last_page_url": str, "last_search_url": str, "seen_urls": BoundedSet}
 IMAGE_CHANNEL_STATE = BoundedCache(maxsize=128)
 
 
@@ -665,6 +665,7 @@ def _get_channel_image_state(channel_id: Optional[int] = None) -> dict:
         state = {
             "last_subject": "",
             "last_page_url": "",
+            "last_search_url": "",
             "seen_urls": BoundedSet(maxsize=64),
         }
         IMAGE_CHANNEL_STATE[cid] = state
@@ -878,17 +879,32 @@ def enrich_image_tool_args(args: dict, history: list, active_channel_id: Optiona
         elif _PAGE_REFERENCE_RE.search(latest_user_text) or _PAGE_REFERENCE_RE.search(raw_q):
             raw_url = _extract_last_page_url_from_history(history, active_channel_id)
 
+    cleaned_q = _clean_image_query(raw_q)
+    is_followup = (
+        not cleaned_q
+        or cleaned_q.lower() in _GENERIC_FOLLOWUP_SUBJECTS
+        or bool(_DIFFERENT_IMAGE_FOLLOWUP_RE.search(raw_q))
+        or bool(_DIFFERENT_IMAGE_FOLLOWUP_RE.search(latest_user_text))
+    )
+
+    if not raw_url and is_followup:
+        state = _get_channel_image_state(active_channel_id)
+        if state.get("last_search_url"):
+            raw_url = str(state["last_search_url"]).strip()
+
     if raw_url:
         enriched["url"] = raw_url
 
-    cleaned_q = _clean_image_query(raw_q)
-
-    if not cleaned_q or cleaned_q.lower() in _GENERIC_FOLLOWUP_SUBJECTS or _DIFFERENT_IMAGE_FOLLOWUP_RE.search(raw_q):
+    if is_followup:
         prior_subj = _extract_last_image_subject_from_history(history, active_channel_id)
         if prior_subj and not raw_url:
             enriched["query"] = prior_subj
             return enriched
-        enriched["query"] = cleaned_q or prior_subj or "article image"
+        enriched["query"] = (
+            cleaned_q
+            if (cleaned_q and cleaned_q.lower() not in _GENERIC_FOLLOWUP_SUBJECTS)
+            else (prior_subj or "article image")
+        )
         return enriched
 
     enriched["query"] = cleaned_q
@@ -1278,6 +1294,11 @@ def search_images(query: str, url: Optional[str] = None, count: Optional[int] = 
         target_count = 1
 
     raw_query = (query or "").strip()
+    is_followup_query = (
+        not _clean_image_query(raw_query)
+        or _clean_image_query(raw_query).lower() in _GENERIC_FOLLOWUP_SUBJECTS
+        or bool(_DIFFERENT_IMAGE_FOLLOWUP_RE.search(raw_query))
+    )
     target_url = (url or "").strip().strip('"\'`<>()')
     if not target_url:
         m_inline = _INLINE_URL_RE.search(raw_query)
@@ -1285,27 +1306,26 @@ def search_images(query: str, url: Optional[str] = None, count: Optional[int] = 
             target_url = m_inline.group(0).rstrip(".,;)>")
         elif _PAGE_REFERENCE_RE.search(raw_query) and state.get("last_page_url"):
             target_url = str(state["last_page_url"]).strip()
+        elif is_followup_query and state.get("last_search_url"):
+            target_url = str(state["last_search_url"]).strip()
 
     clean_subject = _clean_image_query(raw_query)
-    if (
-        not clean_subject
-        or clean_subject.lower() in _GENERIC_FOLLOWUP_SUBJECTS
-        or _DIFFERENT_IMAGE_FOLLOWUP_RE.search(raw_query)
-    ):
-        if not target_url:
-            clean_subject = str(state.get("last_subject") or "").strip()
+    if is_followup_query:
+        clean_subject = str(state.get("last_subject") or "").strip()
 
     if not clean_subject and not target_url:
         return "❌ Error: Image search query is empty. Please specify what you want a picture of."
 
     if target_url:
         state["last_page_url"] = target_url
+        state["last_search_url"] = target_url
         print(f"🖼️ [Webpage Image Search]: Extracting images from {target_url} (target: '{clean_subject or 'main article image'}', count={target_count})...")
         raw_candidates = _extract_image_candidates_from_webpage(target_url, clean_subject)
         if not raw_candidates:
             return f"❌ Could not find any extractable content images on `{target_url}`."
         effective_subject = clean_subject if (clean_subject and clean_subject.lower() not in _GENERIC_FOLLOWUP_SUBJECTS) else (raw_candidates[0].get("title") or "article image")
     else:
+        state["last_search_url"] = ""
         effective_subject = clean_subject
         print(f"🖼️ [Image Search]: Searching web images for '{effective_subject}' (count={target_count})...")
         try:
@@ -1316,7 +1336,7 @@ def search_images(query: str, url: Optional[str] = None, count: Optional[int] = 
         if not raw_candidates:
             return f"❌ No web images found for '{effective_subject}'."
 
-    # Filter out candidates already sent in this channel so 'get a different picture' always yields a fresh image
+    # Filter out candidates already sent in this channel so 'get a different picture' NEVER repeats an image in the session
     fresh_candidates = []
     for c in raw_candidates:
         if not isinstance(c, dict):
@@ -1327,7 +1347,14 @@ def search_images(query: str, url: Optional[str] = None, count: Optional[int] = 
             continue
         fresh_candidates.append(c)
 
-    candidates_to_check = fresh_candidates if fresh_candidates else [c for c in raw_candidates if isinstance(c, dict)]
+    if not fresh_candidates:
+        return (
+            f"❌ All available candidate images for '{effective_subject}'"
+            + (f" on `{target_url}`" if target_url else "")
+            + " have already been shown in this session. Try a more specific search query or another page."
+        )
+
+    candidates_to_check = fresh_candidates
 
     max_vision_attempts = max(4, target_count * 3)
     vision_attempts = 0
@@ -1512,10 +1539,12 @@ def detect_missed_image_tool_call(
     # Check for 'get a different picture' / 'show me another photo' follow-ups first
     if _DIFFERENT_IMAGE_FOLLOWUP_RE.search(cleaned):
         prior_subj = _extract_last_image_subject_from_history(history, active_channel_id)
-        if prior_subj or page_url:
+        state = _get_channel_image_state(active_channel_id)
+        followup_url = page_url or str(state.get("last_search_url") or "").strip()
+        if prior_subj or followup_url:
             out_args: dict = {"query": prior_subj or "article image"}
-            if page_url:
-                out_args["url"] = page_url
+            if followup_url:
+                out_args["url"] = followup_url
             if req_count > 1:
                 out_args["count"] = req_count
             return ("search_images", out_args)
