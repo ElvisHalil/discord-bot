@@ -381,6 +381,24 @@ def skill_music_discovery(
         except Exception as e:
             return f"Error finding tracks for artist '{artist}': {e}"
 
+    if genre and re.match(
+        r"^\s*(?:next|skip|another)(?:\s+(?:song|track|one|tune|please|pls))?\s*[.?!]*$",
+        genre.strip(),
+        re.IGNORECASE,
+    ):
+        genre = None
+
+    if not genre and not similar_to and not artist and not mood and not shift_raw:
+        try:
+            from src.context import get_active_channel_id
+            from src.jobs.engine import JOB_ENGINE
+
+            active_ap = JOB_ENGINE.get_active_autoplay_job(get_active_channel_id())
+            if active_ap and active_ap.payload_text and active_ap.payload_text.lower() != "top tracks":
+                genre = active_ap.payload_text
+        except Exception:
+            pass
+
     if genre and not similar_to and not artist and not mood and not shift_raw:
         m_spec_song = re.match(r"^(?:play\s+)?(?:the\s+song\s+)?(.+?\s+by\s+.+?)$", genre.strip(), re.IGNORECASE)
         if m_spec_song and not re.match(r"^(?:play\s+)?(?:a\s+|some\s+)?(?:songs?|tracks?|music)\s+by\s+", genre.strip(), re.IGNORECASE):

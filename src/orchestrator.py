@@ -47,6 +47,10 @@ from src.skills.voice.context import (
     detect_missed_voice_tool_call,
     enrich_voice_tool_args,
 )
+from src.skills.jobs import (
+    detect_missed_job_tool_call,
+    enrich_job_tool_args,
+)
 from src.tools.web import (
     detect_missed_image_tool_call,
     enrich_image_tool_args,

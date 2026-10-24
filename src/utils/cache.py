@@ -53,6 +53,7 @@ class BoundedCache(OrderedDict):
 
 
 class BoundedSet:
+    __class_getitem__ = classmethod(lambda cls, item: cls)
     """Thread-safe bounded FIFO/LRU set for tracking visited URLs or keys."""
 
     def __init__(self, maxsize: int = 1024, iterable: Optional[Iterable[Any]] = None) -> None:

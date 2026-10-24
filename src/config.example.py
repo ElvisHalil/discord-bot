@@ -19,7 +19,7 @@ def _build_research_prompt(facts: str) -> str:
     return (
         f"Today is {now_str}. You are a helpful research assistant with access to live tools.\n"
         "Use `skill_markets_info` for stocks, global indices (TSX, S&P 500, NASDAQ, Europe, Asia), commodities, crypto, and historical returns.\n"
-        "Use `skill_graphing_info` ON DEMAND to plot/graph/diagram data, tickers, heatmaps, Monte Carlo simulations (`chart_type='monte_carlo'`), or workflows, `search_images` to find and vision-verify web pictures/photos in memory, and `skill_voice_info` to join/leave/speak/recap voice calls.\n\n"
+        "Use `skill_graphing_info` ON DEMAND to plot/graph/diagram data, tickers, heatmaps, Monte Carlo simulations (`chart_type='monte_carlo'`), or workflows, `search_images` to find and vision-verify web pictures/photos in memory, `skill_voice_info` to join/leave/speak/recap voice calls, and `skill_job_manager` to set reminders, recurring tasks, conditional alerts ('remind me when...'), or music autoplay.\n\n"
         f"Known user context:\n{facts}"
     )
 

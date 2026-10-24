@@ -62,6 +62,7 @@ class DeezerAggregator(BaseMusicAggregator):
         fallback_title = clean_title
         fallback_artist = clean_artist
         fallback_album = None
+        fallback_duration = 0
 
         if not resolved_id:
             if not clean_title:
@@ -117,6 +118,10 @@ class DeezerAggregator(BaseMusicAggregator):
                 fallback_title = matched_item.get("title") or clean_title
                 fallback_artist = (matched_item.get("artist") or {}).get("name") or clean_artist
                 fallback_album = (matched_item.get("album") or {}).get("title")
+                try:
+                    fallback_duration = int(matched_item.get("duration") or 0)
+                except (ValueError, TypeError):
+                    fallback_duration = 0
             except Exception:
                 return None
 
@@ -129,6 +134,7 @@ class DeezerAggregator(BaseMusicAggregator):
             "artist": fallback_artist,
             "album": fallback_album,
             "preview": fallback_preview,
+            "duration": fallback_duration,
             "bpm": 0.0,
             "gain": None,
         }
@@ -141,6 +147,12 @@ class DeezerAggregator(BaseMusicAggregator):
                 detail["artist"] = (trk_json.get("artist") or {}).get("name") or detail["artist"]
                 detail["album"] = (trk_json.get("album") or {}).get("title") or detail["album"]
                 detail["preview"] = trk_json.get("preview") or detail["preview"]
+                raw_dur = trk_json.get("duration")
+                if raw_dur is not None:
+                    try:
+                        detail["duration"] = int(raw_dur)
+                    except (ValueError, TypeError):
+                        pass
                 raw_bpm = trk_json.get("bpm")
                 if raw_bpm is not None:
                     try:

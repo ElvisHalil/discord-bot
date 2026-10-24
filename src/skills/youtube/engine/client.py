@@ -29,6 +29,7 @@ youtube_http_get = _http_get
 _OEMBED_CACHE: dict[str, dict] = BoundedCache(maxsize=512)
 _EMBEDDABLE_CACHE: dict[str, bool] = BoundedCache(maxsize=512)
 _SHORT_CACHE: dict[str, bool] = BoundedCache(maxsize=512)
+_DURATION_CACHE: dict[str, int] = BoundedCache(maxsize=512)
 
 
 def get_cached_oembed(vid: str) -> dict | None:
@@ -36,11 +37,21 @@ def get_cached_oembed(vid: str) -> dict | None:
     return _OEMBED_CACHE.get(vid) if vid else None
 
 
+def get_video_duration_seconds(vid: str) -> int | None:
+    """Return cached or fetched video duration in seconds for a YouTube video ID, or None."""
+    if not vid:
+        return None
+    if vid in _DURATION_CACHE:
+        return _DURATION_CACHE[vid]
+    return None
+
+
 def clear_youtube_caches() -> None:
     """Clears in-memory YouTube verification and oEmbed caches."""
     _OEMBED_CACHE.clear()
     _EMBEDDABLE_CACHE.clear()
     _SHORT_CACHE.clear()
+    _DURATION_CACHE.clear()
 
 
 def verify_embeddable(vid: str) -> bool:
@@ -101,6 +112,15 @@ def verify_embeddable(vid: str) -> bool:
             print(f"⚠️ [YouTube]: Skipping {vid} because embed page indicated unplayable/disabled on Discord.")
             _EMBEDDABLE_CACHE[vid] = False
             return False
+
+        m_dur = re.search(r'(?:\\?"lengthSeconds\\?"\s*:\s*\\?"(\d+)\\?"|length_seconds["\':=]+(\d+))', embed_text)
+        if m_dur:
+            try:
+                dur_val = int(m_dur.group(1) or m_dur.group(2) or 0)
+                if dur_val > 0:
+                    _DURATION_CACHE[vid] = dur_val
+            except (ValueError, TypeError):
+                pass
 
         _EMBEDDABLE_CACHE[vid] = True
         return True

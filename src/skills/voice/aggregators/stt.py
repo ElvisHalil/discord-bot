@@ -188,21 +188,35 @@ class VoiceSttAggregator(BaseVoiceAggregator):
             return
         try:
             import importlib
+            import warnings
 
             if importlib.util.find_spec("faster_whisper") is None:
                 return
-            fw_mod = importlib.import_module("faster_whisper")
             os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+            os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+            os.environ.setdefault("HF_HUB_VERBOSITY", "error")
+            logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+            warnings.filterwarnings("ignore", message=".*unauthenticated requests to the HF Hub.*")
+            fw_mod = importlib.import_module("faster_whisper")
             with _WHISPER_LOCK:
                 if _WHISPER_MODEL is None:
                     model_size = os.getenv("WHISPER_MODEL_SIZE", "base.en")
                     device = os.getenv("WHISPER_DEVICE", "cpu")
-                    _WHISPER_MODEL = fw_mod.WhisperModel(
-                        model_size,
-                        device=device,
-                        compute_type="int8",
-                        cpu_threads=4,
-                    )
+                    try:
+                        _WHISPER_MODEL = fw_mod.WhisperModel(
+                            model_size,
+                            device=device,
+                            compute_type="int8",
+                            cpu_threads=4,
+                            local_files_only=True,
+                        )
+                    except Exception:
+                        _WHISPER_MODEL = fw_mod.WhisperModel(
+                            model_size,
+                            device=device,
+                            compute_type="int8",
+                            cpu_threads=4,
+                        )
         except Exception as e:
             logger.debug("faster-whisper warmup failed: %s", e)
 

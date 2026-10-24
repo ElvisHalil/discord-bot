@@ -155,25 +155,32 @@ async def dispatch_tracker_command(
     flight_tracker_service: Any,
     sports_tracker_fn: Callable[..., str],
     sports_tracker_service: Any,
+    job_manager_fn: Optional[Callable[..., str]] = None,
+    job_engine: Optional[Any] = None,
 ) -> Optional[str]:
     """
-    Handle direct flight and sports tracker bang commands (`!trackflight`, `!untrackflight`,
-    `!trackedflights`, `!track`, `!untrack`, `!tracked`).
-    Returns the formatted response string if `text` matched a tracker command, or None otherwise.
+    Handle direct flight, sports, reminder, job, and autoplay bang commands:
+      - Flights: `!trackflight`, `!untrackflight`, `!trackedflights`
+      - Sports: `!track`, `!untrack`, `!tracked`
+      - Jobs & Reminders: `!remind`, `!jobs`, `!reminders`, `!canceljob`, `!stopjob`, `!unremind`
+      - Music Autoplay: `!autoplay`, `!stopautoplay`
+    Returns the formatted response string if `text` matched a command, or None otherwise.
     """
     if not text:
         return None
-    low = text.lower()
+    low = text.strip().lower()
 
     if low.startswith("!trackflight "):
-        target_q = text[13:].strip()
+        target_q = text.strip()[13:].strip()
         set_active_channel_id(channel_id)
         res = await run_in_worker(flight_tracker_fn, action="track", query=target_q)
         flight_tracker_service.ensure_loop_running()
+        if job_engine is not None and hasattr(job_engine, "wake"):
+            job_engine.wake()
         return res
 
     if low.startswith("!untrackflight"):
-        target_q = text[14:].strip()
+        target_q = text.strip()[14:].strip()
         set_active_channel_id(channel_id)
         return await run_in_worker(flight_tracker_fn, action="untrack", query=target_q)
 
@@ -182,20 +189,52 @@ async def dispatch_tracker_command(
         return await run_in_worker(flight_tracker_fn, action="list")
 
     if low.startswith("!track "):
-        target_q = text[7:].strip()
+        target_q = text.strip()[7:].strip()
         set_active_channel_id(channel_id)
         res = await run_in_worker(sports_tracker_fn, action="start", query=target_q)
         sports_tracker_service.ensure_loop_running()
+        if job_engine is not None and hasattr(job_engine, "wake"):
+            job_engine.wake()
         return res
 
     if low.startswith("!untrack"):
-        target_q = text[8:].strip()
+        target_q = text.strip()[8:].strip()
         set_active_channel_id(channel_id)
         return await run_in_worker(sports_tracker_fn, action="stop", query=target_q)
 
     if low in ("!tracked", "!track"):
         set_active_channel_id(channel_id)
         return await run_in_worker(sports_tracker_fn, action="list")
+
+    # Resolve default job_manager_fn if needed for job/reminder/autoplay commands
+    if any(
+        low == cmd or low.startswith(f"{cmd} ")
+        for cmd in ("!remind", "!jobs", "!reminders", "!canceljob", "!stopjob", "!unremind", "!autoplay", "!stopautoplay")
+    ):
+        if job_manager_fn is None:
+            from src.skills.jobs import skill_job_manager as _default_job_fn
+
+            job_manager_fn = _default_job_fn
+        set_active_channel_id(channel_id)
+
+        if low in ("!jobs", "!reminders", "!remind"):
+            return await run_in_worker(job_manager_fn, action="list")
+
+        if low.startswith("!remind "):
+            target_q = text.strip()[8:].strip()
+            return await run_in_worker(job_manager_fn, action="create", query=target_q)
+
+        if low == "!autoplay" or low.startswith("!autoplay "):
+            target_q = text.strip()[9:].strip() or "dnb"
+            return await run_in_worker(job_manager_fn, action="autoplay", query=f"autoplay {target_q}")
+
+        if low == "!stopautoplay" or low.startswith("!stopautoplay "):
+            return await run_in_worker(job_manager_fn, action="cancel", query="autoplay")
+
+        for prefix in ("!canceljob", "!stopjob", "!unremind"):
+            if low == prefix or low.startswith(f"{prefix} "):
+                target_q = text.strip()[len(prefix) :].strip() or "all"
+                return await run_in_worker(job_manager_fn, action="cancel", query=target_q)
 
     return None
 

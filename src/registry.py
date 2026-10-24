@@ -41,6 +41,7 @@ from src.skills import (
     skill_markets_info,
     skill_graphing_info,
     skill_voice_info,
+    skill_job_manager,
 )
 
 # Combined registries for mode execution
@@ -61,6 +62,7 @@ RESEARCH_TOOLS = {
     "skill_markets_info": skill_markets_info,
     "skill_graphing_info": skill_graphing_info,
     "skill_voice_info": skill_voice_info,
+    "skill_job_manager": skill_job_manager,
     "search_images": search_images,
 }
 
@@ -70,5 +72,6 @@ CHAT_TOOLS = {
     **SYSTEM_TOOLS,
     "skill_youtube_search": skill_youtube_search,
     "skill_voice_info": skill_voice_info,
+    "skill_job_manager": skill_job_manager,
 }
 

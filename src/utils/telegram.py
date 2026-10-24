@@ -32,8 +32,11 @@ from src.orchestrator import (
 from src.context import (
     clear_channel_attachments,
     pop_channel_attachments,
+    record_channel_human_activity,
     set_active_channel_id,
+    set_active_user,
 )
+from src.jobs import JOB_ENGINE
 from src.skills.flights import (
     FLIGHT_TRACKER,
     skill_flight_tracker,
@@ -175,7 +178,12 @@ def _normalize_command(text: str, bot_username: str = "") -> str:
             return stripped
         cmd_part = cmd_base
     cmd_low = cmd_part.lower()
-    if cmd_low in ("reset", "mode", "track", "untrack", "tracked", "trackflight", "untrackflight", "trackedflights"):
+    if cmd_low in (
+        "reset", "mode", "track", "untrack", "tracked",
+        "trackflight", "untrackflight", "trackedflights",
+        "remind", "jobs", "reminders", "canceljob", "stopjob", "unremind",
+        "autoplay", "stopautoplay",
+    ):
         rest = f" {parts[1]}" if len(parts) > 1 else ""
         return f"!{cmd_low}{rest}"
     return stripped
@@ -415,6 +423,7 @@ async def _handle_telegram_reaction(
         album=meta.get("album"),
         intro=intro_text,
     )
+    final_reply = JOB_ENGINE.sync_channel_autoplay_on_track_played(internal_cid, final_reply)
     await send_telegram_message(internal_cid, final_reply, token=bot_token)
 
 
@@ -460,6 +469,8 @@ async def handle_telegram_update(
     if hasattr(main_mod, "active_channels"):
         main_mod.active_channels.add(internal_cid)
     user_display = sender.get("first_name") or sender.get("username") or f"User_{user_id}"
+    record_channel_human_activity(internal_cid)
+    set_active_user(user_id, user_display)
     normalized_input = _normalize_command(raw_text, bot_username=bot_username)
 
     # Strip @bot_username mention from input text
@@ -623,6 +634,7 @@ async def handle_telegram_update(
 
         set_active_channel_id(internal_cid)
         reply = await run_in_worker(standardize_song_reply, reply)
+        reply = JOB_ENGINE.sync_channel_autoplay_on_track_played(internal_cid, reply, new_query_hint=normalized_input)
         reply = sanitize_agent_reply(reply)
 
         # Phase 3: Atomic commit (<1ms under channel lock)

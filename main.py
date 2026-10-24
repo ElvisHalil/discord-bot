@@ -33,8 +33,16 @@ from src.context import (
     bind_event_loop,
     clear_channel_attachments,
     pop_channel_attachments,
+    record_channel_human_activity,
     set_active_channel_id,
+    set_active_user,
 )
+from src.jobs import (
+    JOB_ENGINE,
+    ActionType,
+    SystemJobProvider,
+)
+from src.skills.jobs import skill_job_manager
 from src.skills.music.engine.formatting import format_song_card, get_music_metadata, standardize_song_reply
 from src.skills.sports.tracker import (
     SPORTS_TRACKER,
@@ -66,6 +74,7 @@ from src.orchestrator import (
     enrich_markets_tool_args,
     enrich_graphing_tool_args,
     enrich_voice_tool_args,
+    enrich_job_tool_args,
     enrich_image_tool_args,
     enrich_tool_output_with_time_context,
     detect_missed_sports_tool_call,
@@ -74,6 +83,7 @@ from src.orchestrator import (
     detect_missed_markets_tool_call,
     detect_missed_graphing_tool_call,
     detect_missed_voice_tool_call,
+    detect_missed_job_tool_call,
     detect_missed_image_tool_call,
     trim_history,
     compact_intra_turn_tool_history,
@@ -303,6 +313,100 @@ async def handle_flight_tracker_update(channel_id: int, alert_text: str):
         })
 
 
+async def handle_job_fire(job, message_text: str):
+    """Callback invoked by JOB_ENGINE when a scheduled reminder, recurring task, condition alert, or autoplay track fires."""
+    channel_id = job.channel_id
+    is_tg = is_telegram_channel(channel_id)
+    channel = None
+    if not is_tg:
+        channel = client.get_channel(channel_id)
+        if not channel:
+            try:
+                channel = await client.fetch_channel(channel_id)
+            except Exception as e:
+                print(f"⚠️ [Job Engine]: Could not resolve channel {channel_id}: {e}")
+                return
+
+    final_output = message_text
+    # If this is a dynamic AGENT_TASK (and not an idle-brake auto-stop notice), execute it live
+    if job.action_type == ActionType.AGENT_TASK and not message_text.startswith("⏸️"):
+        mention_prefix = f"<@{job.creator_id}> " if job.creator_id > 0 else ""
+        low_payload = (job.payload_text or "").lower()
+        # Fast-path for recurring music play tasks ("play a dnb song")
+        if re.search(r"\bplay\b.*\b(?:song|track|music|dnb|drum\s+and\s+bass|techno|house|jazz|rock|hip\s*hop|trance|dubstep|ambient|lofi|phonk)\b", low_payload):
+            genre_q = re.sub(r"\b(?:play|send|me|a|an|some|another|song|track|music)\b", " ", job.payload_text, flags=re.IGNORECASE)
+            genre_q = " ".join(genre_q.split()).strip() or "dnb"
+            card_text, _ = await run_in_worker(JOB_ENGINE._autoplay_resolver, channel_id, genre_q)
+            if card_text:
+                final_output = f"{mention_prefix}🔁 **Scheduled Music (`{job.job_id}`):**\n\n{card_text}"
+        else:
+            mode_config = MODES.get("research") or MODES[current_mode]
+            set_active_channel_id(channel_id)
+            system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
+            task_history = [
+                system_msg,
+                {"role": "user", "content": f"Execute scheduled task: {job.payload_text}"},
+            ]
+            try:
+                clear_channel_attachments(channel_id)
+                task_reply = await run_agent_turn(channel_id, mode_config, turn_history=task_history)
+                task_reply = suppress_discord_embeds(task_reply)
+                set_active_channel_id(channel_id)
+                if "youtube.com" in task_reply.lower() or "youtu.be" in task_reply.lower():
+                    task_reply = await run_in_worker(standardize_song_reply, task_reply)
+                task_reply = sanitize_agent_reply(task_reply)
+                if task_reply.strip():
+                    final_output = f"{mention_prefix}⏰ **Scheduled Task (`{job.job_id}` — {job.payload_text}):**\n{task_reply.strip()}"
+            except Exception as e:
+                print(f"⚠️ [Job Engine Agent Task Error]: {e}")
+
+    if is_tg:
+        await send_telegram_message(channel_id, final_output)
+    else:
+        chunks = [c for c in chunk_message(final_output) if c]
+        for chunk in chunks:
+            await channel.send(chunk)
+
+    await VOICE_COHOST.announce_tracker_event(channel_id, final_output, profile_or_mode=current_mode)
+
+    mode_config = MODES[current_mode]
+    async with channel_locks[channel_id]:
+        if channel_id not in chat_history:
+            system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
+            chat_history[channel_id] = [system_msg]
+        chat_history[channel_id].append({
+            "role": "assistant",
+            "content": final_output,
+        })
+
+
+def _list_channel_sports_matches(cid: int) -> list[str]:
+    lines = []
+    for (m_cid, _), m in SPORTS_TRACKER.tracked_matches.items():
+        if m_cid == cid:
+            snap = m.last_snapshot
+            lines.append(
+                f"• **[SPORTS]** **{m.home_team} {snap.home_score} - {snap.away_score} {m.away_team}** "
+                f"({m.league_name} — {snap.status_detail})"
+            )
+    return lines
+
+
+def _list_channel_flights(cid: int) -> list[str]:
+    lines = []
+    for (f_cid, _), tf in FLIGHT_TRACKER.tracked_flights.items():
+        if f_cid == cid:
+            lines.append(
+                f"• **[LIVE FLIGHT]** **{tf.flight_number}** ({tf.origin_code} -> {tf.dest_code}) — {tf.last_state.upper()}"
+            )
+    for (w_cid, _), pw in FLIGHT_TRACKER.price_watches.items():
+        if w_cid == cid:
+            lines.append(
+                f"• **[ROUTE PRICE WATCH]** **{pw.origin_code} -> {pw.dest_code}** [{pw.date}] — Lowest: ${pw.lowest_seen_price} {pw.currency}"
+            )
+    return lines
+
+
 async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
     """Callback invoked by VOICE_COHOST when a speaker's utterance in Discord voice chat triggers the AI co-host."""
     channel_id = session.channel_id
@@ -429,6 +533,29 @@ async def on_ready():
     FLIGHT_TRACKER.bind_event_loop(loop)
     FLIGHT_TRACKER.set_notify_callback(handle_flight_tracker_update)
     FLIGHT_TRACKER.ensure_loop_running()
+    JOB_ENGINE.bind_event_loop(loop)
+    JOB_ENGINE.set_fire_callback(handle_job_fire)
+    JOB_ENGINE.register_provider(
+        SystemJobProvider(
+            name="sports_tracker",
+            interval_seconds=SPORTS_TRACKER.poll_interval,
+            is_active_fn=lambda: bool(SPORTS_TRACKER.tracked_matches),
+            poll_fn=SPORTS_TRACKER.poll_once,
+            list_channel_fn=_list_channel_sports_matches,
+            is_system_locked=False,
+        )
+    )
+    JOB_ENGINE.register_provider(
+        SystemJobProvider(
+            name="flight_tracker",
+            interval_seconds=FLIGHT_TRACKER.flight_poll_interval,
+            is_active_fn=lambda: bool(FLIGHT_TRACKER.tracked_flights or FLIGHT_TRACKER.price_watches),
+            poll_fn=lambda: asyncio.sleep(0),
+            list_channel_fn=_list_channel_flights,
+            is_system_locked=False,
+        )
+    )
+    JOB_ENGINE.ensure_loop_running()
     VOICE_COHOST.set_utterance_callback(handle_voice_utterance_turn)
     if hasattr(VOICE_COHOST, "_stt") and hasattr(VOICE_COHOST._stt, "warmup_whisper_model"):
         asyncio.create_task(run_in_worker(VOICE_COHOST._stt.warmup_whisper_model))
@@ -439,6 +566,10 @@ async def on_ready():
 async def on_raw_reaction_add(payload):
     if payload.user_id == client.user.id:
         return
+    if getattr(payload, "guild_id", "present") is None:
+        if BOT_OWNER_ID is None or payload.user_id != BOT_OWNER_ID:
+            return
+    record_channel_human_activity(payload.channel_id)
         
     if str(payload.emoji) == '👍':
         channel = client.get_channel(payload.channel_id)
@@ -569,6 +700,7 @@ async def on_raw_reaction_add(payload):
                         intro=intro_text
                     )
 
+                    final_reply = JOB_ENGINE.sync_channel_autoplay_on_track_played(channel.id, final_reply)
                     await channel.send(final_reply)
 
                     # Record it under the channel lock so it can't land between a
@@ -690,6 +822,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
         "skill_markets_info",
         "skill_graphing_info",
         "skill_voice_info",
+        "skill_job_manager",
         "skill_weather_info",
         "skill_news_headlines",
         "skill_music_analysis",
@@ -760,6 +893,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     detect_missed_sports_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_music_shift_tool_call(history)
                     or detect_missed_flight_tool_call(history, active_channel_id=channel_id)
+                    or detect_missed_job_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_graphing_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_markets_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_image_tool_call(history, active_channel_id=channel_id)
@@ -772,6 +906,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     history.pop()  # Discard stale non-tool reply from iteration 0
                     if forced_tool_name in ("skill_flight_info", "skill_flight_tracker"):
                         forced_args = enrich_flight_tool_args(forced_args, history)
+                    elif forced_tool_name == "skill_job_manager":
+                        forced_args = enrich_job_tool_args(forced_args, history, active_channel_id=channel_id)
                     elif forced_tool_name == "skill_markets_info":
                         forced_args = enrich_markets_tool_args(forced_args, history, active_channel_id=channel_id)
                     elif forced_tool_name == "skill_graphing_info":
@@ -815,6 +951,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     if forced_tool_name == "search_images":
                         hide_tools_next_step = True
                         fast_image_caption_next_step = True
+                    elif forced_tool_name == "skill_job_manager":
+                        hide_tools_next_step = True
                     elif fast_voice_turn and (
                         forced_tool_name in _TERMINAL_SKILLS
                         or "youtube.com/watch?v=" in str(tool_output)
@@ -920,6 +1058,36 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                 deduped_calls.append(c)
             tool_calls = deduped_calls
 
+        # Single-Autoplay-Card guard: prevent running skill_job_manager and skill_music_discovery/skill_youtube_search
+        # in the same step when starting Autoplay or when Autoplay is already active in the channel.
+        if (
+            any(c.function.name == "skill_job_manager" for c in tool_calls)
+            and any(c.function.name in ("skill_music_discovery", "skill_youtube_search") for c in tool_calls)
+        ):
+            active_auto = JOB_ENGINE.get_active_autoplay_job(channel_id)
+            if active_auto is not None:
+                # Autoplay is already active: let skill_music_discovery/skill_youtube_search play the requested track/shift/genre,
+                # and sync_channel_autoplay_on_track_played will automatically reset the Autoplay timer!
+                tool_calls = [
+                    c for c in tool_calls
+                    if not (
+                        c.function.name == "skill_job_manager"
+                        and str((c.function.arguments or {}).get("action", "create")).lower() not in ("cancel", "stop", "clear", "list", "status")
+                    )
+                ]
+            else:
+                # Starting Autoplay: skill_job_manager(action='autoplay') already resolves Track 1, so drop duplicate music tool calls.
+                has_autoplay_job_call = any(
+                    c.function.name == "skill_job_manager"
+                    and (
+                        str((c.function.arguments or {}).get("action", "")).lower() in ("autoplay", "skip", "next")
+                        or "autoplay" in str((c.function.arguments or {}).get("query", "")).lower()
+                    )
+                    for c in tool_calls
+                )
+                if has_autoplay_job_call:
+                    tool_calls = [c for c in tool_calls if c.function.name not in ("skill_music_discovery", "skill_youtube_search")]
+
         print(f"⚡ [{current_mode.upper()}] Model requested {len(tool_calls)} tools simultaneously!")
         has_top_music = any(call.function.name == "skill_music_discovery" for call in tool_calls)
         has_explicit_markets = any(call.function.name == "skill_markets_info" for call in tool_calls)
@@ -957,6 +1125,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     args = enrich_markets_tool_args(args, history, active_channel_id=channel_id)
                 elif tool_name == "skill_graphing_info":
                     args = enrich_graphing_tool_args(args, history, active_channel_id=channel_id)
+                elif tool_name == "skill_job_manager":
+                    args = enrich_job_tool_args(args, history, active_channel_id=channel_id)
                 elif tool_name == "search_images":
                     args = enrich_image_tool_args(args, history, active_channel_id=channel_id)
                 elif tool_name == "skill_voice_info":
@@ -1019,6 +1189,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
             SPORTS_TRACKER.ensure_loop_running()
         if FLIGHT_TRACKER.tracked_flights or FLIGHT_TRACKER.price_watches:
             FLIGHT_TRACKER.ensure_loop_running()
+        if JOB_ENGINE.has_active_work():
+            JOB_ENGINE.ensure_loop_running()
         history.extend(tool_results)
         called_names = {c.function.name for c in tool_calls}
         latest_user_text = next(
@@ -1032,7 +1204,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
         latest_user_clean = re.sub(r"\[Spoken in Discord Voice Channel[^\]]*\]", "", latest_user_text)
         has_compound_media_intent = bool(re.search(r"\b(play|song|track|music|video)\b", latest_user_clean, re.IGNORECASE))
         has_verified_music_link = any(
-            r["name"] in ("skill_music_discovery", "skill_youtube_search") and "youtube.com/watch?v=" in r["content"]
+            r["name"] in ("skill_music_discovery", "skill_youtube_search", "skill_job_manager") and "youtube.com/watch?v=" in r["content"]
             for r in tool_results
         )
         if (
@@ -1041,6 +1213,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                 and (
                     len(tool_calls) >= 2
                     or (called_names.issubset({"skill_news_headlines", "skill_markets_info", "skill_graphing_info", "skill_voice_info", "search_images"}) and not has_compound_media_intent)
+                    or called_names == {"skill_job_manager"}
                     or (fast_voice_turn and not has_compound_media_intent)
                 )
             )
@@ -1073,6 +1246,13 @@ async def on_message(message):
     global current_mode
     if message.author == client.user:
         return
+
+    if isinstance(message.channel, (discord.DMChannel, discord.GroupChannel)):
+        if BOT_OWNER_ID is None or message.author.id != BOT_OWNER_ID:
+            return
+
+    record_channel_human_activity(message.channel.id)
+    set_active_user(message.author.id, message.author.display_name)
 
     # Cache speaker details for auto-ping
     known_users[message.author.name.lower()] = message.author.id
@@ -1270,6 +1450,7 @@ async def on_message(message):
             # (may hit the network for metadata, so run it off the event loop)
             set_active_channel_id(channel_id)
             reply = await run_in_worker(standardize_song_reply, reply)
+            reply = JOB_ENGINE.sync_channel_autoplay_on_track_played(channel_id, reply, new_query_hint=user_input)
 
             # Scrub internal tool name leaks, meta-refusals, and hallucinated betting links
             reply = sanitize_agent_reply(reply)
@@ -1326,6 +1507,10 @@ if __name__ == "__main__":
             pass
         try:
             FLIGHT_TRACKER.shutdown()
+        except Exception:
+            pass
+        try:
+            JOB_ENGINE.shutdown()
         except Exception:
             pass
         try:

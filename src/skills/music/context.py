@@ -332,5 +332,20 @@ def detect_missed_music_shift_tool_call(history: list) -> Optional[Tuple[str, di
             return ("skill_music_discovery", {"genre": clean_genre})
         return ("skill_music_discovery", {})
 
+    if re.match(r"^\s*(?:next|skip)(?:\s+(?:song|track|one|tune|please|pls))?\s*[.?!]*$", clean_user, re.IGNORECASE):
+        try:
+            from src.jobs.engine import JOB_ENGINE
+
+            cid = get_active_channel_id()
+            active_ap = JOB_ENGINE.get_active_autoplay_job(cid)
+            if active_ap:
+                g = active_ap.payload_text if active_ap.payload_text and active_ap.payload_text.lower() != "top tracks" else None
+                return ("skill_music_discovery", {"genre": g} if g else {})
+            last_song = get_channel_last_played_song(cid)
+            if last_song:
+                return ("skill_music_discovery", {"genre": last_song.genre} if last_song.genre else {})
+        except Exception:
+            pass
+
     return None
 

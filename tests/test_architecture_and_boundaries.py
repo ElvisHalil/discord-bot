@@ -235,7 +235,7 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
 
     def test_strict_separation_of_enums_models_and_catalogs(self):
         """Verify each domain skill strictly separates StrEnums (enums.py), dataclasses (models.py), and static tables (catalogs.py)."""
-        for skill in ("music", "sports", "flights", "news", "weather", "youtube", "markets", "graphing", "voice"):
+        for skill in ("music", "sports", "flights", "news", "weather", "youtube", "markets", "graphing", "voice", "jobs"):
             enums_mod = importlib.import_module(f"src.skills.{skill}.enums")
             models_mod = importlib.import_module(f"src.skills.{skill}.models")
             catalogs_mod = importlib.import_module(f"src.skills.{skill}.catalogs")
@@ -494,13 +494,14 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
         skill_names = {d.name for d in skill_dirs}
         self.assertEqual(
             skill_names,
-            {".example", "flights", "graphing", "markets", "music", "news", "sports", "voice", "weather", "youtube"},
+            {".example", "flights", "graphing", "jobs", "markets", "music", "news", "sports", "voice", "weather", "youtube"},
         )
 
         expected_base_aggregators = {
             ".example": "BaseExampleAggregator",
             "flights": "BaseFlightAggregator",
             "graphing": "BaseGraphingAggregator",
+            "jobs": "BaseJobsAggregator",
             "markets": "BaseMarketAggregator",
             "music": "BaseMusicAggregator",
             "news": "BaseNewsAggregator",

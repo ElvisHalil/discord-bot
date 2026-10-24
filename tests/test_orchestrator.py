@@ -926,6 +926,7 @@ class TestConversationWithAllToolsAndSkills(unittest.IsolatedAsyncioTestCase):
             "skill_markets_info",
             "skill_graphing_info",
             "skill_voice_info",
+            "skill_job_manager",
             "search_images",
             "evaluate_math",
             "get_current_datetime",

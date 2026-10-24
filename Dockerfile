@@ -7,7 +7,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HOME=/home/botuser \
-    XDG_CACHE_HOME=/tmp/.cache
+    XDG_CACHE_HOME=/tmp/.cache \
+    HF_HOME=/home/botuser/.cache/huggingface \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    HF_HUB_DISABLE_IMPLICIT_TOKEN=1 \
+    HF_HUB_VERBOSITY=error
 
 # Install minimal system dependencies, voice codecs (Opus/Sodium/FFmpeg) & sandboxed CLI utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -25,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create an unprivileged user (UID/GID 1000) and isolated sandbox workspace
 RUN groupadd -g 1000 botuser \
     && useradd -m -u 1000 -g 1000 -s /bin/bash botuser \
-    && mkdir -p /home/botuser/workspace /app/data \
+    && mkdir -p /home/botuser/workspace /home/botuser/.cache/huggingface /app/data \
     && chown -R botuser:botuser /home/botuser /app/data
 
 WORKDIR /app
@@ -41,6 +45,7 @@ COPY --chown=root:root src/ ./src/
 COPY --chown=root:root tests/ ./tests/
 
 # Drop privileges to the non-root user
+ENV MPLCONFIGDIR=/tmp/matplotlib
 USER 1000:1000
 
 CMD ["python", "main.py"]

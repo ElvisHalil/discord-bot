@@ -64,6 +64,7 @@ services:
     volumes:
       - bot_data:/app/data
       - bot_workspace:/home/botuser/workspace
+      - bot_hf_cache:/home/botuser/.cache/huggingface
     tmpfs:
       - /tmp:size=256m,mode=1777
 
@@ -80,3 +81,4 @@ volumes:
   ollama_models:
   bot_data:
   bot_workspace:
+  bot_hf_cache:

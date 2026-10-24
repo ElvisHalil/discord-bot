@@ -12,6 +12,7 @@ from src.skills.flights import skill_flight_info, skill_flight_tracker
 from src.skills.markets import skill_markets_info
 from src.skills.graphing import skill_graphing_info
 from src.skills.voice import skill_voice_info, skill_voice_tracker
+from src.skills.jobs import skill_job_manager
 
 __all__ = [
     "skill_weather_info",
@@ -29,5 +30,6 @@ __all__ = [
     "skill_graphing_info",
     "skill_voice_info",
     "skill_voice_tracker",
+    "skill_job_manager",
 ]
 

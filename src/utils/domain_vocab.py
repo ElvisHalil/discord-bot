@@ -365,6 +365,13 @@ TOOL_ARG_ALIASES: Dict[str, Dict[str, str]] = {
         "listen_mode": "mode", "activation": "mode",
         "voice": "voice_profile", "profile": "voice_profile", "persona": "voice_profile", "speaker": "voice_profile",
     },
+    "skill_job_manager": {
+        "command": "action", "cmd": "action", "mode": "action", "type": "action", "operation": "action",
+        "q": "query", "prompt": "query", "request": "query", "description": "query",
+        "time": "when", "at": "when", "schedule": "when", "interval": "when", "trigger": "when", "condition": "when", "delay": "when", "duration": "when",
+        "message": "task", "reminder": "task", "text": "task", "what": "task", "content": "task", "genre": "task",
+        "id": "job_id", "target_id": "job_id", "watch_id": "job_id", "reminder_id": "job_id",
+    },
     "evaluate_math": {
         "math": "expression", "expr": "expression", "equation": "expression",
         "formula": "expression", "query": "expression", "q": "expression",
