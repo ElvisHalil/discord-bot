@@ -401,7 +401,10 @@ def _parse_autoplay_request(text: str, now_ts: float) -> Optional[Dict[str, Any]
 
     # Extract genre / artist / vibe target
     cleaned = re.sub(
-        r"\b(?:please|can\s+you|start|begin|turn\s+on|enable|autoplay|auto-play|auto\s+play|radio\s+mode|back[\s\-]+to[\s\-]+back|continuously|play|queue\s+up|queue|some|music|songs?|tracks?|for\s+me|in\s+this\s+channel)\b",
+        r"\b(?:please|can\s+(?:you|we)|could\s+(?:you|we)|let'?s|lets|start|begin|turn\s+on|enable|"
+        r"autoplay|auto-play|auto\s+play|radio(?:\s+mode)?|back[\s\-]+to[\s\-]+back|continuously|"
+        r"play|put\s+on|queue\s+up|queue|some|music|songs?|tracks?|tunes?|for\s+(?:me|us)|in\s+this\s+channel|"
+        r"switch|change|swap|the|genre|vibe|style|mode|over|into|to|instead|now|pls)\b",
         " ",
         text,
         flags=re.IGNORECASE,
@@ -822,7 +825,29 @@ def parse_job_request(
         }
 
     # 7. Fallback: if `when` was passed as a raw duration ("10m", "2h")
-    fallback_sec = parse_duration_seconds(combined) or 600
+    parsed_fallback_dur = parse_duration_seconds(combined)
+    if parsed_fallback_dur is None and not when:
+        is_personal_reminder = bool(
+            re.search(
+                r"\b(?:remind|reminder|timer|alarm|alert|notify|ping|wake|call|text|email|buy|pick\s+up|take\s+out|check|submit|pay|meeting|oven|laundry)\b",
+                low,
+            )
+        )
+        is_timeless_music_genre = bool(
+            re.search(
+                r"\b(?:switch\s+to|change\s+(?:genre\s+)?to|techno|dnb|drum\s+and\s+bass|jungle|house|trance|dubstep|ambient|"
+                r"lofi|lo-fi|phonk|synthwave|electronic|edm|hardstyle|hardcore|gabber|breakbeat|breaks|ukg|garage|bassline|"
+                r"psytrance|acid|minimal|industrial|schranz|electro|disco|funk|soul|r&b|rnb|hip\s*hop|rap|trap|drill|grime|"
+                r"afrobeats|reggae|dancehall|rock|metal|punk|indie|alternative|pop|jazz|classical|blues|country|folk|latin|reggaeton|k-pop|j-pop)\b",
+                low,
+            )
+        )
+        if is_timeless_music_genre and not is_personal_reminder:
+            auto_fallback = _parse_autoplay_request(f"autoplay {combined}", eff_now_ts)
+            if auto_fallback is not None:
+                return auto_fallback
+
+    fallback_sec = parsed_fallback_dur or 600
     clean_task = task or _clean_task_description(query or combined)
     act_type = classify_action_type(clean_task)
     return {

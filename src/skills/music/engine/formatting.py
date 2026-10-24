@@ -502,17 +502,23 @@ def standardize_song_reply(reply: str) -> str:
         video_url = full_url.replace("music.youtube.com", "www.youtube.com")
         from src.skills.youtube.engine.client import get_video_oembed, search_youtube, verify_embeddable
         if not verify_embeddable(vid):
-            print(f"⚠️ [standardize_song_reply]: Video mode ID {vid} is not embeddable in Discord. Attempting auto-resolution...")
             oembed = get_video_oembed(vid)
-            fallback_q = f"{oembed.get('title', '')} {oembed.get('author', '')}".strip() or intro_text
-            if fallback_q:
-                try:
-                    alt_videos = search_youtube(fallback_q, max_results=1)
-                    if alt_videos and alt_videos[0].get("url"):
-                        video_url = alt_videos[0]["url"]
-                        print(f"  └─ ✅ [standardize_song_reply]: Replaced un-embeddable video with {video_url}")
-                except Exception as e:
-                    print(f"  └─ ⚠️ [standardize_song_reply]: Video mode auto-resolution failed: {e}")
+            if oembed.get("title"):
+                print(
+                    f"📌 [standardize_song_reply]: Preserving valid oEmbed-verified video {vid} "
+                    f"('{oembed['title']}' by '{oembed.get('author', '')}') with broadcaster-disabled inline player."
+                )
+            else:
+                print(f"⚠️ [standardize_song_reply]: Video mode ID {vid} is dead/unavailable. Attempting auto-resolution...")
+                fallback_q = intro_text
+                if fallback_q:
+                    try:
+                        alt_videos = search_youtube(fallback_q, max_results=1)
+                        if alt_videos and alt_videos[0].get("url"):
+                            video_url = alt_videos[0]["url"]
+                            print(f"  └─ ✅ [standardize_song_reply]: Replaced dead video with {video_url}")
+                    except Exception as e:
+                        print(f"  └─ ⚠️ [standardize_song_reply]: Video mode auto-resolution failed: {e}")
         if video_url != full_url:
             reply = reply.replace(full_url, video_url)
 

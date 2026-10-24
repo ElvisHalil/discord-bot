@@ -907,6 +907,50 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         self.assertEqual(len(alt_res), 1)
         self.assertEqual(alt_res[0]["id"], "secondvid22")
 
+    def test_official_broadcaster_video_fallback_beats_third_party_watchalong(self):
+        from src.skills.youtube.aggregators.ddg import DuckDuckGoYouTubeAggregator
+
+        oembed_map = {
+            "wOxOwnRkI0I": {
+                "title": "FP1 Highlights | 2026 United States Grand Prix",
+                "author": "FORMULA 1",
+            },
+            "uedrX-ZqWJk": {
+                "title": "F1 LIVE: US Grand Prix 2026 FP1 Watchalong",
+                "author": "Random F1 Fan Stream",
+            },
+        }
+        agg = DuckDuckGoYouTubeAggregator(
+            verify_embeddable_fn=lambda vid: vid != "wOxOwnRkI0I",
+            get_oembed_fn=lambda vid: oembed_map.get(vid, {"title": "", "author": ""}),
+            is_short_fn=lambda vid, **kw: False,
+            http_get_fn=None,
+        )
+        mock_ddgs_instance = MagicMock()
+        mock_ddgs_instance.text.return_value = [
+            {"href": "https://www.youtube.com/watch?v=wOxOwnRkI0I", "title": "FP1 Highlights | 2026 United States Grand Prix"},
+            {"href": "https://www.youtube.com/watch?v=uedrX-ZqWJk", "title": "F1 LIVE: US Grand Prix 2026 FP1 Watchalong"},
+        ]
+        with patch("src.skills.youtube.aggregators.ddg.DDGS", return_value=mock_ddgs_instance):
+            res = agg.search("FP1 highlights from F1 youtube channel", max_results=1)
+
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["id"], "wOxOwnRkI0I")
+        self.assertEqual(res[0]["channel"], "FORMULA 1")
+        self.assertTrue(res[0]["is_official_fallback"])
+
+        # standardize_song_reply in video mode preserves the official FORMULA 1 link when oEmbed is valid
+        with (
+            patch("src.skills.youtube.engine.client.verify_embeddable", return_value=False),
+            patch("src.skills.youtube.engine.client.get_video_oembed", return_value=oembed_map["wOxOwnRkI0I"]),
+        ):
+            video_reply = (
+                "Here are the FP1 highlights from the United States Grand Prix:\n\n"
+                "https://www.youtube.com/watch?v=wOxOwnRkI0I"
+            )
+            cleaned = standardize_song_reply(video_reply)
+            self.assertIn("https://www.youtube.com/watch?v=wOxOwnRkI0I", cleaned)
+
     def test_zero_undefined_names_across_entire_codebase(self):
         """Static AST scope analyzer ensuring no module or function in src/, main.py, or tests/ references an undefined name."""
         import ast

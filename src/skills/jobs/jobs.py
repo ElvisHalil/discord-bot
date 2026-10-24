@@ -23,13 +23,24 @@ _LIST_INTENT_RE = re.compile(
 )
 
 _CANCEL_INTENT_RE = re.compile(
-    r"^\s*(?:cancel|stop|remove|delete|clear|unremind|end|kill|turn\s+off|disable)\b"
+    r"^\s*(?:cancel|stop|remove|delete|clear|unremind|end|kill|turn\s+off|shut\s+off|disable)\b"
     r"(?:\s+(?:the\s+|my\s+)?(?:reminder|job|schedule|timer|watch|autoplay|auto-play|radio|loop))?\s*(.*)$",
+    re.IGNORECASE,
+)
+
+_USER_EXPLICIT_STOP_RE = re.compile(
+    r"\b(?:cancel|stop|remove|delete|clear|unremind|end|kill|turn\s+off|shut\s+off|disable|pause|quit|enough|no\s+more)\b",
     re.IGNORECASE,
 )
 
 _SKIP_AUTOPLAY_RE = re.compile(
     r"^\s*(?:next|skip|next\s+(?:song|track|one)|skip\s+(?:song|track|this|it)|another\s+(?:song|track|one)|play\s+next(?:\s+song|\s+track)?)\s*[.!?]*$",
+    re.IGNORECASE,
+)
+
+_SWITCH_AUTOPLAY_GENRE_RE = re.compile(
+    r"\b(?:switch|change|swap)\s+(?:the\s+)?(?:(?:autoplay|auto-play|radio|music|genre|vibe|style)\s+)?(?:to|into|over\s+to)\s+([a-z0-9\s&'-]{2,40})"
+    r"|\b(?:switch|change|swap)\s+(?:the\s+)?(?:autoplay|auto-play|radio|genre|vibe)\s+([a-z0-9\s&'-]{2,40})",
     re.IGNORECASE,
 )
 
@@ -97,6 +108,9 @@ def skill_job_manager(
         if existing_autoplay is not None:
             _, card_text = JOB_ENGINE.skip_or_update_autoplay(channel_id, new_query=q_str or task)
             return f"{card_text}{_AUTOPLAY_DIRECT_INSTRUCTION}"
+
+    if existing_autoplay is not None and _SWITCH_AUTOPLAY_GENRE_RE.search(combined) and not when:
+        act = "autoplay"
 
     if act == "autoplay" and "autoplay" not in combined.lower():
         q_str = f"autoplay {q_str or task or 'dnb'}".strip()
@@ -184,12 +198,14 @@ def detect_missed_job_tool_call(
     ):
         return ("skill_job_manager", {"action": "cancel", "query": user_text})
 
-    # 3. Music Autoplay ("autoplay dnb", "start techno radio mode") or Skip/Next while Autoplay is active
+    # 3. Music Autoplay ("autoplay dnb", "start techno radio mode") or Skip/Next/Genre-Switch while Autoplay is active
     if re.search(r"\b(?:autoplay|auto-play|auto\s+play|play\s+.*?\bback[\s\-]+to[\s\-]+back)\b", low):
         return ("skill_job_manager", {"action": "autoplay", "query": user_text})
     if active_channel_id is not None and JOB_ENGINE.get_active_autoplay_job(active_channel_id) is not None:
         if _SKIP_AUTOPLAY_RE.match(low):
             return ("skill_job_manager", {"action": "skip", "query": user_text})
+        if _SWITCH_AUTOPLAY_GENRE_RE.search(low) and not _USER_EXPLICIT_STOP_RE.search(low):
+            return ("skill_job_manager", {"action": "autoplay", "query": user_text})
 
     # 4. Explicit reminder or recurring interval ("remind me in 20m...", "play a dnb song every 5m", "every day at 8am remind...")
     if re.search(
@@ -214,14 +230,66 @@ def enrich_job_tool_args(
     history: list,
     active_channel_id: Optional[int] = None,
 ) -> dict:
-    """Ensure `skill_job_manager` receives the full user request in `query` if omitted by the LLM."""
+    """
+    Ensure `skill_job_manager` receives the full user request in `query` if omitted by the LLM,
+    and prevent the LLM from mistakenly cancelling an active Autoplay session or dropping the
+    `autoplay` action when the user asks to switch genres.
+    """
     enriched = dict(args or {})
+    user_text = ""
+    for m in reversed(history or []):
+        r = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+        if r == "user":
+            raw_c = str((m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or "")
+            user_text = raw_c.split(": ", 1)[1].strip() if ": " in raw_c else raw_c.strip()
+            break
+
     if not enriched.get("query") and not enriched.get("when") and not enriched.get("task") and not enriched.get("job_id"):
-        for m in reversed(history or []):
-            r = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
-            if r == "user":
-                raw_c = str((m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or "")
-                enriched["query"] = raw_c.split(": ", 1)[1].strip() if ": " in raw_c else raw_c.strip()
-                break
+        if user_text:
+            enriched["query"] = user_text
+
+    if not user_text:
+        return enriched
+
+    cid = active_channel_id if active_channel_id is not None else get_active_channel_id()
+    existing_autoplay = JOB_ENGINE.get_active_autoplay_job(cid) if cid is not None else None
+    act = str(enriched.get("action") or "create").strip().lower()
+    low_user = user_text.lower()
+    user_wants_stop = bool(_USER_EXPLICIT_STOP_RE.search(low_user))
+
+    # Guardrail 1: If Autoplay is active and the LLM called `action='cancel'` on a genre-switch prompt
+    # (thinking it should cancel the old genre job first), convert it in-place to an Autoplay genre switch!
+    if (
+        existing_autoplay is not None
+        and act in ("cancel", "stop", "remove", "delete", "unremind")
+        and not user_wants_stop
+        and (
+            _SWITCH_AUTOPLAY_GENRE_RE.search(low_user)
+            or re.search(
+                r"\b(?:autoplay|auto-play|auto\s+play|radio|play|switch|change|swap|genre|vibe|"
+                r"techno|dnb|drum\s+and\s+bass|jungle|house|trance|dubstep|ambient|lofi|lo-fi|phonk|synthwave|hip\s*hop|rap|rock|metal|jazz|pop)\b",
+                low_user,
+            )
+        )
+    ):
+        print(
+            f"🛡️ [Job Enricher]: Intercepted mistaken cancel of active Autoplay '{existing_autoplay.job_id}' "
+            f"on genre-switch prompt '{user_text}' -> converting to action='autoplay'."
+        )
+        enriched["action"] = "autoplay"
+        enriched["query"] = user_text
+        enriched.pop("job_id", None)
+        return enriched
+
+    # Guardrail 2: If the user asked for autoplay or to switch autoplay genre, ensure `action='autoplay'`
+    # even if the LLM passed `action='create'` and stripped the word 'autoplay' from `query`.
+    if act == "create" and not user_wants_stop:
+        if re.search(r"\b(?:autoplay|auto-play|auto\s+play|radio\s+mode|play\s+.*?\bback[\s\-]+to[\s\-]+back)\b", low_user):
+            enriched["action"] = "autoplay"
+        elif existing_autoplay is not None and _SWITCH_AUTOPLAY_GENRE_RE.search(low_user):
+            enriched["action"] = "autoplay"
+            if not enriched.get("query"):
+                enriched["query"] = user_text
+
     return enriched
 

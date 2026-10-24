@@ -34,3 +34,35 @@ KNOWN_BARE_MUSIC_GENRES: frozenset[str] = frozenset({
     "banger", "chill", "melodic", "hard", "dark", "sad", "love", "workout",
 })
 
+# Official sports broadcasters, gaming publishers, and media channels that frequently disable
+# third-party iframe embedding on Discord while remaining the authoritative source for video queries.
+TRUSTED_VIDEO_CHANNELS: frozenset[str] = frozenset({
+    "formula 1", "f1", "nfl", "nba", "nhl", "mlb", "ufc", "premier league",
+    "sky sports", "sky sports f1", "sky sports football", "espn", "cbs sports",
+    "cbs sports golazo", "nbc sports", "tnt sports", "dazn", "uefa", "fifa",
+    "laliga", "serie a", "bundesliga", "ligue 1", "sportsnet", "tsn",
+    "motogp", "wrc", "indycar", "nascar", "red bull", "red bull motorsports",
+    "esl", "esl counter-strike", "blast premier", "pgl", "valorant champions tour",
+    "lolesports", "riot games", "valve", "ea sports", "playstation", "xbox",
+    "nintendo", "rockstar games", "ign", "gamespot", "the game awards",
+    "marvel entertainment", "star wars", "dc", "netflix", "prime video",
+    "hbo", "max", "apple", "apple tv", "sony pictures entertainment",
+    "warner bros. pictures", "universal pictures", "paramount pictures",
+    "a24", "bbc", "bbc sport", "itvx", "channel 4",
+})
+
+# Shorthand query tokens mapped to their official YouTube channel names (lowercase)
+CHANNEL_QUERY_ALIASES: dict[str, str] = {
+    "f1": "formula 1",
+    "formula1": "formula 1",
+    "grand prix": "formula 1",
+    "fp1": "formula 1",
+    "fp2": "formula 1",
+    "fp3": "formula 1",
+    "epl": "premier league",
+    "ucl": "cbs sports golazo",
+    "champions league": "cbs sports golazo",
+    "cs2": "esl counter-strike",
+}
+
+

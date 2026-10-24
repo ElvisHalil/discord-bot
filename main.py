@@ -1067,12 +1067,26 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
             active_auto = JOB_ENGINE.get_active_autoplay_job(channel_id)
             if active_auto is not None:
                 # Autoplay is already active: let skill_music_discovery/skill_youtube_search play the requested track/shift/genre,
-                # and sync_channel_autoplay_on_track_played will automatically reset the Autoplay timer!
+                # and sync_channel_autoplay_on_track_played will automatically reset and sync the Autoplay timer!
+                last_u_text = next(
+                    (
+                        str((m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or "").lower()
+                        for m in reversed(history)
+                        if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
+                    ),
+                    "",
+                )
+                user_explicitly_cancelling = bool(
+                    re.search(r"\b(?:cancel|stop|remove|delete|clear|end|kill|turn\s+off|shut\s+off|disable)\b", last_u_text)
+                )
                 tool_calls = [
                     c for c in tool_calls
                     if not (
                         c.function.name == "skill_job_manager"
-                        and str((c.function.arguments or {}).get("action", "create")).lower() not in ("cancel", "stop", "clear", "list", "status")
+                        and (
+                            not user_explicitly_cancelling
+                            or str((c.function.arguments or {}).get("action", "create")).lower() not in ("cancel", "stop", "clear", "list", "status")
+                        )
                     )
                 ]
             else:

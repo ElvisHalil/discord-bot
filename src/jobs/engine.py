@@ -552,11 +552,13 @@ class JobEngine:
 
     @staticmethod
     def _clean_autoplay_query(raw_query: str, fallback_query: str = "dnb") -> str:
-        """Clean boilerplate skip/autoplay words from a query; return `fallback_query` if only skip words remain."""
+        """Clean boilerplate skip/autoplay/genre-switch words from a query; return `fallback_query` if only boilerplate words remain."""
         cleaned = re.sub(
-            r"\b(?:please|can\s+you|could\s+you|start|begin|turn\s+on|enable|autoplay|auto-play|auto\s+play|radio\s+mode|"
-            r"back[\s\-]+to[\s\-]+back|continuously|play|queue\s+up|queue|some|music|songs?|tracks?|for\s+me|in\s+this\s+channel|"
-            r"next|skip|another|one|switch\s+to|change\s+genre\s+to|change\s+to|instead|now)\b",
+            r"\b(?:please|can\s+(?:you|we)|could\s+(?:you|we)|let'?s|lets|start|begin|turn\s+on|enable|"
+            r"autoplay|auto-play|auto\s+play|radio(?:\s+mode)?|back[\s\-]+to[\s\-]+back|continuously|"
+            r"play|put\s+on|queue\s+up|queue|some|music|songs?|tracks?|tunes?|for\s+(?:me|us)|in\s+this\s+channel|"
+            r"next|skip|another|one|switch|change|swap|shift|move|the|genre|vibe|style|mode|over|into|to|instead|now|pls|"
+            r"harder|softer|faster|slower|more\s+intense|more\s+chill|heavier|lighter)\b",
             " ",
             raw_query or "",
             flags=re.IGNORECASE,
@@ -815,35 +817,55 @@ class JobEngine:
         else:
             clamped_duration = int(job.interval_seconds or AUTOPLAY_DEFAULT_TRACK_SECONDS)
 
-        # Extract updated genre/vibe from the played song card (or channel played song history)
-        new_vibe: Optional[str] = None
-        if new_query_hint and new_query_hint.strip():
-            cleaned_hint = self._clean_autoplay_query(new_query_hint, fallback_query="")
-            if cleaned_hint and cleaned_hint.lower() not in ("unknown", "music", "song", "track"):
-                new_vibe = cleaned_hint
-
-        if not new_vibe:
-            m_gen = re.search(r"(?im)^[^\S\n]*\*\*Genre:\*\*\s*(.+)$", reply_text)
-            if m_gen:
-                cand_gen = m_gen.group(1).strip()
-                if cand_gen and cand_gen.lower() not in ("unknown", "music", "none"):
-                    new_vibe = cand_gen
-
-        if not new_vibe:
-            try:
-                from src.skills.music.context import get_channel_last_played_song
-                last_rec = get_channel_last_played_song(channel_id)
-                if last_rec:
-                    rec_genre = getattr(last_rec, "genre", None)
-                    if rec_genre and str(rec_genre).strip().lower() not in ("unknown", "music", "none", ""):
-                        new_vibe = str(rec_genre).strip()
-            except Exception:
-                pass
-
         already_tagged_autoplay = (
             "MUSIC AUTOPLAY STARTED" in reply_text
             or "📻 **Autoplay" in reply_text
         )
+
+        # Extract updated genre/vibe from the user's request or played song card when Autoplay wasn't already updated this turn
+        new_vibe: Optional[str] = None
+        if not already_tagged_autoplay:
+            hint_str = (new_query_hint or "").strip()
+            is_shift_request = bool(
+                re.search(
+                    r"\b(?:harder|softer|faster|slower|more\s+intense|more\s+chill|heavier|lighter|step\s+up|step\s+down)\b",
+                    hint_str,
+                    re.IGNORECASE,
+                )
+            )
+            cleaned_hint = self._clean_autoplay_query(hint_str, fallback_query="") if hint_str else ""
+            is_explicit_skip_only = bool(hint_str and not cleaned_hint and not is_shift_request)
+            current_vibe_generic = not job.payload_text or job.payload_text.strip().lower() in ("top tracks", "music", "unknown", "")
+
+            if not is_explicit_skip_only or current_vibe_generic:
+                umbrella_tags = {"unknown", "music", "none", "electronic", "dance", "detected", "acoustic dsp", ""}
+                if (
+                    cleaned_hint
+                    and cleaned_hint.lower() not in ("unknown", "music", "song", "track")
+                    and " by " not in cleaned_hint.lower()
+                    and len(cleaned_hint.split()) <= 4
+                ):
+                    new_vibe = cleaned_hint
+
+                if not new_vibe:
+                    m_gen = re.search(r"(?im)^[^\S\n]*\*\*Genre:\*\*\s*(.+)$", reply_text)
+                    if m_gen:
+                        cand_gen = m_gen.group(1).strip()
+                        if cand_gen.lower() not in umbrella_tags or current_vibe_generic:
+                            if cand_gen.lower() not in ("unknown", "music", "none", ""):
+                                new_vibe = cand_gen
+
+                if not new_vibe:
+                    try:
+                        from src.skills.music.context import get_channel_last_played_song
+                        last_rec = get_channel_last_played_song(channel_id)
+                        if last_rec:
+                            rec_genre = str(getattr(last_rec, "genre", "") or "").strip()
+                            if rec_genre.lower() not in umbrella_tags or current_vibe_generic:
+                                if rec_genre.lower() not in ("unknown", "music", "none", ""):
+                                    new_vibe = rec_genre
+                    except Exception:
+                        pass
 
         eff_now = float(now_ts if now_ts is not None else time.time())
         with self._lock:

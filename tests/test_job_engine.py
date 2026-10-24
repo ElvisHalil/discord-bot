@@ -1139,6 +1139,80 @@ class TestOrchestratorAndDispatcherJobIntegration(unittest.TestCase):
             asyncio.run(bot_main.on_message(owner_msg))
             dm_channel.send.assert_awaited_once()
 
+    def test_autoplay_genre_switch_intercepts_mistaken_cancel_and_updates_in_place(self):
+        from src.context import set_active_channel_id
+        from src.jobs.engine import JOB_ENGINE
+        from src.skills.jobs.jobs import enrich_job_tool_args
+
+        set_active_channel_id(707)
+        with patch.object(JOB_ENGINE, "jobs", {}), patch.object(JOB_ENGINE, "_save_jobs"), patch.object(
+            JOB_ENGINE,
+            "_autoplay_resolver",
+            side_effect=[
+                ("📻 **Autoplay (acid techno)** — Next track in `3:30`:\n**Song:** Doppelt\n**Artist:** Serge Geyzel\nhttps://music.youtube.com/watch?v=M9rie5p4smw", 210),
+                ("📻 **Autoplay (driving techno)** — Next track in `4:10`:\n**Song:** No Glue Needed\n**Artist:** Blastculture\nhttps://music.youtube.com/watch?v=mC_7olaOie8", 250),
+            ],
+        ):
+            # 1. Start autoplay on 'acid techno'
+            out1 = skill_job_manager(action="autoplay", query="acid techno")
+            self.assertIn("Doppelt", out1)
+            ap_job = JOB_ENGINE.get_active_autoplay_job(707)
+            self.assertIsNotNone(ap_job)
+            self.assertEqual(ap_job.payload_text, "acid techno")
+
+            # 2. User asks to switch to 'driving techno', and LLM mistakenly calls action='cancel', job_id=ap_job.job_id
+            history = [{"role": "user", "content": "User Halil says: switch genre to driving techno"}]
+            enriched = enrich_job_tool_args(
+                {"action": "cancel", "job_id": ap_job.job_id},
+                history,
+                active_channel_id=707,
+            )
+            self.assertEqual(enriched.get("action"), "autoplay")
+            self.assertNotIn("job_id", enriched)
+
+            out2 = skill_job_manager(**enriched)
+            self.assertIn("No Glue Needed", out2)
+            self.assertEqual(ap_job.payload_text, "driving techno")
+            self.assertEqual(ap_job.interval_seconds, 250)
+            self.assertIs(JOB_ENGINE.get_active_autoplay_job(707), ap_job)
+
+    def test_timeless_genre_query_in_create_user_job_starts_autoplay_instead_of_10m_reminder(self):
+        engine = JobEngine(jobs_file=self.jobs_path)
+        t0 = 1760000000.0
+        # Even when no existing autoplay is running, calling create_user_job(query='driving techno')
+        # with no time/duration must create an AUTOPLAY job, NOT a 10-minute ONCE_AT text reminder!
+        job, msg = engine.create_user_job(
+            channel_id=808,
+            query="driving techno",
+            now_ts=t0,
+            defer_first_autoplay_tick=True,
+        )
+        self.assertIsNotNone(job)
+        self.assertEqual(job.trigger_type, TriggerType.AUTOPLAY)
+        self.assertEqual(job.action_type, ActionType.MUSIC_AUTOPLAY)
+        self.assertEqual(job.payload_text, "driving techno")
+        self.assertIn("MUSIC AUTOPLAY STARTED", msg)
+
+    def test_sync_channel_autoplay_preserves_specific_genre_on_next_and_umbrella_tags(self):
+        engine = JobEngine(jobs_file=self.jobs_path)
+        t0 = 1760000000.0
+        job, _ = engine.create_user_job(
+            channel_id=909,
+            query="autoplay acid techno",
+            now_ts=t0,
+            defer_first_autoplay_tick=True,
+        )
+        with patch("src.skills.youtube.engine.client.get_video_duration_seconds", return_value=215):
+            # Saying 'next' when the song card has broad iTunes tag 'Electronic' must NOT overwrite 'acid techno'
+            engine.sync_channel_autoplay_on_track_played(
+                channel_id=909,
+                reply_text="**Song:** Flower Warfare\n**Artist:** Remco Beekwilder\n**Genre:** Electronic\nhttps://music.youtube.com/watch?v=t2hzjZJmc5Y",
+                new_query_hint="next",
+                now_ts=t0 + 50.0,
+            )
+        self.assertEqual(job.payload_text, "acid techno")
+        self.assertEqual(job.next_fire_at, t0 + 50.0 + 215.0)
+
 
 if __name__ == "__main__":
     unittest.main()

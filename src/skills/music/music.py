@@ -95,7 +95,7 @@ def _format_pre_resolved_entry(cand: Track, r: dict, ui_zone: Optional[str] = No
     genre = cand.genre or r.get("genre")
     album = cand.album or r.get("album")
     if vid and vid in MUSIC_METADATA_CACHE:
-        if genre and not MUSIC_METADATA_CACHE[vid].get("genre"):
+        if genre:
             MUSIC_METADATA_CACHE[vid]["genre"] = genre
         if album and not MUSIC_METADATA_CACHE[vid].get("album"):
             MUSIC_METADATA_CACHE[vid]["album"] = album
@@ -500,6 +500,10 @@ def skill_music_discovery(
                 weights=(0.45, 0.35, 0.20),
                 enforce_artist_diversity=True,
             )
+            if parsed_genre:
+                for t in featured_sample:
+                    if not t.genre or t.genre.strip().lower() in ("unknown", "music", "electronic", "dance"):
+                        t.genre = parsed_genre.title()
 
             pre_resolved = _pre_resolve_top_candidate(featured_sample)
             if pre_resolved:

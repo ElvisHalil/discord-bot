@@ -19,7 +19,6 @@ class YouTubeApiAggregator(BaseYouTubeAggregator):
                 'part': 'snippet',
                 'q': query,
                 'type': 'video',
-                'videoEmbeddable': 'true',
                 'maxResults': max_results,
                 'key': api_key
             }

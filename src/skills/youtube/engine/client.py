@@ -191,7 +191,8 @@ def is_youtube_short(vid: str, href: str = "", title: str = "") -> bool:
 _search_manager = YouTubeAggregatorManager(
     verify_embeddable_fn=verify_embeddable,
     get_oembed_fn=get_video_oembed,
-    is_short_fn=is_youtube_short
+    is_short_fn=is_youtube_short,
+    http_get_fn=_http_get,
 )
 
 
