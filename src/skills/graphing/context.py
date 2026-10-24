@@ -246,6 +246,7 @@ def enrich_graphing_tool_args(
     args: dict,
     history: list,
     active_channel_id: Optional[int] = None,
+    has_sibling_graph_calls: bool = False,
 ) -> dict:
     """Preserve the user's latest prompt and resolve follow-up graphing adjustments using channel state."""
     enriched = dict(args or {})
@@ -257,7 +258,7 @@ def enrich_graphing_tool_args(
             latest_user_text = _strip_user_prefix(str(content or ""))
             break
 
-    if latest_user_text:
+    if latest_user_text and not has_sibling_graph_calls:
         cur_q = str(enriched.get("query") or "").strip()
         if not cur_q or latest_user_text.lower() not in cur_q.lower():
             enriched["query"] = latest_user_text
@@ -313,7 +314,7 @@ def enrich_graphing_tool_args(
             and cur_ticker.upper() in ({"BTC", "BTC-USD"} | set(CURRENCY_NAME_TO_ISO.values()))
         ):
             enriched["ticker"] = extracted_tickers[0]
-        elif cur_ticker and len(extracted_tickers) >= 2:
+        elif cur_ticker and len(extracted_tickers) >= 2 and not has_sibling_graph_calls:
             merged: List[str] = []
             for raw_t in re.split(r"\s*(?:,|\bvs\.?\b|\bversus\b|\band\b)\s*", cur_ticker, flags=re.IGNORECASE):
                 rt = raw_t.strip().lstrip("$")
@@ -326,6 +327,11 @@ def enrich_graphing_tool_args(
                 if canon_ext not in merged:
                     merged.append(canon_ext)
             enriched["ticker"] = ", ".join(merged[:5])
+        elif cur_ticker and has_sibling_graph_calls:
+            canon_single = CHART_TICKER_ALIASES.get(cur_ticker.lower(), cur_ticker.upper())
+            enriched["ticker"] = canon_single
+            if not enriched.get("query"):
+                enriched["query"] = f"{canon_single} {enriched.get('timeframe', '')}".strip()
 
     fallback_tickers = (list(state.last_tickers) if state and state.last_tickers else None) or prior_tickers
     if (

@@ -176,6 +176,7 @@ ESPORTS_STREAM_CHANNELS: Tuple[EsportsStreamChannel, ...] = (
     EsportsStreamChannel("ESL Counter-Strike", "ESLCS", "UCPq2ETz4aAGo2Z-8JisDPIA"),
     EsportsStreamChannel("BLAST Premier", "BLASTPremier", "UC9k--dE_UE0Faxzgb_DDkYQ"),
     EsportsStreamChannel("Thunderpick Esports", "thunderpickesports", "UCDs5D1luLRP2oo3lk71MaCA"),
+    EsportsStreamChannel("PGL", "PGL", "UC5jpxDZx4yoBo324pMQ91Ww"),
 )
 
 HLTV_TEAM_ALIASES: Dict[str, str] = {

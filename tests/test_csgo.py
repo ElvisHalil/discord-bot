@@ -248,7 +248,7 @@ class TestCsgoSkill(unittest.TestCase):
     @patch.dict("os.environ", {"YOUTUBE_API_KEY": "test_yt_key"}, clear=False)
     @patch("src.skills.sports.aggregators.kashrock.KashrockAggregator.get_live_scoreboards", return_value="")
     @patch("src.skills.sports.aggregators.esl_live.requests.get")
-    def test_esl_live_aggregator_checks_esl_blast_and_thunderpick(self, mock_get, _mock_kr):
+    def test_esl_live_aggregator_checks_esl_blast_thunderpick_and_pgl(self, mock_get, _mock_kr):
         from src.skills.sports.aggregators.esl_live import EslLiveAggregator
 
         def fake_get(_url, params=None, timeout=5):
@@ -261,6 +261,32 @@ class TestCsgoSkill(unittest.TestCase):
                         "snippet": {"title": "Thunderpick World Championship 2026 Finals - Day 3"},
                     }]
                 }
+            elif cid == "UC5jpxDZx4yoBo324pMQ91Ww":  # PGL (mixed CS2 + Dota 2 + Marvel Rivals)
+                resp.json.return_value = {
+                    "items": [
+                        {
+                            "id": {"videoId": "qJwibMqAi98"},
+                            "snippet": {
+                                "title": "[A] Team Vitality vs. 9z Team - PGL Masters Bucharest 2026 - Group Stage: Opening Match",
+                                "description": "PGL Masters Bucharest 2026 - Counter-Strike 2 October 24 - 31, 2026",
+                            },
+                        },
+                        {
+                            "id": {"videoId": "dota_vid_123"},
+                            "snippet": {
+                                "title": "Team Yandex vs. Natus Vincere - PGL Wallachia Season 9 - Grand Final",
+                                "description": "PGL Wallachia Season #9 - DOTA 2 September 19-27, 2026",
+                            },
+                        },
+                        {
+                            "id": {"videoId": "rivals_vid_456"},
+                            "snippet": {
+                                "title": "PGL Marvel Rivals Showdown - Semifinals",
+                                "description": "Marvel Rivals tournament live from Bucharest",
+                            },
+                        },
+                    ]
+                }
             else:
                 resp.json.return_value = {"items": []}
             return resp
@@ -269,7 +295,7 @@ class TestCsgoSkill(unittest.TestCase):
         agg = EslLiveAggregator()
         out = agg.get_live_matches()
 
-        self.assertEqual(mock_get.call_count, 3)
+        self.assertEqual(mock_get.call_count, 4)
         checked_ids = [call.kwargs["params"]["channelId"] for call in mock_get.call_args_list]
         self.assertEqual(
             checked_ids,
@@ -277,12 +303,22 @@ class TestCsgoSkill(unittest.TestCase):
                 "UCPq2ETz4aAGo2Z-8JisDPIA",  # ESLCS
                 "UC9k--dE_UE0Faxzgb_DDkYQ",  # BLASTPremier
                 "UCDs5D1luLRP2oo3lk71MaCA",  # thunderpickesports
+                "UC5jpxDZx4yoBo324pMQ91Ww",  # PGL
             ],
         )
         self.assertIn("[LIVE CS2 STREAMS]", out)
         self.assertIn("Thunderpick Esports (@thunderpickesports)", out)
         self.assertIn("Thunderpick World Championship 2026 Finals - Day 3", out)
         self.assertIn("https://www.youtube.com/watch?v=7Ql1O23W-hk", out)
+        # PGL CS2 stream must be included
+        self.assertIn("PGL (@PGL)", out)
+        self.assertIn("[A] Team Vitality vs. 9z Team - PGL Masters Bucharest 2026", out)
+        self.assertIn("https://www.youtube.com/watch?v=qJwibMqAi98", out)
+        # PGL Dota 2 (Wallachia) and Marvel Rivals streams must be excluded even when NAVI is in the title
+        self.assertNotIn("PGL Wallachia", out)
+        self.assertNotIn("dota_vid_123", out)
+        self.assertNotIn("Marvel Rivals", out)
+        self.assertNotIn("rivals_vid_456", out)
 
     @patch("src.skills.sports.sports.skill_sports_esports")
     def test_sports_info_routes_cs_live_stream_queries_to_live_streams(self, mock_csgo):

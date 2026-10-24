@@ -162,6 +162,23 @@ class TestNaturalLanguageJobParser(unittest.TestCase):
         self.assertEqual(p_daily["schedule_spec"]["minute"], 30)
         self.assertEqual(p_daily["schedule_spec"]["days"], [0, 1, 2, 3, 4])
 
+        # Recurring daily chart / skill task must classify as ActionType.AGENT_TASK (never static REMINDER)
+        p_chart = parse_job_request(
+            "create and display comparison charts showing the 24hr performance for BTC/USD, BTC/EUR, and BTC/CAD using skill_graphing_info.",
+            when="every morning at 9:01 AM",
+            now_ts=now_ts,
+            now_dt=now_dt,
+        )
+        self.assertEqual(p_chart["trigger_type"], TriggerType.DAILY_SCHEDULE)
+        self.assertEqual(p_chart["action_type"], ActionType.AGENT_TASK)
+        self.assertEqual(p_chart["schedule_spec"]["hour"], 9)
+        self.assertEqual(p_chart["schedule_spec"]["minute"], 1)
+        self.assertNotIn("using skill_graphing_info", p_chart["payload_text"])
+
+        # Background scheduled task execution must never recursively trigger detect_missed_job_tool_call
+        bg_history = [{"role": "user", "content": "Execute scheduled task: create a chart for BTC/USD every morning at 9:01 AM"}]
+        self.assertIsNone(detect_missed_job_tool_call(bg_history, active_channel_id=123))
+
     def test_autoplay_parsing(self):
         now_ts = 1760000000.0
         p_auto = parse_job_request("autoplay liquid dnb", now_ts=now_ts)

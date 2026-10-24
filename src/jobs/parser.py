@@ -143,9 +143,12 @@ _ASSET_SYMBOL_ALIASES: Dict[str, str] = {
 
 _AGENT_TASK_ACTION_RE = re.compile(
     r"\b(?:"
-    r"play\s+(?:a\s+|an\s+|some\s+|another\s+)?.*?\b(?:song|track|music|dnb|drum\s+and\s+bass|techno|house|jazz|rock|hip\s*hop|metal|pop|trance|dubstep|ambient|lofi|lo-fi|phonk|synthwave)\b"
+    r"skill_[a-z0-9_]+|search_web|search_images|read_website|fetch_youtube_transcript"
+    r"|(?:create|display|generate|render|draw|plot|chart|graph|visualize|overlay|compare)\b.*\b(?:chart|charts|graph|graphs|plot|plots|diagram|flowchart|heatmap|monte\s+carlo|performance|return|returns|price|prices|btc|bitcoin|eth|stocks?|markets?)\b"
+    r"|\b(?:monte\s+carlo|gbm\s+simulation|stochastic\s+simulation|comparison\s+charts?|price\s+charts?)\b"
+    r"|(?:play|stream|queue)\s+(?:a\s+|an\s+|some\s+|another\s+)?.*?\b(?:song|track|music|dnb|drum\s+and\s+bass|techno|house|jazz|rock|hip\s*hop|metal|pop|trance|dubstep|ambient|lofi|lo-fi|phonk|synthwave)\b"
     r"|recommend\s+(?:a\s+|an\s+|some\s+)?(?:song|track|music)"
-    r"|(?:check|fetch|pull|get|show|give\s+me|send\s+me|what\s+is|how\s+is|summarize)\s+(?:the\s+|today'?s\s+|current\s+|live\s+)?(?:weather|forecast|temperature|market|markets|stocks?|s&p|nasdaq|tsx|btc|bitcoin|crypto|price\s+of|headlines|news|score)"
+    r"|(?:check|fetch|pull|get|show|give(?:\s+me)?|send(?:\s+me)?|tell(?:\s+me)?|find|look\s+up|what(?:'s|\s+is|\s+are)|how(?:'s|\s+is|\s+are)|summarize|analyze|compare|run|execute|calculate|report|post)\b.*\b(?:weather|forecast|temperature|market|markets|stocks?|s&p|nasdaq|tsx|dow|btc|bitcoin|eth|ethereum|sol|crypto|gold|oil|dxy|price|prices|performance|headlines|news|digest|brief|score|scores|standings|schedule|matches|games?|odds|betting|nhl|nba|nfl|mlb|epl|ucl|f1|ufc|cs2?|esports|flights?|fares?|images?|pictures?|photos?)"
     r"|search\s+(?:for\s+)?(?:images?|pictures?|photos?|news|web)"
     r")\b",
     re.IGNORECASE,
@@ -373,6 +376,7 @@ def _clean_task_description(raw_text: str) -> str:
         t,
         flags=re.IGNORECASE,
     ).strip()
+    t = re.sub(r"\s*\busing\s+`?skill_[a-z0-9_]+`?\.?\s*$", "", t, flags=re.IGNORECASE).strip()
     t = re.sub(r"^(?:to|that|about)\s+", "", t, flags=re.IGNORECASE).strip()
     return t or raw_text.strip()
 

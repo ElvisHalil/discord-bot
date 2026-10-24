@@ -173,6 +173,9 @@ def detect_missed_job_tool_call(
             return None
 
     raw_content = str((last_msg.get("content") if isinstance(last_msg, dict) else getattr(last_msg, "content", "")) or "")
+    # Never trigger job creation recursively inside a background scheduled task execution turn!
+    if raw_content.strip().startswith("Execute scheduled task:"):
+        return None
     # Strip speaker prefix ("User X says: " or "Name (User ID: ...): ")
     if ": " in raw_content:
         user_text = raw_content.split(": ", 1)[1].strip()
@@ -210,8 +213,9 @@ def detect_missed_job_tool_call(
 
     # 4. Explicit reminder or recurring interval ("remind me in 20m...", "play a dnb song every 5m", "every day at 8am remind...")
     if re.search(
-        r"\b(?:remind\s+(?:me|us|the\s+channel)|set\s+a\s+reminder|set\s+a\s+timer)\b"
-        r"|\b(?:play|send|check|post|give\s+me)\s+.*?\bevery\s+(?:\d+|a|an|one|two|five|ten|fifteen|twenty|thirty|hour|minute|day|morning|evening|weekday)\b",
+        r"\b(?:remind\s+(?:me|us|the\s+channel)|set\s+a\s+reminder|set\s+a\s+timer|schedule\s+a\s+(?:job|task|chart|report))\b"
+        r"|\b(?:play|send|check|post|give\s+me|create|plot|chart|graph|draw|render|show|fetch|get|run)\s+.*?\bevery\s+(?:\d+|a|an|one|two|five|ten|fifteen|twenty|thirty|hour|minute|day|morning|evening|weekday)\b"
+        r"|\bevery\s+(?:day|morning|evening|night|weekday)\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b",
         low,
     ):
         return ("skill_job_manager", {"action": "create", "query": user_text})

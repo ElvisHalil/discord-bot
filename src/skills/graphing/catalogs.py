@@ -216,7 +216,7 @@ _BTC_PURCHASING_POWER_RE = re.compile(
 )
 
 
-def _pair_tokens_to_symbol(base_tok: str, quote_tok: str) -> Optional[str]:
+def _pair_tokens_to_symbol(base_tok: str, quote_tok: str, allow_btc_usd: bool = False) -> Optional[str]:
     b_low = (base_tok or "").strip().lower()
     q_low = (quote_tok or "").strip().lower()
     b_fiat = CURRENCY_NAME_TO_ISO.get(b_low)
@@ -228,7 +228,7 @@ def _pair_tokens_to_symbol(base_tok: str, quote_tok: str) -> Optional[str]:
         return f"{b_fiat}{q_fiat}=X"
     if b_fiat and q_crypto == "BTC":
         return f"{b_fiat}-BTC"
-    if b_crypto == "BTC" and q_fiat and q_fiat != "USD":
+    if b_crypto == "BTC" and q_fiat and (allow_btc_usd or q_fiat != "USD"):
         return f"BTC-{q_fiat}"
     if (b_crypto == "SATS" and q_fiat) or (b_fiat and q_crypto == "SATS"):
         fiat_iso = q_fiat or b_fiat
@@ -280,7 +280,7 @@ def extract_fx_pairs_from_text(text: str) -> List[str]:
         return []
     found: List[str] = []
     for m in _FX_PAIR_RE.finditer(text):
-        sym = _pair_tokens_to_symbol(m.group("base"), m.group("quote"))
+        sym = _pair_tokens_to_symbol(m.group("base"), m.group("quote"), allow_btc_usd=True)
         if sym and sym not in found:
             found.append(sym)
     if not found:
@@ -322,10 +322,22 @@ CHART_TICKER_ALIASES: Dict[str, str] = {
     "microstrategy": "MSTR",
     "bitcoin": "BTC-USD",
     "btc": "BTC-USD",
+    "btc/usd": "BTC-USD",
+    "btc-usd": "BTC-USD",
+    "btc/eur": "BTC-EUR",
+    "btc-eur": "BTC-EUR",
+    "btc/cad": "BTC-CAD",
+    "btc-cad": "BTC-CAD",
+    "btc/gbp": "BTC-GBP",
+    "btc-gbp": "BTC-GBP",
     "ethereum": "ETH-USD",
     "eth": "ETH-USD",
+    "eth/usd": "ETH-USD",
+    "eth-usd": "ETH-USD",
     "solana": "SOL-USD",
     "sol": "SOL-USD",
+    "sol/usd": "SOL-USD",
+    "sol-usd": "SOL-USD",
     "xrp": "XRP-USD",
     "ripple": "XRP-USD",
     "dogecoin": "DOGE-USD",

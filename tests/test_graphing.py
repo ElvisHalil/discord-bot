@@ -408,6 +408,28 @@ class TestGraphingSkill(unittest.TestCase):
             ["CAD-BTC"],
         )
 
+        # 5. Multi-fiat BTC comparison ("BTC/USD, BTC/EUR, and BTC/CAD") preserves all 3 pairs in order
+        q_btc_multi = "create and display comparison charts showing the 24hr performance for BTC/USD, BTC/EUR, and BTC/CAD"
+        self.assertEqual(
+            _extract_market_tickers(q_btc_multi, ""),
+            ["BTC-USD", "BTC-EUR", "BTC-CAD"],
+        )
+        enriched_multi = enrich_graphing_tool_args(
+            {"ticker": "BTC/USD"},
+            [{"role": "user", "content": q_btc_multi}],
+            active_channel_id=self.channel_id,
+        )
+        self.assertEqual(enriched_multi["ticker"], "BTC-USD, BTC-EUR, BTC-CAD")
+        self.assertEqual(enriched_multi["timeframe"], "24h")
+        # When sibling graphing calls are running in parallel, keep each call's single ticker distinct
+        enriched_sibling = enrich_graphing_tool_args(
+            {"ticker": "BTC/EUR"},
+            [{"role": "user", "content": q_btc_multi}],
+            active_channel_id=self.channel_id,
+            has_sibling_graph_calls=True,
+        )
+        self.assertEqual(enriched_sibling["ticker"], "BTC-EUR")
+
 
 if __name__ == "__main__":
     unittest.main()

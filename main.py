@@ -333,6 +333,7 @@ async def handle_job_fire(job, message_text: str):
                 return
 
     final_output = message_text
+    attachments = []
     # If this is a dynamic AGENT_TASK (and not an idle-brake auto-stop notice), execute it live
     if job.action_type == ActionType.AGENT_TASK and not message_text.startswith("⏸️"):
         mention_prefix = f"<@{job.creator_id}> " if job.creator_id > 0 else ""
@@ -345,23 +346,45 @@ async def handle_job_fire(job, message_text: str):
             if card_text:
                 final_output = f"{mention_prefix}🔁 **Scheduled Music (`{job.job_id}`):**\n\n{card_text}"
         else:
-            mode_config = MODES.get("research") or MODES[current_mode]
+            base_mode_config = MODES.get("research") or MODES[current_mode]
+            task_tools = {
+                k: v for k, v in (base_mode_config.get("tools") or {}).items()
+                if k != "skill_job_manager"
+            }
+            mode_config = {**base_mode_config, "tools": task_tools}
             set_active_channel_id(channel_id)
+            clean_task_prompt = re.sub(
+                r"\s*\busing\s+`?skill_[a-z0-9_]+`?\.?\s*$",
+                "",
+                job.payload_text or "",
+                flags=re.IGNORECASE,
+            ).strip() or job.payload_text
             system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
             task_history = [
                 system_msg,
-                {"role": "user", "content": f"Execute scheduled task: {job.payload_text}"},
+                {"role": "user", "content": f"Execute scheduled task: {clean_task_prompt}"},
             ]
             try:
                 clear_channel_attachments(channel_id)
                 task_reply = await run_agent_turn(channel_id, mode_config, turn_history=task_history)
+                attachments = pop_channel_attachments(channel_id)
+                if not task_reply.strip() and attachments:
+                    captions = [str(att.get("caption") or "").strip() for att in attachments if att.get("caption")]
+                    task_reply = f"📊 **{captions[0]}**" if captions else "📊 Here is your scheduled chart."
+                elif task_reply.strip() and attachments:
+                    for att in attachments:
+                        cap = str(att.get("caption") or "").strip()
+                        if att.get("filename", "").startswith("monte_carlo_") and "| Basis:" in cap and "Basis:" not in task_reply:
+                            task_reply = f"📊 **{cap}**\n\n{task_reply.lstrip()}"
+                            break
                 task_reply = suppress_discord_embeds(task_reply)
                 set_active_channel_id(channel_id)
                 if "youtube.com" in task_reply.lower() or "youtu.be" in task_reply.lower():
                     task_reply = await run_in_worker(standardize_song_reply, task_reply)
                 task_reply = sanitize_agent_reply(task_reply)
+                clean_label = sanitize_agent_reply(clean_task_prompt)
                 if task_reply.strip():
-                    final_output = f"{mention_prefix}⏰ **Scheduled Task (`{job.job_id}` — {job.payload_text}):**\n{task_reply.strip()}"
+                    final_output = f"{mention_prefix}⏰ **Scheduled Task (`{job.job_id}` — {clean_label}):**\n{task_reply.strip()}"
             except Exception as e:
                 print(f"⚠️ [Job Engine Agent Task Error]: {e}")
 
@@ -378,10 +401,29 @@ async def handle_job_fire(job, message_text: str):
 
     if is_tg:
         await send_telegram_message(channel_id, final_output)
+        for att in attachments:
+            if att.get("data"):
+                await send_telegram_photo(
+                    channel_id,
+                    att["data"],
+                    filename=att.get("filename", "chart.png"),
+                    caption=att.get("caption", ""),
+                )
     else:
         chunks = [c for c in chunk_message(final_output) if c]
-        for chunk in chunks:
-            await channel.send(chunk)
+        discord_files = [
+            discord.File(io.BytesIO(att["data"]), filename=att["filename"])
+            for att in attachments
+            if att.get("data")
+        ]
+        if chunks:
+            for idx, chunk in enumerate(chunks):
+                if idx == len(chunks) - 1 and discord_files:
+                    await channel.send(chunk, files=discord_files)
+                else:
+                    await channel.send(chunk)
+        elif discord_files:
+            await channel.send(files=discord_files)
 
     if not is_music_card:
         await VOICE_COHOST.announce_tracker_event(channel_id, final_output, profile_or_mode=current_mode)
@@ -1158,6 +1200,50 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     )
                 ]
 
+        # Compound Graphing + Scheduled Job co-execution: e.g. "create a chart for BTC/USD now and every morning at 9:01 AM"
+        if iterations == 0 and supports_tools:
+            if (
+                any(c.function.name == "skill_graphing_info" for c in tool_calls)
+                and not any(c.function.name == "skill_job_manager" for c in tool_calls)
+                and "skill_job_manager" in active_tools
+            ):
+                missed_job = detect_missed_job_tool_call(history, active_channel_id=channel_id)
+                if missed_job and missed_job[0] == "skill_job_manager":
+                    print(f"⚡ [{current_mode.upper()}] Co-executing missed skill_job_manager alongside skill_graphing_info: {missed_job[1]}")
+                    tool_calls = list(tool_calls) + [
+                        types.SimpleNamespace(
+                            function=types.SimpleNamespace(
+                                name="skill_job_manager",
+                                arguments=missed_job[1],
+                            )
+                        )
+                    ]
+            elif (
+                any(c.function.name == "skill_job_manager" for c in tool_calls)
+                and not any(c.function.name == "skill_graphing_info" for c in tool_calls)
+                and "skill_graphing_info" in active_tools
+            ):
+                last_u_raw = next(
+                    (
+                        str((m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or "")
+                        for m in reversed(history)
+                        if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
+                    ),
+                    "",
+                )
+                if re.search(r"\b(?:now|right\s+now|today|this\s+(?:morning|afternoon|evening))\s+and\s+(?:every|daily)\b", last_u_raw, re.IGNORECASE):
+                    missed_graph = detect_missed_graphing_tool_call(history, active_channel_id=channel_id)
+                    if missed_graph and missed_graph[0] == "skill_graphing_info":
+                        print(f"⚡ [{current_mode.upper()}] Co-executing compound skill_graphing_info alongside skill_job_manager: {missed_graph[1]}")
+                        tool_calls = list(tool_calls) + [
+                            types.SimpleNamespace(
+                                function=types.SimpleNamespace(
+                                    name="skill_graphing_info",
+                                    arguments=missed_graph[1],
+                                )
+                            )
+                        ]
+
         # Single-image-per-turn guard: prevent duplicate parallel search_images calls in the same step
         if sum(1 for c in tool_calls if c.function.name == "search_images") > 1:
             seen_img_call = False
@@ -1217,6 +1303,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
         print(f"⚡ [{current_mode.upper()}] Model requested {len(tool_calls)} tools simultaneously!")
         has_top_music = any(call.function.name == "skill_music_discovery" for call in tool_calls)
         has_explicit_markets = any(call.function.name == "skill_markets_info" for call in tool_calls)
+        has_sibling_graph_calls = sum(1 for call in tool_calls if call.function.name == "skill_graphing_info") > 1
         per_tool_char_budget = 12000 if len(tool_calls) == 1 else max(5000, 20000 // len(tool_calls))
 
         async def run_tool(call):
@@ -1250,7 +1337,12 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                 elif tool_name == "skill_markets_info":
                     args = enrich_markets_tool_args(args, history, active_channel_id=channel_id)
                 elif tool_name == "skill_graphing_info":
-                    args = enrich_graphing_tool_args(args, history, active_channel_id=channel_id)
+                    args = enrich_graphing_tool_args(
+                        args,
+                        history,
+                        active_channel_id=channel_id,
+                        has_sibling_graph_calls=has_sibling_graph_calls,
+                    )
                 elif tool_name == "skill_job_manager":
                     args = enrich_job_tool_args(args, history, active_channel_id=channel_id)
                 elif tool_name == "search_images":

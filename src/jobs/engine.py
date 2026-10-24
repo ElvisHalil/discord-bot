@@ -42,6 +42,7 @@ from src.jobs.models import (
 )
 from src.jobs.parser import (
     _format_interval_short,
+    classify_action_type,
     compute_next_schedule_timestamp,
     parse_job_request,
 )
@@ -233,6 +234,13 @@ class JobEngine:
                             int(spec.get("minute", 0)),
                             days_of_week=spec.get("days"),
                         )
+                    # Upgrade persisted jobs whose payload is a skill/tool execution task (e.g. charting, market brief)
+                    if (
+                        job.trigger_type in (TriggerType.ONCE_AT, TriggerType.INTERVAL, TriggerType.DAILY_SCHEDULE)
+                        and job.action_type == ActionType.REMINDER
+                        and classify_action_type(job.payload_text) == ActionType.AGENT_TASK
+                    ):
+                        job.action_type = ActionType.AGENT_TASK
                     self.jobs[job.job_id] = job
         except Exception as e:
             print(f"⚠️ [Job Engine]: Could not load jobs from {self.jobs_file}: {e}")
