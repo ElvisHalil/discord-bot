@@ -650,6 +650,38 @@ def skill_graphing_info(
             futs = [submit_to_worker(_market_agg.fetch_bar_series, sym, tf_code) for sym in targets[:5]]
             series_objs = [s for f in futs if (s := f.result()) is not None]
             if len(series_objs) >= 2:
+                combined_intent = f"{q_raw} {t_raw}".lower()
+                wants_separate = bool(
+                    re.search(
+                        r"\b(?:separate|individually|individual|(?:one|1)\s+(?:chart|graph|plot)\s+(?:for\s+)?each|"
+                        r"for\s+each\s+(?:currency|ticker|pair|coin|asset)|"
+                        r"(?:[2-5]|two|three|four|five)\s+(?:separate\s+|individual\s+|different\s+)?(?:charts?|graphs?|plots?))\b",
+                        combined_intent,
+                    )
+                )
+                wants_overlay = bool(
+                    re.search(
+                        r"\b(?:vs\.?|versus|compare|comparing|comparison|overlay|against|relative\s+to|"
+                        r"(?:in|on)\s+(?:a|one|the\s+same)\s+(?:single\s+)?(?:chart|graph|plot))\b",
+                        combined_intent,
+                    )
+                )
+                if wants_separate or not wants_overlay:
+                    visuals = [_mpl_agg.render_single_market_chart(s) for s in series_objs]
+                    for v in visuals:
+                        queue_channel_attachment(
+                            filename=v.filename,
+                            data=v.png_bytes,
+                            caption=v.title,
+                        )
+                    update_channel_chart_state(
+                        chart_type=ChartType.MARKET,
+                        title=visuals[-1].title,
+                        tickers=[s.symbol for s in series_objs],
+                        timeframe=tf_code,
+                    )
+                    return "\n\n".join(format_visual_confirmation(v) for v in visuals)
+
                 visual = _mpl_agg.render_multi_market_comparison(series_objs)
                 update_channel_chart_state(
                     chart_type=ChartType.MARKET,

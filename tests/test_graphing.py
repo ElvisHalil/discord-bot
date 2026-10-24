@@ -160,6 +160,24 @@ class TestGraphingSkill(unittest.TestCase):
         self.assertEqual(len(atts_comp), 1)
         self.assertTrue(atts_comp[0]["data"].startswith(PNG_MAGIC))
 
+        # Separate individual price charts when listing multiple tickers without 'vs'/'compare'/'overlay'
+        # or when explicitly asking for separate charts ("one for each")
+        with patch(
+            "src.skills.graphing.graphing._market_agg.fetch_bar_series",
+            side_effect=[fake_nvda, fake_amd],
+        ):
+            out_sep = skill_graphing_info(
+                ticker="NVDA, AMD",
+                timeframe="6mo",
+                query="create a chart for NVDA and AMD",
+            )
+        self.assertIn("NVIDIA Corp. (NVDA)", out_sep)
+        self.assertIn("Advanced Micro Devices (AMD)", out_sep)
+        self.assertNotIn("Normalized Return Comparison", out_sep)
+        atts_sep = pop_channel_attachments(self.channel_id)
+        self.assertEqual(len(atts_sep), 2)
+        self.assertTrue(all(a["data"].startswith(PNG_MAGIC) for a in atts_sep))
+
     def test_mermaid_shorthand_sanitization_and_offline_fallback(self):
         code = normalize_and_sanitize_mermaid(
             "User Request (Discord) -> Orchestrator [Main Loop] -> Graphing Skill (PNG)"
