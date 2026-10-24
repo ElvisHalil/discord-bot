@@ -931,6 +931,151 @@ class TestSkillSportsInfo(unittest.TestCase):
         self.assertIn("🔥 **TODAY —", out)
         self.assertIn("Edmonton Oilers", out)
 
+    @patch("src.skills.sports.aggregators.f1.fetch_json")
+    def test_f1_schedule_and_time_enrichment_pipeline_no_double_annotation_across_dst_and_midnight_utc(self, mock_fetch):
+        """
+        Verify that F1Aggregator.get_schedule() + enrich_tool_output_with_time_context():
+        1. Converts Austin (MDT), Mexico City (MDT -> MST DST transition on Nov 1), and Las Vegas (midnight UTC rollover)
+           to exact local Mountain Time + UTC.
+        2. Computes local weekend date ranges ('2026-11-19 to 2026-11-21' for Las Vegas GP) so '• Dates:' never
+           contradicts the Thursday-Saturday local session days.
+        3. Never double-annotates pre-formatted (Local + UTC) session lines across either MDT or MST when passed
+           through enrich_tool_output_with_time_context().
+        """
+        from datetime import timezone
+        from src.utils.timezones import enrich_tool_output_with_time_context, get_local_now
+
+        ref_utc = datetime(2026, 10, 24, 20, 15, tzinfo=timezone.utc)  # Sat Oct 24, 2:15 PM MDT
+
+        austin_comps = [
+            {"id": "1", "type": {"abbreviation": "FP1"}, "date": "2026-10-23T17:30Z", "status": {"type": {"state": "post", "completed": True}}, "competitors": [{"order": 1, "athlete": {"displayName": "Charles Leclerc"}}]},
+            {"id": "2", "type": {"abbreviation": "Qual"}, "date": "2026-10-24T21:00Z", "status": {"type": {"state": "pre", "completed": False}}, "competitors": []},
+            {"id": "3", "type": {"abbreviation": "Race"}, "date": "2026-10-25T20:00Z", "status": {"type": {"state": "pre", "completed": False}}, "competitors": []},
+        ]
+        mexico_comps = [
+            {"id": "4", "type": {"abbreviation": "Qual"}, "date": "2026-10-31T21:00Z", "status": {"type": {"state": "pre", "completed": False}}, "competitors": []},
+            {"id": "5", "type": {"abbreviation": "Race"}, "date": "2026-11-01T20:00Z", "status": {"type": {"state": "pre", "completed": False}}, "competitors": []},
+        ]
+        vegas_comps = [
+            {"id": "6", "type": {"abbreviation": "FP1"}, "date": "2026-11-20T00:30Z", "status": {"type": {"state": "pre", "completed": False}}, "competitors": []},
+            {"id": "7", "type": {"abbreviation": "FP3"}, "date": "2026-11-21T00:30Z", "status": {"type": {"state": "pre", "completed": False}}, "competitors": []},
+            {"id": "8", "type": {"abbreviation": "Qual"}, "date": "2026-11-21T04:00Z", "status": {"type": {"state": "pre", "completed": False}}, "competitors": []},
+            {"id": "9", "type": {"abbreviation": "Race"}, "date": "2026-11-22T04:00Z", "status": {"type": {"state": "pre", "completed": False}}, "competitors": []},
+        ]
+
+        def side_effect(url, timeout=8):
+            if "dates=20261023" in url:
+                return {"events": [{"name": "United States Grand Prix", "circuit": {"fullName": "Circuit of the Americas", "address": {"city": "Austin", "country": "USA"}}, "competitions": austin_comps}]}
+            if "dates=20261030" in url:
+                return {"events": [{"name": "Mexico City Grand Prix", "circuit": {"fullName": "Autodromo Hermanos Rodriguez", "address": {"city": "Mexico City", "country": "Mexico"}}, "competitions": mexico_comps}]}
+            if "dates=20261120" in url:
+                return {"events": [{"name": "Las Vegas Grand Prix", "circuit": {"fullName": "Las Vegas Street Circuit", "address": {"city": "Nevada", "country": "USA"}}, "competitions": vegas_comps}]}
+            return {
+                "season": {"year": 2026},
+                "leagues": [{
+                    "calendar": [
+                        {"label": "United States Grand Prix", "startDate": "2026-10-23T20:30Z", "endDate": "2026-10-25T20:00Z"},
+                        {"label": "Mexico City Grand Prix", "startDate": "2026-10-30T21:30Z", "endDate": "2026-11-01T20:00Z"},
+                        {"label": "Las Vegas Grand Prix", "startDate": "2026-11-20T03:30Z", "endDate": "2026-11-22T07:00Z"},
+                    ]
+                }],
+                "events": [{"name": "United States Grand Prix", "status": {"type": {"detail": "Final"}}, "competitions": austin_comps}],
+            }
+
+        mock_fetch.side_effect = side_effect
+        with patch.dict("os.environ", {"BOT_TIMEZONE": "America/Edmonton"}, clear=False):
+            real_get_local_now = get_local_now
+            with patch(
+                "src.skills.sports.aggregators.f1.get_local_now",
+                side_effect=lambda now=None, tz_override=None: real_get_local_now(now=now or ref_utc, tz_override=tz_override),
+            ):
+                raw_sched = skill_sports_info("f1", "schedule")
+            enriched = enrich_tool_output_with_time_context(raw_sched, now=ref_utc, tz_override="America/Edmonton")
+
+        # 1. Reference clock header is prepended
+        self.assertTrue(enriched.startswith("🕒 Current Time:") or enriched.startswith("[🕒 Current Time:"))
+        # 2. Austin GP in MDT (UTC-6)
+        self.assertIn("• Dates: 2026-10-23 to 2026-10-25", enriched)
+        self.assertIn("• Qualifying: Saturday, Oct 24 at 3:00 PM MDT (21:00 UTC) [🕒 Upcoming]", enriched)
+        self.assertIn("• Grand Prix (Race): Sunday, Oct 25 at 2:00 PM MDT (20:00 UTC) [🕒 Upcoming]", enriched)
+        # 3. Mexico City GP crosses DST boundary: Saturday Oct 31 is MDT (UTC-6), Sunday Nov 01 is MST (UTC-7)
+        self.assertIn("• Qualifying: Saturday, Oct 31 at 3:00 PM MDT (21:00 UTC) [🕒 Upcoming]", enriched)
+        self.assertIn("• Grand Prix (Race): Sunday, Nov 01 at 1:00 PM MST (20:00 UTC) [🕒 Upcoming]", enriched)
+        # 4. Las Vegas GP crosses midnight UTC: local dates are Thu Nov 19 to Sat Nov 21, with explicit UTC day labels
+        self.assertIn("• Dates: 2026-11-19 to 2026-11-21", enriched)
+        self.assertIn("• Practice 1 (FP1): Thursday, Nov 19 at 5:30 PM MST (Fri Nov 20, 00:30 UTC) [🕒 Upcoming]", enriched)
+        self.assertIn("• Qualifying: Friday, Nov 20 at 9:00 PM MST (Sat Nov 21, 04:00 UTC) [🕒 Upcoming]", enriched)
+        self.assertIn("• Grand Prix (Race): Saturday, Nov 21 at 9:00 PM MST (Sun Nov 22, 04:00 UTC) [🕒 Upcoming]", enriched)
+        # 5. Zero double-annotation on any session line (no '/ 21:00 CET' or '/ 23:00 CEST' injected into session lines)
+        for line in enriched.splitlines():
+            if line.strip().startswith("• "):
+                self.assertNotIn("CET", line)
+                self.assertNotIn("CEST", line)
+
+    @patch("src.skills.sports.aggregators.f1.fetch_json")
+    def test_f1_schedule_and_tracker_alignment_for_sprint_weekend_and_evening_utc_rollover(self, mock_fetch):
+        """
+        Verify that on a Sprint weekend queried late in the evening local time (when UTC has already rolled over
+        to the next calendar day), F1Aggregator.get_schedule() and F1Aggregator.get_session_for_tracker() produce
+        identical session start times and labels for Sprint Qualifying, Sprint, Qualifying, and Race.
+        """
+        from datetime import timezone
+        from src.skills.sports.aggregators.f1 import F1Aggregator
+        from src.utils.timezones import get_local_now
+
+        # Current time: Sunday Nov 8, 2026 at 8:30 PM MST (= Monday Nov 9, 03:30 UTC)
+        ref_utc = datetime(2026, 11, 9, 3, 30, tzinfo=timezone.utc)
+        sprint_comps = [
+            {"id": "101", "type": {"abbreviation": "FP1"}, "date": "2026-11-06T15:30Z", "status": {"type": {"state": "post", "completed": True}}, "competitors": []},
+            {"id": "102", "type": {"abbreviation": "SQ"}, "date": "2026-11-06T19:30Z", "status": {"type": {"state": "post", "completed": True}}, "competitors": []},
+            {"id": "103", "type": {"abbreviation": "Sprint"}, "date": "2026-11-07T15:00Z", "status": {"type": {"state": "post", "completed": True}}, "competitors": []},
+            {"id": "104", "type": {"abbreviation": "Qual"}, "date": "2026-11-07T19:00Z", "status": {"type": {"state": "post", "completed": True}}, "competitors": []},
+            {"id": "105", "type": {"abbreviation": "Race"}, "date": "2026-11-08T17:00Z", "status": {"type": {"state": "pre", "completed": False}}, "competitors": []},
+        ]
+        sb_payload = {
+            "season": {"year": 2026},
+            "leagues": [{
+                "calendar": [
+                    {"label": "São Paulo Grand Prix", "startDate": "2026-11-06T15:30Z", "endDate": "2026-11-08T21:00Z"}
+                ]
+            }],
+            "events": [{
+                "id": "401858400",
+                "name": "São Paulo Grand Prix",
+                "circuit": {"fullName": "Autodromo Jose Carlos Pace", "address": {"city": "São Paulo", "country": "Brazil"}},
+                "status": {"type": {"detail": "Weekend"}},
+                "competitions": sprint_comps,
+            }],
+        }
+        mock_fetch.return_value = sb_payload
+
+        agg = F1Aggregator()
+        with patch.dict("os.environ", {"BOT_TIMEZONE": "America/Edmonton"}, clear=False):
+            real_get_local_now = get_local_now
+            with patch(
+                "src.skills.sports.aggregators.f1.get_local_now",
+                side_effect=lambda now=None, tz_override=None: real_get_local_now(now=now or ref_utc, tz_override=tz_override),
+            ):
+                sched_out = agg.get_schedule()
+                tracker_sq = agg.get_session_for_tracker(query="track sprint qualifying")
+                tracker_sprint = agg.get_session_for_tracker(query="track f1 sprint")
+                tracker_quali = agg.get_session_for_tracker(query="track f1 qualifying")
+                tracker_race = agg.get_session_for_tracker(query="track f1 race")
+
+        # Even though UTC is already Monday Nov 9 (03:30 UTC), local date is still Sunday Nov 8 MST, so São Paulo GP remains in UPCOMING!
+        self.assertIn("1. São Paulo Grand Prix", sched_out)
+        self.assertIn("• Weekend Format: Sprint Format", sched_out)
+        self.assertNotIn("None of the remaining 2026 races are Sprint weekends", sched_out)
+
+        # Verify schedule and tracker start times match identically
+        self.assertEqual(tracker_sq["away_team"], "Sprint Qualifying (SQ)")
+        self.assertEqual(tracker_sprint["away_team"], "Sprint")
+        self.assertEqual(tracker_quali["away_team"], "Qualifying")
+        self.assertEqual(tracker_quali["event_id"], "401858400:104")
+        self.assertEqual(tracker_race["away_team"], "Grand Prix (Race)")
+        self.assertEqual(tracker_race["snapshot"].status_detail, "Sunday, Nov 08 at 10:00 AM MST (17:00 UTC)")
+        self.assertIn("• Grand Prix (Race): Sunday, Nov 08 at 10:00 AM MST (17:00 UTC)", sched_out)
+
 
 if __name__ == "__main__":
     unittest.main()

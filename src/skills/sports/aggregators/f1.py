@@ -31,8 +31,8 @@ def _normalize_f1_session_label(raw_type: str) -> str:
         return "Qualifying"
     if rt in ("Race", "R") or rt_low == "race":
         return "Grand Prix (Race)"
-    if "sprint" in rt_low and ("qual" in rt_low or "shootout" in rt_low or rt.upper() in ("SQ", "SS")):
-        return f"Sprint Qualifying ({rt})"
+    if rt.upper() in ("SQ", "SS") or ("sprint" in rt_low and ("qual" in rt_low or "shootout" in rt_low)):
+        return f"Sprint Qualifying ({rt})" if rt.lower() != "sprint qualifying" else "Sprint Qualifying"
     if "sprint" in rt_low:
         return f"Sprint ({rt})" if rt.lower() != "sprint" else "Sprint"
     return rt or "Session"
@@ -142,9 +142,9 @@ class F1Aggregator(BaseSportsAggregator):
             calendar = leagues[0].get("calendar", []) if leagues else []
             season_year = data.get("season", {}).get("year", datetime.now().year)
 
-            # 1. Parse Calendar & Find Next/Recent Races
-            now_utc = datetime.now(timezone.utc)
-            now = now_utc.replace(tzinfo=None)
+            # 1. Parse Calendar & Find Next/Recent Races (anchored to configured local date)
+            local_now = get_local_now()
+            local_today = local_now.date()
             upcoming_races: List[Dict[str, Any]] = []
             past_races: List[Dict[str, Any]] = []
 
@@ -154,19 +154,26 @@ class F1Aggregator(BaseSportsAggregator):
                 end_str = item.get("endDate", "")
                 race_date = None
                 end_date = None
+                start_local_date = None
+                end_local_date = None
                 try:
                     clean_date = start_str.replace("Z", "+00:00")
-                    race_date = datetime.fromisoformat(clean_date).astimezone(timezone.utc).replace(tzinfo=None)
+                    dt_start_utc = datetime.fromisoformat(clean_date).astimezone(timezone.utc)
+                    race_date = dt_start_utc.replace(tzinfo=None)
+                    start_local_date = get_local_now(now=dt_start_utc).date()
                 except Exception:
                     pass
                 try:
                     if end_str:
                         clean_end = end_str.replace("Z", "+00:00")
-                        end_date = datetime.fromisoformat(clean_end).astimezone(timezone.utc).replace(tzinfo=None)
+                        dt_end_utc = datetime.fromisoformat(clean_end).astimezone(timezone.utc)
+                        end_date = dt_end_utc.replace(tzinfo=None)
+                        end_local_date = get_local_now(now=dt_end_utc).date()
                 except Exception:
                     pass
 
                 cutoff_dt = end_date or race_date
+                cutoff_local_date = end_local_date or start_local_date or (cutoff_dt.date() if cutoff_dt else None)
                 entry = {
                     "label": label,
                     "startDate": start_str,
@@ -174,11 +181,14 @@ class F1Aggregator(BaseSportsAggregator):
                     "dt": race_date,
                     "end_dt": end_date,
                     "cutoff_dt": cutoff_dt,
+                    "start_local_date": start_local_date,
+                    "cutoff_local_date": cutoff_local_date,
                     "date_str": start_str[:10] if start_str else "TBD",
+                    "end_date_str": end_str[:10] if end_str else (start_str[:10] if start_str else "TBD"),
                     "date_param": start_str[:10].replace("-", "") if start_str else "",
                 }
 
-                if cutoff_dt and cutoff_dt.date() >= now.date():
+                if cutoff_local_date and max(cutoff_local_date, cutoff_dt.date() if cutoff_dt else cutoff_local_date) >= local_today:
                     upcoming_races.append(entry)
                 else:
                     past_races.append(entry)
@@ -192,13 +202,15 @@ class F1Aggregator(BaseSportsAggregator):
             if is_week:
                 selected_races = [
                     r for r in upcoming_races
-                    if (r["dt"] or r["cutoff_dt"]) and ((r["dt"] or r["cutoff_dt"]).date() - now.date()).days <= 7
+                    if (r["start_local_date"] or r["cutoff_local_date"])
+                    and ((r["start_local_date"] or r["cutoff_local_date"]) - local_today).days <= 7
                 ]
                 header = "🏎️ --- F1 RACES THIS WEEK ---"
             elif is_month:
                 selected_races = [
                     r for r in upcoming_races
-                    if (r["dt"] or r["cutoff_dt"]) and ((r["dt"] or r["cutoff_dt"]).date() - now.date()).days <= 31
+                    if (r["start_local_date"] or r["cutoff_local_date"])
+                    and ((r["start_local_date"] or r["cutoff_local_date"]) - local_today).days <= 31
                 ]
                 header = f"🏎️ --- UPCOMING GRAND PRIX THIS MONTH ({len(selected_races)} Races) ---"
             else:
@@ -216,7 +228,9 @@ class F1Aggregator(BaseSportsAggregator):
 
                 for idx, (r, det) in enumerate(race_details_list, 1):
                     output_lines.append(f"{idx}. {r['label']}")
-                    output_lines.append(f"   • Dates: {r['date_str']} to {r['endDate'][:10]}")
+                    start_d_disp = det.get("start_date_local") or r["date_str"]
+                    end_d_disp = det.get("end_date_local") or r["end_date_str"]
+                    output_lines.append(f"   • Dates: {start_d_disp} to {end_d_disp}")
                     circuit_info = det.get("circuit", "")
                     loc_info = det.get("location", "")
                     if circuit_info and loc_info:
@@ -238,8 +252,11 @@ class F1Aggregator(BaseSportsAggregator):
                     output_lines.append("")
 
                 output_lines.append("📌 CALENDAR & FORMAT VERIFICATION:")
-                output_lines.append("All remaining 2026 Grand Prix weekends listed above feature the confirmed traditional 3-day format including Practice 1 (FP1), Practice 2 (FP2), Practice 3 (FP3), Qualifying, and the Grand Prix Race.")
-                output_lines.append("None of the remaining 2026 races are Sprint weekends in the official calendar.")
+                if any(det.get("has_sprint") for _, det in race_details_list):
+                    output_lines.append("Weekend formats (Standard 3-Day vs Sprint) and session start times above are verified against the official FIA/ESPN schedule.")
+                else:
+                    output_lines.append("All remaining 2026 Grand Prix weekends listed above feature the confirmed traditional 3-day format including Practice 1 (FP1), Practice 2 (FP2), Practice 3 (FP3), Qualifying, and the Grand Prix Race.")
+                    output_lines.append("None of the remaining 2026 races are Sprint weekends in the official calendar.")
                 output_lines.append("")
             else:
                 next_note = f" (Next race: {upcoming_races[0]['label']} on {upcoming_races[0]['date_str']})" if upcoming_races else ""
@@ -360,6 +377,8 @@ class F1Aggregator(BaseSportsAggregator):
             comps_sorted = sorted(comps, key=lambda c: c.get("date", ""))
             has_fp3 = False
             has_sprint = False
+            first_local_date: Optional[str] = None
+            last_local_date: Optional[str] = None
 
             for comp in comps_sorted:
                 raw_type = comp.get("type", {}).get("abbreviation") or comp.get("type", {}).get("text") or "Session"
@@ -369,6 +388,20 @@ class F1Aggregator(BaseSportsAggregator):
                     has_fp3 = True
                 elif "Sprint" in label:
                     has_sprint = True
+
+                if cdate:
+                    try:
+                        dt_u = datetime.fromisoformat(str(cdate).replace("Z", "+00:00"))
+                        if dt_u.tzinfo is None:
+                            dt_u = dt_u.replace(tzinfo=timezone.utc)
+                        else:
+                            dt_u = dt_u.astimezone(timezone.utc)
+                        loc_d = get_local_now(now=dt_u).strftime("%Y-%m-%d")
+                        if first_local_date is None:
+                            first_local_date = loc_d
+                        last_local_date = loc_d
+                    except Exception:
+                        pass
 
                 time_str = _format_f1_session_time(cdate) if cdate else "Time TBD"
                 status_badge = _format_session_status_badge(comp)
@@ -388,6 +421,8 @@ class F1Aggregator(BaseSportsAggregator):
                 "has_fp3": has_fp3,
                 "has_sprint": has_sprint,
                 "format_note": format_note,
+                "start_date_local": first_local_date,
+                "end_date_local": last_local_date,
             }
         except Exception:
             return {}
@@ -506,7 +541,7 @@ class F1Aggregator(BaseSportsAggregator):
                         track_status_badge = "🟢 Track Clear"
                         q_tag = f" (Q{min(green_count, 3)})" if session_label == "Qualifying" and green_count <= 3 else ""
                         ev_desc = f"🟢 **FIA RACE CONTROL{q_tag} ({time_short})**: {msg}"
-                    elif flag == "RED" or "RED FLAG" in msg_up:
+                    elif flag == "RED" or bool(re.search(r"\bRED\s+FLAG\b", msg_up)):
                         track_status_badge = "🟥 RED FLAG"
                         ev_desc = f"🟥 **RED FLAG ({time_short})**: {msg}"
                     elif cat == "SafetyCar" or "SAFETY CAR" in msg_up:
@@ -658,13 +693,14 @@ class F1Aggregator(BaseSportsAggregator):
                 if all_done:
                     leagues = data.get("leagues") or []
                     calendar = leagues[0].get("calendar", []) if leagues else []
-                    now_date = datetime.now(timezone.utc).date()
+                    local_today = get_local_now().date()
                     for item in calendar:
                         end_str = item.get("endDate") or item.get("startDate") or ""
                         start_str = item.get("startDate") or ""
                         try:
                             end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00")).astimezone(timezone.utc)
-                            if end_dt.date() >= now_date and start_str:
+                            end_local_d = get_local_now(now=end_dt).date()
+                            if max(end_dt.date(), end_local_d) >= local_today and start_str:
                                 d_param = start_str[:10].replace("-", "")
                                 next_data = fetch_json(f"{self.SCOREBOARD_URL}?dates={d_param}", timeout=6) or {}
                                 if next_data.get("events"):
@@ -721,16 +757,17 @@ class F1Aggregator(BaseSportsAggregator):
                     desired_label = "Grand Prix (Race)"
 
                 if desired_label:
-                    target_comp = next(
-                        (
-                            c for c in comps
-                            if desired_label.lower()
-                            in _normalize_f1_session_label(
-                                c.get("type", {}).get("abbreviation") or c.get("type", {}).get("text") or ""
-                            ).lower()
-                        ),
-                        None,
-                    )
+                    def _matches_desired(c_item: Dict[str, Any]) -> bool:
+                        norm_l = _normalize_f1_session_label(
+                            c_item.get("type", {}).get("abbreviation") or c_item.get("type", {}).get("text") or ""
+                        )
+                        if desired_label == "Sprint Qualifying":
+                            return norm_l.startswith("Sprint Qualifying")
+                        if desired_label == "Sprint":
+                            return norm_l.startswith("Sprint") and not norm_l.startswith("Sprint Qualifying")
+                        return norm_l == desired_label
+
+                    target_comp = next((c for c in comps if _matches_desired(c)), None)
 
             # 3. Default: prefer currently live ('in') session, then earliest upcoming ('pre') session, then final session
             if target_comp is None:

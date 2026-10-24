@@ -1064,6 +1064,70 @@ class TestSportsTrackerService(unittest.TestCase):
             self.assertIn("Stopped live tracking", res_stop)
             self.assertIn("MSC Cruises United States Grand Prix — Grand Prix (Race)", res_stop)
 
+    def test_f1_tracker_safety_car_vsc_and_next_weekend_calendar_rollover(self):
+        """
+        Verify:
+        1. When events[0] is completely finished (all sessions state='post'), get_session_for_tracker()
+           automatically rolls over to the next upcoming Grand Prix weekend in the calendar.
+        2. OpenF1 Safety Car / Virtual Safety Car and Chequered Flag messages produce high-signal alerts.
+        """
+        from src.skills.sports.aggregators.f1 import F1Aggregator
+
+        agg = F1Aggregator()
+        finished_austin_sb = {
+            "leagues": [{
+                "calendar": [
+                    {"label": "United States Grand Prix", "startDate": "2020-10-23T17:30Z", "endDate": "2020-10-25T20:00Z"},
+                    {"label": "Mexico City Grand Prix", "startDate": "2099-10-30T18:30Z", "endDate": "2099-11-01T20:00Z"},
+                ]
+            }],
+            "events": [{
+                "id": "401858359",
+                "name": "United States Grand Prix",
+                "competitions": [
+                    {"id": "1", "type": {"abbreviation": "Race"}, "date": "2020-10-25T20:00Z", "status": {"type": {"state": "post", "completed": True}}}
+                ],
+            }],
+        }
+        upcoming_mexico_sb = {
+            "events": [{
+                "id": "401858999",
+                "name": "Mexico City Grand Prix",
+                "circuit": {"fullName": "Autodromo Hermanos Rodriguez"},
+                "competitions": [
+                    {"id": "901", "type": {"abbreviation": "Qual"}, "date": "2099-10-31T21:00Z", "status": {"type": {"state": "in", "completed": False}}},
+                ],
+            }]
+        }
+
+        def fake_fetch(url, timeout=8):
+            if "dates=20991030" in url:
+                return upcoming_mexico_sb
+            if "/sessions?" in url:
+                return [{"session_key": 9999, "session_name": "Qualifying", "date_start": "2099-10-31T21:00:00+00:00"}]
+            if "/race_control?" in url:
+                return [
+                    {"date": "2099-10-31T21:00:00+00:00", "category": "Other", "flag": "GREEN", "message": "GREEN LIGHT - PIT EXIT OPEN"},
+                    {"date": "2099-10-31T21:05:00+00:00", "category": "SafetyCar", "flag": None, "message": "VIRTUAL SAFETY CAR DEPLOYED"},
+                    {"date": "2099-10-31T21:18:00+00:00", "category": "Flag", "flag": "CHEQUERED", "message": "CHEQUERED FLAG"},
+                ]
+            if "/drivers?" in url or "/position?" in url:
+                return []
+            return finished_austin_sb
+
+        with patch("src.skills.sports.aggregators.f1.fetch_json", side_effect=fake_fetch):
+            info = agg.get_session_for_tracker(query="track f1 qualifying")
+
+        self.assertIsNotNone(info)
+        self.assertEqual(info["home_team"], "Mexico City Grand Prix")
+        self.assertEqual(info["away_team"], "Qualifying")
+        snap = info["snapshot"]
+        self.assertEqual(snap.state, "in")
+        self.assertIn("Between Q1 & Q2", snap.status_detail)
+        ev_texts = [desc for _, desc in snap.notable_events]
+        self.assertTrue(any("VIRTUAL SAFETY CAR DEPLOYED" in t for t in ev_texts))
+        self.assertTrue(any("CHEQUERED FLAG (End of Q1)" in t for t in ev_texts))
+
 
 if __name__ == "__main__":
     unittest.main()

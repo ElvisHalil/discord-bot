@@ -404,6 +404,16 @@ def enrich_tool_output_with_time_context(
     local_now = get_local_now(now=now, tz_override=tz_override)
     utc_now = local_now.astimezone(timezone.utc)
     local_abbr = _short_tz_abbr(local_now)
+    local_tz_abbrs = {
+        a
+        for a in (
+            local_abbr,
+            _short_tz_abbr(get_local_now(now=utc_now.replace(month=1, day=15), tz_override=tz_override)),
+            _short_tz_abbr(get_local_now(now=utc_now.replace(month=7, day=15), tz_override=tz_override)),
+        )
+        if a and a.upper() != "UTC"
+    }
+    local_abbr_re = "|".join(re.escape(a) for a in sorted(local_tz_abbrs)) if local_tz_abbrs else re.escape(local_abbr)
 
     annotated_count = 0
     current_section_date: date | None = None
@@ -425,7 +435,11 @@ def enrich_tool_output_with_time_context(
                 pass
 
         # Skip lines that were already annotated or contain pre-formatted (UTC | Local) or Discord epoch tags
-        if re.search(r'<t:\d+:[a-zA-Z]>', line) or re.search(rf'\bUTC\s*\|\s*[^)\n]*\b{re.escape(local_abbr)}\b', line):
+        if (
+            re.search(r'<t:\d+:[a-zA-Z]>', line)
+            or re.search(rf'\bUTC\s*\|\s*[^)\n]*\b(?:{local_abbr_re})\b', line)
+            or (bool(local_tz_abbrs) and bool(re.search(r'\bUTC\b', line)) and bool(re.search(rf'\b(?:{local_abbr_re})\b', line)))
+        ):
             annotated_count += 1
             out_lines.append(line)
             continue

@@ -23,6 +23,7 @@ from src.skills.sports.aggregators.espn_utils import (
 
 
 from src.skills.sports.catalogs import UNIVERSAL_SPORT_LEAGUE_REGISTRY
+from src.utils.timezones import get_local_now
 
 
 class UniversalEspnAggregator(BaseSportsAggregator):
@@ -171,7 +172,7 @@ class UniversalEspnAggregator(BaseSportsAggregator):
             return f"Could not fetch scoreboard for {label}."
 
         events = data.get("events", [])
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         if not events:
             return f"=== {icon} {label.upper()} SCOREBOARD ===\nNo events currently scheduled on the active {label} scoreboard."
 

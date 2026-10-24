@@ -28,6 +28,7 @@ from src.skills.sports.catalogs import (
     SOCCER_MULTI_LEAGUE_KEYS as _SOCCER_MULTI_LEAGUE_KEYS,
 )
 from src.utils.http import fetch_json
+from src.utils.timezones import get_local_now
 
 
 class SoccerAggregator(BaseSportsAggregator):
@@ -122,7 +123,7 @@ class SoccerAggregator(BaseSportsAggregator):
             return self.get_standings(league_code, league_name)
 
         # 5. Temporal Scope & History detection
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         is_past = any(w in q for w in (
             "past", "recent", "played already", "already played", "have been played", "already",
             "last week", "previous week", "go back", "prior", "completed", "results",
@@ -404,7 +405,7 @@ class SoccerAggregator(BaseSportsAggregator):
     def get_past_schedule_range(self, league_code: str, league_name: str, days_back: int = 7, scope_label: str = "RECENT MATCH RESULTS", filter_query: str = "") -> str:
         """Fetches completed matches and results from recent matchdays with goals, yellow/red cards, and team stats."""
         print(f"  └─ ⚽ [Soccer]: Fetching {scope_label} for {league_name} (Code: {league_code}, Past {days_back} days)...")
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         start_date = now - timedelta(days=days_back)
 
         try:
@@ -516,7 +517,7 @@ class SoccerAggregator(BaseSportsAggregator):
     def get_schedule_range(self, league_code: str, league_name: str, days_ahead: int = 8, scope_label: str = "WEEKLY FIXTURES", filter_query: str = "") -> str:
         """Fetches upcoming fixtures across multiple matchdays within the specified time window (week or month)."""
         print(f"  └─ ⚽ [Soccer]: Fetching {scope_label} for {league_name} (Code: {league_code}, Next {days_ahead} days)...")
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         end_date = now + timedelta(days=days_ahead)
 
         try:
@@ -627,7 +628,7 @@ class SoccerAggregator(BaseSportsAggregator):
             data = fetch_json(url, timeout=8)
             events = data.get("events", [])
 
-            now = datetime.now()
+            now = get_local_now().replace(tzinfo=None)
             all_completed = events and all(ev.get("competitions", [{}])[0].get("status", {}).get("type", {}).get("completed", False) for ev in events)
             if (not events or all_completed) and not date_param:
                 upcoming_preview = self.get_schedule_range(league_code, league_name, days_ahead=7, scope_label="UPCOMING MATCHES THIS WEEK", filter_query=filter_query)
@@ -760,7 +761,7 @@ class SoccerAggregator(BaseSportsAggregator):
     def get_multi_league_schedule_range(self, days_ahead: int = 8, scope_label: str = "WEEKLY FIXTURES") -> str:
         """Fetches upcoming fixtures across all major soccer competitions in parallel (2 flat HTTP waves)."""
         print(f"  └─ ⚽ [Soccer]: Fetching {scope_label} across all major competitions (Next {days_ahead} days)...")
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         end_date = now + timedelta(days=days_ahead)
 
         try:
@@ -879,7 +880,7 @@ class SoccerAggregator(BaseSportsAggregator):
     def get_multi_league_past_schedule_range(self, days_back: int = 7, scope_label: str = "RECENT MATCH RESULTS") -> str:
         """Fetches recent completed match results across all major soccer competitions in parallel."""
         print(f"  └─ ⚽ [Soccer]: Fetching {scope_label} across all major competitions (Past {days_back} days)...")
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         start_date = now - timedelta(days=days_back)
 
         try:
@@ -985,7 +986,7 @@ class SoccerAggregator(BaseSportsAggregator):
 
     def get_multi_league_matches(self, date_param: Optional[str] = None) -> str:
         """Fetches live, completed, and scheduled matches for a specific date across all major soccer competitions in parallel."""
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         target_date = date_param or now.strftime("%Y%m%d")
         day_display = self.format_human_date(target_date)
         print(f"  └─ ⚽ [Soccer]: Fetching matches across all major competitions for {day_display}...")

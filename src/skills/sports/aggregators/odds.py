@@ -5,6 +5,7 @@ import unicodedata
 from typing import Any, Optional
 from src.skills.sports.aggregators.base import BaseSportsAggregator
 from src.utils.http import fetch_soup, fetch_json
+from src.utils.timezones import get_local_now
 
 
 def _strip_accents(text: str) -> str:
@@ -629,7 +630,7 @@ class OddsAggregator(BaseSportsAggregator):
         if not league_targets:
             return None
 
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         today_ymd = now.strftime("%Y%m%d")
         tomorrow_ymd = (now + timedelta(days=1)).strftime("%Y%m%d")
 
@@ -761,9 +762,9 @@ class OddsAggregator(BaseSportsAggregator):
                 if isinstance(f1_sb, dict):
                     season_year = (f1_sb.get("season") or {}).get("year", season_year)
                     cal = ((f1_sb.get("leagues") or [{}])[0]).get("calendar") or []
-                    now_dt = datetime.now()
+                    now_dt = get_local_now().replace(tzinfo=None)
                     for item in cal:
-                        s_date = item.get("startDate", "") if isinstance(item, dict) else ""
+                        s_date = (item.get("endDate") or item.get("startDate") or "") if isinstance(item, dict) else ""
                         if s_date:
                             dt = datetime.fromisoformat(s_date.replace("Z", "+00:00")).replace(tzinfo=None)
                             if dt >= now_dt:

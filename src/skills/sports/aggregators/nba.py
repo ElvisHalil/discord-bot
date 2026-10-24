@@ -17,6 +17,7 @@ from src.skills.sports.aggregators.espn_utils import (
     parse_league_injuries,
 )
 from src.utils.http import fetch_json
+from src.utils.timezones import get_local_now
 
 
 class NbaAggregator(BaseSportsAggregator):
@@ -48,7 +49,7 @@ class NbaAggregator(BaseSportsAggregator):
         if any(w in q for w in ("standing", "table", "rank", "conference", "seeds")):
             return self.get_standings()
 
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         is_past = any(w in q for w in (
             "past", "recent", "played already", "already played", "have been played", "already",
             "last week", "previous week", "go back", "prior", "completed", "results",
@@ -113,7 +114,7 @@ class NbaAggregator(BaseSportsAggregator):
     def get_past_schedule_range(self, days_back: int = 7, scope_label: str = "RECENT NBA RESULTS") -> str:
         """Fetches completed NBA games and scores from recent game days."""
         print(f"  └─ 🏀 [NBA]: Fetching {scope_label} (Past {days_back} days)...")
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         start_date = now - timedelta(days=days_back)
 
         try:
@@ -195,7 +196,7 @@ class NbaAggregator(BaseSportsAggregator):
     def get_schedule_range(self, days_ahead: int = 7, scope_label: str = "WEEKLY SCHEDULE") -> str:
         """Fetches upcoming NBA games across multiple days within the specified time window (week or month)."""
         print(f"  └─ 🏀 [NBA]: Fetching {scope_label} (Next {days_ahead} days)...")
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         end_date = now + timedelta(days=days_ahead)
 
         try:
@@ -268,7 +269,7 @@ class NbaAggregator(BaseSportsAggregator):
     def get_games(self, date_param: Optional[str] = None, filter_query: str = "") -> str:
         """Fetches live, upcoming, and recent NBA games with scores, quarter breakdowns, and top performers."""
         print(f"  └─ 🏀 [NBA]: Fetching NBA games (Date: {date_param or 'Today'})...")
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         url = self.SCOREBOARD_URL
         if date_param:
             url += f"?dates={date_param}"

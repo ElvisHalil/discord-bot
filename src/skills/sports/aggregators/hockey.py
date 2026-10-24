@@ -19,6 +19,7 @@ from src.skills.sports.aggregators.espn_utils import (
     parse_match_summary,
 )
 from src.utils.http import fetch_json
+from src.utils.timezones import get_local_now
 
 
 class HockeyAggregator(BaseSportsAggregator):
@@ -75,7 +76,7 @@ class HockeyAggregator(BaseSportsAggregator):
         if any(w in q for w in ("standing", "table", "rank", "points", "wildcard", "division", "conference")):
             return self.get_standings()
 
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         is_past = any(w in q for w in (
             "past", "recent", "played already", "already played", "have been played", "already",
             "last week", "previous week", "go back", "prior", "completed", "results",
@@ -150,7 +151,7 @@ class HockeyAggregator(BaseSportsAggregator):
     def get_past_schedule_range(self, days_back: int = 7, scope_label: str = "RECENT NHL RESULTS") -> str:
         """Fetches completed NHL games and scores from recent game days."""
         print(f"  └─ 🏒 [NHL]: Fetching {scope_label} (Past {days_back} days)...")
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         start_date = now - timedelta(days=days_back)
 
         try:
@@ -232,7 +233,7 @@ class HockeyAggregator(BaseSportsAggregator):
     def get_schedule_range(self, days_ahead: int = 7, scope_label: str = "WEEKLY SCHEDULE") -> str:
         """Fetches upcoming NHL games across multiple days within the specified time window (week or month)."""
         print(f"  └─ 🏒 [NHL]: Fetching {scope_label} (Next {days_ahead} days)...")
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         end_date = now + timedelta(days=days_ahead)
 
         try:
@@ -305,7 +306,7 @@ class HockeyAggregator(BaseSportsAggregator):
     def get_games(self, date_param: Optional[str] = None, filter_query: str = "") -> str:
         """Fetches live, upcoming, and recent NHL hockey games with period linescores and top performers."""
         print(f"  └─ 🏒 [NHL]: Fetching Hockey games (Date: {date_param or 'Today'})...")
-        now = datetime.now()
+        now = get_local_now().replace(tzinfo=None)
         url = self.SCOREBOARD_URL
         if date_param:
             url += f"?dates={date_param}"
