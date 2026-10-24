@@ -145,6 +145,27 @@ def skill_music_discovery(
         mood: Mood or vibe keyword (e.g. 'banger', 'melodic', 'hard', 'dark', 'chill', 'sad', 'love', 'workout').
         shift: Relative 1-notch tempo/intensity shift from the current song: 'harder', 'softer', 'faster', or 'slower'.
     """
+    # Resolve any YouTube / YouTube Music URL passed in similar_to, genre, or artist into 'Song by Artist'
+    for _arg_val in (similar_to, genre, artist):
+        if _arg_val and ("youtube.com/watch" in _arg_val or "youtu.be/" in _arg_val):
+            _m_yt = re.search(
+                r"https?://(?:music\.|www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([0-9A-Za-z_-]{11})",
+                _arg_val,
+            )
+            if _m_yt:
+                from src.skills.music.engine.formatting import get_music_metadata
+
+                _meta = get_music_metadata(_m_yt.group(1))
+                _s = str(_meta.get("song") or "").strip()
+                _a = str(_meta.get("artist") or "").strip()
+                if _s and _s.lower() not in ("unknown", "unknown track", "youtube music"):
+                    similar_to = f"{_s} by {_a}" if (_a and _a.lower() not in ("unknown", "unknown artist")) else _s
+                    if genre and ("youtube.com/watch" in genre or "youtu.be/" in genre):
+                        genre = None
+                    if artist and ("youtube.com/watch" in artist or "youtu.be/" in artist):
+                        artist = None
+                    break
+
     shift_raw = (shift or "").strip()
     if not shift_raw and not artist:
         if mood and parse_spectrum_shift(mood) is not None:

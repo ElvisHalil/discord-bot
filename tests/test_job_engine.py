@@ -1294,6 +1294,21 @@ class TestOrchestratorAndDispatcherJobIntegration(unittest.TestCase):
             self.assertIn("Next track in `4:00`", card)
             self.assertIn("Opus", card)
 
+        # Also verify skill_music_discovery itself resolves a raw YouTube URL inside similar_to into 'Song by Artist'
+        from src.skills.music import music as music_mod
+        from src.skills.music.music import skill_music_discovery
+
+        with patch(
+            "src.skills.music.engine.formatting.get_music_metadata",
+            return_value={"song": "Titan", "artist": "Papa Pedro", "genre": None, "album": None},
+        ), patch.object(
+            music_mod.manager,
+            "get_similar_tracks",
+            return_value=[],
+        ) as mock_sim:
+            skill_music_discovery(similar_to="Titan https://music.youtube.com/watch?v=6iOyD103U64&si=khYUwWJQOTmMGTGs")
+            mock_sim.assert_called_once_with("Titan by Papa Pedro")
+
     def test_autoplay_reply_card_enrichment_and_bare_header_countdown_injection(self):
         from src.skills.jobs.jobs import detect_missed_job_tool_call, enrich_job_tool_args
 

@@ -56,7 +56,7 @@ _REPLY_SONG_CARD_RE = re.compile(
 
 
 def _extract_user_and_reply_card(raw_content: str) -> Tuple[str, Optional[Tuple[str, str]]]:
-    """Strip speaker/reply prefixes cleanly and extract any replied-to song card ('Song', 'Artist')."""
+    """Strip speaker/reply prefixes cleanly and extract any replied-to song card ('Song', 'Artist') or replied-to YouTube URL."""
     text = (raw_content or "").strip()
     m_reply = _REPLY_SONG_CARD_RE.search(text)
     reply_seed = (m_reply.group(1).strip(), m_reply.group(2).strip()) if m_reply else None
@@ -67,12 +67,17 @@ def _extract_user_and_reply_card(raw_content: str) -> Tuple[str, Optional[Tuple[
         user_text = text.split(": ", 1)[1].strip()
     else:
         user_text = text
+    if "http" not in user_text.lower() and ("youtube.com/watch" in text.lower() or "youtu.be/" in text.lower()):
+        m_yt = re.search(r"https?://(?:music\.|www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[0-9A-Za-z_-]{11}\S*", text)
+        if m_yt:
+            yt_clean = m_yt.group(0).rstrip("\"'\\]")
+            user_text = f"{user_text} {yt_clean}".strip()
     return user_text, reply_seed
 
 _AUTOPLAY_DIRECT_INSTRUCTION = (
     "\n\n[SYSTEM INSTRUCTION: You MUST include the exact `📻 **Autoplay (...)` header and the full "
     "`**Song:** / **Artist:** / https://music.youtube.com/watch?v=...` card above in your reply so Track #1 "
-    "plays immediately. Do NOT omit the song card or URL, and do NOT call skill_music_discovery or skill_youtube_search.]"
+    "plays immediately. Do NOT omit the song card or URL, and do NOT call skill_music_discovery, skill_youtube_search, or read_youtube_video.]"
 )
 
 

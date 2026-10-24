@@ -1258,15 +1258,14 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
             tool_calls = deduped_calls
 
         # Autoplay Start Interception: when the user explicitly asks to start/run Autoplay (e.g. "start autoplay
-        # similar to this <youtube link>" or "autoplay similar to Strobe") and the LLM called skill_music_discovery
-        # or skill_youtube_search instead of skill_job_manager, convert it to skill_job_manager(action='autoplay')
-        # so the Autoplay job is registered in JOB_ENGINE with a live countdown timer.
+        # similar to this <youtube link>" or "autoplay similar to Strobe") and the LLM called read_youtube_video,
+        # skill_music_discovery, or skill_youtube_search instead of skill_job_manager, convert it to
+        # skill_job_manager(action='autoplay') so the Autoplay job is registered in JOB_ENGINE with a live countdown timer.
         if (
-            iterations == 0
-            and supports_tools
+            supports_tools
             and "skill_job_manager" in active_tools
             and not any(c.function.name == "skill_job_manager" for c in tool_calls)
-            and any(c.function.name in ("skill_music_discovery", "skill_youtube_search") for c in tool_calls)
+            and any(c.function.name in ("skill_music_discovery", "skill_youtube_search", "read_youtube_video") for c in tool_calls)
         ):
             last_u_raw = next(
                 (
@@ -1280,14 +1279,19 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                 missed_auto = detect_missed_job_tool_call(history, active_channel_id=channel_id)
                 if missed_auto and missed_auto[0] == "skill_job_manager" and (missed_auto[1] or {}).get("action") == "autoplay":
                     music_call = next(
-                        (c for c in tool_calls if c.function.name in ("skill_music_discovery", "skill_youtube_search")),
+                        (
+                            c for c in tool_calls
+                            if c.function.name in ("skill_music_discovery", "skill_youtube_search", "read_youtube_video")
+                        ),
                         None,
                     )
                     m_args = dict((music_call.function.arguments if music_call else None) or {})
                     base_auto_q = str((missed_auto[1] or {}).get("query") or "").strip()
                     low_auto_q = base_auto_q.lower()
                     if "youtube.com/watch" not in low_auto_q and "youtu.be/" not in low_auto_q and " by " not in low_auto_q:
-                        if m_args.get("similar_to"):
+                        if m_args.get("url") and ("youtube.com/watch" in str(m_args.get("url")).lower() or "youtu.be/" in str(m_args.get("url")).lower()):
+                            base_auto_q = f"autoplay similar to {m_args['url']}"
+                        elif m_args.get("similar_to"):
                             base_auto_q = f"autoplay similar to {m_args['similar_to']}"
                         elif m_args.get("genre"):
                             base_auto_q = f"autoplay {m_args['genre']}"
@@ -1303,7 +1307,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                         f"on explicit Autoplay prompt -> redirecting to skill_job_manager: {auto_args}"
                     )
                     tool_calls = [
-                        c for c in tool_calls if c.function.name not in ("skill_music_discovery", "skill_youtube_search")
+                        c for c in tool_calls
+                        if c.function.name not in ("skill_music_discovery", "skill_youtube_search", "read_youtube_video")
                     ] + [
                         types.SimpleNamespace(
                             function=types.SimpleNamespace(
@@ -1312,12 +1317,36 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                             )
                         )
                     ]
+                elif (
+                    "skill_music_discovery" in active_tools
+                    and any(c.function.name == "read_youtube_video" for c in tool_calls)
+                    and not any(c.function.name == "skill_music_discovery" for c in tool_calls)
+                    and (
+                        "music.youtube.com/watch" in last_u_raw.lower()
+                        or re.search(r"\b(?:similar\s+to|like\s+this|like\s+that|same\s+vibe|songs?\s+like|tracks?\s+like)\b", last_u_raw, re.IGNORECASE)
+                    )
+                    and not re.search(r"\b(?:summarize|summary|transcript|lyrics|what\s+do\s+they\s+say|about)\b", last_u_raw, re.IGNORECASE)
+                ):
+                    yt_call = next((c for c in tool_calls if c.function.name == "read_youtube_video"), None)
+                    yt_url = str(((yt_call.function.arguments if yt_call else None) or {}).get("url") or "").strip() or last_u_raw
+                    print(
+                        f"⚡ [{current_mode.upper()}] Intercepted read_youtube_video on music similarity/YouTube Music prompt "
+                        f"-> redirecting to skill_music_discovery(similar_to='{yt_url}')"
+                    )
+                    tool_calls = [c for c in tool_calls if c.function.name != "read_youtube_video"] + [
+                        types.SimpleNamespace(
+                            function=types.SimpleNamespace(
+                                name="skill_music_discovery",
+                                arguments={"similar_to": yt_url},
+                            )
+                        )
+                    ]
 
         # Single-Autoplay-Card guard: prevent running skill_job_manager and skill_music_discovery/skill_youtube_search
         # in the same step when starting Autoplay or when Autoplay is already active in the channel.
         if (
             any(c.function.name == "skill_job_manager" for c in tool_calls)
-            and any(c.function.name in ("skill_music_discovery", "skill_youtube_search") for c in tool_calls)
+            and any(c.function.name in ("skill_music_discovery", "skill_youtube_search", "read_youtube_video") for c in tool_calls)
         ):
             active_auto = JOB_ENGINE.get_active_autoplay_job(channel_id)
             if active_auto is not None:
@@ -1355,7 +1384,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     for c in tool_calls
                 )
                 if has_autoplay_job_call:
-                    tool_calls = [c for c in tool_calls if c.function.name not in ("skill_music_discovery", "skill_youtube_search")]
+                    tool_calls = [c for c in tool_calls if c.function.name not in ("skill_music_discovery", "skill_youtube_search", "read_youtube_video")]
 
         print(f"⚡ [{current_mode.upper()}] Model requested {len(tool_calls)} tools simultaneously!")
         has_top_music = any(call.function.name == "skill_music_discovery" for call in tool_calls)
