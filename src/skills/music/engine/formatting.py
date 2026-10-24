@@ -593,6 +593,17 @@ def ensure_turn_music_card_preserved(
                     intro=text,
                 )
 
+        # 3. Verified YouTube video or music link from `skill_youtube_search`
+        if t_name == "skill_youtube_search":
+            m_yt = re.search(
+                r"(https?://(?:music\.|www\.)?youtube\.com/watch\?v=[0-9A-Za-z_-]{11})",
+                t_content,
+            )
+            if m_yt:
+                yt_url = m_yt.group(1).strip()
+                print("🛡️ [YouTube Link Guard]: Re-attached verified YouTube URL omitted by LLM summary.")
+                return f"{text}\n\n{yt_url}".strip() if text else yt_url
+
     return reply
 
 

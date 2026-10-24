@@ -843,14 +843,24 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                 break
 
         compact_intra_turn_tool_history(history)
+        # Find the start of the current user turn so we ONLY include tool results from this turn,
+        # never stale tool results from earlier turns in the channel history!
+        last_user_idx = 0
+        for idx in range(len(history) - 1, -1, -1):
+            r = history[idx].get("role") if isinstance(history[idx], dict) else getattr(history[idx], "role", None)
+            if r == "user":
+                last_user_idx = idx
+                break
+
         # Convert tool_calls / role="tool" messages into plain text context so Gemma 4's template
         # never primes the model to emit raw <|tool_call> tags while `tools` is omitted.
         clean_messages = []
-        for m in history:
+        for idx, m in enumerate(history):
             m_role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
             m_content = str((m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or "")
-            m_tools = m.get("tool_calls") if isinstance(m, dict) else getattr(m, "tool_calls", None)
             if m_role == "tool":
+                if idx < last_user_idx:
+                    continue
                 t_name = (m.get("name") if isinstance(m, dict) else getattr(m, "name", None)) or "tool"
                 clean_messages.append({"role": "user", "content": f"[Tool result from {t_name}]:\n{m_content}"})
             elif m_role == "assistant":
@@ -1028,13 +1038,16 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
             reply = response.message.content or ""
             thinking_len = len(getattr(response.message, "thinking", "") or "")
             done_reason = str(getattr(response, "done_reason", "") or "").lower()
+            has_complete_yt_link = bool(
+                re.search(r"https?:\/\/(?:www\.|music\.)?youtube\.com\/watch\?v=[0-9A-Za-z_-]{11}", reply)
+            )
             if fast_voice_turn:
                 is_truncated = not reply.strip()
             else:
                 is_truncated = (
                     not reply.strip()
                     or done_reason == "length"
-                    or (thinking_len > 400 and len(reply.strip()) < 90)
+                    or (thinking_len > 400 and len(reply.strip()) < 90 and not has_complete_yt_link)
                     or bool(re.search(r"\[[^\]]*\]\(<?https?://[^\s)>]*$", reply.strip()))
                 )
             # Nudge with think=False if the model returned empty or mid-generation truncated content
@@ -1044,15 +1057,25 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     f"(done_reason={done_reason or 'n/a'}, content_chars={len(reply)}, thinking_chars={thinking_len}); "
                     f"forcing complete final answer with think=False."
                 )
+                turn_used_news = any(
+                    (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "tool"
+                    and (m.get("name") if isinstance(m, dict) else getattr(m, "name", None)) == "skill_news_headlines"
+                    for m in history[-6:]
+                )
                 if fast_voice_turn:
                     nudge_msg = "Give a 1-2 sentence spoken summary of the result above with no Markdown or URLs."
-                else:
+                elif iterations > 0 and turn_used_news:
                     nudge_msg = (
                         "Now summarize and give your complete final answer based on the tool results above. "
                         "Cover all sections from the tool results (including the Daily Market & Macro Pulse if present) with complete URLs."
-                        if iterations > 0
-                        else "Give your direct, concise final answer to the user's message now."
                     )
+                elif iterations > 0:
+                    nudge_msg = (
+                        "Now give your complete, direct final answer based only on the latest tool result above, "
+                        "preserving any verified URLs."
+                    )
+                else:
+                    nudge_msg = "Give your direct, concise final answer to the user's message now."
                 reply = await final_answer_without_tools(nudge_msg)
             break
 
@@ -1320,7 +1343,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     or (fast_voice_turn and not has_compound_media_intent)
                 )
             )
-            or (fast_voice_turn and has_verified_music_link)
+            or has_verified_music_link
         ) and all("PARALLEL_EXECUTION_BLOCKED" not in r["content"] and not r["content"].startswith("⚠️") for r in tool_results):
             hide_tools_next_step = True
             if "search_images" in called_names:

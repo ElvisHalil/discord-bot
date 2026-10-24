@@ -7,7 +7,7 @@ from __future__ import annotations
 VIDEO_RESULTS_TEMPLATE = (
     "=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
     "Present the video(s) to the user.\n"
-    "1. Paste the raw standard YouTube video link (https://www.youtube.com/watch?v=...) on its own blank line so Discord embeds the media player.\n"
+    "1. Write a brief 1-sentence intro naming the video title and channel, then paste the raw standard YouTube video link (https://www.youtube.com/watch?v=...) on its own blank line so Discord embeds the media player.\n"
     "2. Do NOT wrap the URL in markdown `[Title](link)` or `<>` brackets, and do NOT use `music.youtube.com` in video mode.\n"
     "3. If searching for a single video, present ONLY the best single link."
 )
