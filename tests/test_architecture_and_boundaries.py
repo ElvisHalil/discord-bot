@@ -132,7 +132,7 @@ from src.utils.timezones import FixedTimezoneSpec
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src"
 SKILLS_ROOT = SRC_ROOT / "src" / "skills" if not (SRC_ROOT / "skills").exists() else SRC_ROOT / "skills"
-DOMAIN_SKILLS = {"music", "sports", "flights", "news", "weather", "markets", "graphing", "voice"}
+DOMAIN_SKILLS = {"music", "sports", "flights", "news", "weather", "markets", "graphing", "voice", "jobs"}
 
 
 class TestArchitectureAndBoundaries(unittest.TestCase):

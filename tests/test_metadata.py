@@ -1420,6 +1420,77 @@ class TestYouTubeMusicAggregatorAndBlendedDiscovery(unittest.TestCase):
         mock_ytm_search.assert_called_once()
         mock_http_get.assert_not_called()
 
+    def test_ensure_turn_music_card_preserved_all_three_branches(self):
+        from src.skills.music.engine.formatting import ensure_turn_music_card_preserved
+
+        # Branch 1: Autoplay Track #1 card from skill_job_manager omitted by LLM summary
+        autoplay_tool_msg = {
+            "role": "tool",
+            "name": "skill_job_manager",
+            "content": (
+                "✅ Started Music Autoplay (`J-101`)\n\n"
+                "📻 **Autoplay (`J-101` — Track #1):**\n\n"
+                "**Song:** Fall 2 Fast\n"
+                "**Artist:** Particle\n"
+                "**Genre:** Drum & Bass\n"
+                "https://music.youtube.com/watch?v=9x2FxfdaMVw\n\n"
+                "[SYSTEM INSTRUCTION — Return this card]"
+            ),
+        }
+        hist_auto = [
+            {"role": "user", "content": "autoplay drum and bass"},
+            autoplay_tool_msg,
+        ]
+        preserved_auto = ensure_turn_music_card_preserved(
+            "🎧 Music Autoplay has been started with a Drum & Bass vibe!",
+            hist_auto,
+        )
+        self.assertIn("https://music.youtube.com/watch?v=9x2FxfdaMVw", preserved_auto)
+        self.assertIn("**Song:** Fall 2 Fast", preserved_auto)
+        self.assertNotIn("[SYSTEM INSTRUCTION", preserved_auto)
+
+        # Branch 2: Pre-resolved card from skill_music_discovery omitted by LLM summary
+        music_tool_msg = {
+            "role": "tool",
+            "name": "skill_music_discovery",
+            "content": (
+                "=== VERIFIED YOUTUBE MUSIC RESULT (PRE-RESOLVED IN PARALLEL) ===\n"
+                "Song: Solar System\n"
+                "Artist: Sub Focus\n"
+                "Genre: Drum & Bass\n"
+                "Link: https://music.youtube.com/watch?v=dQw4w9WgXcQ\n"
+            ),
+        }
+        hist_music = [
+            {"role": "user", "content": "play some dnb"},
+            music_tool_msg,
+        ]
+        preserved_music = ensure_turn_music_card_preserved(
+            "Here is a high-energy Drum & Bass roller for you:",
+            hist_music,
+        )
+        self.assertIn("https://music.youtube.com/watch?v=dQw4w9WgXcQ", preserved_music)
+        self.assertIn("**Song:** Solar System", preserved_music)
+
+        # Branch 3: Verified YouTube Music link from skill_youtube_search(is_music=True) omitted by LLM summary
+        yt_tool_msg = {
+            "role": "tool",
+            "name": "skill_youtube_search",
+            "content": (
+                "🎧 **Strobe** by **deadmau5**\n"
+                "https://music.youtube.com/watch?v=tKi9Zwc53Sw"
+            ),
+        }
+        hist_yt = [
+            {"role": "user", "content": "play Strobe by deadmau5"},
+            yt_tool_msg,
+        ]
+        preserved_yt = ensure_turn_music_card_preserved(
+            "Here is Strobe by deadmau5:",
+            hist_yt,
+        )
+        self.assertIn("https://music.youtube.com/watch?v=tKi9Zwc53Sw", preserved_yt)
+
 
 if __name__ == "__main__":
     unittest.main()

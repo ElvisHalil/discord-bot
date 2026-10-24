@@ -699,7 +699,7 @@ class VoiceCohostService:
         # If Music Autoplay is active in this channel and yt-dlp returned an exact duration, sync the timer!
         if duration_sec > 0:
             try:
-                from src.skills.jobs import JOB_ENGINE
+                from src.jobs import JOB_ENGINE
 
                 active_auto = JOB_ENGINE.get_active_autoplay_job(channel_id)
                 if active_auto is not None:
@@ -793,7 +793,7 @@ class VoiceCohostService:
                 )
 
         try:
-            from src.skills.jobs import JOB_ENGINE
+            from src.jobs import JOB_ENGINE
 
             if JOB_ENGINE.get_active_autoplay_job(channel_id) is not None:
                 self.stop_music(channel_id, clear_queue=False)
@@ -830,7 +830,7 @@ class VoiceCohostService:
             lines.append("- **Up Next in Queue:** Empty (React with 👍 on any song card to queue similar tracks!)")
 
         try:
-            from src.skills.jobs import JOB_ENGINE
+            from src.jobs import JOB_ENGINE
 
             auto_job = JOB_ENGINE.get_active_autoplay_job(channel_id)
             if auto_job is not None:

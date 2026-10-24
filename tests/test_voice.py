@@ -296,6 +296,19 @@ class TestVoiceCohostServiceAndSkill(unittest.IsolatedAsyncioTestCase):
             detect_missed_music_shift_tool_call([{"role": "user", "content": "User Elvis says: play Strobe by deadmau5"}]),
             ("skill_youtube_search", {"query": "Strobe by deadmau5", "max_results": 1, "is_music": True}),
         )
+        # Compound voice + music prompts
+        self.assertEqual(
+            detect_missed_music_shift_tool_call([{"role": "user", "content": "User Elvis says: join voice and play drum and bass"}]),
+            ("skill_music_discovery", {"genre": "drum and bass"}),
+        )
+        self.assertEqual(
+            detect_missed_music_shift_tool_call([{"role": "user", "content": "User Elvis says: play some house music in vc"}]),
+            ("skill_music_discovery", {"genre": "house"}),
+        )
+        self.assertEqual(
+            detect_missed_music_shift_tool_call([{"role": "user", "content": "User Elvis says: stream some techno"}]),
+            ("skill_music_discovery", {"genre": "techno"}),
+        )
 
     def test_bare_wake_word_arms_followup_and_ssrc_merge(self):
         # 1. Bare "Hey bot?" returns (True, "") instead of sending "Hey bot?" to the LLM
@@ -530,6 +543,7 @@ class TestVoiceCohostServiceAndSkill(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(is_playing_state["playing"])
 
             # !skip advances immediately to Desire from the queue
+            stale_after_cb = mock_vc._last_after
             skip_out = await dispatch_voice_command(
                 text="!skip",
                 channel_id=777888,
@@ -538,6 +552,12 @@ class TestVoiceCohostServiceAndSkill(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIn("Skipped to Next Queued Track", skip_out)
             self.assertIn("Desire", skip_out)
+            self.assertEqual(VOICE_COHOST.get_current_music_track(777888)["song"], "Desire")
+
+            # Verify generation-token guard: firing Track 1's stale `after` callback must NOT clear Track 2!
+            if stale_after_cb:
+                stale_after_cb(None)
+            self.assertTrue(VOICE_COHOST.is_music_playing(777888))
             self.assertEqual(VOICE_COHOST.get_current_music_track(777888)["song"], "Desire")
 
             stop_out = await dispatch_voice_command(
