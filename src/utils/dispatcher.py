@@ -342,6 +342,49 @@ async def dispatch_voice_command(
         res = await run_in_worker(voice_info_fn, action="unmute")
         return _strip_llm_instructions(res)
 
+    if low == "!pause":
+        if hasattr(voice_cohost_service, "pause_music"):
+            return voice_cohost_service.pause_music(channel_id)
+        return "⚠️ Voice music playback is not available."
+
+    if low in ("!resume", "!unpause"):
+        if hasattr(voice_cohost_service, "resume_music"):
+            return voice_cohost_service.resume_music(channel_id)
+        return "⚠️ Voice music playback is not available."
+
+    if low == "!stop":
+        if hasattr(voice_cohost_service, "stop_music"):
+            return voice_cohost_service.stop_music(channel_id, clear_queue=True)
+        return "⚠️ Voice music playback is not available."
+
+    if low in ("!queue", "!q", "!np", "!nowplaying"):
+        if hasattr(voice_cohost_service, "format_music_queue"):
+            return voice_cohost_service.format_music_queue(channel_id)
+        return "⚠️ Voice music queue is not available."
+
+    if low in ("!skip", "!next"):
+        if hasattr(voice_cohost_service, "skip_music_async"):
+            skip_res = await voice_cohost_service.skip_music_async(channel_id)
+            if skip_res is not None:
+                return skip_res
+            # Autoplay is active in this channel — advance to the next Autoplay track and stream it!
+            from src.skills.jobs import skill_job_manager as _default_job_fn
+
+            set_active_channel_id(channel_id)
+            auto_res = await run_in_worker(_default_job_fn, action="skip", query="skip")
+            auto_res = _strip_llm_instructions(auto_res)
+            if hasattr(voice_cohost_service, "stream_music_from_card_async"):
+                badge = await voice_cohost_service.stream_music_from_card_async(
+                    channel_id,
+                    auto_res,
+                    replace_current=True,
+                    active_mode=active_mode,
+                )
+                if badge and badge not in auto_res:
+                    auto_res = f"{auto_res.rstrip()}\n{badge}"
+            return auto_res
+        return "⚠️ Voice music playback is not available."
+
     return None
 
 

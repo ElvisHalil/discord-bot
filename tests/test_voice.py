@@ -384,6 +384,192 @@ class TestVoiceCohostServiceAndSkill(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(VOICE_COHOST.get_session(777888).voice_profile, "sonia")
         VOICE_COHOST.stop_session(777888)
 
+    async def test_ad_free_voice_music_streaming_queue_and_controls(self):
+        from src.skills.voice.playback.discord_audio import (
+            clear_ytdlp_stream_cache,
+            extract_youtube_audio_stream,
+        )
+
+        clear_ytdlp_stream_cache()
+        sample_card_1 = (
+            "Here is a Drum & Bass roller:\n\n"
+            "**Song:** Solar System\n"
+            "**Artist:** Sub Focus\n"
+            "**Genre:** Drum & Bass\n"
+            "https://music.youtube.com/watch?v=dQw4w9WgXcQ"
+        )
+        sample_card_2 = (
+            "Here is a similar track:\n\n"
+            "**Song:** Desire\n"
+            "**Artist:** Sub Focus & Dimension\n"
+            "**Genre:** Drum & Bass\n"
+            "https://music.youtube.com/watch?v=9bZkp7q19f0"
+        )
+
+        # 1. Opt-in guard: when NOT in a voice session and allow_auto_join=False, returns None
+        badge_idle = await VOICE_COHOST.stream_music_from_card_async(
+            777888,
+            sample_card_1,
+            replace_current=True,
+            allow_auto_join=False,
+        )
+        self.assertIsNone(badge_idle)
+
+        # 2. Voice intent detection for compound prompts
+        self.assertTrue(VOICE_COHOST.has_voice_music_intent("join voice and play some dnb"))
+        self.assertTrue(VOICE_COHOST.has_voice_music_intent("play some house music in vc"))
+        self.assertFalse(VOICE_COHOST.has_voice_music_intent("play some house music"))
+
+        # 3. Auto-join + stream when allow_auto_join=True and author_voice_channel is registered
+        mock_vc = MagicMock()
+        is_playing_state = {"playing": False, "paused": False}
+        mock_vc.is_playing.side_effect = lambda: is_playing_state["playing"]
+        mock_vc.is_paused.side_effect = lambda: is_playing_state["paused"]
+
+        def _on_play(source, after=None):
+            is_playing_state["playing"] = True
+            is_playing_state["paused"] = False
+            mock_vc._last_after = after
+
+        def _on_stop():
+            is_playing_state["playing"] = False
+            is_playing_state["paused"] = False
+
+        def _on_pause():
+            is_playing_state["playing"] = False
+            is_playing_state["paused"] = True
+
+        def _on_resume():
+            is_playing_state["playing"] = True
+            is_playing_state["paused"] = False
+
+        mock_vc.play.side_effect = _on_play
+        mock_vc.stop.side_effect = _on_stop
+        mock_vc.pause.side_effect = _on_pause
+        mock_vc.resume.side_effect = _on_resume
+
+        mock_voice_channel = SimpleNamespace(
+            id=555111,
+            name="DnB Arena",
+            guild=SimpleNamespace(id=999),
+            connect=AsyncMock(return_value=mock_vc),
+        )
+        VOICE_COHOST.register_author_voice_channel(777888, mock_voice_channel)
+
+        fake_stream_info = {
+            "stream_url": "https://rr1---sn-mock.googlevideo.com/videoplayback?id=123",
+            "webpage_url": "https://music.youtube.com/watch?v=dQw4w9WgXcQ",
+            "video_id": "dQw4w9WgXcQ",
+            "title": "Solar System",
+            "uploader": "Sub Focus",
+            "duration": 248,
+            "http_headers": {"User-Agent": "Mozilla/5.0"},
+            "acodec": "opus",
+        }
+        mock_audio_source = MagicMock()
+
+        with patch(
+            "src.skills.voice.tracker.extract_youtube_audio_stream",
+            return_value=fake_stream_info,
+        ), patch(
+            "src.skills.voice.tracker.build_ffmpeg_music_source",
+            return_value=mock_audio_source,
+        ):
+            badge_live = await VOICE_COHOST.stream_music_from_card_async(
+                777888,
+                sample_card_1,
+                replace_current=True,
+                allow_auto_join=True,
+            )
+            self.assertIsNotNone(badge_live)
+            self.assertIn("Streaming Live in Voice (DnB Arena)", badge_live)
+            self.assertTrue(VOICE_COHOST.is_music_playing(777888))
+            self.assertEqual(VOICE_COHOST.get_current_music_track(777888)["song"], "Solar System")
+
+            # 4. Background TTS must NOT overwrite or interrupt active music playback
+            with patch.dict("os.environ", {"VOICE_TTS_BACKEND": "wave_synth"}):
+                _, tts_played = VOICE_COHOST.synthesize_and_play(777888, "Hello there!", interrupt=False)
+                self.assertFalse(tts_played)
+                self.assertTrue(VOICE_COHOST.is_music_playing(777888))
+
+            # 5. 👍 Reaction (replace_current=False) queues Track 2 while Track 1 is playing
+            badge_queued = await VOICE_COHOST.stream_music_from_card_async(
+                777888,
+                sample_card_2,
+                replace_current=False,
+            )
+            self.assertIn("Queued in Voice (DnB Arena — #1)", badge_queued)
+            self.assertIn("Desire", badge_queued)
+
+            # 6. Check !queue, !pause, !resume, !skip, !stop via dispatch_voice_command
+            q_out = await dispatch_voice_command(
+                text="!queue",
+                channel_id=777888,
+                voice_info_fn=skill_voice_info,
+                voice_cohost_service=VOICE_COHOST,
+            )
+            self.assertIn("Solar System", q_out)
+            self.assertIn("Desire", q_out)
+
+            pause_out = await dispatch_voice_command(
+                text="!pause",
+                channel_id=777888,
+                voice_info_fn=skill_voice_info,
+                voice_cohost_service=VOICE_COHOST,
+            )
+            self.assertIn("Paused in Voice", pause_out)
+            self.assertTrue(is_playing_state["paused"])
+
+            resume_out = await dispatch_voice_command(
+                text="!resume",
+                channel_id=777888,
+                voice_info_fn=skill_voice_info,
+                voice_cohost_service=VOICE_COHOST,
+            )
+            self.assertIn("Resumed in Voice", resume_out)
+            self.assertTrue(is_playing_state["playing"])
+
+            # !skip advances immediately to Desire from the queue
+            skip_out = await dispatch_voice_command(
+                text="!skip",
+                channel_id=777888,
+                voice_info_fn=skill_voice_info,
+                voice_cohost_service=VOICE_COHOST,
+            )
+            self.assertIn("Skipped to Next Queued Track", skip_out)
+            self.assertIn("Desire", skip_out)
+            self.assertEqual(VOICE_COHOST.get_current_music_track(777888)["song"], "Desire")
+
+            stop_out = await dispatch_voice_command(
+                text="!stop",
+                channel_id=777888,
+                voice_info_fn=skill_voice_info,
+                voice_cohost_service=VOICE_COHOST,
+            )
+            self.assertIn("Stopped Voice Playback", stop_out)
+            self.assertFalse(VOICE_COHOST.is_music_playing(777888))
+
+        # 7. Verify yt-dlp stream extractor caching with mocked YoutubeDL
+        mock_ydl_instance = MagicMock()
+        mock_ydl_instance.__enter__.return_value = mock_ydl_instance
+        mock_ydl_instance.extract_info.return_value = {
+            "url": "https://cdn.googlevideo.com/stream123",
+            "id": "dQw4w9WgXcQ",
+            "title": "Solar System",
+            "artist": "Sub Focus",
+            "duration": 248,
+            "http_headers": {"User-Agent": "TestUA"},
+            "acodec": "opus",
+        }
+        with patch("yt_dlp.YoutubeDL", return_value=mock_ydl_instance) as mock_ydl_cls:
+            s1 = extract_youtube_audio_stream("https://music.youtube.com/watch?v=dQw4w9WgXcQ")
+            s2 = extract_youtube_audio_stream("https://music.youtube.com/watch?v=dQw4w9WgXcQ")
+            self.assertEqual(s1["stream_url"], "https://cdn.googlevideo.com/stream123")
+            self.assertEqual(s2["duration"], 248)
+            self.assertEqual(mock_ydl_cls.call_count, 1)
+
+        VOICE_COHOST.stop_session(777888)
+
 
 if __name__ == "__main__":
     unittest.main()

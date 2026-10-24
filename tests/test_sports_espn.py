@@ -856,13 +856,17 @@ class TestSportsEspnUpgrade(unittest.TestCase):
                     }]
                 }
             if "racing/f1/scoreboard" in url:
+                from datetime import datetime, timedelta
+
+                start_dt = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT17:30Z")
+                end_dt = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%dT20:00Z")
                 return {
                     "season": {"year": 2026},
                     "leagues": [{
                         "calendar": [{
                             "label": "United States Grand Prix",
-                            "startDate": "2026-10-23T17:30Z",
-                            "endDate": "2026-10-25T20:00Z",
+                            "startDate": start_dt,
+                            "endDate": end_dt,
                         }]
                     }],
                 }

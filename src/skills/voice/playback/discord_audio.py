@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import io
 import logging
+import re
+import shutil
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -21,8 +23,136 @@ from src.skills.voice.engine.vad import (
     compute_pcm_rms_dbfs,
     pcm_48k_stereo_to_16k_mono_wav,
 )
+from src.utils.cache import BoundedCache
 
 logger = logging.getLogger(__name__)
+
+# Short-TTL cache for extracted yt-dlp direct stream URLs (15 min TTL, well inside YouTube's ~6h stream expiry)
+_YTDLP_STREAM_CACHE: BoundedCache = BoundedCache(maxsize=128)
+_YTDLP_STREAM_TTL_SECONDS = 900.0
+_FFMPEG_EXE_CACHE: Optional[str] = None
+
+
+def clear_ytdlp_stream_cache() -> None:
+    """Clear the cached yt-dlp direct audio stream URLs."""
+    _YTDLP_STREAM_CACHE.clear()
+
+
+def resolve_ffmpeg_executable() -> str:
+    """
+    Resolve the `ffmpeg` binary path across Docker Linux (`/usr/bin/ffmpeg`), system PATH,
+    or the bundled `imageio-ffmpeg` wheel fallback on Windows/macOS.
+    """
+    global _FFMPEG_EXE_CACHE
+    if _FFMPEG_EXE_CACHE:
+        return _FFMPEG_EXE_CACHE
+    sys_ffmpeg = shutil.which("ffmpeg")
+    if sys_ffmpeg:
+        _FFMPEG_EXE_CACHE = sys_ffmpeg
+        return sys_ffmpeg
+    try:
+        import imageio_ffmpeg
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe:
+            _FFMPEG_EXE_CACHE = exe
+            return exe
+    except Exception:
+        pass
+    return "ffmpeg"
+
+
+def extract_youtube_audio_stream(youtube_url: str) -> Optional[Dict[str, Any]]:
+    """
+    Extract a direct, ad-free Opus/AAC audio stream URL from a YouTube or YouTube Music link
+    using `yt-dlp` (`download=False`, zero disk writes).
+    """
+    if not youtube_url:
+        return None
+    m_vid = re.search(r"(?:v=|youtu\.be\/)([0-9A-Za-z_-]{11})", youtube_url)
+    vid = m_vid.group(1) if m_vid else ""
+    cache_key = vid or youtube_url.strip()
+
+    now = time.time()
+    cached = _YTDLP_STREAM_CACHE.get(cache_key)
+    if isinstance(cached, dict) and (now - float(cached.get("cached_at", 0.0))) < _YTDLP_STREAM_TTL_SECONDS:
+        return dict(cached)
+
+    # Normalize music.youtube.com/watch?v=VID -> www.youtube.com/watch?v=VID for yt-dlp
+    # (serves the exact same underlying ATV studio audio or OMV track without needing YTMusic cookies).
+    watch_url = f"https://www.youtube.com/watch?v={vid}" if vid else youtube_url.strip()
+
+    try:
+        import yt_dlp
+
+        ydl_opts = {
+            "format": "bestaudio[acodec=opus]/bestaudio/best",
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": False,
+            "geo_bypass": True,
+            "nocheckcertificate": True,
+            "source_address": "0.0.0.0",
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(watch_url, download=False)
+            if not info:
+                return None
+            if "entries" in info and info["entries"]:
+                info = info["entries"][0]
+            stream_url = str(info.get("url") or "").strip()
+            if not stream_url:
+                return None
+            result: Dict[str, Any] = {
+                "stream_url": stream_url,
+                "webpage_url": youtube_url.strip(),
+                "video_id": vid or str(info.get("id") or ""),
+                "title": str(info.get("track") or info.get("title") or "").strip(),
+                "uploader": str(info.get("artist") or info.get("uploader") or "").strip(),
+                "duration": int(info.get("duration") or 0),
+                "http_headers": dict(info.get("http_headers") or {}),
+                "acodec": str(info.get("acodec") or ""),
+                "cached_at": now,
+            }
+            _YTDLP_STREAM_CACHE[cache_key] = result
+            return dict(result)
+    except Exception as e:
+        logger.warning("yt-dlp stream extraction failed for %s: %s", youtube_url, e)
+        print(f"⚠️ [Voice Music Stream]: yt-dlp extraction failed for {youtube_url}: {e}")
+        return None
+
+
+def build_ffmpeg_music_source(
+    stream_info: Dict[str, Any],
+    volume: float = 0.85,
+) -> Optional[discord.AudioSource]:
+    """
+    Build a streaming `discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(...))` audio source
+    from an extracted `yt-dlp` stream dictionary with automatic HTTP reconnect flags.
+    """
+    if not stream_info or not stream_info.get("stream_url"):
+        return None
+    ensure_opus_loaded()
+    stream_url = str(stream_info["stream_url"])
+    ffmpeg_exe = resolve_ffmpeg_executable()
+    before_opts = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin"
+    headers = stream_info.get("http_headers") or {}
+    user_agent = str(headers.get("User-Agent") or "").strip()
+    if user_agent and '"' not in user_agent:
+        before_opts = f'-user_agent "{user_agent}" {before_opts}'
+    try:
+        ffmpeg_source = discord.FFmpegPCMAudio(
+            stream_url,
+            executable=ffmpeg_exe,
+            before_options=before_opts,
+            options="-vn",
+        )
+        return discord.PCMVolumeTransformer(ffmpeg_source, volume=max(0.05, min(2.0, volume)))
+    except Exception as e:
+        logger.warning("Failed to build FFmpegPCMAudio source: %s", e)
+        print(f"⚠️ [Voice Music Stream]: Failed to initialize FFmpegPCMAudio: {e}")
+        return None
 
 
 def ensure_opus_loaded() -> bool:

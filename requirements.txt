@@ -22,5 +22,6 @@ edge-tts~=7.0
 discord-ext-voice-recv>=0.5.2a179
 faster-whisper>=1.0.3
 ytmusicapi~=1.12.3
-ytmusicapi~=1.12.3
+yt-dlp>=2025.1.0
+imageio-ffmpeg>=0.5.1
 

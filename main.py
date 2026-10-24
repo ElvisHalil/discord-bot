@@ -365,6 +365,17 @@ async def handle_job_fire(job, message_text: str):
             except Exception as e:
                 print(f"⚠️ [Job Engine Agent Task Error]: {e}")
 
+    is_music_card = VOICE_COHOST.extract_song_card_track(final_output) is not None
+    if not is_tg and is_music_card and VOICE_COHOST.get_session(channel_id) is not None:
+        voice_badge = await VOICE_COHOST.stream_music_from_card_async(
+            channel_id,
+            final_output,
+            replace_current=True,
+            active_mode=current_mode,
+        )
+        if voice_badge and voice_badge not in final_output:
+            final_output = f"{final_output.rstrip()}\n{voice_badge}"
+
     if is_tg:
         await send_telegram_message(channel_id, final_output)
     else:
@@ -372,7 +383,8 @@ async def handle_job_fire(job, message_text: str):
         for chunk in chunks:
             await channel.send(chunk)
 
-    await VOICE_COHOST.announce_tracker_event(channel_id, final_output, profile_or_mode=current_mode)
+    if not is_music_card:
+        await VOICE_COHOST.announce_tracker_event(channel_id, final_output, profile_or_mode=current_mode)
 
     mode_config = MODES[current_mode]
     async with channel_locks[channel_id]:
@@ -419,6 +431,33 @@ async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
     is_research = mode_config.get("is_research", False)
     tools.set_memory_file(mode_config["memory_file"])
     set_active_channel_id(channel_id)
+
+    # Fast-path for spoken voice music playback controls ("Hey bot, pause", "resume", "stop music", "skip")
+    q_norm = re.sub(r"[^\w\s]", "", (cleaned_query or "").lower()).strip()
+    q_norm = re.sub(r"^(?:please|can\s+you|could\s+you|yo)\s+", "", q_norm).strip()
+    fast_ctrl_reply = None
+    if q_norm in ("pause", "pause music", "pause the music", "pause song", "pause track"):
+        fast_ctrl_reply = VOICE_COHOST.pause_music(channel_id)
+    elif q_norm in ("resume", "resume music", "resume the music", "unpause", "continue music"):
+        fast_ctrl_reply = VOICE_COHOST.resume_music(channel_id)
+    elif q_norm in ("stop", "stop music", "stop the music", "stop playing", "stop playback"):
+        fast_ctrl_reply = VOICE_COHOST.stop_music(channel_id, clear_queue=True)
+    elif q_norm in ("skip", "skip song", "skip track", "next", "next song", "next track") and (
+        VOICE_COHOST._music_queues.get(channel_id) or JOB_ENGINE.get_active_autoplay_job(channel_id) is not None
+    ):
+        fast_ctrl_reply = await dispatch_voice_command(
+            text="!skip",
+            channel_id=channel_id,
+            voice_info_fn=skill_voice_info,
+            voice_cohost_service=VOICE_COHOST,
+            active_mode=current_mode,
+        )
+    if fast_ctrl_reply:
+        channel = client.get_channel(channel_id)
+        if channel is not None:
+            header = f"🎙️ **Voice Co-Host (replying to {utterance.display_name} — *\"{utterance.transcript}\"*):**\n"
+            asyncio.create_task(channel.send(header + fast_ctrl_reply))
+        return None
 
     voice_prompt_hint = (
         f"[Spoken in Discord Voice Channel '{session.voice_channel_name}' — "
@@ -485,7 +524,18 @@ async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
     set_active_channel_id(channel_id)
     if "youtube.com" in reply.lower() or "youtu.be" in reply.lower():
         reply = await run_in_worker(standardize_song_reply, reply)
+        reply = JOB_ENGINE.sync_channel_autoplay_on_track_played(channel_id, reply, new_query_hint=cleaned_query)
     reply = sanitize_agent_reply(reply)
+
+    if VOICE_COHOST.extract_song_card_track(reply) is not None:
+        voice_badge = await VOICE_COHOST.stream_music_from_card_async(
+            channel_id,
+            reply,
+            replace_current=True,
+            active_mode=current_mode,
+        )
+        if voice_badge and voice_badge not in reply:
+            reply = f"{reply.rstrip()}\n{voice_badge}"
 
     turn_delta = turn_history[turn_start_idx:]
     if len(turn_delta) == 1:
@@ -706,6 +756,15 @@ async def on_raw_reaction_add(payload):
                     )
 
                     final_reply = JOB_ENGINE.sync_channel_autoplay_on_track_played(channel.id, final_reply)
+                    if VOICE_COHOST.get_session(channel.id) is not None:
+                        voice_badge = await VOICE_COHOST.stream_music_from_card_async(
+                            channel.id,
+                            final_reply,
+                            replace_current=False,
+                            active_mode=current_mode,
+                        )
+                        if voice_badge and voice_badge not in final_reply:
+                            final_reply = f"{final_reply.rstrip()}\n{voice_badge}"
                     await channel.send(final_reply)
 
                     # Record it under the channel lock so it can't land between a
@@ -1051,6 +1110,31 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     )
                 ]
 
+        # Compound Voice + Music/Autoplay co-execution: if the user asked to "join voice and play dnb"
+        # and the model only emitted skill_voice_info(action='join') on step 0, co-execute the music/autoplay tool!
+        if (
+            iterations == 0
+            and supports_tools
+            and any(c.function.name == "skill_voice_info" for c in tool_calls)
+            and not any(c.function.name in ("skill_music_discovery", "skill_youtube_search", "skill_job_manager") for c in tool_calls)
+        ):
+            missed_voice_music = (
+                detect_missed_job_tool_call(history, active_channel_id=channel_id)
+                or detect_missed_music_shift_tool_call(history)
+            )
+            if missed_voice_music and missed_voice_music[0] in active_tools:
+                print(
+                    f"⚡ [{current_mode.upper()}] Co-executing compound {missed_voice_music[0]} alongside skill_voice_info: {missed_voice_music[1]}"
+                )
+                tool_calls = list(tool_calls) + [
+                    types.SimpleNamespace(
+                        function=types.SimpleNamespace(
+                            name=missed_voice_music[0],
+                            arguments=missed_voice_music[1],
+                        )
+                    )
+                ]
+
         # Single-image-per-turn guard: prevent duplicate parallel search_images calls in the same step
         if sum(1 for c in tool_calls if c.function.name == "search_images") > 1:
             seen_img_call = False
@@ -1328,21 +1412,7 @@ async def on_message(message):
         await message.channel.send("🧹 Memory and context wiped for this channel.")
         return
 
-    # Direct Flight & Live Sports Tracker Commands (!trackflight, !untrackflight, !trackedflights, !track, !untrack, !tracked)
-    tracker_res = await dispatch_tracker_command(
-        text=user_input,
-        channel_id=message.channel.id,
-        flight_tracker_fn=skill_flight_tracker,
-        flight_tracker_service=FLIGHT_TRACKER,
-        sports_tracker_fn=skill_sports_tracker,
-        sports_tracker_service=SPORTS_TRACKER,
-    )
-    if tracker_res is not None:
-        active_channels.add(message.channel.id)
-        await message.channel.send(tracker_res)
-        return
-
-    # Direct Voice Co-Host Commands (!join, !leave, !speak, !vmode, !vrecap, !vstatus, !vmute, !vunmute)
+    # Register author's voice channel early so both tracker commands (!autoplay) and voice commands (!join) can use it
     author_voice_state = getattr(message.author, "voice", None)
     author_voice_channel = getattr(author_voice_state, "channel", None) if author_voice_state else None
     if author_voice_channel is None:
@@ -1356,6 +1426,34 @@ async def on_message(message):
                 or guild_vcs[0]
             )
     VOICE_COHOST.register_author_voice_channel(message.channel.id, author_voice_channel)
+
+    # Direct Flight & Live Sports Tracker Commands (!trackflight, !untrackflight, !trackedflights, !track, !untrack, !tracked, !autoplay, !stopautoplay)
+    tracker_res = await dispatch_tracker_command(
+        text=user_input,
+        channel_id=message.channel.id,
+        flight_tracker_fn=skill_flight_tracker,
+        flight_tracker_service=FLIGHT_TRACKER,
+        sports_tracker_fn=skill_sports_tracker,
+        sports_tracker_service=SPORTS_TRACKER,
+    )
+    if tracker_res is not None:
+        active_channels.add(message.channel.id)
+        if user_input.strip().lower().startswith("!stopautoplay") and VOICE_COHOST.is_music_playing(message.channel.id):
+            VOICE_COHOST.stop_music(message.channel.id, clear_queue=False)
+        elif VOICE_COHOST.extract_song_card_track(tracker_res) is not None:
+            voice_badge = await VOICE_COHOST.stream_music_from_card_async(
+                message.channel.id,
+                tracker_res,
+                replace_current=True,
+                allow_auto_join=VOICE_COHOST.has_voice_music_intent(user_input),
+                active_mode=current_mode,
+            )
+            if voice_badge and voice_badge not in tracker_res:
+                tracker_res = f"{tracker_res.rstrip()}\n{voice_badge}"
+        await message.channel.send(tracker_res)
+        return
+
+    # Direct Voice Co-Host & Music Playback Commands (!join, !leave, !speak, !vmode, !vrecap, !vstatus, !vmute, !vunmute, !pause, !resume, !skip, !stop, !queue)
     voice_res = await dispatch_voice_command(
         text=user_input,
         channel_id=message.channel.id,
@@ -1475,6 +1573,20 @@ async def on_message(message):
             # Scrub internal tool name leaks, meta-refusals, and hallucinated betting links
             reply = sanitize_agent_reply(reply)
 
+            # If the reply contains a Song Card and the bot is in a Discord voice channel (or the user asked
+            # to join/stream in voice in this prompt), stream the song ad-free via yt-dlp + FFmpegPCMAudio!
+            is_song_card_reply = VOICE_COHOST.extract_song_card_track(reply) is not None
+            if is_song_card_reply:
+                voice_stream_badge = await VOICE_COHOST.stream_music_from_card_async(
+                    channel_id,
+                    reply,
+                    replace_current=True,
+                    allow_auto_join=VOICE_COHOST.has_voice_music_intent(user_input),
+                    active_mode=current_mode,
+                )
+                if voice_stream_badge and voice_stream_badge not in reply:
+                    reply = f"{reply.rstrip()}\n{voice_stream_badge}"
+
             # Phase 3: Atomically commit this turn's completed message block (<1ms)
             if not is_empty_fallback:
                 turn_delta = turn_history[turn_start_idx:]
@@ -1506,9 +1618,15 @@ async def on_message(message):
             elif discord_files:
                 await message.channel.send(files=discord_files)
 
-            # If an active unmuted voice co-host session is connected for this channel, speak the reply aloud too
+            # If an active unmuted voice co-host session is connected for this channel, speak non-music replies aloud
+            # (never run TTS over an active ad-free music stream or read a song card URL aloud!)
             active_voice_sess = VOICE_COHOST.get_session(channel_id)
-            if active_voice_sess and not active_voice_sess.is_muted:
+            if (
+                active_voice_sess
+                and not active_voice_sess.is_muted
+                and not is_song_card_reply
+                and not VOICE_COHOST.is_music_playing(channel_id)
+            ):
                 await VOICE_COHOST.speak_async(channel_id, reply, profile_or_mode=current_mode)
 
         except Exception as e:

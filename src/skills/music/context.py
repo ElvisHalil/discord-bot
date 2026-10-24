@@ -338,19 +338,35 @@ def detect_missed_music_shift_tool_call(history: list) -> Optional[Tuple[str, di
     if has_non_music_domain_context(clean_user):
         return None
 
-    m_by = _PLAY_BY_ARTIST_RE.match(clean_user)
+    # Strip compound voice-channel join/target phrases (e.g., "join voice and play dnb", "play house music in vc")
+    music_clause = re.sub(
+        r"^\s*(?:please\s+|yo\s+|hey\s+)?(?:join|connect\s+to|hop\s+in(?:to)?|come\s+in(?:to)?|enter)\s+"
+        r"(?:the\s+|our\s+|my\s+)?(?:voice(?:\s+channel|\s+chat|\s+call)?|vc)\s+(?:and|then|,)\s+",
+        "",
+        clean_user,
+        flags=re.IGNORECASE,
+    ).strip()
+    music_clause = re.sub(
+        r"\s+(?:in|into|on)\s+(?:the\s+|our\s+|my\s+)?(?:voice(?:\s+channel|\s+chat|\s+call)?|vc)\s*[.?!]*$",
+        "",
+        music_clause,
+        flags=re.IGNORECASE,
+    ).strip()
+    music_clause = re.sub(r"^\s*stream\s+", "play ", music_clause, flags=re.IGNORECASE)
+
+    m_by = _PLAY_BY_ARTIST_RE.match(music_clause)
     if m_by:
         artist = m_by.group(1).strip(" .,!?")
         if artist:
             return ("skill_music_discovery", {"artist": artist})
 
-    m_spec = _PLAY_SPECIFIC_BY_ARTIST_RE.match(clean_user)
+    m_spec = _PLAY_SPECIFIC_BY_ARTIST_RE.match(music_clause)
     if m_spec:
         query = m_spec.group(1).strip(" .,!?")
         if query:
             return ("skill_youtube_search", {"query": query, "max_results": 1, "is_music": True})
 
-    m_gen = _GENERIC_PLAY_SONG_RE.match(clean_user)
+    m_gen = _GENERIC_PLAY_SONG_RE.match(music_clause)
     if m_gen:
         qualifier = (m_gen.group(1) or "").strip(" .,!?").lower()
         words = [w for w in qualifier.split() if w not in _GENERIC_QUALIFIER_STOPWORDS]
@@ -358,6 +374,19 @@ def detect_missed_music_shift_tool_call(history: list) -> Optional[Tuple[str, di
         if clean_genre:
             return ("skill_music_discovery", {"genre": clean_genre})
         return ("skill_music_discovery", {})
+
+    # Also match "play <genre>" without trailing "music/song" (e.g. "play dnb", "join voice and play drum and bass")
+    m_bare_genre = re.match(
+        r"^\s*(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:play|put\s+on|drop)\s+(?:some\s+)?([a-z0-9\s&-]{2,30}?)\s*[.?!]*$",
+        music_clause,
+        re.IGNORECASE,
+    )
+    if m_bare_genre:
+        from src.skills.music.engine.spectrum import classify_genre_to_zone
+
+        cand_g = m_bare_genre.group(1).strip(" .,!?").lower()
+        if classify_genre_to_zone(cand_g) is not None:
+            return ("skill_music_discovery", {"genre": cand_g})
 
     if re.match(r"^\s*(?:next|skip)(?:\s+(?:song|track|one|tune|please|pls))?\s*[.?!]*$", clean_user, re.IGNORECASE):
         try:
