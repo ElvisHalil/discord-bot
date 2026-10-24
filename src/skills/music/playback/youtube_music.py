@@ -5,7 +5,12 @@ import urllib.parse
 import requests
 from dotenv import load_dotenv
 from ddgs import DDGS
-from src.skills.music.engine.formatting import parse_song_meta, MUSIC_METADATA_CACHE, record_played_track
+from src.skills.music.engine.formatting import (
+    MUSIC_METADATA_CACHE,
+    extract_remix_qualifier,
+    parse_song_meta,
+    record_played_track,
+)
 from src.skills.youtube.engine.client import (
     get_cached_oembed,
     get_video_oembed,
@@ -165,12 +170,34 @@ def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, in
     is_topic = " - Topic" in author or "Topic" in author
 
     meta = parse_song_meta(query)
-    exp_song_tokens = extract_music_tokens(meta.get("song", ""))
+    raw_song_meta = meta.get("song", "")
+    base_song_meta = re.sub(r'[\(\[\{].*?[\)\]\}]', '', raw_song_meta).strip()
+    exp_song_tokens = extract_music_tokens(base_song_meta) or extract_music_tokens(raw_song_meta)
     artist_name = meta.get("artist", "")
     if artist_name.lower() in ("unknown artist", "unknown", ""):
         exp_artist_tokens = set()
     else:
         exp_artist_tokens = extract_music_tokens(artist_name)
+
+    # Enforce Remix / VIP / Edit qualifier matching when the query specifies one
+    q_remix = extract_remix_qualifier(query)
+    remixer_tokens: set[str] = set()
+    if q_remix:
+        q_remix_words = [w for w in re.findall(r'[a-z0-9]+', q_remix.lower()) if len(w) > 1]
+        remixer_tokens = {
+            w for w in q_remix_words
+            if w not in {"remix", "rmx", "mix", "edit", "rework", "flip", "refix", "bootleg", "dub"}
+        }
+        req_remix_tokens = remixer_tokens if remixer_tokens else set(q_remix_words)
+        if req_remix_tokens:
+            cand_raw_words = set(re.findall(r'[a-z0-9]+', f"{title} {author}".lower()))
+            if len(req_remix_tokens) <= 2:
+                remix_match = req_remix_tokens.issubset(cand_raw_words)
+            else:
+                req_rmx_cnt = max(2, int(len(req_remix_tokens) * 0.6))
+                remix_match = len(req_remix_tokens.intersection(cand_raw_words)) >= req_rmx_cnt
+            if not remix_match:
+                return False, 0, f"Rejected: candidate missing requested remix/VIP qualifier ('{q_remix}')"
 
     # If the query didn't use 'by' or '-' (so exp_artist_tokens is empty), isolate the song tokens
     # by subtracting known channel/artist tokens when non-empty.
@@ -193,6 +220,10 @@ def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, in
     else:
         req_art = max(2, int(len(exp_artist_tokens) * 0.6))
         artist_match = len(exp_artist_tokens.intersection(cand_tokens)) >= req_art
+
+    # On YouTube Music, remixes are often uploaded under the remixer's Topic/official channel
+    if not artist_match and remixer_tokens and remixer_tokens.issubset(cand_tokens):
+        artist_match = True
 
     if is_topic:
         if song_match and artist_match:

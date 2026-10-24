@@ -257,6 +257,36 @@ class TestAudioAnalyzer(unittest.TestCase):
             self.assertNotIn(mainstream_slow, queried_tags)
         self.assertIn("hyperpop", queried_tags)
 
+    def test_rank_candidates_by_acoustic_similarity_filters_outliers_and_respects_half_time(self):
+        """Acoustic similarity re-ranker should demote slow/low-energy outliers while accepting half-time/full-time DnB matches."""
+        from src.skills.music.engine.dsp import rank_candidates_by_acoustic_similarity
+
+        anchor = {"bpm": 174.0, "speed_score": 8.8, "intensity_score": 7.6}
+
+        t_outlier = Track(title="Slow Ambient Skit", artist="Artist A", tier=1)
+        t_halftime_dnb = Track(title="Liquid Roller", artist="Artist B", tier=2)
+        t_fulltime_dnb = Track(title="Dancefloor Anthem", artist="Artist C", tier=1)
+
+        fake_profiles = {
+            "Slow Ambient Skit": {"bpm": 105.0, "speed_score": 3.1, "intensity_score": 2.4, "gain_db": -16.0},
+            "Liquid Roller": {"bpm": 87.0, "speed_score": 8.0, "intensity_score": 6.9, "gain_db": -8.2},
+            "Dancefloor Anthem": {"bpm": 174.0, "speed_score": 8.7, "intensity_score": 7.8, "gain_db": -6.8},
+        }
+
+        def _fake_get_profile(title, artist="", deezer_id=None, preview_url=None, deezer_agg=None):
+            return dict(fake_profiles[title])
+
+        with patch("src.skills.music.engine.dsp.get_track_acoustic_profile", side_effect=_fake_get_profile):
+            ranked = rank_candidates_by_acoustic_similarity(
+                [t_outlier, t_halftime_dnb, t_fulltime_dnb],
+                seed_song="Desire",
+                seed_artist="Sub Focus",
+                anchor_profile=anchor,
+            )
+            # Slow Ambient Skit (slot 0) must be pushed to the back behind both DnB tracks
+            self.assertEqual(ranked[-1].title, "Slow Ambient Skit")
+            self.assertIn(ranked[0].title, {"Liquid Roller", "Dancefloor Anthem"})
+
 
 if __name__ == "__main__":
     unittest.main()

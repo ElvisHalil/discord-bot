@@ -274,6 +274,55 @@ class TestSkillMusicDiscoverySpectrumIntegration(unittest.TestCase):
         norm = normalize_tool_args("skill_music_discovery", skill_music_discovery, {"direction": "harder"})
         self.assertEqual(norm, {"shift": "harder"})
 
+    def test_genre_family_continuity_on_spectrum_shift_and_mood(self):
+        from unittest.mock import MagicMock
+        from src.skills.music.aggregators.manager import MusicAggregatorManager
+        from src.skills.music.engine.spectrum import classify_genre_family
+
+        self.assertEqual(classify_genre_family("Tech House"), "electronic")
+        self.assertEqual(classify_genre_family("Drum and Bass"), "electronic")
+        self.assertEqual(classify_genre_family("Thrash Metal"), "rock_metal")
+        self.assertEqual(classify_genre_family("Hardcore Punk"), "rock_metal")
+        self.assertEqual(classify_genre_family("Boom Bap"), "hiphop_rnb")
+        self.assertEqual(classify_genre_family("Drift Phonk"), "hiphop_rnb")
+
+        mgr = MusicAggregatorManager()
+        mock_lfm = MagicMock()
+        mock_lfm.get_charts.return_value = []
+        mock_dz = MagicMock()
+        mock_dz.get_charts.return_value = []
+        mock_bp = MagicMock()
+        mock_bp.get_charts.return_value = []
+        mgr.aggregators = {"lastfm": mock_lfm, "deezer": mock_dz, "beatport": mock_bp}
+
+        # 1. Shifting into fast_hard from 'Tech House' must stay in Electronic (no thrash metal / hardcore punk)
+        fast_hard = ZONE_BY_NAME["fast_hard"]
+        mgr.get_spectrum_tracks(
+            target_zone=fast_hard,
+            prefer_deep_cuts=False,
+            d_tempo=0,
+            d_intensity=1,
+            seed_genre="Tech House",
+        )
+        queried_tags = [c.args[0].lower() for c in mock_lfm.get_charts.call_args_list]
+        self.assertTrue(len(queried_tags) > 0)
+        for off_family in ("thrash metal", "hardcore punk", "grindcore"):
+            self.assertNotIn(off_family, queried_tags)
+        for tag in queried_tags:
+            self.assertEqual(classify_genre_family(tag), "electronic")
+
+        # 2. Standalone mood ('play a banger') in enrich_music_tool_args inherits the channel's active genre ('Drum and Bass')
+        record_channel_played_song(
+            song="Solar System",
+            artist="Sub Focus",
+            genre="Drum and Bass",
+            ui_zone="fast_hard",
+        )
+        history = [{"role": "user", "content": "User Alex says: play a banger"}]
+        enriched = enrich_music_tool_args({"mood": "banger"}, history)
+        self.assertEqual(enriched.get("genre"), "Drum and Bass")
+        self.assertEqual(enriched.get("mood"), "banger")
+
 
 if __name__ == "__main__":
     unittest.main()

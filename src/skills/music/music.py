@@ -1,5 +1,4 @@
 import logging
-import random
 import re
 from typing import Optional
 
@@ -24,7 +23,7 @@ from src.skills.music.engine.spectrum import (
 from src.skills.music.enums import AudioAction
 from src.skills.music.models import Track
 from src.skills.music.playback.youtube_music import resolve_youtube_music_link
-from src.skills.music.templates import SONG_TEMPLATE, build_music_llm_instructions
+from src.skills.music.templates import build_music_llm_instructions
 
 logger = logging.getLogger(__name__)
 
@@ -265,19 +264,12 @@ def skill_music_discovery(
             if not all_tracks:
                 return f"No tracks found for spectrum zone '{target_zone_name}'."
 
-            fresh_tracks = [t for t in all_tracks if not is_recently_played(t.title, t.artist)]
-            source_tracks = fresh_tracks or all_tracks
-
-            artist_seen = set()
-            featured_diverse = []
-            for t in source_tracks:
-                clean_artist = t.artist.lower().strip()
-                if clean_artist and clean_artist not in artist_seen:
-                    artist_seen.add(clean_artist)
-                    featured_diverse.append(t)
-
-            random.shuffle(featured_diverse)
-            candidate_pool = featured_diverse or source_tracks
+            candidate_pool = MusicAggregatorManager.sample_tiered_tracks(
+                all_tracks,
+                k=20,
+                weights=(0.45, 0.35, 0.20),
+                enforce_artist_diversity=True,
+            )
 
             try:
                 candidate_pool = audio_analyzer.rank_candidates_by_acoustic_shift(
@@ -435,21 +427,40 @@ def skill_music_discovery(
             if not tracks:
                 return f"No similar songs found for '{similar_to}'."
 
-            seen = set()
-            unique_tracks = []
-            for t in tracks:
-                key = (t.title.lower(), t.artist.lower())
-                if key not in seen:
-                    seen.add(key)
-                    unique_tracks.append(t)
-
-            is_unrelated_fallback = all(t.source == "fallback_unrelated" for t in unique_tracks)
             top_sample = MusicAggregatorManager.sample_tiered_tracks(
-                unique_tracks,
+                tracks,
                 k=15,
                 weights=(0.50, 0.35, 0.15),
                 enforce_artist_diversity=True,
             )
+            is_unrelated_fallback = all(t.source == "fallback_unrelated" for t in top_sample)
+
+            if not is_unrelated_fallback and top_sample:
+                try:
+                    s_meta = parse_song_meta(similar_to)
+                    s_song = s_meta.get("song", "")
+                    s_artist = s_meta.get("artist", "")
+                    sim_anchor = None
+                    last_played = get_channel_last_played_song()
+                    if last_played and last_played.get("bpm"):
+                        lp_s = _norm_track_token(last_played.get("song") or "")
+                        lp_alt = _norm_track_token(last_played.get("alt_song") or "")
+                        norm_s = _norm_track_token(s_song)
+                        if norm_s and (norm_s in (lp_s, lp_alt) or lp_s in norm_s):
+                            sim_anchor = {
+                                "bpm": float(last_played["bpm"]),
+                                "speed_score": float(last_played.get("speed_score") or 5.5),
+                                "intensity_score": float(last_played.get("intensity_score") or 5.5),
+                            }
+                    top_sample = audio_analyzer.rank_candidates_by_acoustic_similarity(
+                        top_sample,
+                        seed_song=s_song,
+                        seed_artist=s_artist,
+                        anchor_profile=sim_anchor,
+                        max_analyze=6,
+                    )
+                except Exception as e:
+                    logger.debug("Acoustic similarity verification skipped for %r: %s", similar_to, e)
 
             if is_unrelated_fallback:
                 header = f"=== NO DIRECT SIMILAR SONGS FOUND FOR '{similar_to}' — FALLBACK SUGGESTIONS ===\n\n"

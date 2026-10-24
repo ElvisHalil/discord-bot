@@ -3,7 +3,6 @@ import time
 import random
 import urllib.parse
 import requests
-from requests.adapters import HTTPAdapter
 from src.skills.music.aggregators.base import BaseMusicAggregator
 from src.skills.music.models import Track
 from src.utils.cache import BoundedCache

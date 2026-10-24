@@ -472,11 +472,20 @@ def rank_candidates_by_acoustic_shift(
                 # When intensity was NOT asked to change, mildly prefer staying within ±2.5 intensity points
                 shift_fit -= max(0.0, abs(c_intens - anchor_intens) - 2.0) * 0.6
 
-            # Genre continuity bonus: if the candidate satisfies the requested shift direction AND stays in
-            # the same genre as the anchor, give a mild +1.5 bonus so we only jump genres once faster/harder
-            # tracks in the current genre are exhausted.
-            if direction_satisfied and anchor_genre and (trk.genre or "").strip().lower() == anchor_genre:
+            # Genre & macro-family continuity: keep shifts in the listener's macro genre family
+            # (e.g., Electronic stays Electronic instead of jumping into Thrash Metal).
+            from src.skills.music.engine.spectrum import classify_genre_family
+
+            cand_genre = (trk.genre or "").strip().lower()
+            anchor_family = classify_genre_family(anchor_genre)
+            cand_family = classify_genre_family(cand_genre)
+            if direction_satisfied and anchor_genre and cand_genre == anchor_genre:
                 shift_fit += 1.5
+            if anchor_family and cand_family:
+                if anchor_family == cand_family:
+                    shift_fit += 2.0
+                else:
+                    shift_fit -= 8.0
 
             scored_subset.append((shift_fit, -idx, trk))
         else:
@@ -485,6 +494,96 @@ def rank_candidates_by_acoustic_shift(
 
     scored_subset.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return [item[2] for item in scored_subset] + remainder
+
+
+def rank_candidates_by_acoustic_similarity(
+    candidates: List[Track],
+    seed_song: str = "",
+    seed_artist: str = "",
+    anchor_profile: Optional[Dict[str, Any]] = None,
+    max_analyze: int = 6,
+) -> List[Track]:
+    """
+    Verify the top `max_analyze` similarity (`similar_to` / 👍) candidates against the seed track's
+    acoustic BPM and intensity profile:
+    - Preserves the 3-shelf sampler's slot priority when candidates are acoustically compatible
+      with the seed track (including half-time/double-time BPM octaves).
+    - Pushes acoustic outliers (e.g., a slow ambient interlude or ballad when the seed is a high-energy
+      club/DnB track) behind compatible tracks.
+    """
+    if not candidates:
+        return candidates
+
+    if anchor_profile is None and seed_song:
+        anchor_profile = get_track_acoustic_profile(seed_song, seed_artist)
+    if not anchor_profile or not anchor_profile.get("bpm"):
+        return candidates
+
+    from src.utils.workers import submit_to_worker
+
+    subset = list(candidates[:max_analyze])
+    remainder = list(candidates[max_analyze:])
+
+    futures = [
+        (
+            idx,
+            trk,
+            submit_to_worker(
+                get_track_acoustic_profile,
+                trk.title,
+                trk.artist,
+                trk.deezer_id,
+                trk.preview_url,
+            ),
+        )
+        for idx, trk in enumerate(subset)
+    ]
+
+    anchor_bpm = float(anchor_profile.get("bpm", 120.0))
+    anchor_speed = float(anchor_profile.get("speed_score", 5.5))
+    anchor_intens = float(anchor_profile.get("intensity_score", 5.5))
+
+    scored_subset: List[Tuple[int, float, int, Track]] = []
+    for idx, trk, fut in futures:
+        prof = None
+        try:
+            prof = fut.result(timeout=5)
+        except Exception as e:
+            logger.debug("Acoustic similarity worker failed for %r: %s", trk.title, e)
+
+        if prof and prof.get("bpm"):
+            trk.bpm = prof.get("bpm")
+            trk.gain = prof.get("gain_db")
+            trk.speed_score = prof.get("speed_score")
+            trk.intensity_score = prof.get("intensity_score")
+            if not trk.preview_url:
+                trk.preview_url = prof.get("preview_url")
+            if not trk.deezer_id:
+                trk.deezer_id = prof.get("deezer_id")
+
+            c_bpm = float(prof["bpm"])
+            c_speed = float(prof.get("speed_score", 5.5))
+            c_intens = float(prof.get("intensity_score", 5.5))
+
+            # Account for half-time / double-time BPM detection (e.g. 87 BPM vs 174 BPM in DnB)
+            bpm_diff = min(
+                abs(c_bpm - anchor_bpm),
+                abs(c_bpm * 2.0 - anchor_bpm),
+                abs(c_bpm * 0.5 - anchor_bpm),
+            )
+            intens_diff = abs(c_intens - anchor_intens)
+            speed_diff = abs(c_speed - anchor_speed)
+
+            is_compatible = 1 if (bpm_diff <= 24.0 and intens_diff <= 2.8) else 0
+            # Mild slot decay (-idx * 1.2) keeps Slot 0 on top whenever it is acoustically compatible
+            sim_fit = 20.0 - (bpm_diff * 0.25) - (intens_diff * 2.2) - (speed_diff * 0.5) - (idx * 1.2)
+            scored_subset.append((is_compatible, sim_fit, -idx, trk))
+        else:
+            # Neutral fallback when a track has no Deezer preview
+            scored_subset.append((1, 10.0 - (idx * 1.2), -idx, trk))
+
+    scored_subset.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    return [item[3] for item in scored_subset] + remainder
 
 
 def listen_with_gemma_audio(

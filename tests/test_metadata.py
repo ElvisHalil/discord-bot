@@ -33,6 +33,61 @@ class TestMusicMetadata(unittest.TestCase):
         self.assertEqual(meta["song"], "Running")
         self.assertEqual(meta["artist"], "Anyma")
 
+    def test_remix_and_vip_preservation(self):
+        # Parenthetical remix in 'by' query
+        m1 = parse_song_meta("Take Me (Sub Focus Remix) by Wilkinson")
+        self.assertEqual(m1["song"], "Take Me (Sub Focus Remix)")
+        self.assertEqual(m1["artist"], "Wilkinson")
+
+        # Bracketed VIP alongside Official Audio tag
+        m2 = parse_song_meta("Chase & Status - Baddadan [VIP] (Official Audio)", author="Chase & Status")
+        self.assertEqual(m2["song"], "Baddadan (VIP)")
+        self.assertEqual(m2["artist"], "Chase & Status")
+
+        # Hyphenated remix on Topic channel
+        m3 = parse_song_meta("Take Me - Sub Focus Remix", author="Wilkinson - Topic")
+        self.assertEqual(m3["song"], "Take Me (Sub Focus Remix)")
+        self.assertEqual(m3["artist"], "Wilkinson")
+
+        # Artist edit & Dub mix preserved, while Radio Edit and Extended Mix are stripped
+        m4 = parse_song_meta("Desire (Dimension Edit) by Sub Focus")
+        self.assertEqual(m4["song"], "Desire (Dimension Edit)")
+        self.assertEqual(m4["artist"], "Sub Focus")
+
+        m5 = parse_song_meta("Strobe (Radio Edit) [Extended Mix]", author="deadmau5 - Topic")
+        self.assertEqual(m5["song"], "Strobe")
+        self.assertEqual(m5["artist"], "deadmau5")
+
+    def test_score_music_candidate_enforces_remix_and_vip(self):
+        from src.skills.music.playback.youtube_music import score_music_candidate
+
+        q_remix = "Take Me (Sub Focus Remix) by Wilkinson"
+        # Un-remixed original must be rejected when a remix was requested
+        valid_orig, _, _ = score_music_candidate(q_remix, "Take Me", "Wilkinson - Topic")
+        self.assertFalse(valid_orig)
+
+        # Different remixer must be rejected
+        valid_other, _, _ = score_music_candidate(q_remix, "Take Me (Calibre Remix)", "Wilkinson - Topic")
+        self.assertFalse(valid_other)
+
+        # Matching remix on original artist's Topic channel -> score 3
+        valid_topic, score_topic, _ = score_music_candidate(q_remix, "Take Me (Sub Focus Remix)", "Wilkinson - Topic")
+        self.assertTrue(valid_topic)
+        self.assertEqual(score_topic, 3)
+
+        # Matching remix on remixer's Topic channel -> score 3
+        valid_rmx_topic, score_rmx_topic, _ = score_music_candidate(q_remix, "Take Me (Sub Focus Remix)", "Sub Focus - Topic")
+        self.assertTrue(valid_rmx_topic)
+        self.assertEqual(score_rmx_topic, 3)
+
+        # VIP enforcement
+        q_vip = "Baddadan (VIP) by Chase & Status"
+        valid_non_vip, _, _ = score_music_candidate(q_vip, "Baddadan", "Chase & Status - Topic")
+        self.assertFalse(valid_non_vip)
+        valid_vip, score_vip, _ = score_music_candidate(q_vip, "Baddadan (VIP)", "Chase & Status - Topic")
+        self.assertTrue(valid_vip)
+        self.assertEqual(score_vip, 3)
+
     def test_by_keyword_with_genre(self):
         meta = parse_song_meta("Apex by Bicep (Genre: Techno)")
         self.assertEqual(meta["song"], "Apex")

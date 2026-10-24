@@ -163,7 +163,17 @@ class MusicAggregatorManager:
         if not tracks:
             return []
 
-        pool = list(tracks)
+        fresh_tracks = [t for t in tracks if not is_recently_played(t.title, t.artist)]
+        raw_pool = fresh_tracks or list(tracks)
+
+        seen_keys: set[tuple[str, str]] = set()
+        pool: list[Track] = []
+        for t in raw_pool:
+            key = ((t.title or "").lower().strip(), (t.artist or "").lower().strip())
+            if key not in seen_keys:
+                seen_keys.add(key)
+                pool.append(t)
+
         if enforce_artist_diversity:
             by_artist: dict[str, Track] = {}
             for t in pool:
@@ -587,18 +597,40 @@ class MusicAggregatorManager:
         Fetch diverse tracks for a target 3x3 spectrum zone using its mainstream_tags,
         deep_cut_tags, and intersection_modifiers across Last.fm and Deezer concurrently.
         """
+        from src.skills.music.engine.spectrum import classify_genre_family, get_zone_tags_for_family
         from src.utils.workers import submit_to_worker
 
         mainstream = list(target_zone.get("mainstream_tags", []))
         deep_cuts = list(target_zone.get("deep_cut_tags", []))
         modifiers = list(target_zone.get("intersection_modifiers", []))
         intensity_lvl = target_zone.get("intensity", "mid")
+        ui_zone_name = str(target_zone.get("ui_zone") or "mid_mid").lower()
+
+        seed_family = classify_genre_family(seed_genre)
+        family_zone_tags = get_zone_tags_for_family(ui_zone_name, seed_family) if seed_family else []
+
+        eff_mainstream = mainstream
+        eff_deep_cuts = deep_cuts
+        if seed_family:
+            fam_main = [t for t in mainstream if classify_genre_family(t) == seed_family]
+            fam_deep = [t for t in deep_cuts if classify_genre_family(t) == seed_family]
+            if not prefer_deep_cuts:
+                merged_main = list(dict.fromkeys(fam_main + family_zone_tags))
+                if merged_main:
+                    eff_mainstream = merged_main
+                if fam_deep:
+                    eff_deep_cuts = fam_deep
+                else:
+                    eff_deep_cuts = [t for t in family_zone_tags if t not in eff_mainstream[:2]]
+            else:
+                if fam_deep:
+                    eff_deep_cuts = fam_deep
 
         if prefer_deep_cuts:
-            active_tags = random.sample(deep_cuts, min(4, len(deep_cuts))) if deep_cuts else list(mainstream[:3])
+            active_tags = random.sample(eff_deep_cuts, min(4, len(eff_deep_cuts))) if eff_deep_cuts else list(eff_mainstream[:3])
         else:
-            chosen_main = random.sample(mainstream, min(3, len(mainstream)))
-            chosen_deep = random.sample(deep_cuts, min(1, len(deep_cuts)))
+            chosen_main = random.sample(eff_mainstream, min(3, len(eff_mainstream)))
+            chosen_deep = [t for t in random.sample(eff_deep_cuts, min(1, len(eff_deep_cuts))) if t not in chosen_main]
             active_tags = chosen_main + chosen_deep
 
         # High-velocity escalation: when pushing 'faster' at the fast boundary or from >=152 BPM,
@@ -609,14 +641,19 @@ class MusicAggregatorManager:
                 "mid": ["happy hardcore", "uk hardcore", "drum and bass", "eurobeat", "hyperpop"],
                 "hard": ["breakcore", "neurofunk", "gabber", "frenchcore", "hardstyle"],
             }
-            hv_pool = [t for t in high_vel_map.get(intensity_lvl, high_vel_map["mid"]) if t not in active_tags]
+            hv_raw = high_vel_map.get(intensity_lvl, high_vel_map["mid"])
+            if seed_family and seed_family != "electronic":
+                hv_fam = [t for t in family_zone_tags if t not in active_tags]
+                hv_pool = hv_fam or [t for t in hv_raw if t not in active_tags]
+            else:
+                hv_pool = [t for t in hv_raw if t not in active_tags]
             if hv_pool:
                 active_tags = active_tags[:2] + random.sample(hv_pool, min(2, len(hv_pool)))
 
         # Preserve genre continuity if the current seed_genre already belongs to this zone's tags
         if seed_genre:
             sg_low = seed_genre.strip().lower()
-            zone_all = {t.lower() for t in (mainstream + deep_cuts)}
+            zone_all = {t.lower() for t in (mainstream + deep_cuts + family_zone_tags)}
             if sg_low in zone_all and sg_low not in [t.lower() for t in active_tags]:
                 active_tags.insert(0, sg_low)
 
@@ -625,7 +662,7 @@ class MusicAggregatorManager:
 
         print(
             f"  └─ 🎛️ [Spectrum Shift]: Fetching zone '{target_zone.get('ui_zone')}' "
-            f"(tempo={target_zone.get('tempo')}, intensity={target_zone.get('intensity')}, tags={active_tags})..."
+            f"(tempo={target_zone.get('tempo')}, intensity={target_zone.get('intensity')}, family={seed_family or 'any'}, tags={active_tags})..."
         )
 
         lastfm = self.aggregators.get("lastfm")
@@ -660,7 +697,6 @@ class MusicAggregatorManager:
                 except Exception as e:
                     logger.debug("Spectrum shift worker failed for tag %r: %s", tag_label, e)
 
-        random.shuffle(all_tracks)
         return self._filter_and_deduplicate(all_tracks, exclude_query=exclude_query)
 
 

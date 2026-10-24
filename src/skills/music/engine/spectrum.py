@@ -56,17 +56,124 @@ __all__ = [
     "TempoLevel",
     "ZONE_BY_COORDS",
     "ZONE_BY_NAME",
+    "classify_genre_family",
     "classify_genre_to_zone",
     "clear_channel_played_songs",
     "detect_missed_music_shift_tool_call",
     "enrich_music_tool_args",
     "get_channel_last_played_song",
+    "get_zone_tags_for_family",
     "has_non_music_domain_context",
     "is_valid_music_shift_context",
     "parse_spectrum_shift",
     "record_channel_played_song",
     "step_spectrum_zone",
 ]
+
+_ROCK_METAL_FAMILY_RE = re.compile(
+    r"\b(?:"
+    r"rock|metal|punk|grunge|shoegaze|metalcore|deathcore|mathcore|grindcore"
+    r"|post-hardcore|hardcore\s+punk|doom|sludge|stoner|slowcore|sadcore|emo"
+    r"|alt-rock|pop-punk|post-punk|post-rock|noise\s+rock|industrial\s+metal"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_HIPHOP_RNB_FAMILY_RE = re.compile(
+    r"\b(?:"
+    r"hip-hop|hip\s+hop|rap|trap|drill|phonk|boom\s+bap|g-funk"
+    r"|r&b|rnb|neo-soul|soul|quiet\s+storm|lofi|lo-fi|chillhop|cloud\s+rap"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_ELECTRONIC_FAMILY_RE = re.compile(
+    r"\b(?:"
+    r"electronic|electronica|edm|dance|house|microhouse|techno|trance|psytrance"
+    r"|dnb|drum\s+and\s+bass|drum\s*&\s*bass|liquid|neurofunk|jump\s+up|jungle"
+    r"|breakcore|breakbeat|dubstep|chillstep|riddim|uk\s+garage|bassline"
+    r"|hardstyle|happy\s+hardcore|uk\s+hardcore|gabber|frenchcore"
+    r"|synthwave|retrowave|vaporwave|chillwave|electropop|synthpop|hyperpop"
+    r"|bubblegum\s+bass|eurobeat|nu-disco|disco|electro|ebm|industrial"
+    r"|ambient|downtempo|chillout|trip-hop|trip\s+hop|drone|dub|power\s+electronics"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_POP_INDIE_FOLK_FAMILY_RE = re.compile(
+    r"\b(?:"
+    r"pop|indie\s+pop|jangle\s+pop|twee\s+pop|city\s+pop|soft\s+pop|sophisti-pop|dream\s+pop"
+    r"|folk|indie\s+folk|freak\s+folk|acoustic|singer-songwriter|country"
+    r"|bossanova|bossa\s+nova|jazz|dark\s+jazz|blues|classical|modern\s+classical"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_ZONE_FAMILY_TAGS: Dict[Tuple[str, str], List[str]] = {
+    # Electronic macro family across all 9 zones
+    ("slow_soft", "electronic"): ["ambient", "downtempo", "chillout", "space ambient"],
+    ("mid_soft", "electronic"): ["chillwave", "downtempo", "melodic house", "deep house"],
+    ("fast_soft", "electronic"): ["liquid dnb", "minimal techno", "microhouse", "ambient techno"],
+    ("slow_mid", "electronic"): ["trip-hop", "dub", "downtempo", "chillstep"],
+    ("mid_mid", "electronic"): ["synthpop", "synthwave", "vaporwave", "electropop"],
+    ("fast_mid", "electronic"): ["house", "tech house", "techno", "trance", "uk garage", "electropop"],
+    ("slow_hard", "electronic"): ["industrial", "dark electro", "power electronics", "ebm"],
+    ("mid_hard", "electronic"): ["dubstep", "ebm", "hard techno", "electro house"],
+    ("fast_hard", "electronic"): ["drum and bass", "neurofunk", "hardstyle", "breakcore", "gabber"],
+    # Rock / Metal / Punk macro family across all 9 zones
+    ("slow_soft", "rock_metal"): ["slowcore", "post-rock", "acoustic", "indie folk"],
+    ("mid_soft", "rock_metal"): ["indie folk", "soft rock", "acoustic", "freak folk"],
+    ("fast_soft", "rock_metal"): ["shoegaze", "dream pop", "jangle pop", "post-punk"],
+    ("slow_mid", "rock_metal"): ["blues rock", "slowcore", "sadcore", "desert rock"],
+    ("mid_mid", "rock_metal"): ["alt-rock", "indie rock", "classic rock", "jangle pop"],
+    ("fast_mid", "rock_metal"): ["pop-punk", "punk rock", "garage rock", "post-punk"],
+    ("slow_hard", "rock_metal"): ["doom metal", "stoner rock", "sludge", "drone metal", "death doom"],
+    ("mid_hard", "rock_metal"): ["grunge", "hard rock", "metalcore", "post-hardcore", "noise rock", "industrial metal"],
+    ("fast_hard", "rock_metal"): ["thrash metal", "hardcore punk", "grindcore", "death metal"],
+    # Hip-Hop / Rap / R&B / Phonk macro family across all 9 zones
+    ("slow_soft", "hiphop_rnb"): ["lo-fi beats", "lofi", "quiet storm", "chillout"],
+    ("mid_soft", "hiphop_rnb"): ["rnb", "neo-soul", "quiet storm", "soul"],
+    ("fast_soft", "hiphop_rnb"): ["liquid funk", "neo-soul", "rnb"],
+    ("slow_mid", "hiphop_rnb"): ["trip-hop", "boom bap", "g-funk", "west coast hip hop"],
+    ("mid_mid", "hiphop_rnb"): ["hip-hop", "rap", "boom bap", "cloud rap"],
+    ("fast_mid", "hiphop_rnb"): ["trap", "hip-hop", "uk drill", "rap"],
+    ("slow_hard", "hiphop_rnb"): ["phonk", "dark trap", "memphis rap"],
+    ("mid_hard", "hiphop_rnb"): ["trap", "drill", "uk drill", "hardcore hip hop"],
+    ("fast_hard", "hiphop_rnb"): ["drift phonk", "phonk", "rage rap", "uk drill"],
+}
+
+
+def classify_genre_family(genre_or_tag: Optional[str]) -> Optional[str]:
+    """
+    Classify a genre or subgenre tag into a macro genre family:
+    'electronic', 'rock_metal', 'hiphop_rnb', or 'pop_indie_folk'.
+    Used to keep 1-notch spectrum shifts ('harder', 'faster', 'softer', 'slower')
+    within the listener's current musical universe instead of jumping from Electronic to Thrash Metal.
+    """
+    if not genre_or_tag:
+        return None
+    s = str(genre_or_tag).strip().lower()
+    if not s or s in ("acoustic dsp", "detected", "unknown"):
+        return None
+    # Check specific compound exceptions before general regexes
+    if "phonk" in s:
+        return "hiphop_rnb"
+    if _ROCK_METAL_FAMILY_RE.search(s):
+        return "rock_metal"
+    if _ELECTRONIC_FAMILY_RE.search(s):
+        return "electronic"
+    if _HIPHOP_RNB_FAMILY_RE.search(s):
+        return "hiphop_rnb"
+    if _POP_INDIE_FOLK_FAMILY_RE.search(s):
+        return "pop_indie_folk"
+    return None
+
+
+def get_zone_tags_for_family(ui_zone: str, family: Optional[str]) -> List[str]:
+    """Return family-consistent genre tags for a given (ui_zone, family) pair."""
+    if not ui_zone or not family:
+        return []
+    return list(_ZONE_FAMILY_TAGS.get((str(ui_zone).lower(), family), []))
 
 
 def classify_genre_to_zone(genre_or_tags: Union[str, List[str], None]) -> Optional[str]:

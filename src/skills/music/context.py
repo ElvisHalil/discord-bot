@@ -257,6 +257,33 @@ def enrich_music_tool_args(args: dict, history: list) -> dict:
         elif has_non_music_domain_context(clean_user) or not enriched.get("genre"):
             enriched["shift"] = f"NON_MUSIC_CONVERSATION: {clean_user}"
 
+    # 3. Inherit active channel genre when user asks for a standalone mood (e.g., 'play a banger')
+    # while already listening to a genre in this channel
+    if (
+        enriched.get("mood")
+        and not enriched.get("genre")
+        and not enriched.get("similar_to")
+        and not enriched.get("artist")
+        and not enriched.get("shift")
+    ):
+        active_genre = None
+        last_played = get_channel_last_played_song()
+        if last_played and last_played.get("genre"):
+            lp_g = last_played["genre"].strip()
+            if lp_g.lower() not in ("acoustic dsp", "detected", "unknown"):
+                active_genre = lp_g
+        if not active_genre:
+            for m in reversed(history):
+                role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+                if role == "assistant":
+                    c_text = str(m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "") or "")
+                    m_g = re.search(r"(?im)^\s*(?:\*\*)?Genre:\*{0,2}\s*(.+)$", c_text)
+                    if m_g:
+                        active_genre = m_g.group(1).strip()
+                    break
+        if active_genre:
+            enriched["genre"] = active_genre
+
     return enriched
 
 

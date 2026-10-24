@@ -25,6 +25,7 @@ __all__ = [
     "_get_music_channel_deque",
     "_norm_track_token",
     "clear_recently_played_tracks",
+    "extract_remix_qualifier",
     "format_song_card",
     "get_music_metadata",
     "is_placeholder_text",
@@ -34,11 +35,77 @@ __all__ = [
     "standardize_song_reply",
 ]
 
+_REMIX_GARBAGE_OR_GENERIC_RE = re.compile(
+    r'\b(?:'
+    r'slowed|reverb|nightcore|sped\s+up|8d|bass\s+boost(?:ed)?|karaoke|acapella|instrumental'
+    r'|1\s*hour|2\s*hours|10\s*hours|full\s+album|full\s+set|live\s+set|dj\s+set|boiler\s+room'
+    r'|podcast|episode|reaction|tutorial|cover|tribute|mashup|megamix|continuous\s+mix'
+    r'|original\s+mix|extended\s+mix|radio\s+edit|radio\s+mix|original\s+edit|extended\s+edit'
+    r'|short\s+edit|clean\s+edit|explicit|album\s+version|single\s+version'
+    r'|official|music\s+video|video|audio|lyric|lyrics|visualizer|remaster(?:ed)?|free\s+download'
+    r'|hd|4k|hq|live\s+at|live\s+from|session'
+    r')\b',
+    re.IGNORECASE,
+)
+
+_REMIX_POSITIVE_RE = re.compile(
+    r'(?:'
+    r'\b(?:remix|rmx|vip|rework|flip|refix|bootleg)\b'
+    r'|\b(?:dub\s+mix|vip\s+dub)\b'
+    r'|^(?!english\b|japanese\b|spanish\b|french\b|german\b|italian\b|portuguese\b|russian\b|hindi\b|korean\b|chinese\b)[a-z0-9&\'.\s-]{2,35}\s+dub$'
+    r'|^(?!radio\b|original\b|extended\b|short\b|clean\b|explicit\b|album\b|single\b|vocal\b|instrumental\b|club\b|main\b|video\b|official\b|live\b|new\b|full\b|dj\b|\d{4}\b)[a-z0-9&\'.\s-]{2,35}\s+edit$'
+    r')',
+    re.IGNORECASE,
+)
+
+
+def _is_remix_qualifier(text: str, allow_bare_single_word: bool = True) -> bool:
+    """Returns True if `text` is a genuine remix, VIP, rework, flip, dub, or artist edit qualifier."""
+    s = (text or "").strip(" ()[]{}-–—\"'")
+    if not s or len(s) > 65:
+        return False
+    # Reject strings that still contain internal ' - ' separators (e.g. 'Song Title - Sub Focus Remix')
+    if " - " in s or " – " in s or " — " in s:
+        return False
+    if _REMIX_GARBAGE_OR_GENERIC_RE.search(s):
+        return False
+    if not allow_bare_single_word and len(s.split()) < 2:
+        return False
+    return bool(_REMIX_POSITIVE_RE.search(s))
+
+
+def extract_remix_qualifier(text: str) -> str | None:
+    """
+    Extracts a preserved remix/VIP/edit qualifier from a song title or query if present.
+    Checks parenthetical/bracketed tags first (e.g., '(Sub Focus Remix)', '[VIP]'),
+    then trailing hyphenated suffixes (e.g., 'Take Me - Sub Focus Remix').
+    """
+    if not text:
+        return None
+    # Strip trailing ' by Artist' if a full query was passed
+    work = re.sub(r'https?://\S+', '', text).strip()
+    had_by = " by " in work
+    if had_by:
+        work = work.split(" by ", 1)[0].strip()
+
+    for m in re.finditer(r'[\(\[\{]([^\)\]\}]*)[\)\]\}]', work):
+        cand = m.group(1).strip(" -–—\"'")
+        if _is_remix_qualifier(cand, allow_bare_single_word=True):
+            return cand
+
+    m_dash = re.search(r'\s+[-–—]\s+([^-–—|/()\[\]\{\}]+)$', work)
+    if m_dash:
+        cand = m_dash.group(1).strip(" -–—\"'")
+        if _is_remix_qualifier(cand, allow_bare_single_word=had_by):
+            return cand
+
+    return None
+
 
 def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
     """
     Parses a raw video title, channel/author name, or query into structured metadata:
-    - song: clean song/track title (always non-empty)
+    - song: clean song/track title (always non-empty), preserving named remix/VIP qualifiers
     - artist: clean artist name (always non-empty)
     - genre: genre name if present in title/tag, else None
     - album: album title if present in tag, else None
@@ -60,25 +127,33 @@ def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
     title = re.sub(r'\(Genre:\s*[^)]+\)', '', title, flags=re.IGNORECASE)
     title = re.sub(r'\(Album:\s*[^)]+\)', '', title, flags=re.IGNORECASE).strip()
 
-    # Clean promotional and video suffixes
+    # Clean promotional and video suffixes (bounded to individual bracket groups so '(Sub Focus Remix) (Official Audio)' keeps the remix)
     clean = re.sub(
-        r'[\(\[\{].*?(?:official|video|audio|lyrics|visualizer|download|remastered|remaster|hd|4k|hq|original mix|extended mix|radio edit|free download).*?[\)\]\}]',
+        r'[\(\[\{][^\)\]\}]*?(?:official|video|audio|lyrics|visualizer|download|remastered|remaster|hd|4k|hq|original mix|extended mix|radio edit|free download)[^\)\]\}]*?[\)\]\}]',
         '',
         title,
         flags=re.IGNORECASE,
     )
-    clean = re.sub(r'[\(\[\{](?:feat\.|ft\.).*?[\)\]\}]', '', clean, flags=re.IGNORECASE).strip()
+    clean = re.sub(r'[\(\[\{](?:feat\.|ft\.)[^\)\]\}]*[\)\]\}]', '', clean, flags=re.IGNORECASE).strip()
 
     clean_author = re.sub(r'\s*-\s*Topic$', '', author or "", flags=re.IGNORECASE).strip()
     is_topic_author = bool(re.search(r'\s*-\s*Topic$', author or "", flags=re.IGNORECASE))
     artist = None
     song = None
 
+    has_dash = " - " in clean or " – " in clean
+    dash_is_remix_only = False
+    if has_dash and " by " not in clean:
+        delim = " - " if " - " in clean else " – "
+        p0, p1 = clean.split(delim, 1)
+        if _is_remix_qualifier(p1.strip(" -–—\"'"), allow_bare_single_word=is_topic_author and p0.strip().lower() != clean_author.lower()):
+            dash_is_remix_only = True
+
     if " by " in clean:
         parts = clean.split(" by ", 1)
         song = parts[0].strip(" -–—\"'")
         artist = parts[1].strip(" -–—\"'")
-    elif " - " in clean or " – " in clean:
+    elif has_dash and not dash_is_remix_only:
         delim = " - " if " - " in clean else " – "
         parts = clean.split(delim, 1)
         artist = parts[0].strip(" -–—\"'")
@@ -90,7 +165,7 @@ def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
         song = clean.strip(" -–—\"'")
         if song.lower().startswith(artist.lower()):
             song = song[len(artist):].strip(" -–—\"'")
-        song = re.sub(r'\s+\b(?:ft|feat)\.?\s+.*$', '', song, flags=re.IGNORECASE).strip(" -–—\"'")
+        song = re.sub(r'\s+\b(?:ft|feat)\.?\s+[^(\[\{]*', '', song, flags=re.IGNORECASE).strip(" -–—\"'")
         if not song:
             song = q_song
     elif clean_author and clean_author.lower() not in ("youtube", "various artists", "unknown"):
@@ -106,8 +181,26 @@ def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
         song = clean or title
         artist = clean_author or "Unknown Artist"
 
+    # Extract any genuine remix/VIP/edit qualifier from `song` before stripping brackets and dash suffixes
+    remix_tag = None
+    if song:
+        for m in re.finditer(r'[\(\[\{]([^\)\]\}]*)[\)\]\}]', song):
+            cand = m.group(1).strip(" -–—\"'")
+            if _is_remix_qualifier(cand, allow_bare_single_word=True):
+                remix_tag = cand
+                break
+        if not remix_tag:
+            m_dash = re.search(r'\s+[-–—]\s+([^-–—|/()\[\]\{\}]+)$', song)
+            if m_dash:
+                cand = m_dash.group(1).strip(" -–—\"'")
+                if _is_remix_qualifier(cand, allow_bare_single_word=True):
+                    remix_tag = cand
+
     song = re.sub(r'[\(\[\{].*?[\)\]\}]', '', song).strip(" -–—\"'")
     song = re.sub(r'[-–—|/].*$', '', song).strip(" -–—\"'")
+
+    if remix_tag and song and remix_tag.lower() not in song.lower():
+        song = f"{song} ({remix_tag})"
 
     if not song:
         song = title or "Unknown Track"
