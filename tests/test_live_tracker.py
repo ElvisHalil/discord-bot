@@ -849,6 +849,221 @@ class TestSportsTrackerService(unittest.TestCase):
         self.assertTrue(any("MAP 2 FINAL (Mirage)" in t and "Next Map" not in t for t in triggers))
         self.assertTrue(any("FULL-TIME / FINAL WHISTLE (Final (BO3))" in t for t in triggers))
 
+    @patch.dict("os.environ", {"BOT_TIMEZONE": "America/Edmonton"})
+    def test_f1_live_session_tracking_lifecycle_and_openf1_telemetry(self):
+        """Verify end-to-end F1 Qualifying & Race session tracking across pre-session, OpenF1 Green Light,
+        Red Flag, Safety Car, Steward Penalties, P1 Provisional Pole lead changes, and Final Chequered Flag."""
+        from src.skills.sports.aggregators.f1 import F1Aggregator
+
+        agg = F1Aggregator()
+
+        espn_scoreboard_pre = {
+            "events": [{
+                "id": "401858359",
+                "name": "MSC Cruises United States Grand Prix",
+                "circuit": {"fullName": "Circuit of the Americas"},
+                "competitions": [
+                    {
+                        "id": "401858363",
+                        "type": {"abbreviation": "Qual"},
+                        "date": "2026-10-24T21:00Z",
+                        "status": {"type": {"state": "pre", "completed": False}},
+                        "competitors": [],
+                    },
+                    {
+                        "id": "401858364",
+                        "type": {"abbreviation": "Race"},
+                        "date": "2026-10-25T20:00Z",
+                        "status": {"type": {"state": "pre", "completed": False}},
+                        "competitors": [],
+                    },
+                ],
+            }]
+        }
+
+        # 1. Start tracking F1 Qualifying while 'pre'
+        with patch("src.skills.sports.aggregators.f1.fetch_json", return_value=espn_scoreboard_pre), \
+             patch.object(F1Aggregator, "_fetch_openf1_live_data", return_value={}):
+            start_msg = SPORTS_TRACKER.start_tracking(12345, query="track the F1 qualifying session", sport="f1")
+
+        self.assertIn("LIVE F1 SESSION TRACKER ACTIVATED", start_msg)
+        self.assertIn("MSC Cruises United States Grand Prix — Qualifying", start_msg)
+        self.assertIn("Saturday, Oct 24 at 3:00 PM MDT (21:00 UTC)", start_msg)
+        self.assertIn((12345, "401858359:401858363"), SPORTS_TRACKER.tracked_matches)
+
+        tracked = SPORTS_TRACKER.tracked_matches[(12345, "401858359:401858363")]
+        self.assertEqual(tracked.sport_path, "f1")
+        self.assertEqual(tracked.last_snapshot.state, "pre")
+
+        # 2. Session goes LIVE ('in') with OpenF1 Green Light + initial running order (P1: Max Verstappen, P2: Lando Norris)
+        espn_scoreboard_live = {
+            "events": [{
+                "id": "401858359",
+                "name": "MSC Cruises United States Grand Prix",
+                "circuit": {"fullName": "Circuit of the Americas"},
+                "competitions": [
+                    {
+                        "id": "401858363",
+                        "type": {"abbreviation": "Qual"},
+                        "date": "2026-10-24T21:00Z",
+                        "status": {"type": {"state": "in", "completed": False, "name": "STATUS_IN_PROGRESS"}},
+                        "competitors": [],
+                    }
+                ],
+            }]
+        }
+
+        def fake_openf1_fetch_step1(url, timeout=4):
+            if "/sessions?" in url:
+                return [{"session_key": 9901, "session_name": "Qualifying", "date_start": "2026-10-24T21:00:00+00:00"}]
+            if "/race_control?" in url:
+                return [
+                    {"date": "2026-10-24T21:00:00+00:00", "category": "Other", "flag": "GREEN", "message": "GREEN LIGHT - PIT EXIT OPEN"},
+                ]
+            if "/drivers?" in url:
+                return [
+                    {"driver_number": 1, "full_name": "Max VERSTAPPEN"},
+                    {"driver_number": 4, "full_name": "Lando NORRIS"},
+                    {"driver_number": 16, "full_name": "Charles LECLERC"},
+                ]
+            if "/position?" in url:
+                return [
+                    {"driver_number": 1, "position": 1},
+                    {"driver_number": 4, "position": 2},
+                    {"driver_number": 16, "position": 3},
+                ]
+            return []
+
+        with patch("src.skills.sports.aggregators.f1.fetch_json", side_effect=lambda u, timeout=8: espn_scoreboard_live if "espn.com" in u else fake_openf1_fetch_step1(u, timeout)):
+            info_step1 = agg.get_session_for_tracker(event_id="401858359:401858363")
+
+        snap1 = info_step1["snapshot"]
+        self.assertEqual(snap1.state, "in")
+        self.assertEqual(snap1.home_score, "P1: Max Verstappen")
+        self.assertEqual(snap1.away_score, "P2: Lando Norris")
+        self.assertIn("Q1 • 🟢 Track Clear", snap1.status_detail)
+
+        trigs1 = diff_snapshots(tracked, snap1)
+        self.assertTrue(any("F1 SESSION LIVE" in t for t in trigs1))
+        self.assertTrue(any("GREEN LIGHT - PIT EXIT OPEN" in t for t in trigs1))
+        self.assertTrue(any("P1 LEADER UPDATE" in t and "P1: Max Verstappen" in t for t in trigs1))
+        snap1.seen_event_ids |= tracked.last_snapshot.seen_event_ids
+        tracked.last_snapshot = snap1
+
+        # 3. Mid-session: Lando Norris takes Provisional Pole (P1) + Red Flag + Steward Penalty
+        def fake_openf1_fetch_step2(url, timeout=4):
+            if "/sessions?" in url:
+                return [{"session_key": 9901, "session_name": "Qualifying", "date_start": "2026-10-24T21:00:00+00:00"}]
+            if "/race_control?" in url:
+                return [
+                    {"date": "2026-10-24T21:00:00+00:00", "category": "Other", "flag": "GREEN", "message": "GREEN LIGHT - PIT EXIT OPEN"},
+                    {"date": "2026-10-24T21:14:22+00:00", "category": "Flag", "flag": "RED", "message": "RED FLAG"},
+                    {"date": "2026-10-24T21:15:10+00:00", "category": "Other", "flag": None, "message": "FIA STEWARDS: 3 PLACE GRID PENALTY FOR CAR 11"},
+                ]
+            if "/drivers?" in url:
+                return [
+                    {"driver_number": 1, "full_name": "Max VERSTAPPEN"},
+                    {"driver_number": 4, "full_name": "Lando NORRIS"},
+                    {"driver_number": 16, "full_name": "Charles LECLERC"},
+                ]
+            if "/position?" in url:
+                return [
+                    {"driver_number": 4, "position": 1},
+                    {"driver_number": 1, "position": 2},
+                    {"driver_number": 16, "position": 3},
+                ]
+            return []
+
+        with patch("src.skills.sports.aggregators.f1.fetch_json", side_effect=lambda u, timeout=8: espn_scoreboard_live if "espn.com" in u else fake_openf1_fetch_step2(u, timeout)):
+            info_step2 = agg.get_session_for_tracker(event_id="401858359:401858363")
+
+        snap2 = info_step2["snapshot"]
+        trigs2 = diff_snapshots(tracked, snap2)
+        # Must NOT re-trigger the earlier GREEN LIGHT event
+        self.assertFalse(any("GREEN LIGHT" in t for t in trigs2))
+        self.assertTrue(any("RED FLAG" in t for t in trigs2))
+        self.assertTrue(any("FIA STEWARDS" in t and "PENALTY" in t for t in trigs2))
+        self.assertTrue(any("P1 LEADER UPDATE" in t and "P1: Lando Norris" in t and "was P1: Max Verstappen" in t for t in trigs2))
+        snap2.seen_event_ids |= tracked.last_snapshot.seen_event_ids
+        tracked.last_snapshot = snap2
+
+        # 4. Session finishes ('post') via poll_once() -> fires Final classification alert and auto-removes from tracker
+        espn_scoreboard_post = {
+            "events": [{
+                "id": "401858359",
+                "name": "MSC Cruises United States Grand Prix",
+                "circuit": {"fullName": "Circuit of the Americas"},
+                "competitions": [
+                    {
+                        "id": "401858363",
+                        "type": {"abbreviation": "Qual"},
+                        "date": "2026-10-24T21:00Z",
+                        "status": {"type": {"state": "post", "completed": True, "name": "STATUS_FINAL"}},
+                        "competitors": [
+                            {"order": 1, "athlete": {"displayName": "Lando Norris"}},
+                            {"order": 2, "athlete": {"displayName": "Max Verstappen"}},
+                            {"order": 3, "athlete": {"displayName": "Charles Leclerc"}},
+                        ],
+                    }
+                ],
+            }]
+        }
+
+        f1_notifications = []
+
+        async def fake_f1_notify(m, s, trigs):
+            f1_notifications.append((m.event_id, s.home_score, s.away_score, trigs))
+
+        SPORTS_TRACKER.set_notify_callback(fake_f1_notify)
+        with patch("src.skills.sports.aggregators.f1.fetch_json", return_value=espn_scoreboard_post):
+            asyncio.run(SPORTS_TRACKER.poll_once())
+
+        self.assertEqual(len(SPORTS_TRACKER.tracked_matches), 0)
+        self.assertEqual(len(f1_notifications), 1)
+        self.assertEqual(f1_notifications[0][1], "P1: Lando Norris")
+        self.assertTrue(any("F1 SESSION FINISHED" in t for t in f1_notifications[0][3]))
+
+    def test_f1_tracker_start_list_stop_and_missed_tool_call(self):
+        """Verify list_tracked, stop_tracking('f1'), and detect_missed_sports_tool_call for F1 sessions."""
+        from src.skills.sports.context import detect_missed_sports_tool_call
+
+        # 1. Turn-0 missed tool call detection sets sport='f1'
+        missed = detect_missed_sports_tool_call(
+            [{"role": "user", "content": "track the F1 qualifying session"}],
+            active_channel_id=12345,
+        )
+        self.assertIsNotNone(missed)
+        self.assertEqual(missed[0], "skill_sports_tracker")
+        self.assertEqual(missed[1].get("sport"), "f1")
+
+        # 2. List & Stop F1 session
+        espn_sb = {
+            "events": [{
+                "id": "401858359",
+                "name": "MSC Cruises United States Grand Prix",
+                "circuit": {"fullName": "Circuit of the Americas"},
+                "competitions": [
+                    {
+                        "id": "401858364",
+                        "type": {"abbreviation": "Race"},
+                        "date": "2026-10-25T20:00Z",
+                        "status": {"type": {"state": "pre", "completed": False}},
+                        "competitors": [],
+                    }
+                ],
+            }]
+        }
+        with patch("src.skills.sports.aggregators.f1.fetch_json", return_value=espn_sb):
+            res_start = skill_sports_tracker(query="track the F1 race tomorrow", action="start", sport="f1")
+            self.assertIn("Grand Prix (Race)", res_start)
+
+            res_list = skill_sports_tracker(action="list")
+            self.assertIn("MSC Cruises United States Grand Prix — Grand Prix (Race)", res_list)
+
+            res_stop = skill_sports_tracker(query="f1", action="stop")
+            self.assertIn("Stopped live tracking", res_stop)
+            self.assertIn("MSC Cruises United States Grand Prix — Grand Prix (Race)", res_stop)
+
 
 if __name__ == "__main__":
     unittest.main()

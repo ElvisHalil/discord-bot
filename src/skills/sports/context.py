@@ -9,7 +9,7 @@ import logging
 import re
 import typing
 
-from src.skills.sports.tracker import get_channel_last_match_query
+from src.skills.sports.tracker import _is_f1_tracking_query, get_channel_last_match_query
 from src.skills.sports.catalogs import (
     GENERIC_SINGLE_WORD_QUERIES as _GENERIC_SINGLE_WORD_QUERIES,
     SPORTS_INTENT_STOPWORDS as _INTENT_WORDS_TO_STRIP,
@@ -42,11 +42,12 @@ _FOLLOWUP_MATCH_PATTERN = re.compile(
     r"\b(?:"
     r"their|they|them|his|her|its|that\s+team|same\s+team|"
     r"this\s+game|that\s+game|the\s+game|this\s+match|that\s+match|the\s+match|"
+    r"this\s+session|that\s+session|the\s+session|this\s+race|that\s+race|the\s+race|"
     r"tracked\s+games?|tracked\s+matches|both\s+games|both\s+matches|these\s+games|these\s+matches|"
     r"track\s+this|track\s+that|track\s+the|track\s+it|untrack|"
     r"hows?\s+the\s+game|how\s+is\s+the\s+game|hows?\s+it\s+going|"
     r"who\s+scored|last\s+goal|still\s+live|not\s+over|what\s+minute|"
-    r"whats?\s+the\s+score|whats?\s+the\s+status|status\s+of\s+(?:the|that|this)\s+(?:game|match)"
+    r"whats?\s+the\s+score|whats?\s+the\s+status|status\s+of\s+(?:the|that|this)\s+(?:game|match|session|race)"
     r")\b",
     re.IGNORECASE,
 )
@@ -217,8 +218,8 @@ def detect_explicit_tracker_intent(user_text: str) -> typing.Optional[typing.Tup
         return (TrackerAction.STOP, (m_stop.group(1) or "").strip(" ?.!,"))
 
     if re.search(
-        r"\b(?:what\s+(?:games?|matches?)\s+are\s+(?:you|we)\s+tracking|"
-        r"which\s+(?:games?|matches?)\s+are\s+(?:being\s+)?tracked|"
+        r"\b(?:what\s+(?:games?|matches?|sessions?|races?)\s+are\s+(?:you|we)\s+tracking|"
+        r"which\s+(?:games?|matches?|sessions?|races?)\s+are\s+(?:being\s+)?tracked|"
         r"list\s+tracked|are\s+you\s+tracking\s+(?:any|the|this))\b",
         q_low,
     ):
@@ -233,7 +234,7 @@ def detect_explicit_tracker_intent(user_text: str) -> typing.Optional[typing.Tup
         return (TrackerAction.START, m_start.group(1).strip())
 
     m_mid = re.search(
-        r"\b(?:track\s+(?:this|that|the)\s+(?:game|match)|start\s+tracking\s+(?:this|that|the)\s+(?:game|match))\b",
+        r"\b(?:track\s+(?:this|that|the)\s+(?:game|match|session|race|qualifying)|start\s+tracking\s+(?:this|that|the)\s+(?:game|match|session|race|qualifying))\b",
         q_low,
     )
     if m_mid:
@@ -246,10 +247,10 @@ _LIVE_MATCH_FOLLOWUP_RE = re.compile(
     r"\b(?:"
     r"score|scores|scored|scorer|goal|goals|game|match|minute|halftime|"
     r"winning|losing|leading|lineup|lineups|possession|shots|yellow\s+card|red\s+card|"
-    r"hows?\s+(?:the|this|that)\s+(?:game|match)|"
+    r"hows?\s+(?:the|this|that)\s+(?:game|match|session|race)|"
     r"whats?\s+the\s+status|status\s+of\s+(?:the|this|that)|"
-    r"still\s+live|(?:game|match)\s+live|"
-    r"(?:is\s+it|game|match)\s+(?:over|finished)|"
+    r"still\s+live|(?:game|match|session|race)\s+live|"
+    r"(?:is\s+it|game|match|session|race)\s+(?:over|finished)|"
     r"(?:first|second|1st|2nd)\s+half|"
     r"who(?:'s|\s+is)\s+playing|still\s+playing"
     r")\b",
@@ -279,13 +280,15 @@ def detect_missed_sports_tool_call(
     latest_user = user_texts[-1]
     q_low = latest_user.lower()
 
-    # 1. Explicit live match tracker command ("track this game", "track real madrid", "untrack")
+    # 1. Explicit live match tracker command ("track this game", "track real madrid", "track F1 qualifying", "untrack")
     tracker_intent = detect_explicit_tracker_intent(latest_user)
     if tracker_intent is not None:
         action, target_q = tracker_intent
-        args = {"action": action, "query": target_q}
+        args: dict = {"action": action, "query": target_q}
         if action == TrackerAction.START:
             args = enrich_sports_tool_args(args, history)
+            if _is_f1_tracking_query(str(args.get("query") or ""), str(args.get("sport") or "")):
+                args["sport"] = "f1"
         return ("skill_sports_tracker", args)
 
     # 2. Live sports status / score / match follow-up when channel already has sports context

@@ -153,6 +153,147 @@ class TestF1Aggregator(unittest.TestCase):
         self.assertIn("Standard 3-Day Weekend (with FP3)", res)
         self.assertIn("None of the remaining 2026 races are Sprint weekends", res)
 
+    @patch("src.skills.sports.aggregators.f1.fetch_json")
+    def test_active_race_weekend_not_marked_final_prematurely(self, mock_fetch):
+        """During an active race weekend (FP1-FP3 completed, Qualifying/Race upcoming),
+        get_schedule() must NOT report the Grand Prix as (Final) even if events[0].status.detail is 'Final'."""
+        us_gp_event = {
+            "id": "401858359",
+            "name": "MSC Cruises United States Grand Prix",
+            "date": "2026-10-23T17:30Z",
+            "status": {"type": {"detail": "Final"}},
+            "circuit": {"fullName": "Circuit of the Americas", "address": {"city": "Austin", "country": "USA"}},
+            "competitions": [
+                {
+                    "id": "c_fp1",
+                    "type": {"abbreviation": "FP1"},
+                    "date": "2026-10-23T17:30Z",
+                    "status": {"type": {"state": "post", "completed": True, "detail": "Final"}},
+                    "competitors": [
+                        {"order": 1, "athlete": {"displayName": "Charles Leclerc"}},
+                        {"order": 2, "athlete": {"displayName": "Alexander Albon"}},
+                        {"order": 3, "athlete": {"displayName": "Liam Lawson"}},
+                    ],
+                },
+                {
+                    "id": "c_fp3",
+                    "type": {"abbreviation": "FP3"},
+                    "date": "2026-10-24T17:30Z",
+                    "status": {"type": {"state": "post", "completed": True, "detail": "Final"}},
+                    "competitors": [
+                        {"order": 1, "athlete": {"displayName": "Lewis Hamilton"}},
+                        {"order": 2, "athlete": {"displayName": "Max Verstappen"}},
+                        {"order": 3, "athlete": {"displayName": "Charles Leclerc"}},
+                    ],
+                },
+                {
+                    "id": "c_qual",
+                    "type": {"abbreviation": "Qual"},
+                    "date": "2026-10-24T21:00Z",
+                    "status": {"type": {"state": "pre", "completed": False, "detail": "Sat, Oct 24 at 5:00 PM EDT"}},
+                    "competitors": [],
+                },
+                {
+                    "id": "c_race",
+                    "type": {"abbreviation": "Race"},
+                    "date": "2026-10-25T20:00Z",
+                    "status": {"type": {"state": "pre", "completed": False, "detail": "Sun, Oct 25 at 4:00 PM EDT"}},
+                    "competitors": [],
+                },
+            ],
+        }
+        mock_fetch.side_effect = [
+            {
+                "season": {"year": 2026},
+                "leagues": [{
+                    "calendar": [{
+                        "label": "United States Grand Prix",
+                        "startDate": "2026-10-23T17:30Z",
+                        "endDate": "2026-10-25T20:00Z",
+                    }]
+                }],
+                "events": [us_gp_event],
+            },
+            {"events": [us_gp_event]},
+        ]
+        res = self.agg.get_schedule()
+        self.assertNotIn("MOST RECENT GRAND PRIX: MSC Cruises United States Grand Prix (Final)", res)
+        self.assertIn("CURRENT RACE WEEKEND STATUS: MSC Cruises United States Grand Prix (Weekend In Progress", res)
+        self.assertIn("Latest Completed Session (Practice 3 (FP3)): P1: Lewis Hamilton, P2: Max Verstappen, P3: Charles Leclerc", res)
+        self.assertIn("Next Scheduled Session: Qualifying", res)
+        self.assertIn("[✅ Completed — P1: Lewis Hamilton, P2: Max Verstappen, P3: Charles Leclerc]", res)
+        self.assertIn("Qualifying:", res)
+        self.assertIn("[🕒 Upcoming]", res)
+
+    @patch.dict("os.environ", {"BOT_TIMEZONE": "America/Edmonton"})
+    def test_night_session_utc_midnight_rollover_local_time_alignment(self):
+        """Night sessions crossing midnight UTC (e.g. Las Vegas GP at 04:00 UTC on Saturday)
+        must display the local day-of-week and time first (Friday 9:00 PM MST)."""
+        from src.skills.sports.aggregators.f1 import _format_f1_session_time
+
+        vegas_qual_str = _format_f1_session_time("2026-11-21T04:00Z")
+        self.assertIn("Friday, Nov 20 at 9:00 PM MST", vegas_qual_str)
+        self.assertIn("Sat Nov 21, 04:00 UTC", vegas_qual_str)
+
+        cota_qual_str = _format_f1_session_time("2026-10-24T21:00Z")
+        self.assertEqual(cota_qual_str, "Saturday, Oct 24 at 3:00 PM MDT (21:00 UTC)")
+
+    @patch.dict("os.environ", {"BOT_TIMEZONE": "America/Edmonton"})
+    @patch("src.skills.sports.aggregators.f1.fetch_json")
+    def test_schedule_and_tracker_session_alignment(self, mock_fetch):
+        """F1Aggregator.get_schedule() and F1Aggregator.get_session_for_tracker() must produce
+        identical session labels and local/UTC timestamps for Qualifying and Race."""
+        us_gp_event = {
+            "id": "401858359",
+            "name": "MSC Cruises United States Grand Prix",
+            "circuit": {"fullName": "Circuit of the Americas", "address": {"city": "Austin", "country": "USA"}},
+            "competitions": [
+                {
+                    "id": "401858363",
+                    "type": {"abbreviation": "Qual"},
+                    "date": "2026-10-24T21:00Z",
+                    "status": {"type": {"state": "pre", "completed": False}},
+                    "competitors": [],
+                },
+                {
+                    "id": "401858364",
+                    "type": {"abbreviation": "Race"},
+                    "date": "2026-10-25T20:00Z",
+                    "status": {"type": {"state": "pre", "completed": False}},
+                    "competitors": [],
+                },
+            ],
+        }
+        mock_fetch.side_effect = [
+            {
+                "season": {"year": 2026},
+                "leagues": [{
+                    "calendar": [{
+                        "label": "United States Grand Prix",
+                        "startDate": "2026-10-23T17:30Z",
+                        "endDate": "2026-10-25T20:00Z",
+                    }]
+                }],
+                "events": [us_gp_event],
+            },
+            {"events": [us_gp_event]},
+            {"events": [us_gp_event]},
+            {"events": [us_gp_event]},
+        ]
+        sched_text = self.agg.get_schedule()
+        qual_tracker = self.agg.get_session_for_tracker(query="track F1 qualifying")
+        race_tracker = self.agg.get_session_for_tracker(query="track F1 race tomorrow")
+
+        self.assertIsNotNone(qual_tracker)
+        self.assertIsNotNone(race_tracker)
+        self.assertEqual(qual_tracker["away_team"], "Qualifying")
+        self.assertEqual(qual_tracker["snapshot"].status_detail, "Saturday, Oct 24 at 3:00 PM MDT (21:00 UTC)")
+        self.assertIn(qual_tracker["snapshot"].status_detail, sched_text)
+
+        self.assertEqual(race_tracker["away_team"], "Grand Prix (Race)")
+        self.assertEqual(race_tracker["snapshot"].status_detail, "Sunday, Oct 25 at 2:00 PM MDT (20:00 UTC)")
+        self.assertIn(race_tracker["snapshot"].status_detail, sched_text)
+
 
 class TestSoccerAggregator(unittest.TestCase):
     def setUp(self):

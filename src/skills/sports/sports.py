@@ -410,7 +410,7 @@ def skill_sports_info(
     if is_cs:
         matched_tasks.append((SportId.CS, _run_cs, "Present the Counter-Strike tournament/match details clearly."))
     if is_f1:
-        matched_tasks.append((SportId.F1, _f1_aggregator.get_info, "Review the Formula 1 schedule/standings and inform the user. Remind them session times are in UTC."))
+        matched_tasks.append((SportId.F1, _f1_aggregator.get_info, "Review the Formula 1 schedule, session status, and standings, reporting exact local session times alongside UTC."))
     if is_nba:
         matched_tasks.append((SportId.NBA, _nba_aggregator.get_info, "Present the NBA games, leaders, injuries, rosters, or standings clearly. Include scores, status, and quarter linescores if available."))
     if is_nhl:

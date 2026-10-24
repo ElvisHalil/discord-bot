@@ -235,13 +235,22 @@ async def handle_live_match_update(match, snapshot, triggers):
             "Include the exact score, match clock/status, competition name, and any goal scorer/assist/card or stats details."
         )
 
-    internal_user_prompt = (
-        f"[INTERNAL LIVE SPORTS TRACKER TRIGGER]\n"
-        f"Match: {snapshot.home_team} vs {snapshot.away_team} ({match.league_name})\n"
-        f"Current Score: {snapshot.home_team} {snapshot.home_score} - {snapshot.away_score} {snapshot.away_team} ({snapshot.status_detail})\n"
-        f"Events Just Detected:\n{trigger_block}{stats_line}\n\n"
-        "Announce this live update to the Discord channel now."
-    )
+    if getattr(match, "sport_path", "") == "f1":
+        internal_user_prompt = (
+            f"[INTERNAL LIVE F1 SESSION TRACKER TRIGGER]\n"
+            f"Grand Prix Session: {snapshot.home_team} — {snapshot.away_team} ({match.league_name})\n"
+            f"Current Leader / Order: {snapshot.home_score} | {snapshot.away_score} ({snapshot.status_detail})\n"
+            f"Events Just Detected:\n{trigger_block}{stats_line}\n\n"
+            "Announce this live Formula 1 session update to the Discord channel now."
+        )
+    else:
+        internal_user_prompt = (
+            f"[INTERNAL LIVE SPORTS TRACKER TRIGGER]\n"
+            f"Match: {snapshot.home_team} vs {snapshot.away_team} ({match.league_name})\n"
+            f"Current Score: {snapshot.home_team} {snapshot.home_score} - {snapshot.away_score} {snapshot.away_team} ({snapshot.status_detail})\n"
+            f"Events Just Detected:\n{trigger_block}{stats_line}\n\n"
+            "Announce this live update to the Discord channel now."
+        )
 
     update_options = {
         **mode_config["ollama_options"],
@@ -445,10 +454,16 @@ def _list_channel_sports_matches(cid: int) -> list[str]:
     for (m_cid, _), m in SPORTS_TRACKER.tracked_matches.items():
         if m_cid == cid:
             snap = m.last_snapshot
-            lines.append(
-                f"• **[SPORTS]** **{m.home_team} {snap.home_score} - {snap.away_score} {m.away_team}** "
-                f"({m.league_name} — {snap.status_detail})"
-            )
+            if getattr(m, "sport_path", "") == "f1":
+                lines.append(
+                    f"• **[F1 SESSION]** **{m.home_team} — {m.away_team}** [{snap.home_score} | {snap.away_score}] "
+                    f"({m.league_name} — {snap.status_detail})"
+                )
+            else:
+                lines.append(
+                    f"• **[SPORTS]** **{m.home_team} {snap.home_score} - {snap.away_score} {m.away_team}** "
+                    f"({m.league_name} — {snap.status_detail})"
+                )
     return lines
 
 

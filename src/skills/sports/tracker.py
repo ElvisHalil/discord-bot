@@ -32,6 +32,7 @@ from src.skills.sports.aggregators.espn_utils import (
     record_channel_last_match_query,
     resolve_espn_team,
 )
+from src.skills.sports.aggregators.f1 import F1Aggregator
 from src.skills.sports.aggregators.kashrock import (
     KashrockAggregator,
     _format_iso_start_time,
@@ -39,6 +40,7 @@ from src.skills.sports.aggregators.kashrock import (
 )
 from src.skills.sports.aggregators.soccer import SoccerAggregator
 from src.skills.sports.aggregators.universal_espn import UniversalEspnAggregator
+from src.skills.sports.catalogs import F1_DRIVERS
 from src.skills.sports.enums import (
     MatchState,
     TrackerAction,
@@ -447,6 +449,42 @@ def resolve_cs2_live_or_next_event(target: str) -> Optional[Dict[str, Any]]:
     }
 
 
+_F1_TRACKER_KEYWORDS = frozenset({
+    "f1", "formula1", "grandprix", "qualifying", "quali", "fp1", "fp2", "fp3",
+    "cota", "silverstone", "monza", "monaco", "spa", "suzuka", "interlagos",
+    "zandvoort", "bahrain", "jeddah", "imola", "baku", "lusail", "verstappen",
+    "hamilton", "leclerc", "norris", "piastri", "russell", "antonelli", "sainz",
+    "alonso", "albon", "gasly", "ocon", "hulkenberg", "tsunoda", "stroll",
+    "bearman", "lawson", "hadjar", "bortoleto", "colapinto", "ferrari", "mclaren",
+    "redbull", "mercedes", "williams", "haas", "alpine", "sauber", "audi", "cadillac",
+})
+
+
+def _is_f1_tracking_query(target: str, sport_clean: str) -> bool:
+    """Return True if the tracking request targets a Formula 1 session (FP1-3, Qualifying, Sprint, or Race)."""
+    if sport_clean in ("f1", "formula 1", "formula1", "formula one", "grand prix", "racing"):
+        return True
+    t_low = (target or "").lower()
+    if any(
+        phrase in t_low
+        for phrase in (
+            "formula 1", "formula one", "grand prix", "free practice", "practice 1",
+            "practice 2", "practice 3", "sprint qualifying", "sprint shootout",
+            "red bull", "aston martin", "racing bulls",
+        )
+    ):
+        return True
+    if any(drv in t_low for drv in F1_DRIVERS):
+        return True
+    tokens = set(re.findall(r"[a-z0-9]+", t_low))
+    return bool(tokens & _F1_TRACKER_KEYWORDS)
+
+
+def resolve_f1_live_or_next_event(target: str) -> Optional[Dict[str, Any]]:
+    """Resolve an F1 session tracking query into a trackable event dict via F1Aggregator."""
+    return F1Aggregator().get_session_for_tracker(query=target)
+
+
 def diff_snapshots(tracked: TrackedMatch, curr: MatchSnapshot) -> List[str]:
     """
     Compare previous MatchSnapshot against current MatchSnapshot and return a list
@@ -454,6 +492,36 @@ def diff_snapshots(tracked: TrackedMatch, curr: MatchSnapshot) -> List[str]:
     """
     prev = tracked.last_snapshot
     triggers: List[str] = []
+
+    if tracked.sport_path == "f1":
+        # 1. F1 Session Start (pre -> in)
+        if prev.state == "pre" and curr.state == "in":
+            triggers.append(
+                f"🟢 **F1 SESSION LIVE**: **{curr.home_team} — {curr.away_team}** is now UNDERWAY! ({curr.status_detail})"
+            )
+        # 2. FIA Race Control Milestones (Green Light, Q1/Q2/Q3 Chequered Flags, Red Flags, Safety Car, VSC, Stewards)
+        new_f1_events = [
+            desc for ev_id, desc in curr.notable_events if ev_id not in prev.seen_event_ids
+        ]
+        for d in new_f1_events:
+            triggers.append(
+                f"{d} — **{curr.home_team} ({curr.away_team})** | {curr.stats_summary or curr.status_detail}"
+            )
+        # 3. P1 Leader / Provisional Pole Update
+        if curr.state == "in" and curr.home_score != prev.home_score and curr.home_score.startswith("P1:"):
+            prev_ldr = f" (was {prev.home_score})" if prev.home_score.startswith("P1:") else ""
+            triggers.append(
+                f"🏎️ **P1 LEADER UPDATE ({curr.home_team} — {curr.away_team})**: "
+                f"**{curr.home_score}**{prev_ldr} | **{curr.away_score}** ({curr.stats_summary})"
+            )
+        # 4. Session Finished / Final Classification
+        if curr.is_finished and not prev.is_finished:
+            stat_str = f" | {curr.stats_summary}" if curr.stats_summary else ""
+            triggers.append(
+                f"🏁 **F1 SESSION FINISHED ({curr.home_team} — {curr.away_team})**: "
+                f"**{curr.home_score}** takes P1 ({curr.away_score}){stat_str}"
+            )
+        return triggers
 
     # 1. Kickoff / Game Start
     if prev.state == "pre" and curr.state == "in":
@@ -556,6 +624,13 @@ def resolve_live_or_next_event(
         if cs_info:
             return cs_info
         if sport_clean in ("cs", "cs2", "csgo", "counter-strike", "counter strike", "esports", "hltv", "bo3"):
+            return None
+
+    if _is_f1_tracking_query(target, sport_clean):
+        f1_info = resolve_f1_live_or_next_event(query or target)
+        if f1_info:
+            return f1_info
+        if sport_clean in ("f1", "formula 1", "formula1", "formula one", "grand prix", "racing"):
             return None
 
     sport_hint = None
@@ -785,13 +860,15 @@ class SportsTrackerService:
         def _fetch_match_payload(m: TrackedMatch) -> Any:
             if m.sport_path == "esports":
                 return KashrockAggregator().get_series_for_tracker(m.event_id, m.home_team, m.away_team)
+            if m.sport_path == "f1":
+                return F1Aggregator().get_session_for_tracker(event_id=m.event_id)
             summary_url = (
                 f"https://site.api.espn.com/apis/site/v2/sports/{m.sport_path}/"
                 f"{m.league_code}/summary?event={m.event_id}"
             )
             return fetch_json(summary_url, timeout=8)
 
-        # 2. Fetch fresh ESPN summaries or CS2 series concurrently across all tracked matches via shared worker pool
+        # 2. Fetch fresh ESPN summaries, F1 sessions, or CS2 series concurrently across all tracked matches via shared worker pool
         responses = await asyncio.gather(
             *(
                 run_in_worker(
@@ -799,7 +876,7 @@ class SportsTrackerService:
                     f"https://site.api.espn.com/apis/site/v2/sports/{match.sport_path}/{match.league_code}/summary?event={match.event_id}",
                     timeout=8,
                 )
-                if match.sport_path != "esports"
+                if match.sport_path not in ("esports", "f1")
                 else run_in_worker(_fetch_match_payload, match)
                 for _, match in active_items
             ),
@@ -817,6 +894,10 @@ class SportsTrackerService:
                 if not isinstance(payload, CsLiveSeries):
                     continue
                 curr_snapshot = extract_snapshot_from_cs_series(payload)
+            elif match.sport_path == "f1":
+                if not isinstance(payload, dict) or not isinstance(payload.get("snapshot"), MatchSnapshot):
+                    continue
+                curr_snapshot = payload["snapshot"]
             else:
                 if not isinstance(payload, dict):
                     continue
@@ -891,13 +972,27 @@ class SportsTrackerService:
         if not info:
             return (
                 f"⚠️ Could not find an active or upcoming match for '{query}'. "
-                "Please specify the team or matchup name (e.g. 'Real Madrid', 'Arsenal', 'Lakers', 'Aurora vs BetBoom')."
+                "Please specify the team, matchup, or session name (e.g. 'Real Madrid', 'Arsenal', 'Lakers', 'Aurora vs BetBoom', 'F1 Qualifying').\n\n"
+                "=== CRITICAL INSTRUCTION FOR YOU (THE LLM) ===\n"
+                "1. Live tracking did NOT start because no active or upcoming match/session matched the query.\n"
+                "2. Do NOT claim that you are tracking or monitoring this event. Inform the user clearly and ask them to clarify."
             )
 
         snap: MatchSnapshot = info["snapshot"]
-        record_channel_last_match_query(f"{snap.home_team} vs {snap.away_team}", sport=info["sport_path"], channel_id=channel_id)
+        is_f1 = info["sport_path"] == "f1"
+        record_channel_last_match_query(
+            f"F1 {snap.home_team} {snap.away_team}" if is_f1 else f"{snap.home_team} vs {snap.away_team}",
+            sport=info["sport_path"],
+            channel_id=channel_id,
+        )
 
         if snap.is_finished:
+            if is_f1:
+                return (
+                    f"🏁 The Formula 1 session **{snap.home_team} — {snap.away_team}** "
+                    f"({info['league_name']}) has already finished ({snap.home_score}, {snap.away_score} — {snap.stats_summary}), "
+                    "so live tracking is not needed."
+                )
             return (
                 f"🏁 The match **{snap.home_team} {snap.home_score} - {snap.away_score} {snap.away_team}** "
                 f"({info['league_name']}) has already finished ({snap.status_detail}), so live tracking is not needed."
@@ -918,6 +1013,32 @@ class SportsTrackerService:
         self.ensure_loop_running()
 
         extra_details = ""
+        if is_f1:
+            if snap.state == MatchState.IN:
+                status_badge = (
+                    f"🔴 LIVE IN PROGRESS RIGHT NOW ({snap.status_detail}) — "
+                    f"Current Order: **{snap.home_score}** | **{snap.away_score}**"
+                )
+                if snap.notable_events:
+                    ev_lines = "\n".join(f"  - {desc}" for _, desc in snap.notable_events[-5:])
+                    extra_details += f"\n• **Recent FIA Race Control Events:**\n{ev_lines}"
+                if snap.stats_summary:
+                    extra_details += f"\n• **Live Classification:** {snap.stats_summary}"
+            else:
+                status_badge = f"🕒 Scheduled ({snap.status_detail}) — **{snap.home_team} ({snap.away_team})**"
+                if snap.stats_summary:
+                    extra_details += f"\n• **Session Info:** {snap.stats_summary}"
+            llm_instruction = build_live_tracker_instructions(snap)
+            return (
+                f"📡 **LIVE F1 SESSION TRACKER ACTIVATED**\n"
+                f"• **Session:** {snap.home_team} — {snap.away_team} ({info['league_name']})\n"
+                f"• **Current Status:** {status_badge}"
+                f"{extra_details}\n"
+                f"• **Tracking Rules:** Polling every {self.poll_interval}s via ESPN & OpenF1 Real-Time Telemetry for session start (Green Light), FIA Race Control flags (Red Flag, Safety Car, VSC), Steward penalties, P1 / Provisional Pole lead changes, Q1/Q2/Q3 progression, and Chequered Flag. "
+                f"The tracker will remain active while the session is underway and will automatically stop once the Chequered Flag / Final classification is reached."
+                f"{llm_instruction}"
+            )
+
         if snap.state == MatchState.IN:
             status_badge = (
                 f"🔴 LIVE IN PROGRESS RIGHT NOW (Current Match Clock: {snap.status_detail} — ONGOING, NOT FINISHED) — "
@@ -951,11 +1072,13 @@ class SportsTrackerService:
         removed: List[str] = []
         for key in channel_keys:
             m = self.tracked_matches[key]
+            haystack = f"{m.home_team} {m.away_team} {m.sport_path} {m.league_name}".lower()
             if not q_clean or q_clean in ("all", "everything", "stop") or (
-                q_clean in m.home_team.lower() or q_clean in m.away_team.lower()
-                or any(t in m.home_team.lower() or t in m.away_team.lower() for t in q_clean.split())
+                q_clean in haystack
+                or any(t in haystack for t in q_clean.split())
             ):
-                removed.append(f"**{m.home_team} vs {m.away_team}** ({m.league_name})")
+                label = f"**{m.home_team} — {m.away_team}**" if m.sport_path == "f1" else f"**{m.home_team} vs {m.away_team}**"
+                removed.append(f"{label} ({m.league_name})")
                 self.tracked_matches.pop(key, None)
 
         if not removed:
@@ -969,7 +1092,7 @@ class SportsTrackerService:
         if not matches:
             return "ℹ️ No live matches are currently being tracked in this channel."
 
-        espn_matches = [m for m in matches if m.sport_path != "esports"]
+        espn_matches = [m for m in matches if m.sport_path not in ("esports", "f1")]
         espn_summaries: Dict[str, Any] = {}
         if espn_matches:
             req_list = [
@@ -993,6 +1116,13 @@ class SportsTrackerService:
                         s = extract_snapshot_from_cs_series(cs_series)
                 except Exception as e:
                     logger.debug("Failed to extract CS2 snapshot in list_tracked: %s", e)
+            elif m.sport_path == "f1":
+                try:
+                    f1_info = F1Aggregator().get_session_for_tracker(event_id=m.event_id)
+                    if f1_info and isinstance(f1_info.get("snapshot"), MatchSnapshot):
+                        s = f1_info["snapshot"]
+                except Exception as e:
+                    logger.debug("Failed to extract F1 snapshot in list_tracked: %s", e)
             else:
                 summary_data = espn_summaries.get(m.event_id)
                 if summary_data and summary_data.get("header"):
@@ -1000,10 +1130,16 @@ class SportsTrackerService:
                         s = extract_snapshot_from_summary(summary_data)
                     except Exception as e:
                         logger.debug("Failed to extract snapshot in list_tracked: %s", e)
-            lines.append(
-                f"• **{m.home_team} {s.home_score} - {s.away_score} {m.away_team}** "
-                f"({m.league_name}) — Status: `{s.status_detail}`"
-            )
+            if m.sport_path == "f1":
+                lines.append(
+                    f"• **{m.home_team} — {m.away_team}** [{s.home_score} | {s.away_score}] "
+                    f"({m.league_name}) — Status: `{s.status_detail}`"
+                )
+            else:
+                lines.append(
+                    f"• **{m.home_team} {s.home_score} - {s.away_score} {m.away_team}** "
+                    f"({m.league_name}) — Status: `{s.status_detail}`"
+                )
         return "\n".join(lines)
 
 
@@ -1016,12 +1152,12 @@ def skill_sports_tracker(
     sport: Optional[str] = None,
 ) -> str:
     """
-    Start, stop, or list live background match tracking (Soccer, NBA, NHL, NFL, MLB, CS2 Esports) that posts channel alerts on score changes, red cards, halftime, and full time.
+    Start, stop, or list live background match/session tracking (Soccer, NBA, NHL, NFL, MLB, F1, CS2 Esports) that posts channel alerts on score/leader changes, red flags/cards, halftime, and full time.
 
     Args:
-        query: Team or matchup to track (e.g. 'Real Madrid', 'AS Roma vs Real Madrid', 'Lakers', 'Arsenal').
+        query: Team, matchup, or F1 session to track (e.g. 'Real Madrid', 'Lakers', 'F1 Qualifying', 'F1 Race').
         action: 'start' to begin tracking, 'stop' to stop tracking, or 'list' to view tracked games.
-        sport: Optional sport or league hint (e.g. 'soccer', 'ucl', 'nba', 'nhl', 'nfl', 'cs2').
+        sport: Optional sport or league hint (e.g. 'soccer', 'ucl', 'nba', 'nhl', 'nfl', 'f1', 'cs2').
     """
     channel_id = get_active_channel_id()
     act = (action or TrackerAction.START).strip().lower()
