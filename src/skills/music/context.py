@@ -284,6 +284,31 @@ def enrich_music_tool_args(args: dict, history: list) -> dict:
         if active_genre:
             enriched["genre"] = active_genre
 
+    # 4. On bare 'next' / 'skip' while Autoplay is active, keep the station's seed/genre rather than drifting
+    if re.match(r"^\s*(?:next|skip)(?:\s+(?:song|track|one|tune|please|pls))?\s*[.?!]*$", clean_user, re.IGNORECASE):
+        try:
+            from src.jobs.engine import JOB_ENGINE
+
+            active_ap = JOB_ENGINE.get_active_autoplay_job(get_active_channel_id())
+            if active_ap and active_ap.payload_text and active_ap.payload_text.lower() != "top tracks":
+                ap_q = active_ap.payload_text.strip()
+                m_sim = re.match(
+                    r"^(?:similar\s+to|similar|songs?\s+like|tracks?\s+like|music\s+like|like|mix\s+with)\s+(.+)$",
+                    ap_q,
+                    flags=re.IGNORECASE,
+                )
+                if m_sim:
+                    enriched["similar_to"] = m_sim.group(1).strip()
+                    enriched.pop("genre", None)
+                elif " by " in ap_q.lower():
+                    enriched["similar_to"] = ap_q
+                    enriched.pop("genre", None)
+                else:
+                    enriched["genre"] = ap_q
+                    enriched.pop("similar_to", None)
+        except Exception:
+            pass
+
     return enriched
 
 
