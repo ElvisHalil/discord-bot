@@ -10,14 +10,15 @@ Designed specifically to give compact local LLMs (4B–8B parameters) **determin
 
 | Domain | Capabilities |
 | :--- | :--- |
-| 🎙️ **Real-Time Discord Voice-Channel AI Co-Host** | Joins live Discord voice channels (`!join` or *"hop in the voice channel"*) as a low-latency, interactive AI co-host. Features **Discord DAVE E2EE (`davey`) audio decryption**, **Per-Speaker Voice Activity Detection (VAD)** (`0.30s` silence gap), **Sub-Second Local Speech-to-Text** via **`faster-whisper` (`int8` pre-warmed)**, **Wake-Word (`"Hey bot"`) / Open-Mic / Listen-Only modes**, **9 Neural Voice & Accent Presets (`!voice <preset>` or by voice command)** (`british`, `ava`, `deep`, `sportscaster`, `australian`, etc.), **Spoken Song Discovery & Song Card Posting**, **Live Sports & Flight Tracker Voice Break-Ins**, **Speaker-Attributed Call Recaps (`!vrecap`)**, and **Discord Voice Message Transcription**. |
+| 🎙️ **Real-Time Discord Voice-Channel AI Co-Host & Ad-Free Music Streamer** | Joins live Discord voice channels (`!join` or *"hop in the voice channel"*) as a low-latency, interactive AI co-host **and** ad-free live music streamer. Features **Ad-Free Voice Music Streaming (`yt-dlp` + `FFmpegPCMAudio`)** with automatic `👍` reaction queueing (`!pause`, `!resume`, `!skip`, `!stop`, `!queue`), **Discord DAVE E2EE (`davey`) audio decryption**, **Per-Speaker Voice Activity Detection (VAD)** (`0.30s` silence gap), **Sub-Second Local Speech-to-Text** via **`faster-whisper` (`int8` pre-warmed)**, **Wake-Word (`"Hey bot"`) / Open-Mic / Listen-Only modes**, **9 Neural Voice & Accent Presets (`!voice <preset>` or by voice command)** (`british`, `ava`, `deep`, `sportscaster`, `australian`, etc.), **Live Sports & Flight Tracker Voice Break-Ins**, **Speaker-Attributed Call Recaps (`!vrecap`)**, and **Discord Voice Message Transcription**. |
+| 🎵 **Music Discovery, `ytmusicapi` Radio, Autoplay & Audio DSP** | Blended multi-source discovery combining **YouTube Music's (`ytmusicapi`) Watch-Playlist Radio Engine** (~40% co-listened radio tracks & official studio `ATV` song resolution) with **Last.fm**, **Deezer**, **Beatport**, **FreqBlog**, and **iTunes RSS** (~60%). Powered by a **3-Shelf (45% Anthems / 35% Cult / 20% Underground) Crate-Digging Tiered Sampler** with multi-source consensus boosting, cross-source genre gatekeeping, remix/VIP preservation, **3×3 Tempo × Intensity Spectrum Shifting** (`faster`, `slower`, `harder`, `softer`), **Continuous Radio Autoplay (`!autoplay <genre>`)**, **In-Memory DSP (`miniaudio` + `numpy`) BPM/Key/Gain Analysis**, and **👍 Song-Card Reaction Similar-Track Discovery**. |
+| ⏰ **Background Job Engine, Reminders & Conditional Alerts** | Unified background scheduler (`src/jobs/` & `src/skills/jobs/`) supporting **One-Shot & Recurring Reminders** (`!remind`, *"remind me in 30m..."*, *"every 2h..."*), **Dynamic Condition Alerts** (*"alert me when BTC hits $100k"*, *"notify me when it starts raining"*), **Scheduled Agent Tasks**, and **Continuous Music Autoplay (`!autoplay` / `!stopautoplay`)** with automatic 1-hour channel idle protection and live genre/tempo takeover. |
 | 📊 **On-Demand Graphing, Monte Carlo, Heatmaps & Diagrams** | Deterministic, dark-themed high-DPI PNG rendering for **Arbitrary 2D Data Graphs** (`bar`, `horizontal_bar`, `stacked_bar`, `line`, `area`, `scatter`, `pie`, `donut`), **10,000-Path Monte Carlo Price Simulations & Fan Charts** (projecting any forward horizon with 5th–95th percentile confidence cones, terminal distribution histograms, and win/drawdown probabilities — calibrated on **5-Year History by default** or any custom historical window like `10y`, `3y`, or `max`), **Calendar & 2D Matrix Heatmaps** (`calendar_heatmap`, `heatmap`), **Financial, FX & Multi-Ticker Market Plots** (supporting any custom window like `3d`, `7d`, `14d`, `1mo`, `5y` and hourly/`1h` or `15m` bar intervals), and **Architecture Diagrams & Flowcharts** (`flowchart`, `sequence`, `architecture`, `state`, `mindmap`). |
 | 📈 **Global Markets, TSX/Stocks & Crypto** | Real-time global macro benchmarks (**S&P/TSX**, **S&P 500**, **Nasdaq 100**, **Dow**, **FTSE**, **DAX**, **Nikkei**, **VIX**, **Gold**, **Silver**, **WTI Crude**, **USD/CAD**, **10Y Yields**), **Risk-On / Risk-Off Regime Classification**, **Yahoo Finance v8 + TradingView Scanner fallback** for US/Canadian TSX equities & ETFs, **CoinGecko Top Movers & DeFi TVL**, **Historical Chart Summaries (`1d`–`5y`)** with annualized volatility & max drawdown, **Fundamentals & Earnings Dates**, **Side-by-Side Comparison Matrix**, and **Portfolio / Watchlist Valuation**. |
-| 🎵 **Music Discovery & Audio DSP** | Multi-source chart & underground discovery (**Last.fm**, **Deezer**, **Beatport**, **FreqBlog**, **iTunes RSS / Billboard**), **Genre × Mood Matrix**, **3×3 Tempo × Intensity Spectrum Shifting** (`faster`, `slower`, `harder`, `softer`), **In-Memory DSP (`miniaudio` + `numpy`) BPM/Key/Gain Analysis**, native **`gemma4:e4b` Audio Listening**, and **👍 Song-Card Reaction Similar-Track Discovery**. |
 | 🏟️ **Live Sports, CS2 Esports & Decimal Odds** | Real-time scoreboards, fixtures, and standings for **Soccer** (UCL, EPL, La Liga, Serie A, Bundesliga, Ligue 1, MLS, etc.), **NHL**, **NBA**, **NFL**, **MLB**, **UFC**, **Formula 1** (3-day session timings & driver/constructor standings), and **Counter-Strike 2** (**HLTV**, **Liquipedia**, **ESL/BLAST** live streams). Includes **Decimal Betting Odds** with implied win probabilities and **Background Live Match Tracking** (kickoff, goals, red cards, period/halftime, full-time alerts). |
 | ✈️ **Flights, Airfare Calendars & Live Radar** | Live **Google Flights** itinerary scraping (Best, Cheapest, Shortest/Fastest), **Round-Trip & Flexible-Date Price Grids** with automatic **Visual Monthly Fare Calendar Heatmaps** (color-coded `MON–SUN` calendar cards highlighting cheapest deal days, nonstop flight days, and peak fares), **Direct/Nonstop Route Schedules**, and **Live Commercial Flight Status & Radar Telemetry** (**Flightradar24** & **ADSB.lol** live ADS-B altitude/groundspeed/heading). Includes **Background Flight Status & Route Price Drop Alerts**. |
-| 🌐 **Web Research, News & Weather** | Multi-engine web search (**DuckDuckGo** + **Brave Search** fallback), SSRF-hardened stealth article reader (**Jina Reader** + **curl_cffi** TLS impersonation), **YouTube Transcript & Metadata** analyzer, **Google News RSS** headlines (with automatic **Daily Global Market Pulse** enrichment), and **Open-Meteo** current + up to **16-day weather forecasts** (with **wttr.in** automatic fallback). |
-| 💬 **Dual-Platform Discord + Telegram** | Runs simultaneously on **Discord** (with per-channel concurrency locks, live voice co-hosting, and 👍 song-card reactions) and **Telegram** (zero-dependency HTTPS long-polling bridge with fail-closed user/chat allowlist security). |
+| 🖼️ **Vision-Verified Image Search & Web Research** | In-memory web & article image search (`search_images`) with **`gemma4:e4b` Multimodal Vision Verification** (zero disk residue), multi-engine web search (**DuckDuckGo** + **Brave Search** fallback), SSRF-hardened stealth article reader (**Jina Reader** + **curl_cffi** TLS impersonation), **YouTube Transcript & Metadata** analyzer, **Google News RSS** headlines (with automatic **Daily Global Market Pulse** enrichment), and **Open-Meteo** current + up to **16-day weather forecasts** (with **wttr.in** automatic fallback). |
+| 💬 **Dual-Platform Discord + Telegram (Owner-Protected DMs)** | Runs simultaneously on **Discord** (with per-channel concurrency locks, owner-only DM gating via `BOT_OWNER_ID`, live voice co-hosting/music streaming, and 👍 song-card reactions) and **Telegram** (zero-dependency HTTPS long-polling bridge with fail-closed user/chat allowlist security). |
 
 ---
 
@@ -37,6 +38,7 @@ flowchart TD
 
     subgraph Core["Shared Core & Infrastructure Layer"]
         CTX["src/context.py (ACTIVE_CHANNEL_ID & Event Loop Bridge)"]
+        JOB["src/jobs/ (Unified Background Job Engine, Cron/Interval/Condition/Autoplay)"]
         VOCAB["src/utils/domain_vocab.py (Token Sets, Tool Aliases & DictLikeMixin)"]
         WRK["src/utils/workers.py (Shared ThreadPoolExecutor)"]
         HTTP["src/utils/http.py (curl_cffi Stealth Client + SSRF Guard)"]
@@ -45,11 +47,13 @@ flowchart TD
 
     subgraph Skills["Standardized Domain Skills (src/skills/)"]
         VCE["🎙️ voice\n(voice.py, enums, models, catalogs, templates,\ncontext, tracker, engine/, aggregators/, playback/)"]
+        MUS["🎵 music\n(music.py, enums, models, catalogs, templates,\ncontext, engine/, aggregators/, playback/)"]
+        JBS["⏰ jobs\n(jobs.py, enums, models, catalogs, templates,\ncontext)"]
         GRP["📊 graphing\n(graphing.py, enums, models, catalogs, templates,\ncontext, engine/, aggregators/)"]
         MKT["📈 markets\n(markets.py, enums, models, catalogs, templates,\ncontext, engine/, aggregators/)"]
-        MUS["🎵 music\n(music.py, enums, models, catalogs, templates,\ncontext, engine/, aggregators/, playback/)"]
         SPT["🏟️ sports\n(sports.py, enums, models, catalogs, templates,\ncontext, tracker, aggregators/)"]
         FLT["✈️ flights\n(flights.py, enums, models, catalogs, templates,\ncontext, tracker, engine/, aggregators/)"]
+        IMG["🖼️ images\n(images.py, enums, models, catalogs, templates,\ncontext, engine/, aggregators/)"]
         NWS["📰 news\n(news.py, enums, models, catalogs, templates,\naggregators/)"]
         WTH["🌤️ weather\n(weather.py, enums, models, catalogs, templates,\naggregators/)"]
         YT["📺 youtube\n(youtube.py, enums, models, catalogs, templates,\nengine/, aggregators/)"]
@@ -186,10 +190,13 @@ The bot can join any Discord voice channel and participate as a real-time, voice
      - `clara` / `canadian_female` (`en-CA-ClaraNeural` — bright Canadian female)
      - `deep` / `christopher` (`en-US-ChristopherNeural` — deep authoritative US male)
      - `australian` / `william` (`en-AU-WilliamNeural` — relaxed Australian male)
-5. **Voice-First Spoken Replies + Background Text Posting**:
-   - When triggered in voice chat, the bot executes any needed tools, immediately synthesizes and speaks a concise 1–2 sentence answer out loud in the voice channel, and posts the full text answer or **verified YouTube Music Song Card** to the text channel in the background.
+5. **Voice-First Spoken Replies + Ad-Free Live Music Streaming (`yt-dlp` + `FFmpegPCMAudio`)**:
+   - When triggered in voice chat for general questions, the bot executes any needed tools, immediately synthesizes and speaks a concise 1–2 sentence answer out loud, and posts the full text answer to the channel.
+   - Whenever the bot is connected to a voice channel (or you ask *"join voice and play dnb"* / *"play house in vc"*), every Song Card—from direct music requests, `faster`/`harder` spectrum shifts, **Music Autoplay (`!autoplay`)**, or spoken voice commands—streams **live, ad-free audio** directly into the Discord voice channel via `yt-dlp` + `discord.FFmpegPCMAudio` (while suppressing TTS so speech never cuts off the music stream).
+   - Reacting with **👍** on a Song Card while music is playing in voice queues the similar track up next (`📥 Queued in Voice`) and automatically advances when the current track finishes.
+   - Control playback at any time with **`!pause`**, **`!resume`**, **`!skip`** / **`!next`**, **`!stop`**, and **`!queue`** / **`!np`** (or by speaking *"Hey bot, pause"*, *"Hey bot, skip"*, *"Hey bot, faster"*).
 6. **Live Sports & Flight Tracker Voice Break-Ins**:
-   - While connected to a voice channel (and unmuted), any live goal, score change, red card, halftime, final whistle (`!track`), or flight status alert (`!trackflight`) is automatically announced out loud in the voice call in real time.
+   - While connected to a voice channel (and unmuted, when music is not actively playing), any live goal, score change, red card, halftime, final whistle (`!track`), or flight status alert (`!trackflight`) is automatically announced out loud in the voice call in real time.
 7. **Discord Voice Messages & Audio Attachments**:
    - Uploading or recording a Discord voice message (`.ogg`, `.wav`, `.mp3`, `.m4a`, `.flac`) while mentioning the bot automatically transcribes the audio and answers your spoken prompt.
 
@@ -203,25 +210,37 @@ The bot can join any Discord voice channel and participate as a real-time, voice
 | `!mode <profile>` | `/mode <profile>` | Switch active AI model/persona profile (e.g., `research`, `chat`; restricted to `BOT_OWNER_ID`). |
 | `!reset` | `/reset` | Wipe conversation history, tool caches, and active voice session for the current channel. |
 | `!join [mode]` | — | Join your current Discord voice channel (`!join`, `!join conversational`, `!join listen_only`). |
-| `!leave` / `!disconnect` | — | Disconnect the AI co-host from the active Discord voice channel. |
+| `!leave` / `!disconnect` | — | Disconnect the AI co-host and stop voice music streaming in the active Discord voice channel. |
+| `!pause` / `!resume` | — | Pause or resume the currently streaming ad-free voice music track. |
+| `!skip` / `!next` | — | Skip to the next track in the voice queue (or immediately advance active Music Autoplay). |
+| `!stop` | — | Stop voice music playback and clear the queue without leaving the voice channel. |
+| `!queue` / `!np` | — | View the currently streaming voice track, upcoming queue, and active Autoplay radio status. |
+| `!autoplay [genre]` | `/autoplay [genre]` | Start continuous Music Autoplay radio (`!stopautoplay` to stop; adapts to any song/genre/shift). |
+| `!remind <when> <task>` | `/remind <when> <task>` | Create a one-shot, recurring, or conditional reminder (`!jobs` to list, `!canceljob <id>` to stop). |
 | `!voice [preset]` | — | List available neural voice presets or switch speaking voice/accent (`british`, `ava`, `deep`, `sportscaster`, `australian`, etc.). |
 | `!speak <text>` | — | Synthesize `<text>` via Neural TTS and speak it out loud in the active voice channel. |
 | `!vmode <mode>` | — | Switch voice listening mode (`wake_word`, `conversational`, `listen_only`). |
 | `!vrecap` | — | Post a chronological, speaker-attributed transcript recap of the voice call. |
-| `!vstatus` | — | View active voice channel connection, listening mode, TTS voice profile, and utterance stats. |
+| `!vstatus` | — | View active voice channel connection, listening mode, TTS voice profile, now-playing track, and utterance stats. |
 | `!vmute` / `!vunmute` | — | Mute or unmute spoken TTS audio output while keeping voice transcription active. |
 | `!track <team/match>` | `/track <team/match>` | Start live background match tracking (`!untrack` to stop, `!tracked` to list active games). |
 | `!trackflight <flight/route>` | `/trackflight <flight/route>` | Start live flight status or route price watch (`!untrackflight` to stop, `!trackedflights` to list). |
-| React with 👍 on a song card | React with 👍 on a song card | Automatically finds and posts a fresh, acoustically similar song to the reacted track. |
+| React with 👍 on a song card | React with 👍 on a song card | Automatically finds and posts a verified similar track (and queues it up next if streaming in voice!). |
 
 ### Natural Language Examples
-- **Discord Voice Co-Host (`skill_voice_info`)**:
-  - *"Hop into the voice channel in conversational mode"*
+- **Discord Voice Co-Host & Live Music Streaming (`skill_voice_info`)**:
+  - *"Join voice and play some drum and bass"* / *"Hop into the voice channel in conversational mode"*
   - *(Spoken in voice chat)*: *"Hey bot, what is Shopify stock trading at right now?"*
-  - *(Spoken in voice chat)*: *"Hey bot, play some house music"*
+  - *(Spoken in voice chat)*: *"Hey bot, play some liquid dnb"* / *"Hey bot, faster"* / *"Hey bot, skip"* / *"Hey bot, pause"*
   - *(Spoken in voice chat)*: *"Hey bot, switch to a British accent"*
   - *"Give me a recap of what everyone talked about in the voice call"*
-  - *"Announce in the voice channel that we're starting the match in 5 minutes"*
+- **Music Discovery, `ytmusicapi` Radio, Autoplay & Spectrum Shifts (`skill_music_discovery` / `skill_job_manager`)**:
+  - *"Play me a dark techno banger"* / *"Start autoplay with drum and bass"*
+  - *"Give me something a little faster and harder"* (or reply directly to a song card with *"slower"* / *"softer"*)
+  - *"Switch to neurofunk"* / *"Find tracks that harmonically mix with Strobe by Deadmau5"*
+- **Reminders, Recurring Tasks & Conditional Alerts (`skill_job_manager`)**:
+  - *"Remind me in 45 minutes to check the oven"* / *"Every 2 hours play a dnb song"*
+  - *"Alert me when BTC crosses above $105,000"* / *"What jobs and reminders are active right now?"*
 - **On-Demand Graphing, Monte Carlo, Heatmaps & Diagrams (`skill_graphing_info`)**:
   - *"Can you do a Monte Carlo simulation on BTC 2 years into the future?"* *(defaults to 5-Year History)*
   - *"Run a Monte Carlo simulation on NVDA 5 years in the future using the past 10 years of history"* (or *"based on all-time history"*)
@@ -236,10 +255,6 @@ The bot can join any Discord voice channel and participate as a real-time, voice
   - *"Show me the 1-year performance, volatility, and max drawdown for Bitcoin and Gold"*
   - *"Value my portfolio: 25 AAPL, 40 SHOP.TO, 0.5 BTC"*
   - *"What are the fundamentals and next earnings date for Microsoft?"*
-- **Music Discovery & Spectrum Shifts (`skill_music_discovery`)**:
-  - *"Play me a dark techno banger"*
-  - *"Give me something a little faster and harder"* (or reply directly to a song card with *"slower"* / *"softer"*)
-  - *"Find tracks that harmonically mix with Strobe by Deadmau5"*
 - **Sports, CS2 Esports & Live Match Tracking (`skill_sports_info` / `skill_sports_tracker`)**:
   - *"What are the Champions League and NHL games today and their odds?"*
   - *"When is the next F1 race and what are the session times?"*
@@ -255,7 +270,7 @@ The bot can join any Discord voice channel and participate as a real-time, voice
 
 ## 🧪 Running the Test Suite
 
-The repository includes **310+ unit, concurrency, combinatorial, and architectural boundary tests** (executing completely offline in ~10 seconds):
+The repository includes **370+ unit, concurrency, combinatorial, and architectural boundary tests** (executing completely offline in ~15 seconds):
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
