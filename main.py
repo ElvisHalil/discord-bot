@@ -101,6 +101,7 @@ from src.utils.telegram import (
     broadcast_mode_switch,
     is_telegram_channel,
     send_telegram_message,
+    send_telegram_photo,
     start_telegram_bridge,
 )
 
@@ -405,8 +406,8 @@ async def handle_job_fire(job, message_text: str):
             if att.get("data"):
                 await send_telegram_photo(
                     channel_id,
+                    att.get("filename", "chart.png"),
                     att["data"],
-                    filename=att.get("filename", "chart.png"),
                     caption=att.get("caption", ""),
                 )
     else:
@@ -1255,6 +1256,62 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     seen_img_call = True
                 deduped_calls.append(c)
             tool_calls = deduped_calls
+
+        # Autoplay Start Interception: when the user explicitly asks to start/run Autoplay (e.g. "start autoplay
+        # similar to this <youtube link>" or "autoplay similar to Strobe") and the LLM called skill_music_discovery
+        # or skill_youtube_search instead of skill_job_manager, convert it to skill_job_manager(action='autoplay')
+        # so the Autoplay job is registered in JOB_ENGINE with a live countdown timer.
+        if (
+            iterations == 0
+            and supports_tools
+            and "skill_job_manager" in active_tools
+            and not any(c.function.name == "skill_job_manager" for c in tool_calls)
+            and any(c.function.name in ("skill_music_discovery", "skill_youtube_search") for c in tool_calls)
+        ):
+            last_u_raw = next(
+                (
+                    str((m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or "")
+                    for m in reversed(history)
+                    if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
+                ),
+                "",
+            )
+            if not last_u_raw.strip().startswith("Execute scheduled task:"):
+                missed_auto = detect_missed_job_tool_call(history, active_channel_id=channel_id)
+                if missed_auto and missed_auto[0] == "skill_job_manager" and (missed_auto[1] or {}).get("action") == "autoplay":
+                    music_call = next(
+                        (c for c in tool_calls if c.function.name in ("skill_music_discovery", "skill_youtube_search")),
+                        None,
+                    )
+                    m_args = dict((music_call.function.arguments if music_call else None) or {})
+                    base_auto_q = str((missed_auto[1] or {}).get("query") or "").strip()
+                    low_auto_q = base_auto_q.lower()
+                    if "youtube.com/watch" not in low_auto_q and "youtu.be/" not in low_auto_q and " by " not in low_auto_q:
+                        if m_args.get("similar_to"):
+                            base_auto_q = f"autoplay similar to {m_args['similar_to']}"
+                        elif m_args.get("genre"):
+                            base_auto_q = f"autoplay {m_args['genre']}"
+                        elif m_args.get("artist"):
+                            base_auto_q = f"autoplay similar to {m_args['artist']}"
+                    auto_args = enrich_job_tool_args(
+                        {"action": "autoplay", "query": base_auto_q},
+                        history,
+                        active_channel_id=channel_id,
+                    )
+                    print(
+                        f"⚡ [{current_mode.upper()}] Intercepted {music_call.function.name if music_call else 'music tool'} "
+                        f"on explicit Autoplay prompt -> redirecting to skill_job_manager: {auto_args}"
+                    )
+                    tool_calls = [
+                        c for c in tool_calls if c.function.name not in ("skill_music_discovery", "skill_youtube_search")
+                    ] + [
+                        types.SimpleNamespace(
+                            function=types.SimpleNamespace(
+                                name="skill_job_manager",
+                                arguments=auto_args,
+                            )
+                        )
+                    ]
 
         # Single-Autoplay-Card guard: prevent running skill_job_manager and skill_music_discovery/skill_youtube_search
         # in the same step when starting Autoplay or when Autoplay is already active in the channel.

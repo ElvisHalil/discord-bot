@@ -1261,6 +1261,79 @@ class TestOrchestratorAndDispatcherJobIntegration(unittest.TestCase):
         self.assertIn("https://music.youtube.com/watch?v=bPJKn9EK_vI", preserved)
         self.assertNotIn("[SYSTEM INSTRUCTION", preserved)
 
+    def test_autoplay_youtube_link_and_similarity_seed_parsing_and_resolver(self):
+        from src.jobs.engine import resolve_autoplay_track_sync
+        from src.jobs.parser import parse_job_request
+
+        t0 = 1760000000.0
+        with patch(
+            "src.skills.music.engine.formatting.get_music_metadata",
+            return_value={"song": "Strobe", "artist": "Deadmau5", "genre": "Progressive House"},
+        ):
+            parsed = parse_job_request(
+                query="https://music.youtube.com/watch?v=JWxoRY7AFSw start autoplay similar to this",
+                now_ts=t0,
+            )
+            self.assertEqual(parsed["trigger_type"], TriggerType.AUTOPLAY)
+            self.assertEqual(parsed["payload_text"], "similar to Strobe by Deadmau5")
+
+        # Verify resolve_autoplay_track_sync passes similar_to='Strobe by Deadmau5' to skill_music_discovery
+        with patch(
+            "src.skills.music.music.skill_music_discovery",
+            return_value=(
+                "=== VERIFIED YOUTUBE MUSIC RESULT ===\n"
+                "Song: Opus\n"
+                "Artist: Eric Prydz\n"
+                "Genre: Progressive House\n"
+                "Link: https://music.youtube.com/watch?v=iRA82xLsb_w"
+            ),
+        ) as mock_disc, patch("src.skills.youtube.engine.client.get_video_duration_seconds", return_value=240):
+            card, dur = resolve_autoplay_track_sync(707, "similar to Strobe by Deadmau5")
+            mock_disc.assert_called_once_with(similar_to="Strobe by Deadmau5")
+            self.assertEqual(dur, 240)
+            self.assertIn("Next track in `4:00`", card)
+            self.assertIn("Opus", card)
+
+    def test_autoplay_reply_card_enrichment_and_bare_header_countdown_injection(self):
+        from src.skills.jobs.jobs import detect_missed_job_tool_call, enrich_job_tool_args
+
+        history = [
+            {
+                "role": "user",
+                "content": "Jubkill (User ID: 123) [Replying to song card: 'Strobe' by 'Deadmau5']: start autoplay similar to this",
+            }
+        ]
+        missed = detect_missed_job_tool_call(history, active_channel_id=919)
+        self.assertIsNotNone(missed)
+        self.assertEqual(missed[0], "skill_job_manager")
+        self.assertEqual(missed[1]["action"], "autoplay")
+        self.assertEqual(missed[1]["query"], "autoplay similar to Strobe by Deadmau5")
+
+        enriched = enrich_job_tool_args({"action": "autoplay", "query": "similar to this"}, history, active_channel_id=919)
+        self.assertEqual(enriched["action"], "autoplay")
+        self.assertEqual(enriched["query"], "autoplay similar to Strobe by Deadmau5")
+
+        # Also verify sync_channel_autoplay_on_track_played preserves similarity seed across skips
+        # and injects the countdown timer even if the LLM wrote a bare "📻 **Autoplay**" line without a timer.
+        engine = JobEngine(jobs_file=self.jobs_path)
+        t0 = 1760000000.0
+        job, _ = engine.create_user_job(
+            channel_id=919,
+            query="autoplay similar to Strobe by Deadmau5",
+            now_ts=t0,
+            defer_first_autoplay_tick=True,
+        )
+        self.assertEqual(job.payload_text, "similar to Strobe by Deadmau5")
+        with patch("src.skills.youtube.engine.client.get_video_duration_seconds", return_value=210):
+            synced = engine.sync_channel_autoplay_on_track_played(
+                channel_id=919,
+                reply_text="📻 **Autoplay** — Starting similar to Strobe!\n\n**Song:** Flower In A Hurricane\n**Artist:** Justice\n**Genre:** Electronic\n\nhttps://music.youtube.com/watch?v=JWxoRY7AFSw",
+                new_query_hint="skip",
+                now_ts=t0 + 10.0,
+            )
+        self.assertEqual(job.payload_text, "similar to Strobe by Deadmau5")
+        self.assertIn("Next track in `3:30`", synced)
+
 
 if __name__ == "__main__":
     unittest.main()

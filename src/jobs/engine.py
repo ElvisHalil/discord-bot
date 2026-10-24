@@ -66,9 +66,35 @@ def resolve_autoplay_track_sync(channel_id: int, query: str) -> Tuple[str, int]:
     from src.skills.youtube.engine.client import get_video_duration_seconds
     from src.skills.youtube import skill_youtube_search
 
-    disc_res = skill_music_discovery(genre=query)
-    if "NO DIRECT" in disc_res or "Could not find" in disc_res:
-        disc_res = skill_music_discovery(similar_to=query)
+    q_clean = (query or "").strip()
+    # If `query` contains a YouTube / YouTube Music URL, resolve its Song & Artist metadata first
+    m_q_vid = re.search(r"(?:watch\?v=|youtu\.be/)([0-9A-Za-z_-]{11})", q_clean)
+    if m_q_vid:
+        q_meta = get_music_metadata(m_q_vid.group(1))
+        q_song = str(q_meta.get("song") or "").strip()
+        q_art = str(q_meta.get("artist") or "").strip()
+        if q_song and q_song.lower() not in ("unknown", "unknown track"):
+            q_clean = f"similar to {q_song} by {q_art}" if (q_art and q_art.lower() not in ("unknown", "unknown artist")) else f"similar to {q_song}"
+
+    # Check if `q_clean` is a song/artist similarity seed ("similar to X by Y", "like X", or "Song by Artist")
+    m_sim_prefix = re.match(
+        r"^(?:similar\s+to|similar|songs?\s+like|tracks?\s+like|music\s+like|like|mix\s+with)\s+(.+)$",
+        q_clean,
+        flags=re.IGNORECASE,
+    )
+    if m_sim_prefix:
+        seed_target = m_sim_prefix.group(1).strip()
+        disc_res = skill_music_discovery(similar_to=seed_target)
+        if "NO DIRECT" in disc_res or "Could not find" in disc_res:
+            disc_res = skill_music_discovery(genre=seed_target)
+    elif " by " in q_clean.lower():
+        disc_res = skill_music_discovery(similar_to=q_clean)
+        if "NO DIRECT" in disc_res or "Could not find" in disc_res:
+            disc_res = skill_music_discovery(genre=q_clean)
+    else:
+        disc_res = skill_music_discovery(genre=q_clean)
+        if "NO DIRECT" in disc_res or "Could not find" in disc_res:
+            disc_res = skill_music_discovery(similar_to=q_clean)
 
     verified_url: Optional[str] = None
     song_title: str = ""
@@ -561,14 +587,30 @@ class JobEngine:
     @staticmethod
     def _clean_autoplay_query(raw_query: str, fallback_query: str = "dnb") -> str:
         """Clean boilerplate skip/autoplay/genre-switch words from a query; return `fallback_query` if only boilerplate words remain."""
+        raw_str = (raw_query or "").strip()
+        m_yt = re.search(r"https?://(?:music\.|www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([0-9A-Za-z_-]{11})\S*", raw_str)
+        if m_yt:
+            vid = m_yt.group(1)
+            try:
+                from src.skills.music.engine.formatting import get_music_metadata
+                meta = get_music_metadata(vid)
+                s_name = str(meta.get("song") or "").strip()
+                a_name = str(meta.get("artist") or "").strip()
+                if s_name and s_name.lower() not in ("unknown", "unknown track"):
+                    return f"similar to {s_name} by {a_name}" if (a_name and a_name.lower() not in ("unknown", "unknown artist")) else f"similar to {s_name}"
+            except Exception:
+                pass
+            return f"similar to https://music.youtube.com/watch?v={vid}"
+
         cleaned = re.sub(
             r"\b(?:please|can\s+(?:you|we)|could\s+(?:you|we)|let'?s|lets|start|begin|turn\s+on|enable|"
             r"autoplay|auto-play|auto\s+play|radio(?:\s+mode)?|back[\s\-]+to[\s\-]+back|continuously|"
             r"play|put\s+on|queue\s+up|queue|some|music|songs?|tracks?|tunes?|for\s+(?:me|us)|in\s+this\s+channel|"
-            r"next|skip|another|one|switch|change|swap|shift|move|the|genre|vibe|style|mode|over|into|to|instead|now|pls|"
+            r"(?:switch|change|swap|shift|move)\s+(?:(?:the|genre|vibe|style|mode)\s+)?(?:over\s+)?(?:to|into)|"
+            r"next|skip|another|one|switch|change|swap|shift|move|the|genre|vibe|style|mode|over|into|instead|now|pls|"
             r"harder|softer|faster|slower|more\s+intense|more\s+chill|heavier|lighter)\b",
             " ",
-            raw_query or "",
+            raw_str,
             flags=re.IGNORECASE,
         )
         cleaned = re.sub(
@@ -578,7 +620,10 @@ class JobEngine:
             cleaned,
             flags=re.IGNORECASE,
         )
-        res = " ".join(cleaned.split()).strip(" -–—,.!?")
+        cleaned = re.sub(r"^(?:to|into|with|of|on)\s+", "", " ".join(cleaned.split()).strip(" -–—,.!?"), flags=re.IGNORECASE)
+        res = cleaned.strip(" -–—,.!?")
+        if res.lower() in ("similar", "similar to", "like", "this", "that", "it"):
+            return fallback_query
         return res or fallback_query
 
     def create_user_job(
@@ -825,9 +870,8 @@ class JobEngine:
         else:
             clamped_duration = int(job.interval_seconds or AUTOPLAY_DEFAULT_TRACK_SECONDS)
 
-        already_tagged_autoplay = (
-            "MUSIC AUTOPLAY STARTED" in reply_text
-            or "📻 **Autoplay" in reply_text
+        already_tagged_autoplay = bool(
+            re.search(r"Next track in `\d+:\d{2}`", reply_text)
         )
 
         # Extract updated genre/vibe from the user's request or played song card when Autoplay wasn't already updated this turn
@@ -844,18 +888,21 @@ class JobEngine:
             cleaned_hint = self._clean_autoplay_query(hint_str, fallback_query="") if hint_str else ""
             is_explicit_skip_only = bool(hint_str and not cleaned_hint and not is_shift_request)
             current_vibe_generic = not job.payload_text or job.payload_text.strip().lower() in ("top tracks", "music", "unknown", "")
+            is_similarity_station = bool(
+                job.payload_text
+                and (job.payload_text.lower().startswith("similar to ") or " by " in job.payload_text.lower())
+            )
 
-            if not is_explicit_skip_only or current_vibe_generic:
+            if not is_explicit_skip_only or current_vibe_generic or is_shift_request:
                 umbrella_tags = {"unknown", "music", "none", "electronic", "dance", "detected", "acoustic dsp", ""}
                 if (
                     cleaned_hint
                     and cleaned_hint.lower() not in ("unknown", "music", "song", "track")
-                    and " by " not in cleaned_hint.lower()
-                    and len(cleaned_hint.split()) <= 4
+                    and (cleaned_hint.lower().startswith("similar to ") or (" by " not in cleaned_hint.lower() and len(cleaned_hint.split()) <= 4))
                 ):
                     new_vibe = cleaned_hint
 
-                if not new_vibe:
+                if not new_vibe and (not is_similarity_station or is_shift_request or current_vibe_generic):
                     m_gen = re.search(r"(?im)^[^\S\n]*\*\*Genre:\*\*\s*(.+)$", reply_text)
                     if m_gen:
                         cand_gen = m_gen.group(1).strip()
@@ -863,7 +910,7 @@ class JobEngine:
                             if cand_gen.lower() not in ("unknown", "music", "none", ""):
                                 new_vibe = cand_gen
 
-                if not new_vibe:
+                if not new_vibe and (not is_similarity_station or is_shift_request or current_vibe_generic):
                     try:
                         from src.skills.music.context import get_channel_last_played_song
                         last_rec = get_channel_last_played_song(channel_id)
@@ -886,7 +933,9 @@ class JobEngine:
                     job.autoplay_spec = {"query": new_vibe, "queue": [], "last_duration": clamped_duration}
                 else:
                     job.autoplay_spec["query"] = new_vibe
-            if not already_tagged_autoplay:
+            # Avoid double-incrementing run_count if skill_job_manager just created/ticked Track #1 in this turn
+            just_fired_in_turn = (job.last_fired_at is not None and abs(eff_now - job.last_fired_at) < 3.0 and job.run_count >= 1)
+            if not already_tagged_autoplay and not just_fired_in_turn:
                 job.run_count += 1
             job.last_fired_at = eff_now
             job.interval_seconds = clamped_duration
@@ -901,6 +950,9 @@ class JobEngine:
         if not already_tagged_autoplay:
             mins, secs = divmod(clamped_duration, 60)
             banner = f"📻 **Autoplay (`{job.job_id}` — {job.payload_text})** — Next track in `{mins}:{secs:02d}`:"
+            # Replace any bare "📻 **Autoplay..." line lacking a countdown timer, or prepend the banner
+            if "📻 **Autoplay" in reply_text:
+                return re.sub(r"(?m)^📻 \*\*Autoplay[^\n]*$", banner, reply_text, count=1)
             return f"{banner}\n\n{reply_text.lstrip()}"
         return reply_text
 

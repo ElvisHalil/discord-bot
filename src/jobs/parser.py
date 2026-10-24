@@ -387,7 +387,8 @@ def _parse_autoplay_request(text: str, now_ts: float) -> Optional[Dict[str, Any]
     - "autoplay dnb"
     - "start autoplay liquid drum and bass"
     - "play techno songs back to back"
-    - "queue up 5 house songs and autoplay"
+    - "start autoplay similar to this https://music.youtube.com/watch?v=..."
+    - "autoplay similar to Strobe by Deadmau5"
     """
     low = (text or "").strip().lower()
     is_autoplay = bool(
@@ -403,23 +404,64 @@ def _parse_autoplay_request(text: str, now_ts: float) -> Optional[Dict[str, Any]
     eff_max_runs = max_runs or AUTOPLAY_DEFAULT_MAX_RUNS
     eff_ttl = dur_cap or AUTOPLAY_DEFAULT_TTL_SECONDS
 
-    # Extract genre / artist / vibe target
-    cleaned = re.sub(
-        r"\b(?:please|can\s+(?:you|we)|could\s+(?:you|we)|let'?s|lets|start|begin|turn\s+on|enable|"
-        r"autoplay|auto-play|auto\s+play|radio(?:\s+mode)?|back[\s\-]+to[\s\-]+back|continuously|"
-        r"play|put\s+on|queue\s+up|queue|some|music|songs?|tracks?|tunes?|for\s+(?:me|us)|in\s+this\s+channel|"
-        r"switch|change|swap|the|genre|vibe|style|mode|over|into|to|instead|now|pls)\b",
-        " ",
-        text,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(
-        r"\b(?:for\s+)?(?:\d+|two|three|four|five|six|seven|eight|nine|ten|twelve|fifteen|twenty)\s+(?:times|runs|tracks|songs|minutes?|mins?|hours?|hrs?)\b",
-        " ",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    target_query = " ".join(cleaned.split()).strip(" -–—,.!?") or "dnb"
+    # If the user included a YouTube / YouTube Music URL, resolve its Song & Artist metadata as the similarity seed
+    working_text = text or ""
+    m_yt = re.search(r"https?://(?:music\.|www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([0-9A-Za-z_-]{11})\S*", working_text)
+    resolved_yt_seed = ""
+    if m_yt:
+        vid = m_yt.group(1)
+        working_text = (working_text[: m_yt.start()] + " " + working_text[m_yt.end() :]).strip()
+        try:
+            from src.skills.music.engine.formatting import get_music_metadata
+            meta = get_music_metadata(vid)
+            s_name = str(meta.get("song") or "").strip()
+            a_name = str(meta.get("artist") or "").strip()
+            if s_name and s_name.lower() not in ("unknown", "unknown track", "youtube music"):
+                if a_name and a_name.lower() not in ("unknown", "unknown artist"):
+                    resolved_yt_seed = f"similar to {s_name} by {a_name}"
+                else:
+                    resolved_yt_seed = f"similar to {s_name}"
+        except Exception:
+            pass
+        if not resolved_yt_seed:
+            resolved_yt_seed = f"similar to https://music.youtube.com/watch?v={vid}"
+
+    if resolved_yt_seed:
+        target_query = resolved_yt_seed
+    else:
+        # Extract genre / artist / similarity seed target while preserving "similar to <Song> by <Artist>"
+        cleaned = re.sub(
+            r"\b(?:please|can\s+(?:you|we)|could\s+(?:you|we)|let'?s|lets|start|begin|turn\s+on|enable|"
+            r"autoplay|auto-play|auto\s+play|radio(?:\s+mode)?|back[\s\-]+to[\s\-]+back|continuously|"
+            r"play|put\s+on|queue\s+up|queue|some|music|songs?|tracks?|tunes?|for\s+(?:me|us)|in\s+this\s+channel|"
+            r"(?:switch|change|swap|shift|move)\s+(?:(?:the|genre|vibe|style|mode)\s+)?(?:over\s+)?(?:to|into)|"
+            r"switch|change|swap|the|genre|vibe|style|mode|instead|now|pls)\b",
+            " ",
+            working_text,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\b(?:for\s+)?(?:\d+|two|three|four|five|six|seven|eight|nine|ten|twelve|fifteen|twenty)\s+(?:times|runs|tracks|songs|minutes?|mins?|hours?|hrs?)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"\b(?:similar\s+to|like)\s+(?:this|that|it)(?:\s+(?:one|song|track|link|video))?\b", "similar to", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^(?:to|into|with|of|on)\s+", "", " ".join(cleaned.split()).strip(" -–—,.!?"), flags=re.IGNORECASE)
+        target_query = cleaned.strip(" -–—,.!?") or "dnb"
+        if target_query.lower() in ("similar", "similar to", "like", "this", "that", "it"):
+            try:
+                from src.skills.music.context import get_channel_last_played_song
+                last_rec = get_channel_last_played_song()
+                if last_rec and last_rec.song:
+                    if last_rec.artist:
+                        target_query = f"similar to {last_rec.song} by {last_rec.artist}"
+                    else:
+                        target_query = f"similar to {last_rec.song}"
+                else:
+                    target_query = "dnb"
+            except Exception:
+                target_query = "dnb"
 
     return {
         "trigger_type": TriggerType.AUTOPLAY,

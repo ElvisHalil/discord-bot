@@ -44,6 +44,31 @@ _SWITCH_AUTOPLAY_GENRE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_SPEAKER_PREFIX_RE = re.compile(
+    r"^(?:User\s+.+?\s+says(?:\s*\[.*?\])*|.+\(User ID:\s*\d+\)(?:\s*\[.*?\])*|\[Replying to[^\]]*\])\s*:\s*(.+)$",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+
+_REPLY_SONG_CARD_RE = re.compile(
+    r"\[Replying to song card:\s*'([^']+)'\s*by\s*'([^']+)'\]",
+    re.IGNORECASE,
+)
+
+
+def _extract_user_and_reply_card(raw_content: str) -> Tuple[str, Optional[Tuple[str, str]]]:
+    """Strip speaker/reply prefixes cleanly and extract any replied-to song card ('Song', 'Artist')."""
+    text = (raw_content or "").strip()
+    m_reply = _REPLY_SONG_CARD_RE.search(text)
+    reply_seed = (m_reply.group(1).strip(), m_reply.group(2).strip()) if m_reply else None
+    m_pref = _SPEAKER_PREFIX_RE.match(text)
+    if m_pref:
+        user_text = m_pref.group(1).strip()
+    elif ": " in text:
+        user_text = text.split(": ", 1)[1].strip()
+    else:
+        user_text = text
+    return user_text, reply_seed
+
 _AUTOPLAY_DIRECT_INSTRUCTION = (
     "\n\n[SYSTEM INSTRUCTION: You MUST include the exact `📻 **Autoplay (...)` header and the full "
     "`**Song:** / **Artist:** / https://music.youtube.com/watch?v=...` card above in your reply so Track #1 "
@@ -176,11 +201,7 @@ def detect_missed_job_tool_call(
     # Never trigger job creation recursively inside a background scheduled task execution turn!
     if raw_content.strip().startswith("Execute scheduled task:"):
         return None
-    # Strip speaker prefix ("User X says: " or "Name (User ID: ...): ")
-    if ": " in raw_content:
-        user_text = raw_content.split(": ", 1)[1].strip()
-    else:
-        user_text = raw_content.strip()
+    user_text, reply_seed = _extract_user_and_reply_card(raw_content)
 
     if not user_text:
         return None
@@ -204,7 +225,10 @@ def detect_missed_job_tool_call(
 
     # 3. Music Autoplay ("autoplay dnb", "start techno radio mode") or Skip/Next/Genre-Switch while Autoplay is active
     if re.search(r"\b(?:autoplay|auto-play|auto\s+play|play\s+.*?\bback[\s\-]+to[\s\-]+back)\b", low):
-        return ("skill_job_manager", {"action": "autoplay", "query": user_text})
+        auto_q = user_text
+        if reply_seed and "http" not in low:
+            auto_q = f"autoplay similar to {reply_seed[0]} by {reply_seed[1]}"
+        return ("skill_job_manager", {"action": "autoplay", "query": auto_q})
     if active_channel_id is not None and JOB_ENGINE.get_active_autoplay_job(active_channel_id) is not None:
         if _SKIP_AUTOPLAY_RE.match(low):
             return ("skill_job_manager", {"action": "skip", "query": user_text})
@@ -242,11 +266,12 @@ def enrich_job_tool_args(
     """
     enriched = dict(args or {})
     user_text = ""
+    reply_seed: Optional[Tuple[str, str]] = None
     for m in reversed(history or []):
         r = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
         if r == "user":
             raw_c = str((m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or "")
-            user_text = raw_c.split(": ", 1)[1].strip() if ": " in raw_c else raw_c.strip()
+            user_text, reply_seed = _extract_user_and_reply_card(raw_c)
             break
 
     if not enriched.get("query") and not enriched.get("when") and not enriched.get("task") and not enriched.get("job_id"):
@@ -295,6 +320,15 @@ def enrich_job_tool_args(
             enriched["action"] = "autoplay"
             if not enriched.get("query"):
                 enriched["query"] = user_text
+
+    # Guardrail 3: When starting or updating Autoplay from a replied-to song card or YouTube link,
+    # ensure `query` preserves the similarity seed or link if the LLM omitted it.
+    if str(enriched.get("action") or "").strip().lower() == "autoplay":
+        cur_q = str(enriched.get("query") or "").strip()
+        if reply_seed and "http" not in low_user and " by " not in cur_q.lower():
+            enriched["query"] = f"autoplay similar to {reply_seed[0]} by {reply_seed[1]}"
+        elif ("youtube.com/watch" in low_user or "youtu.be/" in low_user) and "http" not in cur_q.lower() and " by " not in cur_q.lower():
+            enriched["query"] = user_text
 
     return enriched
 
