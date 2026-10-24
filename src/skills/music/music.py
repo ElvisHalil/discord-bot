@@ -166,6 +166,25 @@ def skill_music_discovery(
                         artist = None
                     break
 
+    # If `genre` was populated with a similarity phrase (e.g. 'similar to Titan by Papa Pedro'), move it to `similar_to`
+    if genre and not similar_to:
+        _m_sim_g = re.match(
+            r"^(?:similar\s+to|similar|songs?\s+like|tracks?\s+like|music\s+like|like|mix\s+with)\s+(.+)$",
+            genre.strip(),
+            flags=re.IGNORECASE,
+        )
+        if _m_sim_g:
+            similar_to = _m_sim_g.group(1).strip()
+            genre = None
+
+    if similar_to:
+        similar_to = re.sub(
+            r"^(?:similar\s+to|similar|songs?\s+like|tracks?\s+like|music\s+like|like|mix\s+with)\s+",
+            "",
+            similar_to.strip(),
+            flags=re.IGNORECASE,
+        ).strip()
+
     shift_raw = (shift or "").strip()
     if not shift_raw and not artist:
         if mood and parse_spectrum_shift(mood) is not None:
@@ -412,7 +431,18 @@ def skill_music_discovery(
 
             active_ap = JOB_ENGINE.get_active_autoplay_job(get_active_channel_id())
             if active_ap and active_ap.payload_text and active_ap.payload_text.lower() != "top tracks":
-                genre = active_ap.payload_text
+                ap_payload = active_ap.payload_text.strip()
+                m_ap_sim = re.match(
+                    r"^(?:similar\s+to|similar|songs?\s+like|tracks?\s+like|music\s+like|like|mix\s+with)\s+(.+)$",
+                    ap_payload,
+                    flags=re.IGNORECASE,
+                )
+                if m_ap_sim:
+                    similar_to = m_ap_sim.group(1).strip()
+                elif " by " in ap_payload.lower():
+                    similar_to = ap_payload
+                else:
+                    genre = ap_payload
         except Exception:
             pass
 

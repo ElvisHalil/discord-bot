@@ -405,7 +405,7 @@ def _parse_autoplay_request(text: str, now_ts: float) -> Optional[Dict[str, Any]
     eff_ttl = dur_cap or AUTOPLAY_DEFAULT_TTL_SECONDS
 
     # If the user included a YouTube / YouTube Music URL, resolve its Song & Artist metadata as the similarity seed
-    working_text = text or ""
+    working_text = re.sub(r"\[Replying to[^\]]*\]", " ", (text or ""), flags=re.IGNORECASE).strip()
     m_yt = re.search(r"https?://(?:music\.|www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([0-9A-Za-z_-]{11})\S*", working_text)
     resolved_yt_seed = ""
     if m_yt:

@@ -67,6 +67,8 @@ def _extract_user_and_reply_card(raw_content: str) -> Tuple[str, Optional[Tuple[
         user_text = text.split(": ", 1)[1].strip()
     else:
         user_text = text
+    user_text = re.sub(r"\[Replying to[^\]]*\]", " ", user_text, flags=re.IGNORECASE).strip()
+    user_text = " ".join(user_text.split())
     if "http" not in user_text.lower() and ("youtube.com/watch" in text.lower() or "youtu.be/" in text.lower()):
         m_yt = re.search(r"https?://(?:music\.|www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[0-9A-Za-z_-]{11}\S*", text)
         if m_yt:

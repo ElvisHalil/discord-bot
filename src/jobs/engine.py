@@ -99,7 +99,9 @@ def resolve_autoplay_track_sync(channel_id: int, query: str) -> Tuple[str, int]:
     verified_url: Optional[str] = None
     song_title: str = ""
     artist_name: str = ""
-    genre_label: Optional[str] = query.title() if query else None
+    genre_label: Optional[str] = (
+        None if (not query or m_sim_prefix or " by " in q_clean.lower()) else query.title()
+    )
     album_title: Optional[str] = None
 
     if "=== VERIFIED YOUTUBE MUSIC RESULT" in disc_res:
@@ -587,7 +589,7 @@ class JobEngine:
     @staticmethod
     def _clean_autoplay_query(raw_query: str, fallback_query: str = "dnb") -> str:
         """Clean boilerplate skip/autoplay/genre-switch words from a query; return `fallback_query` if only boilerplate words remain."""
-        raw_str = (raw_query or "").strip()
+        raw_str = re.sub(r"\[Replying to[^\]]*\]", " ", (raw_query or ""), flags=re.IGNORECASE).strip()
         m_yt = re.search(r"https?://(?:music\.|www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([0-9A-Za-z_-]{11})\S*", raw_str)
         if m_yt:
             vid = m_yt.group(1)

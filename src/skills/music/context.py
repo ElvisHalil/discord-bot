@@ -395,11 +395,26 @@ def detect_missed_music_shift_tool_call(history: list) -> Optional[Tuple[str, di
             cid = get_active_channel_id()
             active_ap = JOB_ENGINE.get_active_autoplay_job(cid)
             if active_ap:
-                g = active_ap.payload_text if active_ap.payload_text and active_ap.payload_text.lower() != "top tracks" else None
-                return ("skill_music_discovery", {"genre": g} if g else {})
+                g = active_ap.payload_text.strip() if active_ap.payload_text and active_ap.payload_text.lower() != "top tracks" else None
+                if g:
+                    m_sim = re.match(
+                        r"^(?:similar\s+to|similar|songs?\s+like|tracks?\s+like|music\s+like|like|mix\s+with)\s+(.+)$",
+                        g,
+                        flags=re.IGNORECASE,
+                    )
+                    if m_sim:
+                        return ("skill_music_discovery", {"similar_to": m_sim.group(1).strip()})
+                    if " by " in g.lower():
+                        return ("skill_music_discovery", {"similar_to": g})
+                    return ("skill_music_discovery", {"genre": g})
+                return ("skill_music_discovery", {})
             last_song = get_channel_last_played_song(cid)
             if last_song:
-                return ("skill_music_discovery", {"genre": last_song.genre} if last_song.genre else {})
+                if last_song.genre and not last_song.genre.lower().startswith("similar to"):
+                    return ("skill_music_discovery", {"genre": last_song.genre})
+                if last_song.song and last_song.artist:
+                    return ("skill_music_discovery", {"similar_to": f"{last_song.song} by {last_song.artist}"})
+                return ("skill_music_discovery", {})
         except Exception:
             pass
 
