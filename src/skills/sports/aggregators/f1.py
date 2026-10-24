@@ -60,13 +60,47 @@ def _format_f1_session_time(iso_str: str) -> str:
         return f"{iso_str[:10]} at {iso_str[11:16]} UTC" if len(iso_str) >= 16 else str(iso_str)
 
 
+def _parse_lap_time_seconds(val: str) -> Optional[float]:
+    """Parse an F1 lap or race time string ('1:34.035', '59.812', '1:42:00.785') into total seconds."""
+    s = (val or "").strip()
+    if not s or s in ("-", "—", "DNF", "DNS", "DNQ", "DSQ", "NC", "RET", "No Time") or s.startswith("+"):
+        return None
+    try:
+        parts = s.split(":")
+        if len(parts) == 1:
+            return float(parts[0])
+        if len(parts) == 2:
+            return int(parts[0]) * 60.0 + float(parts[1])
+        if len(parts) == 3:
+            return int(parts[0]) * 3600.0 + int(parts[1]) * 60.0 + float(parts[2])
+    except (ValueError, TypeError):
+        return None
+    return None
+
+
+def _is_valid_lap_time(val: str) -> bool:
+    """Return True if val is a valid single-lap F1 time (between 30s and 300s)."""
+    sec = _parse_lap_time_seconds(val)
+    return sec is not None and 30.0 <= sec <= 300.0
+
+
 def _extract_comp_top_drivers(comp: Dict[str, Any], limit: int = 5) -> List[str]:
     """Extract ordered driver display names (P1..Pn) from an ESPN competition block."""
+    st_type = (comp.get("status") or {}).get("type") or {} if isinstance(comp.get("status"), dict) else {}
+    state = (st_type.get("state") or "").lower()
+    if state == MatchState.PRE:
+        return []
     competitors = comp.get("competitors") or []
     if not competitors:
         return []
+    ordered_only = [c for c in competitors if str(c.get("order") or "").isdigit()]
+    if not ordered_only:
+        if state == MatchState.POST or bool(st_type.get("completed", False)):
+            ordered_only = list(competitors)
+        else:
+            return []
     sorted_comps = sorted(
-        competitors,
+        ordered_only,
         key=lambda c: int(c.get("order") or 999) if str(c.get("order") or "").isdigit() else 999,
     )
     drivers: List[str] = []
@@ -103,11 +137,15 @@ def _format_session_status_badge(comp: Dict[str, Any]) -> str:
 
 
 class F1Aggregator(BaseSportsAggregator):
-    """Aggregator for Formula 1 Grand Prix schedules, live session timings, OpenF1 telemetry, results, and standings."""
+    """Aggregator for Formula 1 Grand Prix schedules, live session timings, BBC/ESPN/OpenF1 telemetry, results, and standings."""
 
     SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard"
+    HEADER_URL = "https://site.web.api.espn.com/apis/v2/scoreboard/header?sport=racing&league=f1"
     STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/racing/f1/standings"
     OPENF1_BASE_URL = "https://api.openf1.org/v1"
+    BBC_SEASON_URL = "https://web-cdn.api.bbci.co.uk/wc-poll-data/container/formula1-season-results"
+    BBC_STAGE_URL = "https://web-cdn.api.bbci.co.uk/wc-poll-data/container/formula1-stage-results"
+    _BBC_STAGE_URN_CACHE: Dict[Tuple[int, str], str] = {}
 
     def get_info(self, query: str = "schedule") -> str:
         """Routes F1 queries between schedule, session times/results, and championship standings."""
@@ -280,7 +318,16 @@ class F1Aggregator(BaseSportsAggregator):
                 race_st_type = (race_comp or {}).get("status", {}).get("type", {}) if isinstance((race_comp or {}).get("status"), dict) else {}
                 race_state = (race_st_type.get("state") or "").lower()
                 race_completed = bool(race_st_type.get("completed", False))
-                has_race_results = bool(race_comp and race_comp.get("competitors")) and race_state != MatchState.IN
+                has_ordered_finishers = bool(
+                    race_comp
+                    and any(
+                        str(c.get("order") or "").isdigit() or bool(c.get("winner", False))
+                        for c in (race_comp.get("competitors") or [])
+                    )
+                )
+                has_race_results = (
+                    has_ordered_finishers and race_state not in (MatchState.PRE, MatchState.IN)
+                ) or race_state == MatchState.POST or race_completed
 
                 if has_race_results or race_state == MatchState.POST or race_completed:
                     output_lines.append(f"🏁 --- MOST RECENT GRAND PRIX: {ev_name} ({ev_status}) ---")
@@ -583,17 +630,515 @@ class F1Aggregator(BaseSportsAggregator):
             result["notable_events"] = notable_events
             result["seen_ids"] = seen_ids
             return result
-        except Exception:
+        except (Exception, StopIteration):
             return result
 
-    def _build_session_snapshot(self, ev: Dict[str, Any], comp: Dict[str, Any]) -> MatchSnapshot:
+    def _fetch_espn_header_live_data(
+        self,
+        comp_id: str,
+        session_label: str,
+    ) -> Dict[str, Any]:
+        """
+        Query ESPN's Live F1 Header API (https://site.web.api.espn.com/apis/v2/scoreboard/header?sport=racing&league=f1)
+        for real-time track flag (GREEN/YELLOW/RED/CHECKER), completed lap count, and session completion status.
+        """
+        result: Dict[str, Any] = {
+            "matched": False,
+            "state": "",
+            "completed": False,
+            "flag": "",
+            "leader_laps": 0,
+            "track_badge": "",
+            "is_finished_flag": False,
+            "notable_events": [],
+            "seen_ids": set(),
+            "driver_teams": {},
+        }
+        try:
+            data = fetch_json(self.HEADER_URL, timeout=4)
+            if not isinstance(data, dict):
+                return result
+            sports = data.get("sports") or []
+            if not sports or not isinstance(sports[0], dict):
+                return result
+            leagues = sports[0].get("leagues") or []
+            if not leagues or not isinstance(leagues[0], dict):
+                return result
+            events = leagues[0].get("events") or []
+            if not events:
+                return result
+
+            target_ev = None
+            for ev_item in events:
+                if str(ev_item.get("id") or "") == str(comp_id):
+                    target_ev = ev_item
+                    break
+                ev_type = (ev_item.get("type") or {}).get("abbreviation") or (ev_item.get("type") or {}).get("text") or ""
+                if _normalize_f1_session_label(ev_type) == session_label:
+                    target_ev = ev_item
+                    break
+
+            if not target_ev:
+                return result
+
+            result["matched"] = True
+            full_st = target_ev.get("fullStatus") or {}
+            st_type = full_st.get("type") or {}
+            state = (st_type.get("state") or "").lower()
+            completed = bool(st_type.get("completed", False))
+            flag = (full_st.get("flag") or "").strip().upper()
+            try:
+                leader_laps = int(full_st.get("period") or 0)
+            except (ValueError, TypeError):
+                leader_laps = 0
+
+            result["state"] = state
+            result["completed"] = completed
+            result["flag"] = flag
+            result["leader_laps"] = leader_laps
+
+            if flag == "RED":
+                result["track_badge"] = "🟥 RED FLAG"
+                ev_id = "f1_espn_flag_red"
+                result["seen_ids"].add(ev_id)
+                result["notable_events"].append((ev_id, "🟥 **RED FLAG**: Session red-flagged on track"))
+            elif flag in ("YELLOW", "CAUTION"):
+                result["track_badge"] = "🟡 YELLOW FLAG"
+            elif flag in ("CHECKER", "CHEQUERED"):
+                result["track_badge"] = "🏁 Chequered Flag"
+                result["is_finished_flag"] = True
+            elif flag == "GREEN":
+                result["track_badge"] = "🟢 Track Clear"
+
+            if state == MatchState.POST or completed:
+                result["is_finished_flag"] = True
+
+            driver_teams: Dict[str, str] = {}
+            for c_item in target_ev.get("competitors") or []:
+                d_name = (c_item.get("displayName") or c_item.get("name") or "").strip()
+                team_name = ((c_item.get("vehicle") or {}).get("manufacturer") or "").strip()
+                if d_name and team_name:
+                    driver_teams[d_name] = team_name
+            result["driver_teams"] = driver_teams
+            return result
+        except (Exception, StopIteration):
+            return result
+
+    def _resolve_bbc_stage_urn(
+        self,
+        ev_name: str,
+        scheduled_iso: str,
+        season_year: int,
+    ) -> Optional[str]:
+        """Resolve a Grand Prix event name / date to its BBC Sport stageUrn."""
+        cache_key = (season_year, ev_name)
+        if cache_key in self._BBC_STAGE_URN_CACHE:
+            return self._BBC_STAGE_URN_CACHE[cache_key]
+        try:
+            data = fetch_json(f"{self.BBC_SEASON_URL}?year={season_year}", timeout=4)
+            if not isinstance(data, dict):
+                return None
+            stages = data.get("stages") or data.get("raceCalendars") or []
+            ev_low = ev_name.lower()
+
+            sched_dt: Optional[datetime] = None
+            if scheduled_iso:
+                try:
+                    sched_dt = datetime.fromisoformat(scheduled_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
+                except Exception:
+                    pass
+
+            matched_urn: Optional[str] = None
+            for st_item in stages:
+                urn = (st_item.get("stageUrn") or "").strip()
+                if not urn:
+                    continue
+                heading_raw = (st_item.get("heading") or st_item.get("name") or "").strip()
+                gp_title = heading_raw.split(",")[0].strip().lower()
+                if gp_title and (gp_title in ev_low or ev_low in gp_title):
+                    matched_urn = urn
+                    break
+                race_iso = (st_item.get("raceDateTime") or st_item.get("endDate") or "").strip()
+                if sched_dt and race_iso:
+                    try:
+                        r_dt = datetime.fromisoformat(race_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
+                        if abs((r_dt - sched_dt).total_seconds()) <= 4 * 86400:
+                            matched_urn = urn
+                            break
+                    except Exception:
+                        pass
+
+            if matched_urn:
+                self._BBC_STAGE_URN_CACHE[cache_key] = matched_urn
+                return matched_urn
+        except (Exception, StopIteration):
+            pass
+        return None
+
+    def _fetch_bbc_f1_live_data(
+        self,
+        ev_name: str,
+        session_label: str,
+        scheduled_iso: str,
+        season_year: int,
+    ) -> Dict[str, Any]:
+        """
+        Query BBC Sport's zero-auth live Formula 1 stage results endpoint
+        (https://web-cdn.api.bbci.co.uk/wc-poll-data/container/formula1-stage-results)
+        for live Q1/Q2/Q3 lap times, segment completion + eliminated ('OUT') drivers,
+        practice lap times, and race gaps/fastest laps.
+        """
+        result: Dict[str, Any] = {
+            "matched": False,
+            "is_live": False,
+            "is_finished_flag": False,
+            "phase_badge": "",
+            "home_score": "",
+            "away_score": "",
+            "top_drivers": [],
+            "extra_stats": "",
+            "notable_events": [],
+            "seen_ids": set(),
+        }
+        try:
+            stage_urn = self._resolve_bbc_stage_urn(ev_name, scheduled_iso, season_year)
+            if not stage_urn:
+                return result
+
+            stage_data = fetch_json(
+                f"{self.BBC_STAGE_URL}?urn={stage_urn}&year={season_year}",
+                timeout=4,
+            )
+            if not isinstance(stage_data, dict):
+                return result
+
+            # 1. QUALIFYING & SPRINT QUALIFYING (Q1 / Q2 / Q3 or SQ1 / SQ2 / SQ3)
+            if "Qualifying" in session_label:
+                is_sprint_quali = "Sprint" in session_label
+                q_list = (
+                    (stage_data.get("sprintQualifying") or stage_data.get("sprintShootout"))
+                    if is_sprint_quali
+                    else stage_data.get("qualifying")
+                )
+                if not isinstance(q_list, list) or not q_list or not isinstance(q_list[0], dict):
+                    return result
+
+                q_block = q_list[0]
+                bbc_status = (q_block.get("status") or "").strip()
+                is_live = bool(q_block.get("isLive", False)) or bbc_status == "MidEvent"
+                participants = q_block.get("participants") or []
+                if not participants and bbc_status == "PreEvent":
+                    return result
+
+                seg_prefix = "SQ" if is_sprint_quali else "Q"
+                parsed_drivers: List[Dict[str, Any]] = []
+                for idx, p in enumerate(participants):
+                    name = (p.get("fullName") or p.get("shortName") or "").strip()
+                    if not name:
+                        continue
+                    team = ((p.get("team") or {}).get("abbreviatedName") or (p.get("team") or {}).get("fullName") or "").strip()
+                    rank_val = str((p.get("rank") or {}).get("value") or "-").strip()
+                    q1_t = str((p.get("qualifying1Time") or {}).get("value") or "-").strip()
+                    q2_t = str((p.get("qualifying2Time") or {}).get("value") or "-").strip()
+                    q3_t = str((p.get("qualifying3Time") or {}).get("value") or "-").strip()
+
+                    q1_sec = _parse_lap_time_seconds(q1_t) if _is_valid_lap_time(q1_t) else None
+                    q2_sec = _parse_lap_time_seconds(q2_t) if _is_valid_lap_time(q2_t) else None
+                    q3_sec = _parse_lap_time_seconds(q3_t) if _is_valid_lap_time(q3_t) else None
+
+                    parsed_drivers.append({
+                        "idx": idx,
+                        "name": name,
+                        "team": team,
+                        "rank": rank_val,
+                        "q1_time": q1_t if q1_sec is not None else "No Time",
+                        "q2_time": q2_t if q2_sec is not None else "No Time",
+                        "q3_time": q3_t if q3_sec is not None else "No Time",
+                        "q1_valid": q1_sec is not None,
+                        "q2_valid": q2_sec is not None,
+                        "q3_valid": q3_sec is not None,
+                        "q1_sec": q1_sec if q1_sec is not None else 9999.0,
+                        "q2_sec": q2_sec if q2_sec is not None else 9999.0,
+                        "q3_sec": q3_sec if q3_sec is not None else 9999.0,
+                    })
+
+                if not parsed_drivers:
+                    return result
+
+                result["matched"] = True
+                result["is_live"] = is_live
+
+                q1_timed = sorted([d for d in parsed_drivers if d["q1_valid"]], key=lambda d: (d["q1_sec"], d["idx"]))
+                q2_timed = sorted([d for d in parsed_drivers if d["q2_valid"]], key=lambda d: (d["q2_sec"], d["idx"]))
+                q3_timed = sorted([d for d in parsed_drivers if d["q3_valid"]], key=lambda d: (d["q3_sec"], d["idx"]))
+
+                total_cars = len(parsed_drivers)
+                adv_q1_count = 16 if total_cars >= 22 else 15
+                adv_q2_count = 10
+
+                # Q1 is complete when Q2 times exist, Q3 times exist, PostEvent, or BBC marks Q1-eliminated timed drivers with rank='-'
+                q1_completed = bool(
+                    q2_timed
+                    or q3_timed
+                    or bbc_status == "PostEvent"
+                    or (len(q1_timed) >= adv_q1_count - 1 and any(d["rank"] == "-" for d in q1_timed))
+                )
+                # Q2 is complete when Q3 times exist, PostEvent, or BBC marks Q2-eliminated timed drivers with rank='-'
+                q2_completed = bool(
+                    q3_timed
+                    or bbc_status == "PostEvent"
+                    or (len(q2_timed) >= adv_q2_count and any(d["rank"] == "-" for d in q2_timed))
+                )
+                q3_completed = bool(bbc_status == "PostEvent")
+
+                notable_events: List[Tuple[str, str]] = []
+                seen_ids: Set[str] = set()
+
+                def _fmt_drv_time(d: Dict[str, Any], time_key: str) -> str:
+                    t_str = d.get(time_key) or "No Time"
+                    return f"{d['name']} ({d['team']} — {t_str})" if d.get("team") else f"{d['name']} ({t_str})"
+
+                # Emit Q1 Complete milestone with Top 3 Q1 times + Eliminated ('OUT') drivers
+                q1_elim_names: Set[str] = set()
+                if q1_completed and q1_timed:
+                    q1_top3_str = " | ".join(
+                        f"P{i}: **{_fmt_drv_time(d, 'q1_time')}**"
+                        for i, d in enumerate(q1_timed[:3], 1)
+                    )
+                    q1_adv_names = {d["name"] for d in q1_timed[:adv_q1_count] if d["rank"] != "-" or d["q2_valid"] or d["q3_valid"]}
+                    if len(q1_adv_names) < adv_q1_count:
+                        q1_adv_names = {d["name"] for d in q1_timed[:adv_q1_count]}
+                    q1_elim = [
+                        d for d in parsed_drivers
+                        if not d["q2_valid"] and not d["q3_valid"] and d["name"] not in q1_adv_names
+                    ]
+                    q1_elim.sort(key=lambda d: (0 if d["q1_valid"] else 1, d["q1_sec"], d["idx"]))
+                    q1_elim_names = {d["name"] for d in q1_elim}
+                    elim_q1_str = ", ".join(
+                        f"P{adv_q1_count + idx}: {d['name']} ({d['q1_time']})"
+                        for idx, d in enumerate(q1_elim, 1)
+                    )
+                    ev_id_q1 = "f1_qual_q1_complete"
+                    ev_desc_q1 = (
+                        f"🏁 **{seg_prefix}1 ENDED — {seg_prefix}1 RESULTS**: "
+                        f"Top 3: {q1_top3_str}"
+                        + (f" | ❌ OUT in {seg_prefix}1: {elim_q1_str}" if elim_q1_str else "")
+                    )
+                    seen_ids.add(ev_id_q1)
+                    notable_events.append((ev_id_q1, ev_desc_q1))
+
+                # Emit Q2 Complete milestone with Top 3 Q2 times + Eliminated ('OUT') drivers
+                if q2_completed and q2_timed:
+                    q2_top3_str = " | ".join(
+                        f"P{i}: **{_fmt_drv_time(d, 'q2_time')}**"
+                        for i, d in enumerate(q2_timed[:3], 1)
+                    )
+                    q2_adv_names = {d["name"] for d in q2_timed[:adv_q2_count] if d["rank"] != "-" or d["q3_valid"]}
+                    if len(q2_adv_names) < adv_q2_count:
+                        q2_adv_names = {d["name"] for d in q2_timed[:adv_q2_count]}
+                    q2_elim = [
+                        d for d in parsed_drivers
+                        if d["name"] not in q1_elim_names and not d["q3_valid"] and d["name"] not in q2_adv_names
+                    ]
+                    q2_elim.sort(key=lambda d: (0 if d["q2_valid"] else 1, d["q2_sec"], d["q1_sec"], d["idx"]))
+                    elim_q2_str = ", ".join(
+                        f"P{adv_q2_count + idx}: {d['name']} ({d['q2_time']})"
+                        for idx, d in enumerate(q2_elim, 1)
+                    )
+                    ev_id_q2 = "f1_qual_q2_complete"
+                    ev_desc_q2 = (
+                        f"🏁 **{seg_prefix}2 ENDED — {seg_prefix}2 RESULTS**: "
+                        f"Top 3: {q2_top3_str}"
+                        + (f" | ❌ OUT in {seg_prefix}2: {elim_q2_str}" if elim_q2_str else "")
+                    )
+                    seen_ids.add(ev_id_q2)
+                    notable_events.append((ev_id_q2, ev_desc_q2))
+
+                # Determine current active phase and classification
+                if q3_completed:
+                    result["is_finished_flag"] = True
+                    result["phase_badge"] = f"{seg_prefix}3 Final"
+                    active_timed = q3_timed or q2_timed or q1_timed
+                    seg_key = "q3_time" if q3_timed else ("q2_time" if q2_timed else "q1_time")
+                    if active_timed:
+                        p1 = active_timed[0]
+                        result["home_score"] = f"P1: {_fmt_drv_time(p1, seg_key)}"
+                        if len(active_timed) >= 3:
+                            p2, p3 = active_timed[1], active_timed[2]
+                            result["away_score"] = f"P2: {_fmt_drv_time(p2, seg_key)} | P3: {_fmt_drv_time(p3, seg_key)}"
+                        elif len(active_timed) >= 2:
+                            result["away_score"] = f"P2: {_fmt_drv_time(active_timed[1], seg_key)}"
+                        else:
+                            result["away_score"] = "Final"
+                        result["top_drivers"] = [_fmt_drv_time(d, seg_key) for d in active_timed[:5]]
+                elif q2_completed:
+                    result["phase_badge"] = f"{seg_prefix}3" if q3_timed else f"Between {seg_prefix}2 & {seg_prefix}3"
+                    active_timed = q3_timed or q2_timed
+                    seg_key = "q3_time" if q3_timed else "q2_time"
+                    if q3_timed:
+                        result["home_score"] = f"P1: {_fmt_drv_time(q3_timed[0], 'q3_time')}"
+                        result["away_score"] = (
+                            f"P2: {_fmt_drv_time(q3_timed[1], 'q3_time')}" if len(q3_timed) >= 2 else f"{seg_prefix}3 Underway"
+                        )
+                        result["top_drivers"] = [_fmt_drv_time(d, "q3_time") for d in q3_timed[:5]]
+                    elif q2_timed:
+                        result["home_score"] = f"{seg_prefix}3 Starting"
+                        result["away_score"] = f"{seg_prefix}2 P1: {_fmt_drv_time(q2_timed[0], 'q2_time')}"
+                        result["top_drivers"] = [_fmt_drv_time(d, "q2_time") for d in q2_timed[:5]]
+                elif q1_completed:
+                    result["phase_badge"] = f"{seg_prefix}2" if q2_timed else f"Between {seg_prefix}1 & {seg_prefix}2"
+                    if q2_timed:
+                        result["home_score"] = f"P1: {_fmt_drv_time(q2_timed[0], 'q2_time')}"
+                        result["away_score"] = (
+                            f"P2: {_fmt_drv_time(q2_timed[1], 'q2_time')}" if len(q2_timed) >= 2 else f"{seg_prefix}2 Underway"
+                        )
+                        result["top_drivers"] = [_fmt_drv_time(d, "q2_time") for d in q2_timed[:5]]
+                    elif q1_timed:
+                        result["home_score"] = f"{seg_prefix}2 Starting"
+                        result["away_score"] = f"{seg_prefix}1 P1: {_fmt_drv_time(q1_timed[0], 'q1_time')}"
+                        result["top_drivers"] = [_fmt_drv_time(d, "q1_time") for d in q1_timed[:5]]
+                else:
+                    result["phase_badge"] = f"{seg_prefix}1"
+                    if q1_timed:
+                        result["home_score"] = f"P1: {_fmt_drv_time(q1_timed[0], 'q1_time')}"
+                        result["away_score"] = (
+                            f"P2: {_fmt_drv_time(q1_timed[1], 'q1_time')}" if len(q1_timed) >= 2 else f"{seg_prefix}1 Underway"
+                        )
+                        result["top_drivers"] = [_fmt_drv_time(d, "q1_time") for d in q1_timed[:5]]
+                    else:
+                        result["home_score"] = f"{seg_prefix}1 Underway"
+                        result["away_score"] = "Track Open"
+
+                result["notable_events"] = notable_events
+                result["seen_ids"] = seen_ids
+                return result
+
+            # 2. PRACTICE SESSIONS (FP1, FP2, FP3)
+            if "Practice" in session_label:
+                p_num = 3 if "3" in session_label else (2 if "2" in session_label else 1)
+                p_list = stage_data.get("practice") or []
+                p_block = next(
+                    (b for b in p_list if isinstance(b, dict) and int(b.get("number") or 0) == p_num),
+                    None,
+                )
+                if not p_block:
+                    return result
+                bbc_status = (p_block.get("status") or "").strip()
+                if bbc_status == "PreEvent":
+                    return result
+                participants = p_block.get("participants") or []
+                p_timed: List[Dict[str, Any]] = []
+                for idx, p in enumerate(participants):
+                    name = (p.get("fullName") or p.get("shortName") or "").strip()
+                    team = ((p.get("team") or {}).get("abbreviatedName") or "").strip()
+                    p_t = str((p.get("practiceTime") or {}).get("value") or "-").strip()
+                    p_sec = _parse_lap_time_seconds(p_t) if _is_valid_lap_time(p_t) else None
+                    if name and p_sec is not None:
+                        p_timed.append({"idx": idx, "name": name, "team": team, "time": p_t, "sec": p_sec})
+
+                if not p_timed and bbc_status != "PostEvent":
+                    return result
+                p_timed.sort(key=lambda d: (d["sec"], d["idx"]))
+                result["matched"] = True
+                result["is_live"] = bool(p_block.get("isLive", False)) or bbc_status == "MidEvent"
+                result["is_finished_flag"] = bbc_status == "PostEvent"
+                if p_timed:
+                    def _fmt_p(d: Dict[str, Any]) -> str:
+                        return f"{d['name']} ({d['team']} — {d['time']})" if d["team"] else f"{d['name']} ({d['time']})"
+
+                    if not result["is_finished_flag"] and len(p_timed) < 5:
+                        result["home_score"] = f"FP{p_num} — Installation Laps"
+                        result["away_score"] = f"{len(p_timed)} Timed"
+                    else:
+                        result["home_score"] = f"P1: {_fmt_p(p_timed[0])}"
+                        result["away_score"] = f"P2: {_fmt_p(p_timed[1])}" if len(p_timed) >= 2 else "In Progress"
+                    result["top_drivers"] = [_fmt_p(d) for d in p_timed[:5]]
+                return result
+
+            # 3. GRAND PRIX (RACE) & SPRINT
+            is_sprint_race = session_label.startswith("Sprint") and "Qualifying" not in session_label
+            r_list = stage_data.get("sprint") if is_sprint_race else stage_data.get("race")
+            if isinstance(r_list, list) and r_list and isinstance(r_list[0], dict):
+                r_block = r_list[0]
+                bbc_status = (r_block.get("status") or "").strip()
+                if bbc_status == "PreEvent":
+                    return result
+                participants = r_block.get("participants") or []
+                ranked: List[Dict[str, Any]] = []
+                fl_driver_str = ""
+                for idx, p in enumerate(participants):
+                    name = (p.get("fullName") or p.get("shortName") or "").strip()
+                    if not name:
+                        continue
+                    team = ((p.get("team") or {}).get("abbreviatedName") or "").strip()
+                    rank_val = str((p.get("rank") or {}).get("value") or "").strip()
+                    dur_val = str((p.get("duration") or {}).get("value") or "-").strip()
+                    fl_val = str((p.get("fastestLap") or {}).get("value") or "-").strip()
+                    has_fl = bool(p.get("hasFastestLap", False))
+                    if has_fl and _is_valid_lap_time(fl_val):
+                        fl_driver_str = f"⚡ Fastest Lap: {name} ({fl_val})"
+                    rank_int = int(rank_val) if rank_val.isdigit() else (900 + idx)
+                    ranked.append({
+                        "rank": rank_int,
+                        "name": name,
+                        "team": team,
+                        "duration": dur_val if dur_val != "-" else "",
+                    })
+
+                if not ranked:
+                    return result
+                ranked.sort(key=lambda d: d["rank"])
+                result["matched"] = True
+                result["is_live"] = bool(r_block.get("isLive", False)) or bbc_status == "MidEvent"
+                result["is_finished_flag"] = bbc_status == "PostEvent"
+                p1 = ranked[0]
+                p2 = ranked[1] if len(ranked) >= 2 else None
+                if result["is_finished_flag"]:
+                    p1_dur = f" ({p1['team']} — {p1['duration']})" if p1["team"] and p1["duration"] else (f" ({p1['duration']})" if p1["duration"] else "")
+                    result["home_score"] = f"P1: {p1['name']}{p1_dur}"
+                else:
+                    # Keep live race home_score anchored to driver name so P1 LEADER UPDATE only fires on actual lead changes
+                    result["home_score"] = f"P1: {p1['name']}"
+                if p2:
+                    p2_gap = f" ({p2['duration']})" if p2["duration"] else ""
+                    result["away_score"] = f"P2: {p2['name']}{p2_gap}"
+                else:
+                    result["away_score"] = "In Progress"
+
+                top_list: List[str] = []
+                for d in ranked[:5]:
+                    if d["team"] and d["duration"]:
+                        top_list.append(f"{d['name']} ({d['team']} — {d['duration']})")
+                    elif d["team"]:
+                        top_list.append(f"{d['name']} ({d['team']})")
+                    elif d["duration"]:
+                        top_list.append(f"{d['name']} ({d['duration']})")
+                    else:
+                        top_list.append(d["name"])
+                result["top_drivers"] = top_list
+                result["extra_stats"] = fl_driver_str
+                return result
+
+            return result
+        except (Exception, StopIteration):
+            return result
+
+    def _build_session_snapshot(
+        self,
+        ev: Dict[str, Any],
+        comp: Dict[str, Any],
+        season_year: Optional[int] = None,
+        is_tracker_poll: bool = False,
+    ) -> MatchSnapshot:
         """Build a normalized MatchSnapshot for a specific Formula 1 Grand Prix session."""
         ev_name = ev.get("name") or "Formula 1 Grand Prix"
         circuit_name = ev.get("circuit", {}).get("fullName", "")
         raw_type = comp.get("type", {}).get("abbreviation") or comp.get("type", {}).get("text") or "Session"
         session_label = _normalize_f1_session_label(raw_type)
+        comp_id = str(comp.get("id") or "")
         cdate = comp.get("date", "")
         formatted_start = _format_f1_session_time(cdate)
+        yr = season_year or int((cdate[:4] if cdate and cdate[:4].isdigit() else 0) or get_local_now().year)
 
         st_type = comp.get("status", {}).get("type", {}) if isinstance(comp.get("status"), dict) else {}
         state = (st_type.get("state") or MatchState.PRE).lower()
@@ -602,41 +1147,87 @@ class F1Aggregator(BaseSportsAggregator):
 
         espn_drivers = _extract_comp_top_drivers(comp, limit=5)
 
-        # Query OpenF1 when session is live ('in') or within 15 minutes of scheduled start time
-        should_poll_openf1 = state == MatchState.IN
-        if not should_poll_openf1 and state == MatchState.PRE and cdate:
+        # Poll live telemetry (BBC Sport + ESPN Header + OpenF1) when session is live ('in'),
+        # or on active tracker polls when completed ('post') or within 15 minutes of scheduled start time
+        should_poll_telemetry = (state == MatchState.IN) or (is_tracker_poll and (state == MatchState.POST or completed))
+        if is_tracker_poll and not should_poll_telemetry and state == MatchState.PRE and cdate:
             try:
                 dt_start = datetime.fromisoformat(cdate.replace("Z", "+00:00")).astimezone(timezone.utc)
-                sec_until = (dt_start - datetime.now(timezone.utc)).total_seconds()
+                now_utc = get_local_now().astimezone(timezone.utc)
+                sec_until = (dt_start - now_utc).total_seconds()
                 if -7200 <= sec_until <= 900:
-                    should_poll_openf1 = True
+                    should_poll_telemetry = True
             except Exception:
                 pass
 
-        of1 = self._fetch_openf1_live_data(session_label, cdate) if should_poll_openf1 else {}
-        if of1.get("matched") and of1.get("is_green") and state == MatchState.PRE:
+        bbc: Dict[str, Any] = {}
+        hdr: Dict[str, Any] = {}
+        of1: Dict[str, Any] = {}
+        if should_poll_telemetry:
+            fut_bbc = submit_to_worker(self._fetch_bbc_f1_live_data, ev_name, session_label, cdate, yr)
+            fut_hdr = submit_to_worker(self._fetch_espn_header_live_data, comp_id, session_label)
+            fut_of1 = submit_to_worker(self._fetch_openf1_live_data, session_label, cdate)
+            bbc = fut_bbc.result() or {}
+            hdr = fut_hdr.result() or {}
+            of1 = fut_of1.result() or {}
+
+        # Promote 'pre' -> 'in' if any live telemetry feed confirms the session has started
+        if state == MatchState.PRE and (
+            (bbc.get("matched") and bbc.get("is_live"))
+            or (hdr.get("matched") and hdr.get("state") == MatchState.IN)
+            or (of1.get("matched") and of1.get("is_green"))
+        ):
             state = MatchState.IN
             status_name = "STATUS_IN_PROGRESS"
 
-        top_drivers = of1.get("top_drivers") or espn_drivers
-        notable_events: List[Tuple[str, str]] = list(of1.get("notable_events") or [])
-        seen_ids: Set[str] = set(of1.get("seen_ids") or set())
+        # Promote 'in' -> 'post' if BBC Sport, ESPN Header, or OpenF1 confirms Chequered Flag / PostEvent
+        if (
+            (bbc.get("matched") and bbc.get("is_finished_flag"))
+            or (hdr.get("matched") and hdr.get("is_finished_flag"))
+            or (of1.get("matched") and of1.get("is_finished_flag"))
+        ):
+            state = MatchState.POST
+            completed = True
+            status_name = "STATUS_FINAL"
+
+        # Merge notable events across BBC (Q1/Q2 Complete + OUT drivers), ESPN Header (Red Flag), and OpenF1
+        notable_events: List[Tuple[str, str]] = []
+        seen_ids: Set[str] = set()
+        for src in (bbc, hdr, of1):
+            for ev_id, ev_desc in src.get("notable_events") or []:
+                if ev_id not in seen_ids:
+                    seen_ids.add(ev_id)
+                    notable_events.append((ev_id, ev_desc))
+            seen_ids |= set(src.get("seen_ids") or set())
+
+        top_drivers = bbc.get("top_drivers") or of1.get("top_drivers") or espn_drivers
+        phase_badge = bbc.get("phase_badge") or of1.get("phase_badge") or hdr.get("track_badge") or ""
+        if bbc.get("phase_badge") and hdr.get("track_badge") and hdr["track_badge"] not in bbc["phase_badge"] and state == MatchState.IN:
+            phase_badge = f"{bbc['phase_badge']} • {hdr['track_badge']}"
 
         if state == MatchState.POST or completed:
             state = MatchState.POST
             completed = True
             status_name = status_name or "STATUS_FINAL"
-            home_score = f"P1: {top_drivers[0]}" if top_drivers else "Completed"
-            away_score = f"P2: {top_drivers[1]}" if len(top_drivers) >= 2 else "Final"
+            home_score = bbc.get("home_score") or (f"P1: {top_drivers[0]}" if top_drivers else "Completed")
+            away_score = bbc.get("away_score") or (f"P2: {top_drivers[1]}" if len(top_drivers) >= 2 else "Final")
             status_detail = f"Final — {session_label}"
         elif state == MatchState.IN:
-            home_score = f"P1: {top_drivers[0]}" if top_drivers else "Track Open"
-            away_score = (
-                f"P2: {top_drivers[1]}"
-                if len(top_drivers) >= 2
-                else (of1.get("phase_badge") or "In Progress")
-            )
-            phase_str = f" ({of1['phase_badge']})" if of1.get("phase_badge") else ""
+            if bbc.get("matched") and bbc.get("home_score"):
+                home_score = bbc["home_score"]
+                away_score = bbc.get("away_score") or phase_badge or "In Progress"
+            elif not of1.get("matched") and hdr.get("matched") and hdr.get("leader_laps", 0) < (2 if "Race" in session_label or session_label == "Sprint" else 3):
+                # Suppress early out-lap / Lap 1 noise when falling back to ESPN without BBC/OpenF1
+                home_score = f"{session_label} — Setting Initial Laps"
+                away_score = phase_badge or "Track Open"
+            else:
+                home_score = f"P1: {top_drivers[0]}" if top_drivers else "Track Open"
+                away_score = (
+                    f"P2: {top_drivers[1]}"
+                    if len(top_drivers) >= 2
+                    else (phase_badge or "In Progress")
+                )
+            phase_str = f" ({phase_badge})" if phase_badge else ""
             status_detail = f"LIVE — {session_label}{phase_str}"
         else:
             home_score = "Scheduled"
@@ -645,6 +1236,8 @@ class F1Aggregator(BaseSportsAggregator):
 
         if top_drivers:
             stats_summary = "Top 5: " + " | ".join(f"P{i}: {d}" for i, d in enumerate(top_drivers[:5], 1))
+            if bbc.get("extra_stats"):
+                stats_summary += f" | {bbc['extra_stats']}"
         elif circuit_name:
             stats_summary = f"Circuit: {circuit_name} | Start: {formatted_start}"
         else:
@@ -793,7 +1386,7 @@ class F1Aggregator(BaseSportsAggregator):
                     target_comp.get("type", {}).get("abbreviation") or target_comp.get("type", {}).get("text") or "session"
                 )
             )
-            snapshot = self._build_session_snapshot(ev, target_comp)
+            snapshot = self._build_session_snapshot(ev, target_comp, is_tracker_poll=bool(event_id))
             return {
                 "sport_path": "f1",
                 "league_code": "f1",

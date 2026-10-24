@@ -494,12 +494,35 @@ def diff_snapshots(tracked: TrackedMatch, curr: MatchSnapshot) -> List[str]:
     triggers: List[str] = []
 
     if tracked.sport_path == "f1":
+        is_qualifying = "qualifying" in (curr.away_team or "").lower()
+
         # 1. F1 Session Start (pre -> in)
         if prev.state == "pre" and curr.state == "in":
             triggers.append(
                 f"🟢 **F1 SESSION LIVE**: **{curr.home_team} — {curr.away_team}** is now UNDERWAY! ({curr.status_detail})"
             )
-        # 2. FIA Race Control Milestones (Green Light, Q1/Q2/Q3 Chequered Flags, Red Flags, Safety Car, VSC, Stewards)
+
+        if is_qualifying:
+            # For Qualifying / Sprint Qualifying: ONLY emit updates when the session starts,
+            # when Q1 ends (Top 3 times + OUT drivers), when Q2 ends (Top 3 times + OUT drivers),
+            # and when Q3 / Qualifying finishes (Top 3 announced). Suppress all mid-segment updates.
+            qual_segment_events = [
+                desc
+                for ev_id, desc in curr.notable_events
+                if ev_id not in prev.seen_event_ids and ev_id in ("f1_qual_q1_complete", "f1_qual_q2_complete")
+            ]
+            for d in qual_segment_events:
+                triggers.append(f"{d} — **{curr.home_team} ({curr.away_team})**")
+
+            if curr.is_finished and not prev.is_finished:
+                stat_str = f" | {curr.stats_summary}" if curr.stats_summary else ""
+                triggers.append(
+                    f"🏁 **F1 QUALIFYING FINISHED — FINAL TOP 3 ({curr.home_team} — {curr.away_team})**: "
+                    f"🏆 **{curr.home_score}** takes POLE ({curr.away_score}){stat_str}"
+                )
+            return triggers
+
+        # 2. Non-Qualifying F1 Sessions (Race / Sprint / Practice): FIA Race Control Milestones
         new_f1_events = [
             desc for ev_id, desc in curr.notable_events if ev_id not in prev.seen_event_ids
         ]
@@ -507,8 +530,13 @@ def diff_snapshots(tracked: TrackedMatch, curr: MatchSnapshot) -> List[str]:
             triggers.append(
                 f"{d} — **{curr.home_team} ({curr.away_team})** | {curr.stats_summary or curr.status_detail}"
             )
-        # 3. P1 Leader / Provisional Pole Update
-        if curr.state == "in" and curr.home_score != prev.home_score and curr.home_score.startswith("P1:"):
+        # 3. P1 Leader Update (only once session is already underway, never on the initial pre -> in poll)
+        if (
+            prev.state == "in"
+            and curr.state == "in"
+            and curr.home_score != prev.home_score
+            and curr.home_score.startswith("P1:")
+        ):
             prev_ldr = f" (was {prev.home_score})" if prev.home_score.startswith("P1:") else ""
             triggers.append(
                 f"🏎️ **P1 LEADER UPDATE ({curr.home_team} — {curr.away_team})**: "
@@ -1029,12 +1057,19 @@ class SportsTrackerService:
                 if snap.stats_summary:
                     extra_details += f"\n• **Session Info:** {snap.stats_summary}"
             llm_instruction = build_live_tracker_instructions(snap)
+            is_qual_session = "qualifying" in (snap.away_team or "").lower()
+            tracking_rules_str = (
+                f"Polling every {self.poll_interval}s for Qualifying Start, End of Q1 (Top 3 lap times + eliminated 'OUT' drivers), "
+                f"End of Q2 (Top 3 lap times + eliminated 'OUT' drivers), and End of Q3 / Final Top 3 Results (with no mid-session update spam)."
+                if is_qual_session
+                else f"Polling every {self.poll_interval}s for session start (Green Light), FIA Race Control flags (Red Flag, Safety Car, VSC), Steward penalties, P1 lead changes, fastest laps, and Chequered Flag."
+            )
             return (
                 f"📡 **LIVE F1 SESSION TRACKER ACTIVATED**\n"
                 f"• **Session:** {snap.home_team} — {snap.away_team} ({info['league_name']})\n"
                 f"• **Current Status:** {status_badge}"
                 f"{extra_details}\n"
-                f"• **Tracking Rules:** Polling every {self.poll_interval}s via ESPN & OpenF1 Real-Time Telemetry for session start (Green Light), FIA Race Control flags (Red Flag, Safety Car, VSC), Steward penalties, P1 / Provisional Pole lead changes, Q1/Q2/Q3 progression, and Chequered Flag. "
+                f"• **Tracking Rules:** {tracking_rules_str} "
                 f"The tracker will remain active while the session is underway and will automatically stop once the Chequered Flag / Final classification is reached."
                 f"{llm_instruction}"
             )
