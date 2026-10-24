@@ -66,7 +66,7 @@ class MusicAggregatorManager:
 
         from src.skills.music.playback.youtube_music import is_garbage_music_title
 
-        seen = set()
+        seen: dict[tuple[str, str], Track] = {}
         deduped = []
         fresh = []
 
@@ -76,8 +76,21 @@ class MusicAggregatorManager:
 
             key = (t.title.lower().strip(), t.artist.lower().strip())
             if key in seen:
+                existing = seen[key]
+                if not existing.album and t.album:
+                    existing.album = t.album
+                if not existing.genre and t.genre:
+                    existing.genre = t.genre
+                if not existing.deezer_id and t.deezer_id:
+                    existing.deezer_id = t.deezer_id
+                if not existing.preview_url and t.preview_url:
+                    existing.preview_url = t.preview_url
+                # Multi-source consensus boost: track appeared across multiple providers
+                existing.tier = 1
+                existing.verified_genre = True
+                existing.relevance_score = min(1.0, max(existing.relevance_score, t.relevance_score) + 0.15)
                 continue
-            seen.add(key)
+            seen[key] = t
 
             t_song_norm = _norm_track_token(t.title)
             t_art_norm = _norm_track_token(t.artist)
@@ -93,6 +106,115 @@ class MusicAggregatorManager:
                 fresh.append(t)
 
         return fresh if fresh else deduped
+
+    def _apply_genre_gatekeeper(self, tracks: list[Track], genre: Optional[str] = None) -> list[Track]:
+        """
+        Cross-source genre gatekeeper:
+        Uses Last.fm's verified primary-genre artist set (plus Beatport verified artists) to validate
+        tracks coming from Deezer user playlists and coarse iTunes RSS categories.
+        Drops unverified off-genre crossovers when a healthy verified pool (>= 6 tracks) exists.
+        """
+        if not tracks or not genre or genre.lower().strip() in ("all", "global", "general", "none"):
+            return tracks
+
+        lastfm = self.aggregators.get("lastfm")
+        verified_artists: set[str] = set()
+        if lastfm and hasattr(lastfm, "get_verified_genre_artists"):
+            try:
+                verified_artists.update(lastfm.get_verified_genre_artists(genre))
+            except Exception:
+                pass
+
+        for t in tracks:
+            if getattr(t, "verified_genre", False) and t.artist:
+                verified_artists.add(t.artist.lower().strip())
+
+        if not verified_artists:
+            return tracks
+
+        for t in tracks:
+            clean_art = (t.artist or "").lower().strip()
+            if clean_art in verified_artists:
+                t.verified_genre = True
+                if (t.source or "").startswith("itunes_"):
+                    t.tier = min(t.tier, 2)
+
+        verified_pool = [t for t in tracks if getattr(t, "verified_genre", False)]
+        if len(verified_pool) >= 6:
+            return verified_pool
+        return tracks
+
+    @staticmethod
+    def sample_tiered_tracks(
+        tracks: list[Track],
+        k: int = 15,
+        weights: tuple[float, float, float] = (0.45, 0.35, 0.20),
+        enforce_artist_diversity: bool = True,
+    ) -> list[Track]:
+        """
+        3-Shelf Crate-Digging Tiered Sampler:
+        - Organizes verified candidates into 3 shelves:
+            * Shelf 1 (Tier 1, default 45%): Core Genre Favorites / Closest Similarity Matches
+            * Shelf 2 (Tier 2, default 35%): Solid Artist Cuts (#3-#12) / Strong Similarity Neighbors
+            * Shelf 3 (Tier 3, default 20%): Verified Deep Cuts (Pages 2-3 / Beatport Hype / Scene Discovery)
+        - Rolls the weighted dice fresh for every slot (including Slot #0 played by _pre_resolve_top_candidate)
+          so quality and popularity balance remain constant from Song #1 to Song #50 without top-to-bottom decay.
+        """
+        if not tracks:
+            return []
+
+        pool = list(tracks)
+        if enforce_artist_diversity:
+            by_artist: dict[str, Track] = {}
+            for t in pool:
+                clean_art = (t.artist or "").lower().strip()
+                if not clean_art:
+                    continue
+                if clean_art not in by_artist:
+                    by_artist[clean_art] = t
+                else:
+                    prev = by_artist[clean_art]
+                    prev_key = (1 if getattr(prev, "verified_genre", False) else 0, -getattr(prev, "tier", 1), getattr(prev, "relevance_score", 0.0))
+                    curr_key = (1 if getattr(t, "verified_genre", False) else 0, -getattr(t, "tier", 1), getattr(t, "relevance_score", 0.0))
+                    if curr_key > prev_key:
+                        by_artist[clean_art] = t
+            if by_artist:
+                pool = list(by_artist.values())
+
+        shelf_1 = [t for t in pool if getattr(t, "tier", 1) == 1]
+        shelf_2 = [t for t in pool if getattr(t, "tier", 1) == 2]
+        shelf_3 = [t for t in pool if getattr(t, "tier", 1) >= 3]
+
+        # If all tracks carried default tier=1 and pool is large enough, partition into 45/35/20 shelves by index
+        if not shelf_2 and not shelf_3 and len(shelf_1) >= 6:
+            n = len(shelf_1)
+            n1 = max(1, int(round(n * weights[0])))
+            n2 = max(1, int(round(n * weights[1])))
+            shelf_2 = shelf_1[n1 : n1 + n2]
+            shelf_3 = shelf_1[n1 + n2 :]
+            shelf_1 = shelf_1[:n1]
+
+        random.shuffle(shelf_1)
+        random.shuffle(shelf_2)
+        random.shuffle(shelf_3)
+
+        shelves = [shelf_1, shelf_2, shelf_3]
+        sampled: list[Track] = []
+        target_count = min(k, len(pool))
+
+        while len(sampled) < target_count:
+            active_shelves = []
+            active_weights = []
+            for s_list, w in zip(shelves, weights):
+                if s_list:
+                    active_shelves.append(s_list)
+                    active_weights.append(w)
+            if not active_shelves:
+                break
+            chosen_shelf = random.choices(active_shelves, weights=active_weights, k=1)[0]
+            sampled.append(chosen_shelf.pop(0))
+
+        return sampled
 
     def get_similar_tracks(self, query: str) -> list[Track]:
         """
@@ -275,8 +397,10 @@ class MusicAggregatorManager:
                 except Exception as e:
                     logger.debug("Mood track worker failed: %s", e)
 
-        random.shuffle(all_tracks)
-        return self._filter_and_deduplicate(all_tracks, exclude_query=similar_to)
+        deduped = self._filter_and_deduplicate(all_tracks, exclude_query=similar_to)
+        if target_genre:
+            deduped = self._apply_genre_gatekeeper(deduped, target_genre)
+        return deduped
 
     def get_top_charts(self, genre: str = None, mood: str = None) -> list[Track]:
         """Fetches trending and charting music across Last.fm, Beatport, and global charts concurrently, or delegates to mood discovery."""
@@ -304,7 +428,8 @@ class MusicAggregatorManager:
             except Exception as e:
                 logger.debug("Deezer fallback chart fetch failed: %s", e)
 
-        return self._filter_and_deduplicate(all_tracks)
+        deduped = self._filter_and_deduplicate(all_tracks)
+        return self._apply_genre_gatekeeper(deduped, parsed_genre)
 
     def get_artist_tracks(self, artist: str) -> list[Track]:
         """

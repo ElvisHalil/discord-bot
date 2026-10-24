@@ -177,38 +177,59 @@ class DeezerAggregator(BaseMusicAggregator):
         clean_q = re.sub(r'[\(\[\{].*?[\)\]\}]', '', query, flags=re.IGNORECASE)
         clean_q = re.sub(r'[-–—|/].*$', '', clean_q).strip()
 
+        expected_title = ""
+        expected_artist = ""
         candidates = [query.strip()]
         if clean_q and clean_q != query:
             candidates.append(clean_q)
         if " by " in clean_q:
             parts = clean_q.split(" by ", 1)
-            candidates.append(f"{parts[0].strip()} {parts[1].strip()}")
-            candidates.append(parts[0].strip())
-            candidates.append(parts[1].strip())
+            expected_title = parts[0].strip()
+            expected_artist = parts[1].strip()
+            candidates.append(f"{expected_title} {expected_artist}")
         elif " - " in clean_q:
             parts = clean_q.split(" - ", 1)
-            candidates.append(f"{parts[1].strip()} {parts[0].strip()}")
-            candidates.append(parts[1].strip())
-            candidates.append(parts[0].strip())
+            expected_artist = parts[0].strip()
+            expected_title = parts[1].strip()
+            candidates.append(f"{expected_title} {expected_artist}")
 
-        data = None
+        def _toks(s: str) -> set[str]:
+            return {w for w in re.findall(r"[a-z0-9]+", (s or "").lower()) if len(w) > 1}
+
+        exp_t_toks = _toks(expected_title or clean_q)
+        exp_a_toks = _toks(expected_artist)
+
+        matched_track = None
         for q_cand in candidates:
             if not q_cand.strip():
                 continue
             try:
-                r = _http_get(f"https://api.deezer.com/search?q={urllib.parse.quote(q_cand.strip())}&limit=1", timeout=5)
-                res = r.json()
-                if res.get("data"):
-                    data = res
+                r = _http_get(f"https://api.deezer.com/search?q={urllib.parse.quote(q_cand.strip())}&limit=5", timeout=5)
+                res = r.json() or {}
+                items = res.get("data") or []
+                if not items:
+                    continue
+                for item in items:
+                    c_title = item.get("title") or ""
+                    c_artist = (item.get("artist") or {}).get("name") or ""
+                    c_t_toks = _toks(c_title)
+                    c_a_toks = _toks(c_artist)
+                    if exp_t_toks and c_t_toks and not exp_t_toks.intersection(c_t_toks):
+                        continue
+                    if exp_a_toks and c_a_toks and not exp_a_toks.intersection(c_a_toks):
+                        continue
+                    matched_track = item
+                    break
+                if matched_track:
                     break
             except Exception:
                 continue
 
-        if not data or not data.get("data"):
+        if not matched_track:
             print("  └─ ⚠️ [Deezer]: Track not found in catalog.")
             return []
 
-        track = data["data"][0]
+        track = matched_track
         artist_id = track["artist"]["id"]
         track_title = track["title"]
         artist_name = track["artist"]["name"]
@@ -219,10 +240,14 @@ class DeezerAggregator(BaseMusicAggregator):
             r_rel = _http_get(f"https://api.deezer.com/artist/{artist_id}/related?limit=20", timeout=5)
             related_artists = r_rel.json().get("data", [])
             if related_artists:
-                if len(related_artists) > 8:
-                    related_artists = random.sample(related_artists, 8)
+                # Preserve Deezer's related-artist proximity ordering (closest 10 artists) instead of blind random sampling from all 20
+                indexed_artists = list(enumerate(related_artists[:10]))
+                if len(indexed_artists) > 8:
+                    # Keep top 4 closest related artists + sample 4 from #5-#10
+                    indexed_artists = indexed_artists[:4] + random.sample(indexed_artists[4:], 4)
 
-                def _fetch_rel_artist_top(rel_artist):
+                def _fetch_rel_artist_top(idx_and_artist):
+                    art_idx, rel_artist = idx_and_artist
                     rel_tracks = []
                     try:
                         rel_id = rel_artist["id"]
@@ -230,9 +255,18 @@ class DeezerAggregator(BaseMusicAggregator):
                             f"artist_top:{rel_id}:5",
                             f"https://api.deezer.com/artist/{rel_id}/top?limit=5"
                         )
-                        for t in top_data:
+                        for t_idx, t in enumerate(top_data):
                             if t.get('title', '').lower() != track_title.lower():
                                 alb = t.get('album', {}).get('title')
+                                if art_idx < 4 and t_idx < 2:
+                                    tier = 1
+                                    rel_score = 0.88
+                                elif art_idx < 7 and t_idx < 4:
+                                    tier = 2
+                                    rel_score = 0.76
+                                else:
+                                    tier = 3
+                                    rel_score = 0.64
                                 rel_tracks.append(Track(
                                     title=t['title'],
                                     artist=t['artist']['name'],
@@ -240,17 +274,20 @@ class DeezerAggregator(BaseMusicAggregator):
                                     source="deezer",
                                     deezer_id=t.get("id"),
                                     preview_url=t.get("preview"),
+                                    tier=tier,
+                                    relevance_score=rel_score,
+                                    verified_genre=True,
                                 ))
                     except Exception:
                         pass
                     return rel_tracks
 
-                for rel_list in map_in_workers(_fetch_rel_artist_top, related_artists):
+                for rel_list in map_in_workers(_fetch_rel_artist_top, indexed_artists):
                     similar_tracks.extend(rel_list)
             else:
                 r_top = _http_get(f"https://api.deezer.com/artist/{artist_id}/top?limit=10", timeout=5)
                 top = r_top.json()
-                for t in top.get("data", []):
+                for t_idx, t in enumerate(top.get("data", [])):
                     if t['title'].lower() != track_title.lower():
                         alb = t.get('album', {}).get('title')
                         similar_tracks.append(Track(
@@ -260,6 +297,9 @@ class DeezerAggregator(BaseMusicAggregator):
                             source="deezer",
                             deezer_id=t.get("id"),
                             preview_url=t.get("preview"),
+                            tier=1 if t_idx < 4 else (2 if t_idx < 8 else 3),
+                            relevance_score=0.85,
+                            verified_genre=True,
                         ))
         except Exception as e:
             print(f"  └─ ⚠️ [Deezer]: Error fetching recommendations: {e}")
@@ -283,6 +323,27 @@ class DeezerAggregator(BaseMusicAggregator):
                     valid_pls = [p for p in playlists if p.get("id") and p.get("nb_tracks", 0) >= 15]
                     if not valid_pls:
                         valid_pls = [p for p in playlists if p.get("id")]
+
+                    # Prioritize official / well-matched curated playlists over random personal playlists
+                    trusted_curators = (
+                        "beatport", "deezer", "ukf", "hospital", "defected", "drumcode",
+                        "liquicity", "monstercat", "armada", "spinnin", "anjuna", "afterlife",
+                    )
+
+                    def _score_playlist(pl: dict) -> int:
+                        p_title = (pl.get("title") or "").lower()
+                        p_user = ((pl.get("user") or {}).get("name") or "").lower()
+                        score = 0
+                        if clean_g in p_title:
+                            score += 3
+                        if any(tc in p_title or tc in p_user for tc in trusted_curators):
+                            score += 4
+                        nb = int(pl.get("nb_tracks", 0) or 0)
+                        if 20 <= nb <= 150:
+                            score += 2
+                        return score
+
+                    valid_pls.sort(key=_score_playlist, reverse=True)
                     valid_pls = valid_pls[:4]
 
                     selected_pls = random.sample(valid_pls, min(3, len(valid_pls)))
@@ -297,12 +358,20 @@ class DeezerAggregator(BaseMusicAggregator):
                                 f"https://api.deezer.com/playlist/{pl_id}/tracks?limit=40"
                             )
                             if data:
-                                sampled_data = random.sample(data, min(8, len(data)))
+                                indexed_data = list(enumerate(data))
+                                sampled_data = random.sample(indexed_data, min(10, len(indexed_data)))
                                 local_tracks = []
-                                for t in sampled_data:
+                                is_beatport_pl = "beatport" in clean_g or "beatport" in (pl.get("title") or "").lower()
+                                for pos_idx, t in sampled_data:
                                     title = t.get("title", "Unknown")
                                     artist = t.get("artist", {}).get("name", "Unknown")
                                     if title and artist:
+                                        if pos_idx < 12:
+                                            tier = 1
+                                        elif pos_idx < 28:
+                                            tier = 2
+                                        else:
+                                            tier = 3
                                         local_tracks.append(Track(
                                             title=title,
                                             artist=artist,
@@ -311,6 +380,9 @@ class DeezerAggregator(BaseMusicAggregator):
                                             source=f"deezer_{clean_g.replace(' ', '_')}",
                                             deezer_id=t.get("id"),
                                             preview_url=t.get("preview"),
+                                            tier=tier,
+                                            relevance_score=0.92 if is_beatport_pl else 0.78,
+                                            verified_genre=is_beatport_pl,
                                         ))
                                 return pl.get("title", str(pl_id)), local_tracks
                         except Exception:

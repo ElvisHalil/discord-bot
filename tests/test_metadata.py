@@ -926,6 +926,148 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         self.assertEqual(undefined_findings, [], f"Undefined names detected:\n" + "\n".join(undefined_findings))
 
 
+class TestThreeShelfTieredDiscoveryAndGatekeeper(unittest.TestCase):
+    """Tests for the 3-Shelf (45/35/20) Crate-Digging Tiered Sampler and Cross-Source Genre/Similarity Gatekeeper."""
+
+    def setUp(self):
+        from src.skills.music.engine.formatting import RECENTLY_PLAYED_TRACKS
+        from src.skills.music.aggregators.lastfm import clear_lastfm_cache
+        from src.skills.music.aggregators.deezer import clear_deezer_cache
+        RECENTLY_PLAYED_TRACKS.clear()
+        clear_lastfm_cache()
+        clear_deezer_cache()
+
+    def tearDown(self):
+        from src.skills.music.engine.formatting import RECENTLY_PLAYED_TRACKS
+        from src.skills.music.aggregators.lastfm import clear_lastfm_cache
+        from src.skills.music.aggregators.deezer import clear_deezer_cache
+        RECENTLY_PLAYED_TRACKS.clear()
+        clear_lastfm_cache()
+        clear_deezer_cache()
+
+    def test_three_shelf_crate_digging_distribution_and_zero_decay(self):
+        from collections import Counter
+        from src.skills.music.aggregators.manager import MusicAggregatorManager
+        from src.skills.music.models import Track
+
+        pool = (
+            [Track(title=f"Core {i}", artist=f"CoreArt {i}", tier=1, verified_genre=True) for i in range(10)]
+            + [Track(title=f"Mid {i}", artist=f"MidArt {i}", tier=2, verified_genre=True) for i in range(10)]
+            + [Track(title=f"Deep {i}", artist=f"DeepArt {i}", tier=3, verified_genre=True) for i in range(10)]
+        )
+
+        slot0_tiers = Counter()
+        for _ in range(400):
+            sampled = MusicAggregatorManager.sample_tiered_tracks(pool, k=15, weights=(0.45, 0.35, 0.20))
+            self.assertEqual(len(sampled), 15)
+            slot0_tiers[sampled[0].tier] += 1
+
+        # All 3 shelves participate on Slot #0 following the ~45% / 35% / 20% distribution
+        self.assertGreater(slot0_tiers[1], 120)
+        self.assertGreater(slot0_tiers[2], 90)
+        self.assertGreater(slot0_tiers[3], 40)
+        self.assertGreater(slot0_tiers[1], slot0_tiers[3])
+
+    def test_genre_gatekeeper_filters_unverified_itunes_and_deezer_crossovers(self):
+        from src.skills.music.aggregators.manager import MusicAggregatorManager
+        from src.skills.music.models import Track
+
+        mgr = MusicAggregatorManager()
+        mgr.aggregators["lastfm"].get_verified_genre_artists = MagicMock(
+            return_value={"sub focus", "wilkinson", "dimension", "culture shock", "metrik", "kanine", "hybrid minds"}
+        )
+
+        raw_tracks = [
+            Track(title="Solar System", artist="Sub Focus", genre="Dnb", source="lastfm_dnb", tier=1, verified_genre=True),
+            Track(title="Afterglow", artist="Wilkinson", genre="Dnb", source="lastfm_dnb", tier=1, verified_genre=True),
+            Track(title="Offender", artist="Dimension", genre="Dnb", source="lastfm_dnb", tier=2, verified_genre=True),
+            Track(title="Deconstruct", artist="Culture Shock", genre="Dnb", source="lastfm_dnb", tier=2, verified_genre=True),
+            Track(title="Hackers", artist="Metrik", genre="Dnb", source="lastfm_dnb", tier=2, verified_genre=True),
+            Track(title="Want You", artist="Kanine", genre="Dnb", source="beatport_fallback_deezer", tier=1, verified_genre=True),
+            # Verified genre artist appearing on iTunes -> kept and marked verified_genre=True
+            Track(title="Touch", artist="Hybrid Minds", genre="Dnb", source="itunes_dnb", tier=3, verified_genre=False),
+            # Unverified commercial pop crossover on iTunes / random user playlist -> dropped by gatekeeper
+            Track(title="Random Pop Radio Song", artist="Mainstream Pop Star", genre="Pop", source="itunes_dnb", tier=1, verified_genre=False),
+            Track(title="Random User Playlist Song", artist="Unknown Indie Band", genre="Rock", source="deezer_dnb", tier=1, verified_genre=False),
+        ]
+
+        filtered = mgr._apply_genre_gatekeeper(raw_tracks, genre="dnb")
+        filtered_artists = {t.artist for t in filtered}
+        self.assertIn("Hybrid Minds", filtered_artists)
+        self.assertNotIn("Mainstream Pop Star", filtered_artists)
+        self.assertNotIn("Unknown Indie Band", filtered_artists)
+        self.assertTrue(all(t.verified_genre for t in filtered))
+
+    def test_lastfm_similar_tracks_relevance_floor_and_three_shelves(self):
+        from src.skills.music.aggregators.lastfm import LastFmAggregator
+
+        lfm = LastFmAggregator(api_key="test_key")
+        raw_sim = []
+        # 25 tracks with decaying similarity match scores + 1 album intro that should be skipped
+        raw_sim.append({"name": "Album Intro (Skit)", "artist": {"name": "Artist 0"}, "match": "0.99"})
+        for idx in range(30):
+            match_val = max(0.02, 0.95 - idx * 0.04)
+            raw_sim.append({
+                "name": f"Similar Song {idx}",
+                "artist": {"name": f"Artist {idx}"},
+                "match": f"{match_val:.2f}",
+            })
+
+        parsed = lfm._parse_similar_tracks({"similartracks": {"track": raw_sim}})
+        # Drops the Album Intro skit and drops the weak tail (< 0.15 / > 22 tracks)
+        self.assertTrue(all("Intro" not in t.title for t in parsed))
+        self.assertLessEqual(len(parsed), 22)
+        self.assertTrue(all(t.relevance_score >= 0.15 for t in parsed))
+        tiers_present = {t.tier for t in parsed}
+        self.assertEqual(tiers_present, {1, 2, 3})
+
+    @patch("src.skills.music.aggregators.deezer._HTTP_SESSION.get")
+    def test_deezer_similar_validates_title_and_artist_match(self, mock_get):
+        from src.skills.music.aggregators.deezer import DeezerAggregator
+
+        # Deezer search returns an unrelated artist first, followed by the actual matching artist
+        search_resp = MagicMock()
+        search_resp.json.return_value = {
+            "data": [
+                {"id": 999, "title": "Solar System Meditation", "artist": {"id": 888, "name": "Yoga Guru"}},
+                {"id": 101, "title": "Solar System", "artist": {"id": 42, "name": "Sub Focus"}},
+            ]
+        }
+        rel_resp = MagicMock()
+        rel_resp.json.return_value = {
+            "data": [{"id": 55, "name": "Dimension"}]
+        }
+        top_resp = MagicMock()
+        top_resp.json.return_value = {
+            "data": [{"id": 777, "title": "Offender", "artist": {"name": "Dimension"}, "album": {"title": "Organ"}}]
+        }
+        mock_get.side_effect = [search_resp, rel_resp, top_resp]
+
+        dz = DeezerAggregator()
+        tracks = dz.get_similar("Solar System by Sub Focus")
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0].title, "Offender")
+        self.assertEqual(tracks[0].artist, "Dimension")
+        self.assertEqual(tracks[0].tier, 1)
+
+    def test_multi_source_consensus_boosts_to_shelf_1(self):
+        from src.skills.music.aggregators.manager import MusicAggregatorManager
+        from src.skills.music.models import Track
+
+        mgr = MusicAggregatorManager()
+        candidates = [
+            Track(title="Offender", artist="Dimension", source="lastfm_dnb", tier=2, relevance_score=0.80, verified_genre=True),
+            Track(title="Offender", artist="Dimension", album="Organ", deezer_id=12345, source="deezer_dnb", tier=2, relevance_score=0.78),
+        ]
+        deduped = mgr._filter_and_deduplicate(candidates)
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0].tier, 1)
+        self.assertEqual(deduped[0].album, "Organ")
+        self.assertEqual(deduped[0].deezer_id, 12345)
+        self.assertTrue(deduped[0].verified_genre)
+        self.assertGreater(deduped[0].relevance_score, 0.90)
+
+
 if __name__ == "__main__":
     unittest.main()
 

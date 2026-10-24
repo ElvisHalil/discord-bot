@@ -24,7 +24,7 @@ _CHANNEL_LAST_PLAYED_SONG: Dict[int, PlayedSongRecord] = BoundedCache(maxsize=12
 
 # Rolling session history of recently played/recommended tracks to prevent repeats across turns
 # Scoped per channel_id so one chat's music history never affects another chat.
-_CHANNEL_RECENTLY_PLAYED_TRACKS = defaultdict(lambda: deque(maxlen=30))
+_CHANNEL_RECENTLY_PLAYED_TRACKS = defaultdict(lambda: deque(maxlen=80))
 
 
 class _ChannelAwareDeque(deque):
@@ -33,7 +33,7 @@ class _ChannelAwareDeque(deque):
         _CHANNEL_RECENTLY_PLAYED_TRACKS.clear()
 
 
-RECENTLY_PLAYED_TRACKS = _ChannelAwareDeque(maxlen=30)
+RECENTLY_PLAYED_TRACKS = _ChannelAwareDeque(maxlen=80)
 
 _EXPLICIT_MUSIC_CUE_RE = compile_word_boundary_re(_EXPLICIT_MUSIC_CUE_WORDS)
 _REPLY_SONG_CARD_RE = re.compile(

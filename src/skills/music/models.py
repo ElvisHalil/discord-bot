@@ -89,6 +89,9 @@ class Track:
     speed_score: Optional[float] = None
     intensity_score: Optional[float] = None
     acoustic_vibe: Optional[str] = None
+    tier: int = 1
+    relevance_score: float = 1.0
+    verified_genre: bool = False
 
     def display_line(self) -> str:
         """Formatted string representation for tool output."""

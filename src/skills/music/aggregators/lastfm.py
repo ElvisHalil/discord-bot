@@ -21,10 +21,17 @@ def _http_get(url: str, **kwargs):
     return _HTTP_SESSION.get(url, **kwargs)
 
 _LASTFM_RAW_CACHE: dict[str, tuple[float, dict]] = {}
+_LASTFM_VERIFIED_ARTISTS_CACHE: dict[str, set[str]] = {}
 _LASTFM_CACHE_TTL = 900.0
+
+_ALBUM_FILLER_RE = re.compile(
+    r"(?:^|\b)(?:intro|outro|interlude|skit|prologue|epilogue|commentary|voice\s*memo)(?:\b|$)",
+    re.IGNORECASE,
+)
 
 def clear_lastfm_cache() -> None:
     _LASTFM_RAW_CACHE.clear()
+    _LASTFM_VERIFIED_ARTISTS_CACHE.clear()
 
 class LastFmAggregator(BaseMusicAggregator):
     """
@@ -69,12 +76,13 @@ class LastFmAggregator(BaseMusicAggregator):
         return {}
 
     def _parse_similar_tracks(self, data: dict, exclude_song: str = "") -> list[Track]:
-        """Extracts Track models from a Last.fm similartracks response."""
+        """Extracts Track models from a Last.fm similartracks response, enforcing a relevance floor
+        and organizing matches into 3 shelves (Tier 1: Closest, Tier 2: Strong Neighbors, Tier 3: Deeper Cuts)."""
         tracks = []
         raw = data.get("similartracks", {}).get("track", [])
         if isinstance(raw, dict):
             raw = [raw]
-        for t in raw:
+        for idx, t in enumerate(raw):
             title = t.get("name", "")
             artist_obj = t.get("artist", {})
             artist = artist_obj.get("name", "") if isinstance(artist_obj, dict) else str(artist_obj)
@@ -82,10 +90,38 @@ class LastFmAggregator(BaseMusicAggregator):
                 continue
             if exclude_song and exclude_song.lower() == title.lower():
                 continue
+            if _ALBUM_FILLER_RE.search(title) and not _ALBUM_FILLER_RE.search(exclude_song or ""):
+                continue
+
+            raw_match = t.get("match")
+            if raw_match is not None:
+                try:
+                    match_score = float(raw_match)
+                except (TypeError, ValueError):
+                    match_score = max(0.05, 1.0 - idx * 0.02)
+            else:
+                match_score = max(0.05, 1.0 - idx * 0.02)
+
+            # Relevance floor: drop weak #23-#50 tail tracks or ultra-low similarity matches (<0.15 once core pool is filled)
+            if len(tracks) >= 22:
+                break
+            if raw_match is not None and match_score < 0.15 and len(tracks) >= 6:
+                continue
+
+            if len(tracks) < 8 or (raw_match is not None and match_score >= 0.55):
+                tier = 1
+            elif len(tracks) < 16 or (raw_match is not None and match_score >= 0.28):
+                tier = 2
+            else:
+                tier = 3
+
             tracks.append(Track(
                 title=title,
                 artist=artist,
-                source="lastfm_similar"
+                source="lastfm_similar",
+                tier=tier,
+                relevance_score=round(match_score, 3),
+                verified_genre=True,
             ))
         return tracks
 
@@ -144,8 +180,9 @@ class LastFmAggregator(BaseMusicAggregator):
         total_overlap = trk_in_q.union(cand_art_tokens.intersection(q_tokens))
         return len(total_overlap) >= max(1, int(len(q_tokens) * 0.6))
 
-    def _get_similar_artists_tracks(self, artist: str, max_artists: int = 8, tracks_per_artist: int = 3) -> list[Track]:
-        """Fetches top tracks from closely related artists on Last.fm's artist similarity graph."""
+    def _get_similar_artists_tracks(self, artist: str, max_artists: int = 8, tracks_per_artist: int = 4) -> list[Track]:
+        """Fetches top tracks from closely related artists on Last.fm's artist similarity graph,
+        tagged into 3 shelves (Tier 1: Top closest artists, Tier 2: Mid-catalog cuts, Tier 3: Deeper scene cuts)."""
         tracks = []
         artist_res = self._call("artist.getsimilar", {
             "artist": artist,
@@ -156,31 +193,63 @@ class LastFmAggregator(BaseMusicAggregator):
         if isinstance(similar_artists, dict):
             similar_artists = [similar_artists]
 
-        rel_names = [sa.get("name", "") for sa in similar_artists[:max_artists] if sa.get("name", "")]
-        if not rel_names:
+        rel_items: list[tuple[int, str]] = []
+        for idx, sa in enumerate(similar_artists):
+            if len(rel_items) >= max_artists:
+                break
+            name = sa.get("name", "") if isinstance(sa, dict) else str(sa)
+            if not name:
+                continue
+            raw_m = sa.get("match") if isinstance(sa, dict) else None
+            if raw_m is not None:
+                try:
+                    if float(raw_m) < 0.20 and len(rel_items) >= 4:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            rel_items.append((idx, name))
+
+        if not rel_items:
             return []
 
-        def _fetch_artist_top(rel_name: str) -> list[Track]:
+        def _fetch_artist_top(item: tuple[int, str]) -> list[Track]:
+            art_idx, rel_name = item
             local_tracks = []
             top_res = self._call("artist.gettoptracks", {
                 "artist": rel_name,
-                "limit": tracks_per_artist,
+                "limit": max(tracks_per_artist, 8),
                 "autocorrect": 1
             })
             top_tracks = top_res.get("toptracks", {}).get("track", [])
             if isinstance(top_tracks, dict):
                 top_tracks = [top_tracks]
-            for tt in top_tracks:
+            clean_top = [
+                tt for tt in top_tracks
+                if tt.get("name", "") and not _ALBUM_FILLER_RE.search(tt.get("name", ""))
+            ] or top_tracks
+            for t_idx, tt in enumerate(clean_top[:tracks_per_artist]):
                 t_name = tt.get("name", "")
                 if t_name:
+                    if art_idx < 3 and t_idx < 2:
+                        tier = 1
+                        rel_score = 0.90
+                    elif art_idx < 6 and t_idx < 3:
+                        tier = 2
+                        rel_score = 0.78
+                    else:
+                        tier = 3
+                        rel_score = 0.65
                     local_tracks.append(Track(
                         title=t_name,
                         artist=rel_name,
-                        source="lastfm_similar"
+                        source="lastfm_similar",
+                        tier=tier,
+                        relevance_score=rel_score,
+                        verified_genre=True,
                     ))
             return local_tracks
 
-        for art_tracks in map_in_workers(_fetch_artist_top, rel_names):
+        for art_tracks in map_in_workers(_fetch_artist_top, rel_items):
             tracks.extend(art_tracks)
         return tracks
 
@@ -305,6 +374,13 @@ class LastFmAggregator(BaseMusicAggregator):
 
         return tracks
 
+    def get_verified_genre_artists(self, genre: str | None) -> set[str]:
+        """Returns the cached set of verified primary-genre artist names (lowercase) for a genre tag."""
+        if not genre:
+            return set()
+        tag = genre.lower().strip()
+        return set(_LASTFM_VERIFIED_ARTISTS_CACHE.get(tag, set()))
+
     def get_charts(self, genre: str = None) -> list[Track]:
         key = self.api_key or os.getenv("LASTFM_API_KEY")
         if not key:
@@ -327,6 +403,15 @@ class LastFmAggregator(BaseMusicAggregator):
             if isinstance(raw, dict):
                 raw = [raw]
 
+            # Pull a rotating deeper page (Page 2 or 3) when Page 1 has a full catalog so Shelf 3 (Deep Cuts) is stocked
+            deep_raw = []
+            if len(raw) >= 20:
+                deep_page = random.choice((2, 3))
+                deep_res = self._call("tag.gettoptracks", {"tag": tag, "limit": 50, "page": deep_page})
+                deep_raw = deep_res.get("tracks", {}).get("track", [])
+                if isinstance(deep_raw, dict):
+                    deep_raw = [deep_raw]
+
             raw_artists = art_res.get("topartists", {}).get("artist", [])
             if isinstance(raw_artists, dict):
                 raw_artists = [raw_artists]
@@ -341,38 +426,41 @@ class LastFmAggregator(BaseMusicAggregator):
             artist_seen = set()
             source_name = f"lastfm_{tag.replace(' ', '_')}"
 
-            # Step A: Candidate tracks from tag.gettoptracks cross-verified against tag.gettopartists
-            sampled_candidates = []
-            if raw:
-                clean_raw = [
-                    t for t in raw
+            def _filter_tag_track_pool(track_list: list) -> list:
+                if not track_list:
+                    return []
+                cleaned = [
+                    t for t in track_list
                     if not is_garbage_music_title(
                         t.get("name", ""),
                         query="",
                         author=t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))
                     )
+                    and not _ALBUM_FILLER_RE.search(t.get("name", ""))
                 ]
-                if clean_raw:
-                    raw = clean_raw
-
+                if cleaned:
+                    track_list = cleaned
                 if verified_genre_artists:
-                    verified_raw = [
-                        t for t in raw
+                    ver = [
+                        t for t in track_list
                         if (t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))).lower().strip()
                         in verified_genre_artists
                     ]
-                    if verified_raw:
-                        raw = verified_raw
-
-                unplayed_raw = [
-                    t for t in raw
+                    if ver:
+                        track_list = ver
+                unplayed = [
+                    t for t in track_list
                     if not is_recently_played(
                         t.get("name", ""),
                         t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))
                     )
                 ]
-                active_raw = unplayed_raw if unplayed_raw else raw
+                return unplayed if unplayed else track_list
 
+            # Step A: Candidate tracks from tag.gettoptracks cross-verified against tag.gettopartists (Shelf 1 Core)
+            sampled_candidates = []
+            active_raw = _filter_tag_track_pool(raw)
+            if active_raw:
                 diverse_raw = []
                 for t in active_raw:
                     art = t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))
@@ -382,16 +470,29 @@ class LastFmAggregator(BaseMusicAggregator):
                         diverse_raw.append(t)
                 sampled_candidates = random.sample(diverse_raw, min(8, len(diverse_raw)))
 
-            # Step B: Candidate rotating artists from tag.gettopartists
+            # Step A2: Deep-cut candidates from rotating Page 2/3 (Shelf 3 Deep Cuts)
+            sampled_deep_candidates = []
+            active_deep = _filter_tag_track_pool(deep_raw)
+            if active_deep:
+                diverse_deep = []
+                for t in active_deep:
+                    art = t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))
+                    clean_art = art.lower().strip()
+                    if clean_art and clean_art not in artist_seen:
+                        artist_seen.add(clean_art)
+                        diverse_deep.append(t)
+                sampled_deep_candidates = random.sample(diverse_deep, min(5, len(diverse_deep)))
+
+            # Step B: Candidate rotating artists from tag.gettopartists (Shelf 2 Solid Artist Cuts)
             selected_artists = []
             if raw_artists:
                 step_a_artists = {
                     (t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))).lower().strip()
-                    for t in sampled_candidates
+                    for t in (sampled_candidates + sampled_deep_candidates)
                 }
                 fresh_cand_artists = []
                 fallback_cand_artists = []
-                for a in raw_artists[:45]:
+                for a in raw_artists[:48]:
                     a_name = a.get("name", "") if isinstance(a, dict) else str(a)
                     clean_a = a_name.lower().strip()
                     if a_name and clean_a not in step_a_artists:
@@ -406,7 +507,7 @@ class LastFmAggregator(BaseMusicAggregator):
             all_cand_artist_names = list(dict.fromkeys(
                 [
                     (t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", "")))
-                    for t in sampled_candidates
+                    for t in (sampled_candidates + sampled_deep_candidates)
                 ]
                 + selected_artists
             ))
@@ -449,7 +550,14 @@ class LastFmAggregator(BaseMusicAggregator):
                     return True
                 return any(tag in h or h in tag for h in high_set)
 
-            # Finalize Step A tracks (up to 6 verified primary-genre tracks)
+            # Cache verified primary-genre artists for cross-source gatekeeping in MusicAggregatorManager
+            verified_primary_set = {
+                a for a in verified_genre_artists if _is_verified_primary_artist(a)
+            }
+            if verified_primary_set:
+                _LASTFM_VERIFIED_ARTISTS_CACHE[tag] = verified_primary_set
+
+            # Finalize Step A tracks -> Shelf 1 (up to 6 verified primary-genre Core tracks)
             artist_seen = set()
             if sampled_candidates:
                 primary_sampled = [
@@ -469,31 +577,47 @@ class LastFmAggregator(BaseMusicAggregator):
                             title=title,
                             artist=artist,
                             genre=genre.title(),
-                            source=source_name
+                            source=source_name,
+                            tier=1,
+                            relevance_score=1.0,
+                            verified_genre=True,
                         ))
 
-            # Finalize Step B tracks (up to 6 rotating primary-genre artists)
+            # Finalize Step B tracks -> Shelf 2 (up to 6 rotating primary-genre artists' sweet-spot cuts #3-#12)
             verified_step_b_artists = [
                 a_name for a_name in selected_artists
                 if a_name.lower().strip() not in artist_seen and _is_verified_primary_artist(a_name)
             ][:6]
 
             def _fetch_tag_artist_top(a_name: str):
-                top_res = self._call("artist.gettoptracks", {"artist": a_name, "limit": 8, "autocorrect": 1})
+                top_res = self._call("artist.gettoptracks", {"artist": a_name, "limit": 15, "autocorrect": 1})
                 top_trks = top_res.get("toptracks", {}).get("track", [])
                 if isinstance(top_trks, dict):
                     top_trks = [top_trks]
                 if top_trks:
                     clean_trks = [
-                        tk for tk in top_trks[:8]
-                        if tk.get("name") and not is_garbage_music_title(tk.get("name", ""), query="", author=a_name)
+                        tk for tk in top_trks[:15]
+                        if tk.get("name")
+                        and not is_garbage_music_title(tk.get("name", ""), query="", author=a_name)
+                        and not _ALBUM_FILLER_RE.search(tk.get("name", ""))
                     ]
                     active_trks = clean_trks if clean_trks else top_trks[:5]
-                    unplayed_trks = [
-                        tk for tk in active_trks
+                    # Prefer mid-catalog sweet-spot cuts (#3-#12) over #1 radio single when available
+                    mid_catalog = active_trks[2:12] if len(active_trks) >= 4 else active_trks
+                    unplayed_mid = [
+                        tk for tk in mid_catalog
                         if tk.get("name") and not is_recently_played(tk.get("name", ""), a_name)
                     ]
-                    pool_trks = unplayed_trks if unplayed_trks else active_trks
+                    if unplayed_mid:
+                        pool_trks = unplayed_mid
+                        assigned_tier = 2
+                    else:
+                        unplayed_all = [
+                            tk for tk in active_trks
+                            if tk.get("name") and not is_recently_played(tk.get("name", ""), a_name)
+                        ]
+                        pool_trks = unplayed_all if unplayed_all else active_trks
+                        assigned_tier = 2
                     if not pool_trks:
                         return None
                     chosen_t = random.choice(pool_trks)
@@ -503,7 +627,10 @@ class LastFmAggregator(BaseMusicAggregator):
                             title=t_title,
                             artist=a_name,
                             genre=genre.title(),
-                            source=source_name
+                            source=source_name,
+                            tier=assigned_tier,
+                            relevance_score=0.9,
+                            verified_genre=True,
                         )
                 return None
 
@@ -512,6 +639,30 @@ class LastFmAggregator(BaseMusicAggregator):
                     if trk:
                         artist_seen.add(trk.artist.lower().strip())
                         tracks.append(trk)
+
+            # Finalize Step A2 tracks -> Shelf 3 (up to 4 verified Deep Cuts from Page 2/3)
+            if sampled_deep_candidates:
+                primary_deep = [
+                    t for t in sampled_deep_candidates
+                    if _is_verified_primary_artist(
+                        t.get("artist", {}).get("name", "") if isinstance(t.get("artist"), dict) else str(t.get("artist", ""))
+                    )
+                ]
+                for t in (primary_deep or sampled_deep_candidates)[:4]:
+                    title = t.get("name", "")
+                    artist_obj = t.get("artist", {})
+                    artist = artist_obj.get("name", "") if isinstance(artist_obj, dict) else str(artist_obj)
+                    if title and artist and artist.lower().strip() not in artist_seen:
+                        artist_seen.add(artist.lower().strip())
+                        tracks.append(Track(
+                            title=title,
+                            artist=artist,
+                            genre=genre.title(),
+                            source=source_name,
+                            tier=3,
+                            relevance_score=0.85,
+                            verified_genre=True,
+                        ))
         else:
             print("  └─ 📻 [Last.fm]: Fetching global top chart tracks...")
             res = self._call("chart.gettoptracks", {"limit": 50})
@@ -528,7 +679,7 @@ class LastFmAggregator(BaseMusicAggregator):
                         artist_seen.add(clean_art)
                         diverse_raw.append(t)
                 sampled = random.sample(diverse_raw, min(10, len(diverse_raw)))
-                for t in sampled:
+                for idx, t in enumerate(sampled):
                     title = t.get("name", "")
                     artist_obj = t.get("artist", {})
                     artist = artist_obj.get("name", "") if isinstance(artist_obj, dict) else str(artist_obj)
@@ -536,7 +687,8 @@ class LastFmAggregator(BaseMusicAggregator):
                         tracks.append(Track(
                             title=title,
                             artist=artist,
-                            source="lastfm_global"
+                            source="lastfm_global",
+                            tier=1 if idx < 5 else 2,
                         ))
 
         return tracks
@@ -581,20 +733,24 @@ class LastFmAggregator(BaseMusicAggregator):
                         raw_tracks = [raw_tracks]
 
         tracks = []
-        for t in raw_tracks[:limit]:
+        for idx, t in enumerate(raw_tracks[:limit]):
             title = t.get("name", "").strip()
+            if not title or _ALBUM_FILLER_RE.search(title):
+                continue
             artist_obj = t.get("artist", {})
             resolved_artist = (
                 artist_obj.get("name", "").strip()
                 if isinstance(artist_obj, dict)
                 else str(artist_obj or clean_name).strip()
             ) or clean_name
-            if title:
-                tracks.append(Track(
-                    title=title,
-                    artist=resolved_artist,
-                    source="lastfm_artist"
-                ))
+            tier = 1 if idx < 5 else (2 if idx < 13 else 3)
+            tracks.append(Track(
+                title=title,
+                artist=resolved_artist,
+                source="lastfm_artist",
+                tier=tier,
+                verified_genre=True,
+            ))
 
         if tracks:
             print(f"  └─ ✅ [Last.fm Artist]: Found {len(tracks)} top tracks for '{tracks[0].artist}'")

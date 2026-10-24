@@ -126,7 +126,6 @@ async def resolve_reaction_recommendation(
         verified_url, chosen_track = _extract_pre_resolved(similar_res)
 
     if not verified_url or not chosen_track:
-        random.shuffle(similar_tracks)
         for candidate in similar_tracks[:max_candidates]:
             yt_output = await run_in_worker(youtube_search_fn, candidate, max_results=1, is_music=True)
             m_url = re.search(r"(https:\/\/(?:music|www)\.youtube\.com\/watch\?v=[0-9A-Za-z_-]{11})", yt_output)

@@ -366,8 +366,12 @@ def skill_music_discovery(
             if not tracks:
                 return f"No tracks found for artist '{artist}'."
 
-            random.shuffle(tracks)
-            top_sample = tracks[:15]
+            top_sample = MusicAggregatorManager.sample_tiered_tracks(
+                tracks,
+                k=15,
+                weights=(0.45, 0.35, 0.20),
+                enforce_artist_diversity=False,
+            )
             output = f"=== TOP TRACKS BY '{artist.title()}' ===\n\n"
             pre_resolved = _pre_resolve_top_candidate(top_sample)
             if pre_resolved:
@@ -423,7 +427,7 @@ def skill_music_discovery(
             elif parsed_genre:
                 sim_tracks = manager.get_similar_tracks(similar_to)
                 genre_tracks = manager.get_top_charts(genre=parsed_genre)
-                tracks = (genre_tracks or []) + (sim_tracks or [])
+                tracks = (sim_tracks or []) + (genre_tracks or [])
                 mood_tag = parsed_genre.title()
             else:
                 tracks = manager.get_similar_tracks(similar_to)
@@ -440,8 +444,12 @@ def skill_music_discovery(
                     unique_tracks.append(t)
 
             is_unrelated_fallback = all(t.source == "fallback_unrelated" for t in unique_tracks)
-            random.shuffle(unique_tracks)
-            top_sample = unique_tracks[:15]
+            top_sample = MusicAggregatorManager.sample_tiered_tracks(
+                unique_tracks,
+                k=15,
+                weights=(0.50, 0.35, 0.15),
+                enforce_artist_diversity=True,
+            )
 
             if is_unrelated_fallback:
                 header = f"=== NO DIRECT SIMILAR SONGS FOUND FOR '{similar_to}' — FALLBACK SUGGESTIONS ===\n\n"
@@ -475,16 +483,12 @@ def skill_music_discovery(
             all_tracks = manager.get_top_charts(genre=parsed_genre)
             output = f"=== TODAY'S TOP CHARTING MUSIC ({parsed_genre.upper() if parsed_genre else 'ALL GENRES'}) ===\n\n"
         if all_tracks:
-            artist_seen = set()
-            featured_diverse = []
-            for t in all_tracks:
-                clean_artist = t.artist.lower().strip()
-                if clean_artist and clean_artist not in artist_seen:
-                    artist_seen.add(clean_artist)
-                    featured_diverse.append(t)
-
-            random.shuffle(featured_diverse)
-            featured_sample = featured_diverse[:15]
+            featured_sample = MusicAggregatorManager.sample_tiered_tracks(
+                all_tracks,
+                k=15,
+                weights=(0.45, 0.35, 0.20),
+                enforce_artist_diversity=True,
+            )
 
             pre_resolved = _pre_resolve_top_candidate(featured_sample)
             if pre_resolved:

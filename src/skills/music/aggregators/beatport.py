@@ -35,7 +35,12 @@ class BeatportAggregator(BaseMusicAggregator):
                     artist=dt.artist,
                     genre=display_genre if display_genre != "Electronic" else (dt.genre or "Electronic"),
                     album=dt.album,
-                    source="beatport_fallback_deezer"
+                    source="beatport_fallback_deezer",
+                    deezer_id=dt.deezer_id,
+                    preview_url=dt.preview_url,
+                    tier=dt.tier,
+                    relevance_score=dt.relevance_score,
+                    verified_genre=True,
                 ))
         except Exception as err:
             print(f"  └─ ⚠️ [Beatport Playlist Error]: {err}")
