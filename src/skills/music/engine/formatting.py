@@ -531,3 +531,68 @@ def standardize_song_reply(reply: str) -> str:
     reply = re.sub(r'<Raw YouTube[^\n>]*>', '', reply, flags=re.IGNORECASE)
     return reply.strip()
 
+
+def ensure_turn_music_card_preserved(
+    reply: str,
+    turn_messages: list,
+    fast_voice_turn: bool = False,
+) -> str:
+    """
+    Safety net for music & Autoplay turns:
+    If `skill_job_manager` (Autoplay start / skip / genre switch) or `skill_music_discovery`
+    returned a pre-resolved YouTube Music song card in the current turn, and the LLM's final
+    reply summarized the action into a 1-sentence intro while omitting the song card / URL,
+    automatically re-attach the verified song card so Track #1 is always posted immediately.
+    """
+    if fast_voice_turn:
+        return reply
+    text = (reply or "").strip()
+    if re.search(r"https?://(?:music\.|www\.)?youtube\.com/watch\?v=[0-9A-Za-z_-]{11}", text):
+        return reply
+
+    for m in reversed(turn_messages or []):
+        role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+        if role == "user":
+            break
+        if role != "tool":
+            continue
+        t_name = str((m.get("name") if isinstance(m, dict) else getattr(m, "name", "")) or "")
+        t_content = str((m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or "")
+        if not t_content or "youtube.com/watch?v=" not in t_content:
+            continue
+
+        # 1. Autoplay card from `skill_job_manager`
+        if t_name == "skill_job_manager" and "📻 **Autoplay" in t_content:
+            idx = t_content.find("📻 **Autoplay")
+            card_block = t_content[idx:]
+            for marker in ("\n\n[SYSTEM INSTRUCTION", "\n\n[Current Time Context", "\n[Current Time Context"):
+                if marker in card_block:
+                    card_block = card_block.split(marker, 1)[0]
+            card_block = card_block.strip()
+            if card_block and "youtube.com/watch?v=" in card_block:
+                print("🛡️ [Autoplay Card Guard]: Re-attached Track #1 Autoplay song card omitted by LLM summary.")
+                return f"{text}\n\n{card_block}".strip() if text else card_block
+
+        # 2. Pre-resolved card from `skill_music_discovery`
+        if t_name == "skill_music_discovery" and "=== VERIFIED YOUTUBE MUSIC RESULT" in t_content:
+            idx = t_content.find("=== VERIFIED YOUTUBE MUSIC RESULT")
+            block = t_content[idx:]
+            m_s = re.search(r"(?im)^Song:\s*(.+)$", block)
+            m_a = re.search(r"(?im)^Artist:\s*(.+)$", block)
+            m_g = re.search(r"(?im)^Genre:\s*(.+)$", block)
+            m_al = re.search(r"(?im)^Album:\s*(.+)$", block)
+            m_u = re.search(r"(?im)^Link:\s*(https?://\S+)$", block)
+            if m_s and m_a and m_u:
+                print("🛡️ [Music Card Guard]: Re-attached pre-resolved song card omitted by LLM summary.")
+                return format_song_card(
+                    song=m_s.group(1).strip(),
+                    artist=m_a.group(1).strip(),
+                    url=m_u.group(1).strip(),
+                    genre=m_g.group(1).strip() if m_g else None,
+                    album=m_al.group(1).strip() if m_al else None,
+                    intro=text,
+                )
+
+    return reply
+
+

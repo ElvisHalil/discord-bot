@@ -21,3 +21,6 @@ PyNaCl~=1.5
 edge-tts~=7.0
 discord-ext-voice-recv>=0.5.2a179
 faster-whisper>=1.0.3
+ytmusicapi~=1.12.3
+ytmusicapi~=1.12.3
+

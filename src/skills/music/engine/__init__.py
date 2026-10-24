@@ -1,6 +1,7 @@
 from src.skills.music.engine import dsp
 from src.skills.music.engine.formatting import (
     MUSIC_METADATA_CACHE,
+    ensure_turn_music_card_preserved,
     format_song_card,
     get_music_metadata,
     is_placeholder_text,

@@ -1213,6 +1213,37 @@ class TestOrchestratorAndDispatcherJobIntegration(unittest.TestCase):
         self.assertEqual(job.payload_text, "acid techno")
         self.assertEqual(job.next_fire_at, t0 + 50.0 + 215.0)
 
+    def test_ensure_turn_music_card_preserved_reattaches_omitted_autoplay_card(self):
+        from src.skills.music.engine.formatting import ensure_turn_music_card_preserved
+
+        tool_out = (
+            "✅ **Scheduled Job `J-105`:** Music Autoplay (dnb)\n\n"
+            "📻 **Autoplay (dnb)** — Next track in `3:33`:\n\n"
+            "**Song:** Fall 2 Fast\n"
+            "**Artist:** Particle\n"
+            "**Genre:** Dnb\n\n"
+            "https://music.youtube.com/watch?v=bPJKn9EK_vI\n\n"
+            "[SYSTEM INSTRUCTION: You MUST include the exact `📻 **Autoplay (...)` header...]"
+        )
+        turn_history = [
+            {"role": "user", "content": "User Jubkill says: autoplay drum and bass"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "skill_job_manager", "arguments": {"action": "autoplay", "query": "dnb"}}}],
+            },
+            {"role": "tool", "name": "skill_job_manager", "content": tool_out},
+        ]
+        # LLM writes a conversational intro and forgets to copy the Track #1 song card
+        llm_reply = "🎧 Music Autoplay has been started with a Drum & Bass vibe! Enjoying some heavy beats now."
+        preserved = ensure_turn_music_card_preserved(llm_reply, turn_history)
+        self.assertIn("🎧 Music Autoplay has been started with a Drum & Bass vibe!", preserved)
+        self.assertIn("📻 **Autoplay (dnb)** — Next track in `3:33`:", preserved)
+        self.assertIn("**Song:** Fall 2 Fast", preserved)
+        self.assertIn("**Artist:** Particle", preserved)
+        self.assertIn("https://music.youtube.com/watch?v=bPJKn9EK_vI", preserved)
+        self.assertNotIn("[SYSTEM INSTRUCTION", preserved)
+
 
 if __name__ == "__main__":
     unittest.main()

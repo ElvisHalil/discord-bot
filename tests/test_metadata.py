@@ -395,7 +395,7 @@ class TestMusicDiversityExpansion(unittest.TestCase):
         from src.skills.music.music import skill_music_discovery
 
         mgr = MusicAggregatorManager()
-        for name in ("lastfm", "deezer", "freqblog"):
+        for name in ("lastfm", "deezer", "freqblog", "ytmusic"):
             mgr.aggregators[name].get_similar = MagicMock(return_value=[])
         mgr.get_top_charts = MagicMock(return_value=[
             Track(title="Baddadan", artist="Chase & Status", genre="Drum & Bass", source="deezer")
@@ -539,6 +539,7 @@ class TestMusicDiversityExpansion(unittest.TestCase):
         ])
         mgr.aggregators["beatport"].get_charts = MagicMock(return_value=[])
         mgr.aggregators["charts"].get_charts = MagicMock(return_value=[])
+        mgr.aggregators["ytmusic"].get_charts = MagicMock(return_value=[])
         mgr.aggregators["deezer"].get_charts = MagicMock(return_value=[
             Track(title="Off-Genre Playlist Track", artist="Random User", genre="Phonk", source="deezer_phonk")
         ])
@@ -599,6 +600,7 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         mgr.aggregators["beatport"].get_charts = MagicMock(
             side_effect=lambda genre=None: [Track(title=f"BP ({genre})", artist=f"BPArtist ({genre})", source="beatport")]
         )
+        mgr.aggregators["ytmusic"].get_charts = MagicMock(return_value=[])
 
         # Standalone 'banger' pools across 4 Deezer queries + 2 Last.fm tags + Beatport Hype 100
         banger_tracks = mgr.get_mood_tracks(mood="banger")
@@ -718,6 +720,7 @@ class TestMoodVibeDiscovery(unittest.TestCase):
             Track(title="Strobe", artist="deadmau5", album="For Lack of a Better Name", source="deezer_artist"),
             Track(title="Monophobia", artist="deadmau5", album="mau5ville: Level 1", source="deezer_artist"),
         ])
+        mgr.aggregators["ytmusic"].get_artist_top_tracks = MagicMock(return_value=[])
 
         combined = mgr.get_artist_tracks("deadmau5")
         self.assertEqual([t.title for t in combined], ["Strobe", "I Remember", "Monophobia"])
@@ -1156,15 +1159,266 @@ class TestThreeShelfTieredDiscoveryAndGatekeeper(unittest.TestCase):
         mgr = MusicAggregatorManager()
         candidates = [
             Track(title="Offender", artist="Dimension", source="lastfm_dnb", tier=2, relevance_score=0.80, verified_genre=True),
-            Track(title="Offender", artist="Dimension", album="Organ", deezer_id=12345, source="deezer_dnb", tier=2, relevance_score=0.78),
+            Track(
+                title="Offender",
+                artist="Dimension",
+                album="Organ",
+                url="https://music.youtube.com/watch?v=offender123",
+                deezer_id=12345,
+                source="ytmusic_radio",
+                tier=2,
+                relevance_score=0.78,
+            ),
         ]
         deduped = mgr._filter_and_deduplicate(candidates)
         self.assertEqual(len(deduped), 1)
         self.assertEqual(deduped[0].tier, 1)
         self.assertEqual(deduped[0].album, "Organ")
+        self.assertEqual(deduped[0].url, "https://music.youtube.com/watch?v=offender123")
         self.assertEqual(deduped[0].deezer_id, 12345)
         self.assertTrue(deduped[0].verified_genre)
         self.assertGreater(deduped[0].relevance_score, 0.90)
+
+
+class TestYouTubeMusicAggregatorAndBlendedDiscovery(unittest.TestCase):
+    """Tests for `ytmusicapi` (`YouTubeMusicAggregator`), scene-seeded Radio queues, and studio `ATV` link resolution."""
+
+    def setUp(self):
+        from src.skills.music.aggregators.ytmusic import clear_ytmusic_cache
+        from src.skills.music.engine.formatting import MUSIC_METADATA_CACHE, RECENTLY_PLAYED_TRACKS
+        clear_ytmusic_cache()
+        MUSIC_METADATA_CACHE.clear()
+        RECENTLY_PLAYED_TRACKS.clear()
+
+    def tearDown(self):
+        from src.skills.music.aggregators.ytmusic import clear_ytmusic_cache
+        from src.skills.music.engine.formatting import MUSIC_METADATA_CACHE, RECENTLY_PLAYED_TRACKS
+        clear_ytmusic_cache()
+        MUSIC_METADATA_CACHE.clear()
+        RECENTLY_PLAYED_TRACKS.clear()
+
+    def test_parse_ytmusic_duration_and_match_hit_safeguard(self):
+        from src.skills.music.aggregators.ytmusic import (
+            _match_ytmusic_song_hit,
+            parse_ytmusic_duration_seconds,
+        )
+
+        self.assertEqual(parse_ytmusic_duration_seconds({"duration_seconds": 215}), 215)
+        self.assertEqual(parse_ytmusic_duration_seconds({"length": "3:45"}), 225)
+        self.assertEqual(parse_ytmusic_duration_seconds({"duration": "1:02:03"}), 3723)
+        self.assertIsNone(parse_ytmusic_duration_seconds({}))
+
+        hits = [
+            {
+                "videoId": "wrongvid111",
+                "title": "Nobody Knows",
+                "artists": [{"name": "Random Pop Singer"}],
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+            {
+                "videoId": "solarvid222",
+                "title": "Solar System",
+                "artists": [{"name": "Sub Focus"}],
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+        ]
+        # Unrelated fuzzy hit must be rejected when song is completely unknown
+        self.assertIsNone(
+            _match_ytmusic_song_hit(hits, "Completely Unknown Obscure Track 99999", "Nobody")
+        )
+        # Genuine song + artist hit matches accurately
+        matched = _match_ytmusic_song_hit(hits, "Solar System", "Sub Focus")
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched["videoId"], "solarvid222")
+
+    @patch("src.skills.music.aggregators.ytmusic.fetch_ytmusic_watch_radio")
+    @patch("src.skills.music.aggregators.ytmusic.search_ytmusic_songs")
+    def test_ytmusic_get_similar_builds_tiered_atv_radio_and_caches_duration(
+        self, mock_search, mock_radio
+    ):
+        from src.skills.music.aggregators.ytmusic import YouTubeMusicAggregator
+        from src.skills.music.engine.formatting import MUSIC_METADATA_CACHE
+
+        mock_search.return_value = [
+            {
+                "videoId": "seedvid1234",
+                "title": "Solar System",
+                "artists": [{"name": "Sub Focus"}],
+                "album": {"name": "Portals"},
+                "duration_seconds": 288,
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            }
+        ]
+        mock_radio.return_value = [
+            # Seed song itself -> should be excluded
+            {
+                "videoId": "seedvid1234",
+                "title": "Solar System",
+                "artists": [{"name": "Sub Focus"}],
+                "length": "4:48",
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+            # Short 30s intro -> should be skipped (< 65s)
+            {
+                "videoId": "introvid000",
+                "title": "Album Intro",
+                "artists": [{"name": "Dimension"}],
+                "length": "0:30",
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+            # 6 valid co-listened ATV tracks
+            {
+                "videoId": "simvid00001",
+                "title": "Offender",
+                "artists": [{"name": "Dimension"}],
+                "album": {"name": "Organ"},
+                "length": "3:39",
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+            {
+                "videoId": "simvid00002",
+                "title": "Deconstruct",
+                "artists": [{"name": "Culture Shock"}],
+                "album": {"name": "Sequel"},
+                "length": "4:12",
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+            {
+                "videoId": "simvid00003",
+                "title": "Afterglow",
+                "artists": [{"name": "Wilkinson"}],
+                "album": {"name": "Lazers Not Included"},
+                "length": "3:45",
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+            {
+                "videoId": "simvid00004",
+                "title": "Hackers",
+                "artists": [{"name": "Metrik"}],
+                "album": {"name": "Ex Machina"},
+                "length": "4:05",
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+            {
+                "videoId": "simvid00005",
+                "title": "Want You",
+                "artists": [{"name": "Kanine"}],
+                "album": {"name": "Want You - Single"},
+                "length": "3:28",
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+            {
+                "videoId": "simvid00006",
+                "title": "Baddadan",
+                "artists": [{"name": "Chase & Status"}],
+                "album": {"name": "2 Ruff, Vol. 1"},
+                "length": "2:58",
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+        ]
+
+        agg = YouTubeMusicAggregator()
+        tracks = agg.get_similar("Solar System by Sub Focus")
+        self.assertEqual(len(tracks), 6)
+        self.assertTrue(all(t.title != "Solar System" for t in tracks))
+        self.assertTrue(all(t.title != "Album Intro" for t in tracks))
+        self.assertEqual(tracks[0].title, "Offender")
+        self.assertEqual(tracks[0].artist, "Dimension")
+        self.assertEqual(tracks[0].album, "Organ")
+        self.assertEqual(tracks[0].url, "https://music.youtube.com/watch?v=simvid00001")
+        # Metadata cache pre-populated with exact duration in seconds (3:39 = 219s)
+        self.assertIn("simvid00001", MUSIC_METADATA_CACHE)
+        self.assertEqual(MUSIC_METADATA_CACHE["simvid00001"]["duration"], 219)
+        self.assertEqual(MUSIC_METADATA_CACHE["simvid00001"]["album"], "Organ")
+
+    @patch("src.skills.music.aggregators.ytmusic.fetch_ytmusic_watch_radio")
+    @patch("src.skills.music.aggregators.ytmusic.search_ytmusic_songs")
+    def test_ytmusic_get_charts_seeds_radio_from_verified_scene_tracks(
+        self, mock_search, mock_radio
+    ):
+        from src.skills.music.aggregators.ytmusic import YouTubeMusicAggregator
+        from src.skills.music.models import Track
+
+        scene_seeds = [
+            Track(
+                title="Rave",
+                artist="Sam Paganini",
+                genre="Driving Techno",
+                source="lastfm_driving_techno",
+                tier=1,
+                verified_genre=True,
+            )
+        ]
+        mock_search.return_value = [
+            {
+                "videoId": "ravevid1111",
+                "title": "Rave",
+                "artists": [{"name": "Sam Paganini"}],
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            }
+        ]
+        mock_radio.return_value = [
+            {
+                "videoId": "ravevid1111",
+                "title": "Rave",
+                "artists": [{"name": "Sam Paganini"}],
+                "length": "6:15",
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+            {
+                "videoId": "yrvid000001",
+                "title": "Your Mind",
+                "artists": [{"name": "Adam Beyer"}],
+                "album": {"name": "Your Mind"},
+                "length": "5:40",
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+            {
+                "videoId": "yrvid000002",
+                "title": "Age of Love (Charlotte de Witte & Enrico Sangiuliano Remix)",
+                "artists": [{"name": "The Age Of Love"}],
+                "album": {"name": "Age of Love"},
+                "length": "6:02",
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+        ]
+
+        agg = YouTubeMusicAggregator()
+        radio_tracks = agg.get_charts(genre="driving techno", seed_tracks=scene_seeds)
+        self.assertEqual(len(radio_tracks), 2)
+        self.assertEqual(radio_tracks[0].title, "Your Mind")
+        self.assertEqual(radio_tracks[0].artist, "Adam Beyer")
+        self.assertEqual(radio_tracks[0].genre, "Driving Techno")
+        self.assertTrue(radio_tracks[0].verified_genre)
+
+    @patch("src.skills.music.playback.youtube_music.youtube_http_get")
+    @patch("src.skills.music.aggregators.ytmusic.search_ytmusic_songs")
+    def test_fetch_direct_youtube_video_ids_uses_ytmusic_cache_and_atv_search(
+        self, mock_ytm_search, mock_http_get
+    ):
+        from src.skills.music.engine.formatting import MUSIC_METADATA_CACHE
+        from src.skills.music.playback.youtube_music import _fetch_direct_youtube_video_ids
+
+        # 1. Pre-cached track in MUSIC_METADATA_CACHE resolves in 0ms without calling search_ytmusic_songs or HTTP
+        MUSIC_METADATA_CACHE["cachedvid99"] = {
+            "song": "Your Mind",
+            "artist": "Adam Beyer",
+            "duration": 340,
+            "url": "https://music.youtube.com/watch?v=cachedvid99",
+        }
+        vids_cached = _fetch_direct_youtube_video_ids("Your Mind Adam Beyer Topic", limit=2)
+        self.assertEqual(vids_cached, ["cachedvid99"])
+        mock_ytm_search.assert_not_called()
+        mock_http_get.assert_not_called()
+
+        # 2. Uncached track resolves via search_ytmusic_songs without needing HTML scraping
+        mock_ytm_search.return_value = [
+            {"videoId": "atvvid12345", "title": "Strobe", "artists": [{"name": "deadmau5"}]}
+        ]
+        vids_atv = _fetch_direct_youtube_video_ids("Strobe deadmau5 Topic", limit=2)
+        self.assertEqual(vids_atv, ["atvvid12345"])
+        mock_ytm_search.assert_called_once()
+        mock_http_get.assert_not_called()
 
 
 if __name__ == "__main__":

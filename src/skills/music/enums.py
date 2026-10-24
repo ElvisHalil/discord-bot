@@ -67,6 +67,7 @@ class MusicProvider(StrEnum):
     FREQBLOG = "freqblog"
     BEATPORT = "beatport"
     CHARTS = "charts"
+    YTMUSIC = "ytmusic"
     YOUTUBE = "youtube"
 
 

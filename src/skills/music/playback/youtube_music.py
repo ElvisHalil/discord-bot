@@ -89,6 +89,11 @@ def clear_resolved_music_cache() -> None:
     _FAILED_MUSIC_CACHE.clear()
     _LAST_BLOCKED_OFFICIAL.clear()
     SERVED_SONG_VIDS.clear()
+    try:
+        from src.skills.music.aggregators.ytmusic import clear_ytmusic_cache
+        clear_ytmusic_cache()
+    except Exception:
+        pass
 
 
 from src.skills.music.catalogs import (
@@ -275,7 +280,44 @@ def _is_trusted_music_label(author: str) -> bool:
 
 
 def _fetch_direct_youtube_video_ids(yt_q: str, limit: int) -> list[str]:
-    """Queries YouTube search directly over the persistent HTTP session and extracts video IDs."""
+    """
+    Resolves candidate video IDs via:
+    1. Pre-cached `MUSIC_METADATA_CACHE` entry (0ms if track came from `YouTubeMusicAggregator` radio).
+    2. Official `ytmusicapi` studio `songs` (`MUSIC_VIDEO_TYPE_ATV`) search (`search_ytmusic_songs`).
+    3. Direct YouTube HTML search fallback over the persistent HTTP session.
+    """
+    vids: list[str] = []
+    clean_q = re.sub(r"\s+Topic$", "", (yt_q or "").strip(), flags=re.IGNORECASE).strip()
+
+    # 1. Check if `YouTubeMusicAggregator` already pre-cached an official videoId for this track (0ms)
+    try:
+        q_norm = re.sub(r"[^a-z0-9]+", "", clean_q.lower())
+        if q_norm:
+            for cached_vid, meta in list(MUSIC_METADATA_CACHE.items()):
+                c_song = re.sub(r"[^a-z0-9]+", "", str(meta.get("song") or "").lower())
+                c_art = re.sub(r"[^a-z0-9]+", "", str(meta.get("artist") or "").lower())
+                if c_song and c_art and f"{c_song}{c_art}" == q_norm and cached_vid not in vids:
+                    vids.append(cached_vid)
+    except Exception:
+        pass
+
+    # 2. Query YouTube Music's official `songs` (`ATV`) catalog via `ytmusicapi`
+    if not vids and clean_q:
+        try:
+            from src.skills.music.aggregators.ytmusic import search_ytmusic_songs
+            print(f"  └─ 🔍 [YouTube Music API]: Searching studio songs for '{clean_q}'...")
+            ytm_items = search_ytmusic_songs(clean_q, limit=min(max(limit, 2), 4))
+            for item in ytm_items:
+                vid = str((item or {}).get("videoId") or "").strip()
+                if vid and len(vid) == 11 and vid not in vids:
+                    vids.append(vid)
+        except Exception as e:
+            print(f"  └─ ⚠️ [YouTube Music API Search Warning]: {e}")
+
+    if vids:
+        return vids[:limit]
+
+    # 3. Supplement with direct YouTube search over persistent HTTP session
     try:
         print(f"  └─ 🔍 [YouTube Direct]: Querying '{yt_q}'...")
         yt_search_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(yt_q)}"
@@ -288,10 +330,12 @@ def _fetch_direct_youtube_video_ids(yt_q: str, limit: int) -> list[str]:
             direct_vids = list(dict.fromkeys(re.findall(r'"videoRenderer":\{"videoId":"([0-9A-Za-z_-]{11})"', r_yt.text)))
             if not direct_vids:
                 direct_vids = list(dict.fromkeys(re.findall(r'"videoId":"([0-9A-Za-z_-]{11})"', r_yt.text)))
-            return direct_vids[:limit]
+            for d_vid in direct_vids:
+                if d_vid not in vids:
+                    vids.append(d_vid)
     except Exception as e:
         print(f"  └─ ⚠️ [YouTube Direct Search Warning]: {e}")
-    return []
+    return vids[:limit]
 
 
 def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: set[str] | None = None) -> list[dict]:
@@ -611,11 +655,19 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
 
     # Populate in-memory metadata cache for Discord card rendering
     for cand in final_results:
+        existing_meta = MUSIC_METADATA_CACHE.get(cand["id"]) or {}
+        if not cand.get("album") and existing_meta.get("album"):
+            cand["album"] = existing_meta["album"]
+        if not cand.get("genre") and existing_meta.get("genre"):
+            cand["genre"] = existing_meta["genre"]
+        if not cand.get("duration") and existing_meta.get("duration"):
+            cand["duration"] = existing_meta["duration"]
         MUSIC_METADATA_CACHE[cand["id"]] = {
             "song": cand["title"],
             "artist": cand["artist"],
             "genre": cand.get("genre"),
             "album": cand.get("album"),
+            "duration": cand.get("duration"),
             "url": cand["url"],
             "embeddable": cand.get("embeddable", True),
             "is_official_fallback": cand.get("is_official_fallback", False),

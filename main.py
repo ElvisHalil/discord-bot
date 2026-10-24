@@ -43,7 +43,12 @@ from src.jobs import (
     SystemJobProvider,
 )
 from src.skills.jobs import skill_job_manager
-from src.skills.music.engine.formatting import format_song_card, get_music_metadata, standardize_song_reply
+from src.skills.music.engine.formatting import (
+    ensure_turn_music_card_preserved,
+    format_song_card,
+    get_music_metadata,
+    standardize_song_reply,
+)
 from src.skills.sports.tracker import (
     SPORTS_TRACKER,
     skill_sports_tracker,
@@ -1252,6 +1257,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
         if not reply.strip() and is_research:
             reply = "⚠️ I reached the maximum step limit before I could finish. Please try a narrower question."
 
+    reply = ensure_turn_music_card_preserved(reply, history, fast_voice_turn=fast_voice_turn)
     return reply
 
 

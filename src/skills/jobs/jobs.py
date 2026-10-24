@@ -45,8 +45,9 @@ _SWITCH_AUTOPLAY_GENRE_RE = re.compile(
 )
 
 _AUTOPLAY_DIRECT_INSTRUCTION = (
-    "\n\n[SYSTEM INSTRUCTION: Output the Autoplay header and Song/Artist/Link card above directly. "
-    "Do NOT call skill_music_discovery or skill_youtube_search.]"
+    "\n\n[SYSTEM INSTRUCTION: You MUST include the exact `📻 **Autoplay (...)` header and the full "
+    "`**Song:** / **Artist:** / https://music.youtube.com/watch?v=...` card above in your reply so Track #1 "
+    "plays immediately. Do NOT omit the song card or URL, and do NOT call skill_music_discovery or skill_youtube_search.]"
 )
 
 

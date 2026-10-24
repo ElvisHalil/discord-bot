@@ -8,6 +8,7 @@ from src.skills.music.aggregators.charts import ChartsAggregator
 from src.skills.music.aggregators.deezer import DeezerAggregator
 from src.skills.music.aggregators.freqblog import FreqBlogAggregator
 from src.skills.music.aggregators.lastfm import LastFmAggregator
+from src.skills.music.aggregators.ytmusic import YouTubeMusicAggregator
 from src.skills.music.catalogs import (
     GENRE_CANONICAL_MAP,
     GENRE_MOOD_MATRIX,
@@ -39,6 +40,7 @@ class MusicAggregatorManager:
             MusicProvider.FREQBLOG: FreqBlogAggregator(),
             MusicProvider.BEATPORT: BeatportAggregator(),
             MusicProvider.CHARTS: ChartsAggregator(),
+            MusicProvider.YTMUSIC: YouTubeMusicAggregator(),
         }
 
     def register_aggregator(self, name: str, aggregator: BaseMusicAggregator):
@@ -74,13 +76,15 @@ class MusicAggregatorManager:
             if is_garbage_music_title(t.title, query="", author=t.artist):
                 continue
 
-            key = (t.title.lower().strip(), t.artist.lower().strip())
+            key = (_norm_track_token(t.title) or t.title.lower().strip(), _norm_track_token(t.artist) or t.artist.lower().strip())
             if key in seen:
                 existing = seen[key]
                 if not existing.album and t.album:
                     existing.album = t.album
                 if not existing.genre and t.genre:
                     existing.genre = t.genre
+                if not existing.url and t.url:
+                    existing.url = t.url
                 if not existing.deezer_id and t.deezer_id:
                     existing.deezer_id = t.deezer_id
                 if not existing.preview_url and t.preview_url:
@@ -228,24 +232,51 @@ class MusicAggregatorManager:
 
     def get_similar_tracks(self, query: str) -> list[Track]:
         """
-        Executes the similarity recommendation fallback chain:
-        1. Query Last.fm API (scrobble-based similarity graph if API key configured)
-        2. Query Deezer API (artist graph & related tracks)
-        3. Query FreqBlog API (acoustic & neural embedding fallback if FREQBLOG_API_KEY configured)
-        4. Transparent genre-aware / generic chart fallback tagged as 'fallback_unrelated' if song is completely unknown
+        Executes the blended similarity recommendation pipeline:
+        1. Concurrently query Last.fm (scrobble-based similarity graph) and YouTube Music Radio
+           (`get_watch_playlist(radio=True)` -> up to `YTMUSIC_SIMILAR_RADIO_LIMIT` tracks, ~60% share).
+        2. Supplement with Deezer (artist graph & related tracks) when Last.fm returns no tracks.
+        3. Query FreqBlog API (acoustic & neural embedding fallback if FREQBLOG_API_KEY configured).
+        4. Transparent genre-aware / generic chart fallback tagged as 'fallback_unrelated' if song is completely unknown.
         """
-        tracks = []
+        from src.utils.workers import submit_to_worker
 
-        # 1. Primary: Last.fm (if LASTFM_API_KEY is available)
+        tracks: list[Track] = []
         lastfm = self.aggregators.get("lastfm")
-        if lastfm:
-            tracks = self._filter_and_deduplicate(lastfm.get_similar(query), exclude_query=query)
+        ytmusic = self.aggregators.get("ytmusic")
 
-        # 2. Secondary: Deezer
-        if not tracks:
+        lfm_tracks: list[Track] = []
+        ytm_tracks: list[Track] = []
+
+        if lastfm and ytmusic:
+            fut_lfm = submit_to_worker(lastfm.get_similar, query)
+            fut_ytm = submit_to_worker(ytmusic.get_similar, query)
+            try:
+                lfm_tracks = fut_lfm.result() or []
+            except Exception as e:
+                logger.debug("Last.fm get_similar failed for %r: %s", query, e)
+            try:
+                ytm_tracks = fut_ytm.result() or []
+            except Exception as e:
+                logger.debug("YTMusic get_similar failed for %r: %s", query, e)
+        elif lastfm:
+            lfm_tracks = lastfm.get_similar(query) or []
+        elif ytmusic:
+            ytm_tracks = ytmusic.get_similar(query) or []
+
+        raw_similar = list(lfm_tracks) + list(ytm_tracks)
+
+        # 2. Secondary: Supplement with Deezer if Last.fm had no similarity matches
+        if not lfm_tracks:
             deezer = self.aggregators.get("deezer")
             if deezer:
-                tracks = self._filter_and_deduplicate(deezer.get_similar(query), exclude_query=query)
+                try:
+                    raw_similar.extend(deezer.get_similar(query) or [])
+                except Exception as e:
+                    logger.debug("Deezer get_similar failed for %r: %s", query, e)
+
+        if raw_similar:
+            tracks = self._filter_and_deduplicate(raw_similar, exclude_query=query)
 
         # 3. Tertiary: FreqBlog (Acoustic neural embedding fallback, protected by local cache)
         if not tracks:
@@ -407,13 +438,23 @@ class MusicAggregatorManager:
                 except Exception as e:
                     logger.debug("Mood track worker failed: %s", e)
 
+        # Blend in YouTube Music Radio tracks seeded from the verified mood/vibe tracks (~50/50 split)
+        ytmusic = self.aggregators.get("ytmusic")
+        if ytmusic and hasattr(ytmusic, "get_charts") and all_tracks:
+            try:
+                all_tracks.extend(
+                    ytmusic.get_charts(genre=target_genre or canon_mood, seed_tracks=all_tracks) or []
+                )
+            except Exception as e:
+                logger.debug("YTMusic mood radio fetch failed: %s", e)
+
         deduped = self._filter_and_deduplicate(all_tracks, exclude_query=similar_to)
         if target_genre:
             deduped = self._apply_genre_gatekeeper(deduped, target_genre)
         return deduped
 
     def get_top_charts(self, genre: str = None, mood: str = None) -> list[Track]:
-        """Fetches trending and charting music across Last.fm, Beatport, and global charts concurrently, or delegates to mood discovery."""
+        """Fetches trending and charting music across Last.fm, Beatport, global charts, and YouTube Music Radio (~50/50 split), or delegates to mood discovery."""
         from src.utils.workers import submit_to_worker
         parsed_genre, parsed_mood = parse_mood_and_genre(genre, mood)
         if parsed_mood:
@@ -438,28 +479,43 @@ class MusicAggregatorManager:
             except Exception as e:
                 logger.debug("Deezer fallback chart fetch failed: %s", e)
 
+        # Blend in YouTube Music Radio (`YTMUSIC_GENRE_RADIO_LIMIT = 15` tracks -> ~50/50 split),
+        # seeded from verified scene tracks in `all_tracks` so YTMusic Radio stays anchored to authentic artists
+        ytmusic = self.aggregators.get("ytmusic")
+        if ytmusic and hasattr(ytmusic, "get_charts"):
+            try:
+                all_tracks.extend(ytmusic.get_charts(genre=parsed_genre, seed_tracks=all_tracks) or [])
+            except Exception as e:
+                logger.debug("YTMusic chart radio fetch failed: %s", e)
+
         deduped = self._filter_and_deduplicate(all_tracks)
         return self._apply_genre_gatekeeper(deduped, parsed_genre)
 
     def get_artist_tracks(self, artist: str) -> list[Track]:
         """
-        Fetches top tracks by a specific artist concurrently across Last.fm and Deezer.
+        Fetches top tracks by a specific artist concurrently across Last.fm, Deezer, and YouTube Music:
         - Last.fm provides scrobble-ranked fan favorites and autocorrected artist resolution.
         - Deezer provides trending catalog tracks and enriches matching Last.fm tracks with Album metadata.
+        - YouTube Music provides official studio (`ATV`) tracks (`YTMUSIC_ARTIST_TRACK_LIMIT = 12` -> ~50% share)
+          with pre-attached `https://music.youtube.com/watch?v=...` links and album metadata.
         """
         from src.utils.workers import submit_to_worker
 
         lastfm = self.aggregators.get("lastfm")
         deezer = self.aggregators.get("deezer")
+        ytmusic = self.aggregators.get("ytmusic")
 
         lfm_tracks: list[Track] = []
         dz_tracks: list[Track] = []
+        ytm_tracks: list[Track] = []
 
         tasks = []
         if lastfm and hasattr(lastfm, "get_artist_top_tracks"):
             tasks.append(("lastfm", lastfm.get_artist_top_tracks))
         if deezer and hasattr(deezer, "get_artist_top_tracks"):
             tasks.append(("deezer", deezer.get_artist_top_tracks))
+        if ytmusic and hasattr(ytmusic, "get_artist_top_tracks"):
+            tasks.append(("ytmusic", ytmusic.get_artist_top_tracks))
 
         if len(tasks) == 1:
             name, fn = tasks[0]
@@ -467,8 +523,10 @@ class MusicAggregatorManager:
                 res = fn(artist) or []
                 if name == "lastfm":
                     lfm_tracks = res
-                else:
+                elif name == "deezer":
                     dz_tracks = res
+                else:
+                    ytm_tracks = res
             except Exception as e:
                 logger.debug("Artist track provider %s failed for %r: %s", name, artist, e)
         elif len(tasks) >= 2:
@@ -478,14 +536,16 @@ class MusicAggregatorManager:
                     res = fut.result() or []
                     if name == "lastfm":
                         lfm_tracks = res
-                    else:
+                    elif name == "deezer":
                         dz_tracks = res
+                    else:
+                        ytm_tracks = res
                 except Exception as e:
                     logger.debug("Artist track worker %s failed for %r: %s", name, artist, e)
 
-        # Map Deezer album titles by normalized track title so Last.fm tracks get Album metadata when available
+        # Map Deezer and YouTube Music album titles by normalized track title so Last.fm tracks get Album metadata
         album_by_title = {}
-        for dt in dz_tracks:
+        for dt in dz_tracks + ytm_tracks:
             if dt.album:
                 norm_t = _norm_track_token(dt.title)
                 if norm_t and norm_t not in album_by_title:
@@ -499,6 +559,7 @@ class MusicAggregatorManager:
             combined.append(lt)
 
         combined.extend(dz_tracks)
+        combined.extend(ytm_tracks)
         return self._filter_and_deduplicate(combined)
 
     def resolve_track_genre_and_zone(
