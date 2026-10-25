@@ -713,6 +713,11 @@ class F1Aggregator(BaseSportsAggregator):
             if state == MatchState.POST or completed:
                 result["is_finished_flag"] = True
 
+            is_race_or_sprint = ("Race" in session_label or session_label.startswith("Sprint")) and "Qualifying" not in session_label
+            if is_race_or_sprint and leader_laps > 0 and not result["is_finished_flag"]:
+                base_badge = result["track_badge"] or "🟢 Track Clear"
+                result["track_badge"] = f"Lap {leader_laps} • {base_badge}"
+
             driver_teams: Dict[str, str] = {}
             for c_item in target_ev.get("competitors") or []:
                 d_name = (c_item.get("displayName") or c_item.get("name") or "").strip()

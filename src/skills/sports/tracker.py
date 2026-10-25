@@ -938,6 +938,7 @@ class SportsTrackerService:
             prev_state = match.last_snapshot.state
             prev_detail = match.last_snapshot.status_detail
             prev_score = (match.last_snapshot.home_score, match.last_snapshot.away_score)
+            prev_stats = match.last_snapshot.stats_summary
             # Carry forward all previously seen event IDs so we never re-alert old goals/cards/milestones
             merged_seen = set(match.last_snapshot.seen_event_ids) | set(curr_snapshot.seen_event_ids)
 
@@ -947,13 +948,14 @@ class SportsTrackerService:
 
             # Prevent mid-game 4-hour cutoff:
             # 1) Reset timer at Kickoff (pre -> in) so pre-game wait never eats into live match duration.
-            # 2) While actively in progress ('in') with clock, score, or event progression, extend the window
+            # 2) While actively in progress ('in') with clock, score, stats, or event progression, extend the window
             #    so extra-time, overtime, rain-delayed, or BO5 series never get cut off mid-game.
             if prev_state == MatchState.PRE and curr_snapshot.state == MatchState.IN:
                 match.created_at = now
             elif curr_snapshot.state == MatchState.IN and (
                 curr_snapshot.status_detail != prev_detail
                 or (curr_snapshot.home_score, curr_snapshot.away_score) != prev_score
+                or curr_snapshot.stats_summary != prev_stats
                 or bool(triggers)
             ):
                 match.created_at = max(match.created_at, now - (SAFETY_TIMEOUT_SECONDS - 3600))
