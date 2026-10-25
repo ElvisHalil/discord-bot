@@ -60,3 +60,7 @@ test.json
 scratch/
 .pytest_cache/
 .coverage
+
+# Parked Internal Digest Prototype
+src/digest/
+tests/test_digest.py
