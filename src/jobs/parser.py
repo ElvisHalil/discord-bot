@@ -150,6 +150,8 @@ _AGENT_TASK_ACTION_RE = re.compile(
     r"|recommend\s+(?:a\s+|an\s+|some\s+)?(?:song|track|music)"
     r"|(?:check|fetch|pull|get|show|give(?:\s+me)?|send(?:\s+me)?|tell(?:\s+me)?|find|look\s+up|what(?:'s|\s+is|\s+are)|how(?:'s|\s+is|\s+are)|summarize|analyze|compare|run|execute|calculate|report|post)\b.*\b(?:weather|forecast|temperature|market|markets|stocks?|s&p|nasdaq|tsx|dow|btc|bitcoin|eth|ethereum|sol|crypto|gold|oil|dxy|price|prices|performance|headlines|news|digest|brief|score|scores|standings|schedule|matches|games?|odds|betting|nhl|nba|nfl|mlb|epl|ucl|f1|ufc|cs2?|esports|flights?|fares?|images?|pictures?|photos?)"
     r"|search\s+(?:for\s+)?(?:images?|pictures?|photos?|news|web)"
+    r"|(?:think\s+of|come\s+up\s+with|brainstorm|invent|devise|suggest|propose|write|compose|draft|design|generate|quiz\s+me|challenge\s+me|ask\s+me|teach\s+me|explain)\b"
+    r"|(?:give\s+me|send\s+me|tell\s+me|share|post)\s+(?:a|an|some|one|two|three|\d+|another|new|random|daily|weekly|quick|short|low[\s\-]+effort)\s+.*?\b(?:task|tasks|idea|ideas|exercise|exercises|cognition|cognitive|puzzle|riddle|brain\s*teaser|trivia|fact|facts|joke|jokes|quote|quotes|prompt|prompts|question|questions|challenge|workout|stretch|recipe|story|poem|haiku|tip|tips|advice|thought|reflection|topic|summary|recap)\b"
     r")\b",
     re.IGNORECASE,
 )
@@ -763,8 +765,8 @@ def parse_job_request(
             "requested_seconds": raw_interval_sec,
         }
 
-    # 3. Check Recurring Daily / Weekly Clock Schedule ("every day at 8am", "every weekday at 9:30am", "every Friday at 5pm")
-    if re.search(r"\b(?:every\s+(?:day|morning|afternoon|evening|night|weekday|weekend|mon|tue|wed|thu|fri|sat|sun)|daily)\b", low):
+    # 3. Check Recurring Daily / Weekly Clock Schedule ("every day at 8am", "every weekday at 9:30am", "every Friday at 5pm", "every Thursday")
+    if re.search(r"\b(?:every\s+(?:day|morning|afternoon|evening|night|weekday|weekend|(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*)|daily|weekly)\b", low):
         clock = _parse_clock_time(when or combined) or (9, 0)
         hr, mn = clock
         days_list: Optional[List[int]] = None

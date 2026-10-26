@@ -703,9 +703,13 @@ class VoiceCohostService:
 
                 active_auto = JOB_ENGINE.get_active_autoplay_job(channel_id)
                 if active_auto is not None:
-                    bounded_dur = max(30, min(duration_sec + 3, 900))
+                    bounded_dur = max(90, min(int(duration_sec), 480))
+                    now_ts = time.time()
                     active_auto.interval_seconds = bounded_dur
-                    active_auto.next_run_at = time.time() + bounded_dur
+                    if active_auto.autoplay_spec is not None:
+                        active_auto.autoplay_spec["last_duration"] = bounded_dur
+                    active_auto.next_fire_at = now_ts + bounded_dur
+                    JOB_ENGINE._save_jobs()
                     JOB_ENGINE.wake()
             except Exception:
                 pass

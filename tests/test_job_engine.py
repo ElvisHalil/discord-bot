@@ -1349,6 +1349,336 @@ class TestOrchestratorAndDispatcherJobIntegration(unittest.TestCase):
         self.assertEqual(job.payload_text, "similar to Strobe by Deadmau5")
         self.assertIn("Next track in `3:30`", synced)
 
+    def test_double_skip_overwrites_llm_copied_previous_track_countdown(self):
+        """
+        Regression test for Bug 2:
+        When skipping a song twice during active Autoplay, the LLM often mimics the previous
+        assistant message in `chat_history` and copies Song 1/Song 2's `Next track in M:SS`
+        into Song 3's reply. `sync_channel_autoplay_on_track_played` MUST overwrite that stale
+        `Next track in M:SS` badge with Song 3's actual duration so the displayed countdown
+        matches `job.interval_seconds` and `job.next_fire_at`.
+        """
+        engine = JobEngine(jobs_file=self.jobs_path)
+        t0 = 1760000000.0
+        job, _ = engine.create_user_job(
+            channel_id=929,
+            query="autoplay dnb",
+            now_ts=t0,
+            defer_first_autoplay_tick=True,
+        )
+        job.run_count = 1
+        job.last_fired_at = t0
+        job.interval_seconds = 288
+        job.next_fire_at = t0 + 288.0
+
+        # Skip #1 at t0 + 20s -> plays 'Gold Dust (Fox Stevenson Remix)' (233s = 3:53)
+        with patch("src.skills.youtube.engine.client.get_video_duration_seconds", return_value=233):
+            reply_skip1 = engine.sync_channel_autoplay_on_track_played(
+                channel_id=929,
+                reply_text=(
+                    "Here is the next drum and bass track:\n\n"
+                    "**Song:** Gold Dust (Fox Stevenson Remix)\n"
+                    "**Artist:** DJ Fresh\n"
+                    "**Genre:** Dnb\n\n"
+                    "https://music.youtube.com/watch?v=V2RAdlc20GA"
+                ),
+                new_query_hint="skip",
+                now_ts=t0 + 20.0,
+            )
+        self.assertIn("Next track in `3:53`", reply_skip1)
+        self.assertEqual(job.interval_seconds, 233)
+        self.assertEqual(job.next_fire_at, t0 + 20.0 + 233.0)
+        self.assertEqual(job.run_count, 2)
+
+        # Skip #2 at t0 + 35s -> plays 'Unforgettable' by YUSSI (147s = 2:27),
+        # AND the LLM copies `📻 **Autoplay (`J-101` — dnb)** — Next track in `3:53`:` from Skip #1!
+        with patch("src.skills.youtube.engine.client.get_video_duration_seconds", return_value=147):
+            reply_skip2 = engine.sync_channel_autoplay_on_track_played(
+                channel_id=929,
+                reply_text=(
+                    f"📻 **Autoplay (`{job.job_id}` — dnb)** — Next track in `3:53`:\n\n"
+                    "**Song:** Unforgettable\n"
+                    "**Artist:** YUSSI\n"
+                    "**Genre:** Dnb\n\n"
+                    "https://music.youtube.com/watch?v=DmWDMpAzBJA"
+                ),
+                new_query_hint="skip",
+                now_ts=t0 + 35.0,
+            )
+        # Displayed 'Next track in' MUST be updated to 2:27 (147s), NOT left at 3:53!
+        self.assertIn("Next track in `2:27`", reply_skip2)
+        self.assertNotIn("Next track in `3:53`", reply_skip2)
+        self.assertEqual(job.interval_seconds, 147)
+        self.assertEqual(job.next_fire_at, t0 + 35.0 + 147.0)
+        self.assertEqual(job.run_count, 3)
+
+    def test_plain_play_dnb_and_autoplay_meta_question_never_start_autoplay(self):
+        """
+        Regression test for Bug 1:
+        1. 'play dnb' or 'play liquid dnb' without 'autoplay' must return False for
+           `has_explicit_autoplay_start_intent`, and if the LLM mistakenly emits
+           `skill_job_manager(action='autoplay', query='dnb')` when no Autoplay is active,
+           `run_agent_turn` redirects it to `skill_music_discovery(genre='dnb')`.
+        2. Questions/negations like 'who told you to autoplay?' must never trigger
+           `detect_missed_job_tool_call`.
+        """
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        import main as bot_main
+        from src.skills.jobs import (
+            detect_missed_job_tool_call,
+            has_explicit_autoplay_start_intent,
+            is_autoplay_meta_or_negation,
+        )
+
+        # 1. Intent helper checks
+        self.assertFalse(has_explicit_autoplay_start_intent("User Halil says: play dnb"))
+        self.assertFalse(has_explicit_autoplay_start_intent("User Halil says: play liquid dnb"))
+        self.assertFalse(has_explicit_autoplay_start_intent("User Halil says: who told you to autoplay?"))
+        self.assertTrue(is_autoplay_meta_or_negation("User Halil says: who told you to autoplay?"))
+        self.assertTrue(has_explicit_autoplay_start_intent("User Halil says: autoplay dnb"))
+        self.assertTrue(has_explicit_autoplay_start_intent("User Halil says: play dnb back to back"))
+
+        # 2. detect_missed_job_tool_call must ignore 'who told you to autoplay?' and 'play dnb'
+        self.assertIsNone(
+            detect_missed_job_tool_call([{"role": "user", "content": "User Halil says: who told you to autoplay?"}])
+        )
+        self.assertIsNone(
+            detect_missed_job_tool_call([{"role": "user", "content": "User Halil says: play dnb"}])
+        )
+
+        # 3. In run_agent_turn, a hallucinated skill_job_manager(action='autoplay', query='dnb')
+        # on 'play dnb' (with no active Autoplay job) is redirected to skill_music_discovery({'genre': 'dnb'})
+        music_calls = []
+
+        def fake_music_disc(genre: str = None, similar_to: str = None, artist: str = None, mood: str = None, shift: str = None):
+            music_calls.append({"genre": genre, "similar_to": similar_to, "artist": artist, "mood": mood, "shift": shift})
+            return (
+                "=== VERIFIED YOUTUBE MUSIC RESULT ===\n"
+                "Song: Alpha\n"
+                "Artist: Break\n"
+                "Genre: Dnb\n"
+                "Link: https://music.youtube.com/watch?v=sP_CELnP21U"
+            )
+
+        job_mock = MagicMock(return_value="SHOULD NOT BE CALLED")
+        fake_mode = {
+            "model": "gemma4:e4b",
+            "is_research": True,
+            "supports_tools": True,
+            "max_iterations": 3,
+            "ollama_options": {"num_ctx": 4096, "num_predict": 512},
+            "tools": {
+                "skill_music_discovery": fake_music_disc,
+                "skill_job_manager": job_mock,
+            },
+        }
+        step0_resp = SimpleNamespace(
+            done_reason="stop",
+            message=SimpleNamespace(
+                role="assistant",
+                content="",
+                thinking="",
+                tool_calls=[
+                    SimpleNamespace(
+                        function=SimpleNamespace(
+                            name="skill_job_manager",
+                            arguments={"action": "autoplay", "query": "dnb"},
+                        )
+                    )
+                ],
+            ),
+        )
+        step1_resp = SimpleNamespace(
+            done_reason="stop",
+            message=SimpleNamespace(
+                role="assistant",
+                content="**Song:** Alpha\n**Artist:** Break\n**Genre:** Dnb\n\nhttps://music.youtube.com/watch?v=sP_CELnP21U",
+                thinking="",
+                tool_calls=None,
+            ),
+        )
+        turn_hist = [
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": "User Halil says: play dnb"},
+        ]
+        with patch.object(bot_main.JOB_ENGINE, "get_active_autoplay_job", return_value=None), patch.object(
+            bot_main.ollama_client, "chat", AsyncMock(side_effect=[step0_resp, step1_resp])
+        ):
+            out_reply = asyncio.run(bot_main.run_agent_turn(939, fake_mode, turn_history=turn_hist))
+
+        job_mock.assert_not_called()
+        self.assertEqual(len(music_calls), 1)
+        self.assertEqual(music_calls[0]["genre"], "dnb")
+        self.assertIn("Alpha", out_reply)
+
+    def test_list_intent_does_not_hijack_create_and_enrich_populates_query(self):
+        """
+        Regression test:
+        1. `skill_job_manager(action='create', query='check the oven reminder in 10 minutes')` or
+           `query='show me NVDA chart on a daily schedule', when='every day at 9am'` must NOT be hijacked
+           by `_LIST_INTENT_RE` into returning `list_channel_jobs` ("No active reminders...").
+        2. `enrich_job_tool_args` must populate `query` from the user's message even when the LLM passed
+           only `task` or only `when`.
+        """
+        from src.context import set_active_channel_id, set_active_user
+        from src.skills.jobs import (
+            detect_missed_job_tool_call,
+            enrich_job_tool_args,
+            skill_job_manager,
+        )
+
+        engine = JobEngine(jobs_file=self.jobs_path)
+        set_active_channel_id(940)
+        set_active_user(42, "Halil")
+        with patch("src.skills.jobs.jobs.JOB_ENGINE", engine):
+            out1 = skill_job_manager(action="create", query="check the oven reminder in 10 minutes")
+            self.assertIn("REMINDER SET", out1)
+            self.assertRegex(out1, r"`J-\d+`")
+
+            out2 = skill_job_manager(
+                action="create",
+                query="show me NVDA chart on a daily schedule",
+                when="every day at 9am",
+            )
+            self.assertIn("SCHEDULED ROUTINE CREATED", out2)
+            self.assertRegex(out2, r"`J-\d+`")
+            self.assertEqual(len([j for j in engine.jobs.values() if j.channel_id == 940]), 2)
+
+            # enrich_job_tool_args populates `query` when LLM only supplied `task`
+            hist = [{"role": "user", "content": "User Halil says: remind me in 20 minutes to take out the trash"}]
+            enriched = enrich_job_tool_args({"action": "create", "task": "take out the trash"}, hist, active_channel_id=940)
+            self.assertEqual(enriched["query"], "remind me in 20 minutes to take out the trash")
+
+        # Broadened detect_missed_job_tool_call checks
+        for prompt in (
+            "User Halil says: every 5 minutes check BTC price",
+            "User Halil says: schedule a daily market summary at 9am",
+            "User Halil says: in 15 minutes tell me to stretch",
+            "User Halil says: tell me when BTC hits 100k",
+            "User Halil says: when NVDA drops below 120, alert me",
+        ):
+            res = detect_missed_job_tool_call([{"role": "user", "content": prompt}], active_channel_id=940)
+            self.assertIsNotNone(res, f"Expected job detection for: {prompt}")
+            self.assertEqual(res[0], "skill_job_manager")
+            self.assertEqual(res[1]["action"], "create")
+
+        for non_job_prompt in (
+            "User Halil says: what is the Oilers schedule?",
+            "User Halil says: why does the sun rise every morning?",
+        ):
+            self.assertIsNone(
+                detect_missed_job_tool_call([{"role": "user", "content": non_job_prompt}], active_channel_id=940),
+                f"Expected None for non-job prompt: {non_job_prompt}",
+            )
+
+    def test_step0_co_execution_and_phantom_schedule_recovery_guarantee_job_id(self):
+        """
+        Regression test:
+        1. When the LLM calls `save_memory` on Step 0 for 'remind me in 15 minutes to check the pizza' and
+           replies on Step 1 without the `J-XXX` ID ("Got it, I've set a reminder!"), `run_agent_turn`
+           replaces `save_memory` with `skill_job_manager`, registers the job in `JOB_ENGINE`, and prepends
+           the `⏰ **REMINDER SET (`J-XXX`)**` block to the final reply.
+        2. When an unusual phrasing bypasses Step 0 and the LLM replies claiming "I'll remind you at 4:30 PM..."
+           without calling `skill_job_manager`, post-turn phantom schedule recovery executes `skill_job_manager`
+           and prepends the real `J-XXX` confirmation block.
+        """
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
+        import main as bot_main
+        from src.skills.jobs import skill_job_manager
+
+        engine = JobEngine(jobs_file=self.jobs_path)
+        save_mem_mock = MagicMock(return_value="Memory saved.")
+        fake_mode = {
+            "model": "gemma4:e4b",
+            "is_research": True,
+            "supports_tools": True,
+            "max_iterations": 3,
+            "ollama_options": {"num_ctx": 4096, "num_predict": 512},
+            "tools": {
+                "save_memory": save_mem_mock,
+                "skill_job_manager": skill_job_manager,
+            },
+        }
+
+        # Case 1: LLM calls save_memory on Step 0 and drops J-XXX in Step 1 prose
+        step0_mem = SimpleNamespace(
+            done_reason="stop",
+            message=SimpleNamespace(
+                role="assistant",
+                content="",
+                thinking="",
+                tool_calls=[
+                    SimpleNamespace(
+                        function=SimpleNamespace(
+                            name="save_memory",
+                            arguments={"fact": "Remind user in 15 minutes to check the pizza"},
+                        )
+                    )
+                ],
+            ),
+        )
+        step1_prose = SimpleNamespace(
+            done_reason="stop",
+            message=SimpleNamespace(
+                role="assistant",
+                content="Got it! I have set a reminder to check the pizza in 15 minutes.",
+                thinking="",
+                tool_calls=None,
+            ),
+        )
+        hist1 = [
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": "User Halil says: remind me in 15 minutes to check the pizza"},
+        ]
+        with patch.object(bot_main, "JOB_ENGINE", engine), patch(
+            "src.skills.jobs.jobs.JOB_ENGINE", engine
+        ), patch.object(bot_main.ollama_client, "chat", AsyncMock(side_effect=[step0_mem, step1_prose])):
+            reply1 = asyncio.run(bot_main.run_agent_turn(941, fake_mode, turn_history=hist1))
+
+        save_mem_mock.assert_not_called()
+        jobs_941 = [j for j in engine.jobs.values() if j.channel_id == 941]
+        self.assertEqual(len(jobs_941), 1)
+        self.assertIn(jobs_941[0].job_id, reply1)
+        self.assertIn("REMINDER SET", reply1)
+
+        # Case 2: Unusual phrasing bypasses Step 0, LLM claims "I'll ping you at 4:30 PM" with no tool call
+        step0_phantom = SimpleNamespace(
+            done_reason="stop",
+            message=SimpleNamespace(
+                role="assistant",
+                content="Sure thing! I'll remind you at 4:30 PM about the deployment.",
+                thinking="",
+                tool_calls=None,
+            ),
+        )
+        hist2 = [
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": "User Halil says: ping me at 4:30pm about the deployment"},
+        ]
+        with patch.object(bot_main, "JOB_ENGINE", engine), patch(
+            "src.skills.jobs.jobs.JOB_ENGINE", engine
+        ), patch.object(bot_main.ollama_client, "chat", AsyncMock(side_effect=[step0_phantom])):
+            reply2 = asyncio.run(bot_main.run_agent_turn(942, fake_mode, turn_history=hist2))
+
+        jobs_942 = [j for j in engine.jobs.values() if j.channel_id == 942]
+        self.assertEqual(len(jobs_942), 1)
+        self.assertIn(jobs_942[0].job_id, reply2)
+        self.assertIn("REMINDER SET", reply2)
+
+        # Case 3: Creative / generative LLM prompt ("every thursday think of some low effort cognition task")
+        # must parse as TriggerType.DAILY_SCHEDULE on Thursday (days=[3]) AND ActionType.AGENT_TASK ("Live AI Task")
+        job_thu, confirm_thu = engine.create_user_job(
+            channel_id=943,
+            query="every thursday think of some low effort cognition task",
+        )
+        self.assertEqual(job_thu.trigger_type, TriggerType.DAILY_SCHEDULE)
+        self.assertEqual(job_thu.action_type, ActionType.AGENT_TASK)
+        self.assertEqual(job_thu.schedule_spec["days"], [3])
+        self.assertIn("Task (Live AI Task)", confirm_thu)
+        self.assertIn("Every Thu", confirm_thu)
+
 
 if __name__ == "__main__":
     unittest.main()

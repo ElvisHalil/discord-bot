@@ -42,7 +42,13 @@ from src.jobs import (
     ActionType,
     SystemJobProvider,
 )
-from src.skills.jobs import skill_job_manager
+from src.skills.jobs import (
+    ensure_turn_job_confirmation_preserved,
+    has_explicit_autoplay_start_intent,
+    has_phantom_schedule_claim,
+    is_autoplay_meta_or_negation,
+    skill_job_manager,
+)
 from src.skills.music.engine.formatting import (
     ensure_turn_music_card_preserved,
     format_song_card,
@@ -356,7 +362,7 @@ async def handle_job_fire(job, message_text: str):
             if card_text:
                 final_output = f"{mention_prefix}🔁 **Scheduled Music (`{job.job_id}`):**\n\n{card_text}"
         else:
-            base_mode_config = MODES.get("research") or MODES[current_mode]
+            base_mode_config = MODES.get("research") or MODES.get("research-gemma") or MODES[current_mode]
             task_tools = {
                 k: v for k, v in (base_mode_config.get("tools") or {}).items()
                 if k != "skill_job_manager"
@@ -370,9 +376,21 @@ async def handle_job_fire(job, message_text: str):
                 flags=re.IGNORECASE,
             ).strip() or job.payload_text
             system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
+            recent_context = [
+                m for m in list(chat_history.get(channel_id) or [])[1:]
+                if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) in ("user", "assistant")
+            ][-4:]
             task_history = [
                 system_msg,
-                {"role": "user", "content": f"Execute scheduled task: {clean_task_prompt}"},
+                *recent_context,
+                {
+                    "role": "user",
+                    "content": (
+                        f"Execute scheduled task (Run #{max(1, job.run_count)}): {clean_task_prompt}. "
+                        "Provide the result directly for the user now (if this is a recurring creative or brainstorming prompt, "
+                        "generate a fresh, non-repetitive idea)."
+                    ),
+                },
             ]
             try:
                 clear_channel_attachments(channel_id)
@@ -1065,10 +1083,10 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
         if not tool_calls:
             if iterations == 0 and supports_tools:
                 missed = (
-                    detect_missed_sports_tool_call(history, active_channel_id=channel_id)
+                    detect_missed_job_tool_call(history, active_channel_id=channel_id)
+                    or detect_missed_sports_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_music_shift_tool_call(history)
                     or detect_missed_flight_tool_call(history, active_channel_id=channel_id)
-                    or detect_missed_job_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_graphing_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_markets_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_image_tool_call(history, active_channel_id=channel_id)
@@ -1113,6 +1131,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                         SPORTS_TRACKER.ensure_loop_running()
                     if FLIGHT_TRACKER.tracked_flights or FLIGHT_TRACKER.price_watches:
                         FLIGHT_TRACKER.ensure_loop_running()
+                    if JOB_ENGINE.has_active_work():
+                        JOB_ENGINE.ensure_loop_running()
                     history.append({
                         "role": "assistant",
                         "content": "",
@@ -1259,16 +1279,32 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     )
                 ]
 
-        # Compound Graphing + Scheduled Job co-execution: e.g. "create a chart for BTC/USD now and every morning at 9:01 AM"
+        # Compound Domain/System Tool + Scheduled Job co-execution: when the user asks to set a reminder,
+        # recurring interval, daily schedule, or conditional watch (e.g. "check BTC every 5m", "remind me in
+        # 20m to check the oven", "create a chart for BTC/USD now and every morning at 9:01 AM") and the LLM
+        # called a domain or system tool (`save_memory`, `get_current_datetime`, `skill_markets_info`,
+        # `skill_weather_info`, `skill_graphing_info`, etc.) without calling `skill_job_manager`, co-execute
+        # (or replace `save_memory` with) `skill_job_manager` so the job is always registered in JOB_ENGINE.
         if iterations == 0 and supports_tools:
             if (
-                any(c.function.name == "skill_graphing_info" for c in tool_calls)
-                and not any(c.function.name == "skill_job_manager" for c in tool_calls)
+                not any(c.function.name in ("skill_job_manager", "skill_sports_tracker", "skill_flight_tracker") for c in tool_calls)
                 and "skill_job_manager" in active_tools
             ):
                 missed_job = detect_missed_job_tool_call(history, active_channel_id=channel_id)
-                if missed_job and missed_job[0] == "skill_job_manager":
-                    print(f"⚡ [{current_mode.upper()}] Co-executing missed skill_job_manager alongside skill_graphing_info: {missed_job[1]}")
+                if missed_job and missed_job[0] == "skill_job_manager" and (missed_job[1] or {}).get("action") != "autoplay":
+                    last_u_raw = next(
+                        (
+                            str((m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or "")
+                            for m in reversed(history)
+                            if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
+                        ),
+                        "",
+                    )
+                    if any(c.function.name == "save_memory" for c in tool_calls) and not re.search(
+                        r"\b(?:remember|memorize|save\s+to\s+memory)\b", last_u_raw, re.IGNORECASE
+                    ):
+                        tool_calls = [c for c in tool_calls if c.function.name != "save_memory"]
+                    print(f"⚡ [{current_mode.upper()}] Co-executing missed skill_job_manager alongside {[c.function.name for c in tool_calls]}: {missed_job[1]}")
                     tool_calls = list(tool_calls) + [
                         types.SimpleNamespace(
                             function=types.SimpleNamespace(
@@ -1403,6 +1439,99 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                             )
                         )
                     ]
+
+        # Unrequested Autoplay Guardrail: when Autoplay is NOT active in the channel and the user did NOT
+        # explicitly ask to start Autoplay (e.g. user simply said "play dnb", "play liquid dnb", or asked
+        # "who told you to autoplay?"), prevent a hallucinated skill_job_manager(action='autoplay') call
+        # from starting continuous Autoplay; redirect plain music requests to skill_music_discovery instead.
+        if (
+            supports_tools
+            and any(c.function.name == "skill_job_manager" for c in tool_calls)
+            and JOB_ENGINE.get_active_autoplay_job(channel_id) is None
+        ):
+            last_u_raw = next(
+                (
+                    str((m.get("content") if isinstance(m, dict) else getattr(m, "content", "")) or "")
+                    for m in reversed(history)
+                    if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
+                ),
+                "",
+            )
+            if not last_u_raw.strip().startswith("Execute scheduled task:") and not has_explicit_autoplay_start_intent(last_u_raw):
+                legit_job_intent = detect_missed_job_tool_call(history, active_channel_id=channel_id)
+                rewritten_calls = []
+                for c in tool_calls:
+                    if c.function.name != "skill_job_manager":
+                        rewritten_calls.append(c)
+                        continue
+                    c_args = dict(c.function.arguments or {})
+                    c_act = str(c_args.get("action") or "create").strip().lower()
+                    c_query = str(c_args.get("query") or c_args.get("task") or "").strip()
+                    c_when = str(c_args.get("when") or "").strip()
+                    has_schedule_or_reminder_signal = bool(
+                        re.search(
+                            r"\b(?:remind|reminder|timer|alarm|schedule|alert|notify|ping|when|whenever|if|once|every|daily|tomorrow|tonight|in\s+\d+|at\s+\d+)\b",
+                            f"{c_query} {last_u_raw}",
+                            re.IGNORECASE,
+                        )
+                    )
+                    is_unrequested_autoplay = (
+                        c_act in ("autoplay", "skip", "next")
+                        or "autoplay" in c_query.lower()
+                        or (c_act == "create" and not c_when and legit_job_intent is None and not has_schedule_or_reminder_signal)
+                    )
+                    if not is_unrequested_autoplay:
+                        rewritten_calls.append(c)
+                        continue
+                    if is_autoplay_meta_or_negation(last_u_raw):
+                        print(
+                            f"🛡️ [{current_mode.upper()}] Suppressed hallucinated skill_job_manager({c_args}) "
+                            f"on autoplay meta-question/negation: '{last_u_raw}'"
+                        )
+                        continue
+                    if any(other.function.name in ("skill_music_discovery", "skill_youtube_search") for other in tool_calls if other is not c):
+                        print(
+                            f"🛡️ [{current_mode.upper()}] Dropped unrequested skill_job_manager({c_args}) "
+                            f"alongside existing music tool on single-song prompt."
+                        )
+                        continue
+                    music_fallback = detect_missed_music_shift_tool_call(history)
+                    if music_fallback and music_fallback[0] in active_tools:
+                        fb_name, fb_args = music_fallback
+                    elif "skill_music_discovery" in active_tools:
+                        clean_g = re.sub(
+                            r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)?(?:auto[-\s]?play|play|put\s+on|drop|queue)\s+(?:some\s+|a\s+|an\s+)?",
+                            "",
+                            c_query,
+                            flags=re.IGNORECASE,
+                        ).strip()
+                        clean_g = re.sub(r"\s+(?:music|song|songs|track|tracks)\s*$", "", clean_g, flags=re.IGNORECASE).strip()
+                        fb_name = "skill_music_discovery"
+                        if re.match(r"^(?:similar\s+to|like)\s+", clean_g, re.IGNORECASE) or " by " in clean_g.lower():
+                            sim_seed = re.sub(r"^(?:similar\s+to|like)\s+", "", clean_g, flags=re.IGNORECASE).strip()
+                            fb_args = {"similar_to": sim_seed}
+                        else:
+                            fb_args = {"genre": clean_g or "dnb"}
+                    else:
+                        continue
+                    print(
+                        f"⚡ [{current_mode.upper()}] Intercepted unrequested skill_job_manager({c_args}) "
+                        f"on single-song prompt -> redirecting to {fb_name}({fb_args})"
+                    )
+                    rewritten_calls.append(
+                        types.SimpleNamespace(
+                            function=types.SimpleNamespace(
+                                name=fb_name,
+                                arguments=fb_args,
+                            )
+                        )
+                    )
+                tool_calls = rewritten_calls
+                if not tool_calls:
+                    reply = await final_answer_without_tools(
+                        "Give your direct, concise final answer to the user's message now."
+                    )
+                    break
 
         # Single-Autoplay-Card guard: prevent running skill_job_manager and skill_music_discovery/skill_youtube_search
         # in the same step when starting Autoplay or when Autoplay is already active in the channel.
@@ -1604,6 +1733,69 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
         if not reply.strip() and is_research:
             reply = "⚠️ I reached the maximum step limit before I could finish. Please try a narrower question."
 
+    # Post-turn Phantom-Schedule Auto-Recovery & Job ID Confirmation Guard:
+    # 1. If `skill_job_manager` did NOT run during this turn, yet the user asked to schedule a job OR the LLM's
+    #    reply claims it scheduled a reminder/task/timer/watch without a `J-XXX` ID, execute `skill_job_manager`
+    #    now (or append a clear warning if unavailable) so the bot never claims a job is scheduled when `!jobs` is empty.
+    # 2. Whenever `skill_job_manager` ran in this turn, ensure the `J-XXX` confirmation block (or `⚠️` warning)
+    #    is preserved in `reply` even if the LLM paraphrased the tool output.
+    if not fast_voice_turn and supports_tools and history:
+        last_u_idx = -1
+        last_u_text = ""
+        for idx in range(len(history) - 1, -1, -1):
+            r = history[idx].get("role") if isinstance(history[idx], dict) else getattr(history[idx], "role", None)
+            if r == "user":
+                last_u_idx = idx
+                last_u_text = str(
+                    (history[idx].get("content") if isinstance(history[idx], dict) else getattr(history[idx], "content", "")) or ""
+                )
+                break
+        if last_u_idx >= 0 and not last_u_text.strip().startswith("Execute scheduled task:"):
+            turn_tools_used = {
+                (m.get("name") if isinstance(m, dict) else getattr(m, "name", None))
+                for m in history[last_u_idx + 1 :]
+                if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "tool"
+            }
+            if not (turn_tools_used & {"skill_job_manager", "skill_flight_tracker", "skill_sports_tracker"}):
+                missed_post = detect_missed_job_tool_call(history, active_channel_id=channel_id)
+                needs_recovery = (
+                    (missed_post and missed_post[0] == "skill_job_manager" and (missed_post[1] or {}).get("action") == "create")
+                    or has_phantom_schedule_claim(reply, last_u_text)
+                )
+                if needs_recovery:
+                    if "skill_job_manager" in active_tools:
+                        job_func = active_tools["skill_job_manager"]
+                        base_job_args = (missed_post[1] if missed_post else {"action": "create"}) or {"action": "create"}
+                        rec_args = enrich_job_tool_args(
+                            normalize_tool_args("skill_job_manager", job_func, base_job_args),
+                            history,
+                            active_channel_id=channel_id,
+                        )
+                        set_active_channel_id(channel_id)
+                        print(
+                            f"🛡️ [{current_mode.upper()}] Post-turn phantom schedule recovery -> executing skill_job_manager({rec_args})"
+                        )
+                        try:
+                            rec_out = await run_in_worker(job_func, **rec_args)
+                        except Exception as e:
+                            rec_out = f"⚠️ Tool execution failed: {e}"
+                        if JOB_ENGINE.has_active_work():
+                            JOB_ENGINE.ensure_loop_running()
+                        history.append(
+                            {
+                                "role": "tool",
+                                "name": "skill_job_manager",
+                                "content": _format_tool_output_for_turn(str(rec_out)),
+                            }
+                        )
+                    else:
+                        warn_unavail = (
+                            "⚠️ **Scheduling Failed:** No background job was registered in `!jobs` because "
+                            "`skill_job_manager` is not enabled in the current mode's tool configuration (`src/config.py`)."
+                        )
+                        reply = f"{warn_unavail}\n\n{reply.strip()}".strip() if reply.strip() else warn_unavail
+
+    reply = ensure_turn_job_confirmation_preserved(reply, history, fast_voice_turn=fast_voice_turn)
     reply = ensure_turn_music_card_preserved(reply, history, fast_voice_turn=fast_voice_turn)
     return reply
 

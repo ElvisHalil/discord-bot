@@ -155,8 +155,17 @@ def resolve_autoplay_track_sync(channel_id: int, query: str) -> Tuple[str, int]:
         album_title = album_title or meta.get("album")
         genre_label = genre_label or meta.get("genre")
 
-    # Resolve track duration in seconds via Deezer or YouTube embed cache
+    # Resolve track duration in seconds via YouTube/YTMusic cache or Deezer
     duration_sec = get_video_duration_seconds(vid) or 0
+    if duration_sec <= 0 and vid:
+        try:
+            from src.skills.music.engine.formatting import MUSIC_METADATA_CACHE
+
+            cached_meta = MUSIC_METADATA_CACHE.get(vid)
+            if isinstance(cached_meta, dict) and cached_meta.get("duration"):
+                duration_sec = int(cached_meta["duration"])
+        except Exception:
+            pass
     if duration_sec <= 0 and song_title:
         try:
             dz_detail = DeezerAggregator().resolve_track_details(song_title, artist_name)
@@ -872,13 +881,16 @@ class JobEngine:
         else:
             clamped_duration = int(job.interval_seconds or AUTOPLAY_DEFAULT_TRACK_SECONDS)
 
-        already_tagged_autoplay = bool(
-            re.search(r"Next track in `\d+:\d{2}`", reply_text)
+        eff_now = float(now_ts if now_ts is not None else time.time())
+        just_fired_in_turn = (
+            job.last_fired_at is not None
+            and abs(eff_now - job.last_fired_at) < 3.0
+            and job.run_count >= 1
         )
 
         # Extract updated genre/vibe from the user's request or played song card when Autoplay wasn't already updated this turn
         new_vibe: Optional[str] = None
-        if not already_tagged_autoplay:
+        if not just_fired_in_turn:
             hint_str = (new_query_hint or "").strip()
             is_shift_request = bool(
                 re.search(
@@ -924,7 +936,6 @@ class JobEngine:
                     except Exception:
                         pass
 
-        eff_now = float(now_ts if now_ts is not None else time.time())
         with self._lock:
             job.trigger_type = TriggerType.AUTOPLAY
             job.action_type = ActionType.MUSIC_AUTOPLAY
@@ -936,8 +947,7 @@ class JobEngine:
                 else:
                     job.autoplay_spec["query"] = new_vibe
             # Avoid double-incrementing run_count if skill_job_manager just created/ticked Track #1 in this turn
-            just_fired_in_turn = (job.last_fired_at is not None and abs(eff_now - job.last_fired_at) < 3.0 and job.run_count >= 1)
-            if not already_tagged_autoplay and not just_fired_in_turn:
+            if not just_fired_in_turn:
                 job.run_count += 1
             job.last_fired_at = eff_now
             job.interval_seconds = clamped_duration
@@ -949,14 +959,15 @@ class JobEngine:
         self._save_jobs()
         self.wake()
 
-        if not already_tagged_autoplay:
-            mins, secs = divmod(clamped_duration, 60)
-            banner = f"📻 **Autoplay (`{job.job_id}` — {job.payload_text})** — Next track in `{mins}:{secs:02d}`:"
-            # Replace any bare "📻 **Autoplay..." line lacking a countdown timer, or prepend the banner
-            if "📻 **Autoplay" in reply_text:
-                return re.sub(r"(?m)^📻 \*\*Autoplay[^\n]*$", banner, reply_text, count=1)
-            return f"{banner}\n\n{reply_text.lstrip()}"
-        return reply_text
+        mins, secs = divmod(clamped_duration, 60)
+        banner = f"📻 **Autoplay (`{job.job_id}` — {job.payload_text})** — Next track in `{mins}:{secs:02d}`:"
+        # Always overwrite any existing "📻 **Autoplay..." line or "Next track in `M:SS`" badge so LLM-copied
+        # or fallback countdowns from earlier turns/steps are guaranteed to match `clamped_duration`.
+        if re.search(r"(?m)^📻 \*\*Autoplay[^\n]*$", reply_text):
+            return re.sub(r"(?m)^📻 \*\*Autoplay[^\n]*$", banner, reply_text, count=1)
+        if re.search(r"Next track in `\d+:\d{2}`", reply_text):
+            return re.sub(r"Next track in `\d+:\d{2}`", f"Next track in `{mins}:{secs:02d}`", reply_text)
+        return f"{banner}\n\n{reply_text.lstrip()}"
 
     def format_job_created(
         self,
@@ -998,10 +1009,19 @@ class JobEngine:
             spec = job.schedule_spec or {}
             hr, mn = int(spec.get("hour", 9)), int(spec.get("minute", 0))
             days = spec.get("days")
-            days_label = "Every day" if not days else f"Days {days}"
+            day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            if not days:
+                days_label = "Every day"
+            elif days == [0, 1, 2, 3, 4]:
+                days_label = "Every weekday"
+            elif days == [5, 6]:
+                days_label = "Every weekend"
+            else:
+                days_label = "Every " + ", ".join(day_names[d] for d in days if 0 <= d < 7)
+            mode_label = "Live AI Task" if job.action_type == ActionType.AGENT_TASK else "Reminder"
             return (
                 f"🗓️ **SCHEDULED ROUTINE CREATED (`{job.job_id}`)**\n"
-                f"• **Task**: {job.payload_text}\n"
+                f"• **Task ({mode_label})**: {job.payload_text}\n"
                 f"• **Schedule**: {days_label} at **{hr:02d}:{mn:02d}** local time (Next run in `{_format_interval_short(delta_s)}`)\n"
                 f"• **Manage**: View with `!jobs` or cancel with `!canceljob {job.job_id}`."
             )
