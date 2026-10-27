@@ -30,6 +30,7 @@ _OEMBED_CACHE: dict[str, dict] = BoundedCache(maxsize=512)
 _EMBEDDABLE_CACHE: dict[str, bool] = BoundedCache(maxsize=512)
 _SHORT_CACHE: dict[str, bool] = BoundedCache(maxsize=512)
 _DURATION_CACHE: dict[str, int] = BoundedCache(maxsize=512)
+_YTMUSIC_CLIENT = None
 
 
 def get_cached_oembed(vid: str) -> dict | None:
@@ -37,41 +38,36 @@ def get_cached_oembed(vid: str) -> dict | None:
     return _OEMBED_CACHE.get(vid) if vid else None
 
 
+def cache_video_duration(vid: str, duration_seconds: int | None) -> None:
+    """Store a verified video duration in seconds in the shared YouTube duration cache."""
+    if not vid or not duration_seconds:
+        return
+    try:
+        dur_val = int(duration_seconds)
+        if dur_val > 0:
+            _DURATION_CACHE[vid] = dur_val
+    except (TypeError, ValueError):
+        pass
+
+
 def get_video_duration_seconds(vid: str) -> int | None:
     """Return cached or fetched video duration in seconds for a YouTube video ID, or None."""
+    global _YTMUSIC_CLIENT
     if not vid:
         return None
     if vid in _DURATION_CACHE:
         return _DURATION_CACHE[vid]
     try:
-        from src.skills.music.engine.formatting import MUSIC_METADATA_CACHE
+        if _YTMUSIC_CLIENT is None:
+            from ytmusicapi import YTMusic
 
-        cached_meta = MUSIC_METADATA_CACHE.get(vid)
-        if isinstance(cached_meta, dict) and cached_meta.get("duration"):
-            dur_val = int(cached_meta["duration"])
-            if dur_val > 0:
-                _DURATION_CACHE[vid] = dur_val
-                return dur_val
-    except Exception:
-        pass
-    try:
-        from src.skills.music.aggregators.ytmusic import _get_ytmusic_client
-
-        yt = _get_ytmusic_client()
-        if yt is not None:
-            song_info = yt.get_song(vid) or {}
-            v_details = song_info.get("videoDetails") or {}
-            len_sec = int(v_details.get("lengthSeconds") or 0)
-            if len_sec > 0:
-                _DURATION_CACHE[vid] = len_sec
-                try:
-                    from src.skills.music.engine.formatting import MUSIC_METADATA_CACHE
-
-                    if vid in MUSIC_METADATA_CACHE and isinstance(MUSIC_METADATA_CACHE[vid], dict):
-                        MUSIC_METADATA_CACHE[vid]["duration"] = len_sec
-                except Exception:
-                    pass
-                return len_sec
+            _YTMUSIC_CLIENT = YTMusic()
+        song_info = _YTMUSIC_CLIENT.get_song(vid) or {}
+        v_details = song_info.get("videoDetails") or {}
+        len_sec = int(v_details.get("lengthSeconds") or 0)
+        if len_sec > 0:
+            _DURATION_CACHE[vid] = len_sec
+            return len_sec
     except Exception:
         pass
     return None

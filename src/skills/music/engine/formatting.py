@@ -222,6 +222,13 @@ def get_music_metadata(vid: str, fallback_text: str = "", fallback_title: str = 
     """
     if vid and vid in MUSIC_METADATA_CACHE:
         cached = dict(MUSIC_METADATA_CACHE[vid])
+        if cached.get("duration"):
+            try:
+                from src.skills.youtube.engine.client import cache_video_duration
+
+                cache_video_duration(vid, cached["duration"])
+            except Exception:
+                pass
         if fallback_text:
             parsed_fb = parse_song_meta(fallback_text)
             if parsed_fb.get("genre") and not cached.get("genre"):

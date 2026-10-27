@@ -10,7 +10,17 @@ from src.skills.sports.sports import skill_sports_info
 
 class TestF1Aggregator(unittest.TestCase):
     def setUp(self):
+        from datetime import timezone
+        from src.skills.sports.aggregators.f1 import get_local_now as _real_get_local_now
+
         self.agg = F1Aggregator()
+        fixed_utc_now = datetime(2026, 10, 24, 18, 0, tzinfo=timezone.utc)
+        self._local_now_patcher = patch(
+            'src.skills.sports.aggregators.f1.get_local_now',
+            side_effect=lambda now=None: _real_get_local_now(now=fixed_utc_now if now is None else now),
+        )
+        self._local_now_patcher.start()
+        self.addCleanup(self._local_now_patcher.stop)
 
     @patch("src.skills.sports.aggregators.f1.fetch_json")
     def test_get_schedule(self, mock_fetch):

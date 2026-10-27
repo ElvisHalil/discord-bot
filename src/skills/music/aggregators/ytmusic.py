@@ -155,16 +155,24 @@ def _cache_ytmusic_metadata(
     if not vid or not title or not artist:
         return
     existing = MUSIC_METADATA_CACHE.get(vid) or {}
+    eff_dur = duration_sec or existing.get("duration")
     MUSIC_METADATA_CACHE[vid] = {
         "song": title,
         "artist": artist,
         "album": album or existing.get("album"),
         "genre": genre or existing.get("genre"),
-        "duration": duration_sec or existing.get("duration"),
+        "duration": eff_dur,
         "url": f"https://music.youtube.com/watch?v={vid}",
         "embeddable": existing.get("embeddable", True),
         "is_official_fallback": existing.get("is_official_fallback", False),
     }
+    if eff_dur:
+        try:
+            from src.skills.youtube.engine.client import cache_video_duration
+
+            cache_video_duration(vid, eff_dur)
+        except Exception:
+            pass
 
 
 def search_ytmusic_songs(query: str, limit: int = 5) -> List[dict]:

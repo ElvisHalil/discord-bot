@@ -44,6 +44,7 @@ logs/
 # IDE & Editor Settings
 .vscode/
 .idea/
+.agents/
 *.swp
 *.swo
 *~
