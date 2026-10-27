@@ -21,9 +21,11 @@ from src.utils.http import (
     _fetch_public,
     _is_private_or_local_host,
     BlockedRedirectError,
+    SecretRedactingFilter,
     ThreadLocalRequestsSession,
     clear_http_caches,
     decode_google_news_url,
+    redact_secrets,
 )
 from src.utils.timezones import (
     build_reference_clock,
@@ -32,6 +34,7 @@ from src.utils.timezones import (
     resolve_configured_timezone,
 )
 from src.utils.workers import (
+    LEAF_WORKER_POOL,
     SUB_WORKER_POOL,
     WORKER_POOL,
     map_in_workers,
@@ -57,19 +60,20 @@ __all__ = [
     "_fetch_public",
     "_is_private_or_local_host",
     "BlockedRedirectError",
+    "SecretRedactingFilter",
     "ThreadLocalRequestsSession",
     "clear_http_caches",
     "decode_google_news_url",
+    "redact_secrets",
     "build_reference_clock",
     "enrich_tool_output_with_time_context",
     "get_local_now",
     "resolve_configured_timezone",
     "WORKER_POOL",
     "SUB_WORKER_POOL",
+    "LEAF_WORKER_POOL",
     "run_in_worker",
     "submit_to_worker",
     "map_in_workers",
     "shutdown_worker_pool",
 ]
-
-

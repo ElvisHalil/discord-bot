@@ -2,7 +2,7 @@
 
 A privacy-first, locally hosted AI research and entertainment assistant for **Discord** and **Telegram**, powered by **Ollama** (`gemma4:e4b`, `qwen3:8b`, etc.) with a modular, multi-threaded Python skill engine.
 
-Designed specifically to give compact local LLMs (4B–8B parameters) **deterministic, real-time tool execution**, pre-verified links, timezone-aware schedules, and background event tracking without relying on paid cloud LLM APIs.
+Designed specifically to give compact local LLMs (4B–8B parameters) **deterministic, real-time tool execution**, pre-verified links, full-timeline video comprehension, timezone-aware schedules, and background event tracking without relying on paid cloud LLM APIs.
 
 ---
 
@@ -11,62 +11,67 @@ Designed specifically to give compact local LLMs (4B–8B parameters) **determin
 | Domain | Capabilities |
 | :--- | :--- |
 | 🎙️ **Real-Time Discord Voice-Channel AI Co-Host & Ad-Free Music Streamer** | Joins live Discord voice channels (`!join` or *"hop in the voice channel"*) as a low-latency, interactive AI co-host **and** ad-free live music streamer. Features **Ad-Free Voice Music Streaming (`yt-dlp` + `FFmpegPCMAudio`)** with automatic `👍` reaction queueing (`!pause`, `!resume`, `!skip`, `!stop`, `!queue`), **Discord DAVE E2EE (`davey`) audio decryption**, **Per-Speaker Voice Activity Detection (VAD)** (`0.30s` silence gap), **Sub-Second Local Speech-to-Text** via **`faster-whisper` (`int8` pre-warmed)**, **Wake-Word (`"Hey bot"`) / Open-Mic / Listen-Only modes**, **9 Neural Voice & Accent Presets (`!voice <preset>` or by voice command)** (`british`, `ava`, `deep`, `sportscaster`, `australian`, etc.), **Live Sports & Flight Tracker Voice Break-Ins**, **Speaker-Attributed Call Recaps (`!vrecap`)**, and **Discord Voice Message Transcription**. |
-| 🎵 **Music Discovery, `ytmusicapi` Radio, Autoplay & Audio DSP** | Blended multi-source discovery combining **YouTube Music's (`ytmusicapi`) Watch-Playlist Radio Engine** (~40% co-listened radio tracks & official studio `ATV` song resolution) with **Last.fm**, **Deezer**, **Beatport**, **FreqBlog**, and **iTunes RSS** (~60%). Powered by a **3-Shelf (45% Anthems / 35% Cult / 20% Underground) Crate-Digging Tiered Sampler** with multi-source consensus boosting, cross-source genre gatekeeping, remix/VIP preservation, **3×3 Tempo × Intensity Spectrum Shifting** (`faster`, `slower`, `harder`, `softer`), **Continuous Radio Autoplay (`!autoplay <genre>`)**, **In-Memory DSP (`miniaudio` + `numpy`) BPM/Key/Gain Analysis**, and **👍 Song-Card Reaction Similar-Track Discovery**. |
-| ⏰ **Background Job Engine, Reminders & Conditional Alerts** | Unified background scheduler (`src/jobs/` & `src/skills/jobs/`) supporting **One-Shot & Recurring Reminders** (`!remind`, *"remind me in 30m..."*, *"every 2h..."*), **Dynamic Condition Alerts** (*"alert me when BTC hits $100k"*, *"notify me when it starts raining"*), **Scheduled Agent Tasks**, and **Continuous Music Autoplay (`!autoplay` / `!stopautoplay`)** with automatic 1-hour channel idle protection and live genre/tempo takeover. |
-| 📊 **On-Demand Graphing, Monte Carlo, Heatmaps & Diagrams** | Deterministic, dark-themed high-DPI PNG rendering for **Arbitrary 2D Data Graphs** (`bar`, `horizontal_bar`, `stacked_bar`, `line`, `area`, `scatter`, `pie`, `donut`), **10,000-Path Monte Carlo Price Simulations & Fan Charts** (projecting any forward horizon with 5th–95th percentile confidence cones, terminal distribution histograms, and win/drawdown probabilities — calibrated on **5-Year History by default** or any custom historical window like `10y`, `3y`, or `max`), **Calendar & 2D Matrix Heatmaps** (`calendar_heatmap`, `heatmap`), **Financial, FX & Multi-Ticker Market Plots** (supporting any custom window like `3d`, `7d`, `14d`, `1mo`, `5y` and hourly/`1h` or `15m` bar intervals), and **Architecture Diagrams & Flowcharts** (`flowchart`, `sequence`, `architecture`, `state`, `mindmap`). |
+| 🎵 **Music Discovery, `ytmusicapi` Radio, Autoplay & Audio DSP** | Blended multi-source discovery combining **YouTube Music's (`ytmusicapi`) Watch-Playlist Radio Engine** (~40% co-listened radio tracks & official studio `ATV` song resolution) with **Last.fm**, **Deezer**, **Beatport**, **FreqBlog**, and **iTunes RSS** (~60%). Powered by a **3-Shelf (45% Anthems / 35% Cult / 20% Underground) Crate-Digging Tiered Sampler** with multi-source consensus boosting, cross-source genre gatekeeping, remix/VIP preservation, **3×3 Tempo × Intensity Spectrum Shifting** (`faster`, `slower`, `harder`, `softer`), **Continuous Radio Autoplay (`!autoplay <genre/song/URL>`)** supporting genre seeds, artist/track similarity seeds, and direct YouTube/YTMusic URL seeds with real-duration countdown timers (`120s–480s`) and seed-preserving `!skip`, **SSRF-Hardened In-Memory DSP (`miniaudio` + `numpy`) BPM/Key/Gain Analysis**, and **👍 Song-Card Reaction Similar-Track Discovery**. |
+| ⏰ **Background Job Engine, Reminders & Conditional Alerts** | Unified background scheduler (`src/jobs/` & `src/skills/jobs/`) supporting **One-Shot & Recurring Reminders** (`!remind`, *"remind me in 30m..."*, *"every Monday at 9am..."*), **Scheduled Multi-Skill & Graphing Agent Tasks** (e.g., *"every morning at 8am plot BTC and ETH"* with automatic rendered PNG chart attachment delivery), **Dynamic Condition Alerts** across markets (price crossings & intraday `%` moves), weather, YouTube channel uploads, and web keywords (*"alert me when BTC hits \$100k"*, *"notify me when it starts raining"*), and **Continuous Music Autoplay (`!autoplay` / `!stopautoplay`)** with automatic 1-hour channel idle protection and live station takeover. |
+| 📊 **On-Demand Graphing, Monte Carlo, Heatmaps & Diagrams** | Deterministic, dark-themed high-DPI PNG rendering for **Arbitrary 2D Data Graphs** (`bar`, `horizontal_bar`, `stacked_bar`, `line`, `area`, `scatter`, `pie`, `donut`), **10,000-Path Monte Carlo Price Simulations & Fan Charts** (projecting any forward horizon with 5th–95th percentile confidence cones, terminal distribution histograms, and win/drawdown probabilities — calibrated on **5-Year History by default** or any custom historical window like `10y`, `3y`, or `max`), **Calendar & 2D Matrix Heatmaps** (`calendar_heatmap`, `heatmap`), **Financial, FX & Multi-Ticker Market Plots** (rendering **separate true-scale price charts by default** when listing multiple tickers, or a **normalized `%` return overlay** on comparison queries like *"compare"* / *"vs"*, across any custom window like `3d`, `7d`, `14d`, `1mo`, `5y` and hourly/`1h` or `15m` bar intervals), and **Architecture Diagrams & Flowcharts** (`flowchart`, `sequence`, `architecture`, `state`, `mindmap`). |
 | 📈 **Global Markets, TSX/Stocks & Crypto** | Real-time global macro benchmarks (**S&P/TSX**, **S&P 500**, **Nasdaq 100**, **Dow**, **FTSE**, **DAX**, **Nikkei**, **VIX**, **Gold**, **Silver**, **WTI Crude**, **USD/CAD**, **10Y Yields**), **Risk-On / Risk-Off Regime Classification**, **Yahoo Finance v8 + TradingView Scanner fallback** for US/Canadian TSX equities & ETFs, **CoinGecko Top Movers & DeFi TVL**, **Historical Chart Summaries (`1d`–`5y`)** with annualized volatility & max drawdown, **Fundamentals & Earnings Dates**, **Side-by-Side Comparison Matrix**, and **Portfolio / Watchlist Valuation**. |
-| 🏟️ **Live Sports, CS2 Esports & Decimal Odds** | Real-time scoreboards, fixtures, and standings for **Soccer** (UCL, EPL, La Liga, Serie A, Bundesliga, Ligue 1, MLS, etc.), **NHL**, **NBA**, **NFL**, **MLB**, **UFC**, **Formula 1** (3-day session timings & driver/constructor standings), and **Counter-Strike 2** (**HLTV**, **Liquipedia**, **ESL/BLAST** live streams). Includes **Decimal Betting Odds** with implied win probabilities and **Background Live Match Tracking** (kickoff, goals, red cards, period/halftime, full-time alerts). |
+| 🏟️ **Live Sports, Formula 1 Telemetry, CS2 Esports & Decimal Odds** | Real-time scoreboards, fixtures, and standings for **Soccer** (UCL, EPL, La Liga, Serie A, Bundesliga, Ligue 1, MLS, etc.), **NHL**, **NBA**, **NFL**, **MLB**, **UFC**, **Formula 1** (**OpenF1 + BBC Sport + ESPN** 3-day weekend timings, driver/constructor standings, live **Lap Counter (`Lap 42/71`)**, Safety Car / Red Flag alerts, and **Q1/Q2/Q3 Qualifying segment-end summaries** with Top 3 + eliminated `OUT` drivers and lap times), and **Counter-Strike 2** (**HLTV**, **Liquipedia**, **ESL/BLAST/PGL** live streams). Includes **Decimal Betting Odds** with implied win probabilities and fault-isolated **Background Live Match Tracking** (`!track`). |
 | ✈️ **Flights, Airfare Calendars & Live Radar** | Live **Google Flights** itinerary scraping (Best, Cheapest, Shortest/Fastest), **Round-Trip & Flexible-Date Price Grids** with automatic **Visual Monthly Fare Calendar Heatmaps** (color-coded `MON–SUN` calendar cards highlighting cheapest deal days, nonstop flight days, and peak fares), **Direct/Nonstop Route Schedules**, and **Live Commercial Flight Status & Radar Telemetry** (**Flightradar24** & **ADSB.lol** live ADS-B altitude/groundspeed/heading). Includes **Background Flight Status & Route Price Drop Alerts**. |
-| 🖼️ **Vision-Verified Image Search & Web Research** | In-memory web & article image search (`search_images`) with **`gemma4:e4b` Multimodal Vision Verification** (zero disk residue), multi-engine web search (**DuckDuckGo** + **Brave Search** fallback), SSRF-hardened stealth article reader (**Jina Reader** + **curl_cffi** TLS impersonation), **YouTube Transcript & Metadata** analyzer, **Google News RSS** headlines (with automatic **Daily Global Market Pulse** enrichment), and **Open-Meteo** current + up to **16-day weather forecasts** (with **wttr.in** automatic fallback). |
-| 💬 **Dual-Platform Discord + Telegram (Owner-Protected DMs)** | Runs simultaneously on **Discord** (with per-channel concurrency locks, owner-only DM gating via `BOT_OWNER_ID`, live voice co-hosting/music streaming, and 👍 song-card reactions) and **Telegram** (zero-dependency HTTPS long-polling bridge with fail-closed user/chat allowlist security). |
+| 📺 **Full-Timeline YouTube Video Reader, Vision Search & Web Research** | **Full-Timeline (`0%–100%`) YouTube Transcript Reader (`read_youtube_video`)** delivering verbatim timestamped transcripts for short/medium videos (`<= 12.5k` chars) and **6–10 chronological chapter digests spanning `0%–100%` of the video** (with TF-IDF + metric/thesis salience scoring, sponsor-read filtering, targeted **`query` / timestamp zoom** like `45:00` or `1:15:00`, and `O(1)` stride-sampling safety for 10h+ livestreams), **Official Broadcaster YouTube Search (`skill_youtube_search`)** (`@Formula1`, `@NBA`, `@NHL`, `@ufc`, `@premierleague`, `@CBSGolazo`, `@ESLCS`, `@BLASTPremier`, `@PGL`), **Multimodal Vision-Verified Image Search (`search_images`)** via `gemma4:e4b` in memory, multi-engine web search (**DuckDuckGo** + **Brave Search** fallback), SSRF-hardened stealth article reader (**Jina Reader** + **curl_cffi** TLS impersonation), **Google News RSS** headlines (with **Daily Global Market Pulse** enrichment), and **Open-Meteo** current + up to **16-day weather forecasts** (with **wttr.in** fallback). |
+| 🔒 **Hardened Concurrency, Security & Dual-Platform Isolation** | Runs simultaneously on **Discord** (per-channel concurrency locks, owner-only DM gating via `BOT_OWNER_ID`, mass-ping sanitization via `AllowedMentions(everyone=False, roles=False, users=True)`, live voice co-hosting/music streaming, and 👍 song-card reactions) and **Telegram** (zero-dependency HTTPS long-polling bridge with fail-closed user/chat allowlist security). Powered by a **3-Tier Deadlock-Free Worker Hierarchy (`WORKER_POOL` → `SUB_WORKER_POOL` → `LEAF_WORKER_POOL`)**, **Automatic Log/Exception/Cache Secret Redaction (`SecretRedactingFilter`)**, and **End-to-End SSRF & Redirect Guards**. |
 
 ---
 
 ## 🏗️ Architecture Overview
 
-Every skill under `src/skills/` follows an identical, standardized package layout (`__init__.py`, `<skill_name>.py`, `enums.py`, `models.py`, `catalogs.py`, `templates.py`, `aggregators/`, plus optional `context.py`, `tracker.py`, `engine/`, `playback/`), with a copy-paste-ready skeleton in `src/skills/.example/`. Cross-cutting concerns live in a shared core execution context (`src/context.py`), shared domain vocabularies (`src/utils/domain_vocab.py`), and a centralized background worker pool (`src/utils/workers.py`).
+Every domain skill under `src/skills/` follows an identical, standardized package layout (`__init__.py`, `<skill_name>.py`, `enums.py`, `models.py`, `catalogs.py`, `templates.py`, `aggregators/`, plus optional `context.py`, `tracker.py`, `engine/`, `playback/`), with a copy-paste-ready skeleton in `src/skills/.example/`. Cross-cutting tools and infrastructure live in `src/tools/`, `src/jobs/`, `src/context.py`, and `src/utils/`.
 
 ```mermaid
 flowchart TD
     subgraph Entry["Platform Entry Layer"]
         MAIN["main.py (Discord Bot & Voice Runtime)"]
         TG["src/utils/telegram.py (Telegram Bridge)"]
-        ORCH["src/orchestrator.py (Tool Routing & Sanitization)"]
+        DISP["src/utils/dispatcher.py (Shared Command & Reaction Dispatcher)"]
+        ORCH["src/orchestrator.py (Tool Routing, Enrichment & Sanitization)"]
         REG["src/registry.py (Tool Schemas)"]
         CFG["src/config.py / src/config.example.py"]
     end
 
-    subgraph Core["Shared Core & Infrastructure Layer"]
-        CTX["src/context.py (ACTIVE_CHANNEL_ID & Event Loop Bridge)"]
-        JOB["src/jobs/ (Unified Background Job Engine, Cron/Interval/Condition/Autoplay)"]
+    subgraph Core["Shared Core, Tools & Infrastructure Layer"]
+        CTX["src/context.py (ACTIVE_CHANNEL_ID, Attachment Queue & Event Loop Bridge)"]
+        JOB["src/jobs/ (Unified Background Job Engine: Cron/Interval/Condition/Autoplay)"]
+        TLS["src/tools/ (system.py Clock/Math/Memory + web.py Search, Vision Images, Stealth Reader & Full-Timeline YouTube Reader)"]
         VOCAB["src/utils/domain_vocab.py (Token Sets, Tool Aliases & DictLikeMixin)"]
-        WRK["src/utils/workers.py (Shared ThreadPoolExecutor)"]
-        HTTP["src/utils/http.py (curl_cffi Stealth Client + SSRF Guard)"]
-        TZ["src/utils/timezones.py (Dual Local + UTC/CET Formatter)"]
+        WRK["src/utils/workers.py (3-Tier Worker Hierarchy: Turn / Sub / Leaf)"]
+        HTTP["src/utils/http.py (curl_cffi Stealth Client, SSRF Guard & SecretRedactingFilter)"]
+        TZ["src/utils/timezones.py (DST-Safe Dual Local + UTC/CET Formatter)"]
     end
 
     subgraph Skills["Standardized Domain Skills (src/skills/)"]
         VCE["🎙️ voice\n(voice.py, enums, models, catalogs, templates,\ncontext, tracker, engine/, aggregators/, playback/)"]
         MUS["🎵 music\n(music.py, enums, models, catalogs, templates,\ncontext, engine/, aggregators/, playback/)"]
-        JBS["⏰ jobs\n(jobs.py, enums, models, catalogs, templates,\ncontext)"]
-        GRP["📊 graphing\n(graphing.py, enums, models, catalogs, templates,\ncontext, engine/, aggregators/)"]
-        MKT["📈 markets\n(markets.py, enums, models, catalogs, templates,\ncontext, engine/, aggregators/)"]
+        JBS["⏰ jobs\n(jobs.py, enums, models, catalogs, templates,\naggregators/)"]
+        GRP["📊 graphing\n(graphing.py, enums, models, catalogs, templates,\ncontext, aggregators/)"]
+        MKT["📈 markets\n(markets.py, enums, models, catalogs, templates,\ncontext, aggregators/)"]
         SPT["🏟️ sports\n(sports.py, enums, models, catalogs, templates,\ncontext, tracker, aggregators/)"]
         FLT["✈️ flights\n(flights.py, enums, models, catalogs, templates,\ncontext, tracker, engine/, aggregators/)"]
-        IMG["🖼️ images\n(images.py, enums, models, catalogs, templates,\ncontext, engine/, aggregators/)"]
         NWS["📰 news\n(news.py, enums, models, catalogs, templates,\naggregators/)"]
         WTH["🌤️ weather\n(weather.py, enums, models, catalogs, templates,\naggregators/)"]
         YT["📺 youtube\n(youtube.py, enums, models, catalogs, templates,\nengine/, aggregators/)"]
-        EX["🧩 .example\n(example.py + Copy-Paste Skeleton)"]
+        EX["🧩 .example\n(example.py, enums, models, catalogs, templates,\ncontext, tracker, aggregators/)"]
     end
 
+    MAIN --> DISP
+    TG --> DISP
     MAIN --> ORCH
     TG --> ORCH
     MAIN --> CTX
     TG --> CTX
     ORCH --> REG
+    REG --> TLS
     REG --> Skills
     Skills --> Core
+    TLS --> Core
 ```
 
 ### 📁 Standard Skill Package Layout (`src/skills/<skill_name>/`)
@@ -108,7 +113,7 @@ Many coding and OS agents (like Claude Code, Cursor, or OpenClaw) use `SKILL.md`
 
 This bot intentionally uses **compiled Python skill packages + `templates.py`** instead:
 - **Built for Fast Local Models (`4B–8B`)**: Rather than asking a small local model to read a Markdown guide and improvise CLI commands across 3–4 turns, each skill exposes a strict, typed Python function (`<skill_name>.py`) and appends concise formatting rules (`templates.py`) directly to the tool output in a **single turn**.
-- **Deterministic Speed & Concurrency**: Heavy lifting — like 24-thread worker fan-out, API fallback chains, and in-memory MP3/PCM signal processing — runs in deterministic, unit-tested Python rather than prompt instructions.
+- **Deterministic Speed & Concurrency**: Heavy lifting — like 3-tier deadlock-free worker fan-out, API fallback chains, full-timeline transcript salience scoring, and in-memory MP3/PCM signal processing — runs in deterministic, unit-tested Python rather than prompt instructions.
 
 ---
 
@@ -157,19 +162,19 @@ python main.py
 ```
 
 #### Option B: Run in a Hardened, Self-Contained Docker Stack (`ollama` + `discord-bot`)
-For complete filesystem and network isolation from the host machine (pre-configured with `libopus0` and `ffmpeg` for Discord Voice Co-Hosting):
+For complete filesystem and network isolation from the host machine (pre-configured with `libopus0`, `libsodium23`, and `ffmpeg` for Discord Voice Co-Hosting & Music Streaming):
 ```bash
 docker compose up -d --build
 ```
 - **Dedicated GPU `ollama` Container**: Runs `ollama/ollama` inside a sibling container on a private internal bridge network (`http://ollama:11434`) with GPU passthrough (`capabilities: [gpu]`) and an isolated `ollama_models` volume. Missing models in `MODES` are pulled automatically on first boot (`OLLAMA_AUTO_PULL=true`).
-- **Zero Host Bind-Mounts**: No host folders are mounted into either container (`ollama_models`, `bot_data`, and `bot_workspace` use isolated Docker-managed named volumes).
+- **Zero Host Bind-Mounts**: No host folders are mounted into either container (`ollama_models`, `bot_data`, `bot_workspace`, and `bot_hf_cache` use isolated Docker-managed named volumes).
 - **Read-Only Root Filesystem**: `/`, `/usr`, and `/app` in `discord-bot` are mounted read-only; the bot runs as an unprivileged user (`1000:1000`) with `cap_drop: [ALL]` and `no-new-privileges:true`.
 
 ---
 
 ## 🎙️ Discord Voice-Channel AI Co-Host Guide
 
-The bot can join any Discord voice channel and participate as a real-time, voice-activated AI co-host while retaining full access to all 10 domain skills.
+The bot can join any Discord voice channel and participate as a real-time, voice-activated AI co-host while retaining full access to all domain skills and web tools.
 
 ### How It Works
 1. **Join a Voice Channel**: Hop into any Discord voice channel and type **`!join`** (or **`!join conversational`**), or simply ask in chat: *"@Bot hop into the voice channel"*.
@@ -212,18 +217,18 @@ The bot can join any Discord voice channel and participate as a real-time, voice
 | `!join [mode]` | — | Join your current Discord voice channel (`!join`, `!join conversational`, `!join listen_only`). |
 | `!leave` / `!disconnect` | — | Disconnect the AI co-host and stop voice music streaming in the active Discord voice channel. |
 | `!pause` / `!resume` | — | Pause or resume the currently streaming ad-free voice music track. |
-| `!skip` / `!next` | — | Skip to the next track in the voice queue (or immediately advance active Music Autoplay). |
+| `!skip` / `!next` | — | Skip to the next track in the voice queue (or immediately advance active Music Autoplay while preserving station seed). |
 | `!stop` | — | Stop voice music playback and clear the queue without leaving the voice channel. |
 | `!queue` / `!np` | — | View the currently streaming voice track, upcoming queue, and active Autoplay radio status. |
-| `!autoplay [genre]` | `/autoplay [genre]` | Start continuous Music Autoplay radio (`!stopautoplay` to stop; adapts to any song/genre/shift). |
-| `!remind <when> <task>` | `/remind <when> <task>` | Create a one-shot, recurring, or conditional reminder (`!jobs` to list, `!canceljob <id>` to stop). |
+| `!autoplay [seed]` | `/autoplay [seed]` | Start continuous Music Autoplay radio by genre, artist/track similarity, or YouTube URL (`!stopautoplay` to stop). |
+| `!remind <when> <task>` | `/remind <when> <task>` | Create a one-shot, recurring, or conditional reminder/task (`!jobs` to list, `!canceljob <id>` to stop). |
 | `!voice [preset]` | — | List available neural voice presets or switch speaking voice/accent (`british`, `ava`, `deep`, `sportscaster`, `australian`, etc.). |
 | `!speak <text>` | — | Synthesize `<text>` via Neural TTS and speak it out loud in the active voice channel. |
 | `!vmode <mode>` | — | Switch voice listening mode (`wake_word`, `conversational`, `listen_only`). |
 | `!vrecap` | — | Post a chronological, speaker-attributed transcript recap of the voice call. |
 | `!vstatus` | — | View active voice channel connection, listening mode, TTS voice profile, now-playing track, and utterance stats. |
 | `!vmute` / `!vunmute` | — | Mute or unmute spoken TTS audio output while keeping voice transcription active. |
-| `!track <team/match>` | `/track <team/match>` | Start live background match tracking (`!untrack` to stop, `!tracked` to list active games). |
+| `!track <team/match/F1>` | `/track <team/match/F1>` | Start live background match or F1 session tracking (`!untrack` to stop, `!tracked` to list active games). |
 | `!trackflight <flight/route>` | `/trackflight <flight/route>` | Start live flight status or route price watch (`!untrackflight` to stop, `!trackedflights` to list). |
 | React with 👍 on a song card | React with 👍 on a song card | Automatically finds and posts a verified similar track (and queues it up next if streaming in voice!). |
 
@@ -236,15 +241,20 @@ The bot can join any Discord voice channel and participate as a real-time, voice
   - *"Give me a recap of what everyone talked about in the voice call"*
 - **Music Discovery, `ytmusicapi` Radio, Autoplay & Spectrum Shifts (`skill_music_discovery` / `skill_job_manager`)**:
   - *"Play me a dark techno banger"* / *"Start autoplay with drum and bass"*
-  - *"Give me something a little faster and harder"* (or reply directly to a song card with *"slower"* / *"softer"*)
+  - *"Start autoplay with songs like Strobe by Deadmau5"* / *"Autoplay https://music.youtube.com/watch?v=..."*
+  - *"Give me something a little faster and harder"* (or reply directly to a song card with *"slower"* / *"softer"* / *"skip"*)
   - *"Switch to neurofunk"* / *"Find tracks that harmonically mix with Strobe by Deadmau5"*
-- **Reminders, Recurring Tasks & Conditional Alerts (`skill_job_manager`)**:
-  - *"Remind me in 45 minutes to check the oven"* / *"Every 2 hours play a dnb song"*
-  - *"Alert me when BTC crosses above $105,000"* / *"What jobs and reminders are active right now?"*
+- **Reminders, Recurring Multi-Skill Tasks & Conditional Alerts (`skill_job_manager`)**:
+  - *"Remind me in 45 minutes to check the oven"* / *"Every Monday at 9am send me the global market overview and plot BTC"*
+  - *"Alert me when BTC crosses above \$105,000"* / *"What jobs and reminders are active right now?"*
+- **Long-Form YouTube Video Analysis & Broadcaster Video Search (`read_youtube_video` / `skill_youtube_search`)**:
+  - *"https://www.youtube.com/watch?v=..."* *(generates a full `0%–100%` chronological multi-chapter analysis even for 1h–10h+ podcasts and lectures)*
+  - *"What did they say about interest rates around 45:00 in https://www.youtube.com/watch?v=...?"* *(extracts targeted verbatim lines around `45:00` alongside the full-video digest)*
+  - *"Find the latest Formula 1 race highlights on YouTube"*
 - **On-Demand Graphing, Monte Carlo, Heatmaps & Diagrams (`skill_graphing_info`)**:
   - *"Can you do a Monte Carlo simulation on BTC 2 years into the future?"* *(defaults to 5-Year History)*
   - *"Run a Monte Carlo simulation on NVDA 5 years in the future using the past 10 years of history"* (or *"based on all-time history"*)
-  - *"Plot NVDA vs AMD vs SHOP.TO over the last 6 months"* / *"Graph the last 3 days of BTC by hour"*
+  - *"Graph BTC and ETH over the last month"* *(renders separate true-scale price charts)* / *"Compare NVDA vs AMD vs SHOP.TO over the last 6 months"* *(renders a normalized `%` return overlay)*
   - *"Graph a bar chart of GPU VRAM: RTX 4090: 24, RTX 4080: 16, RTX 4070 Ti: 12"*
   - *"Make a calendar heatmap of daily prices in May"* / *"Plot a heatmap of regional server latency"*
   - *"Draw a flowchart of how an OAuth2 login request is authenticated"*
@@ -255,9 +265,9 @@ The bot can join any Discord voice channel and participate as a real-time, voice
   - *"Show me the 1-year performance, volatility, and max drawdown for Bitcoin and Gold"*
   - *"Value my portfolio: 25 AAPL, 40 SHOP.TO, 0.5 BTC"*
   - *"What are the fundamentals and next earnings date for Microsoft?"*
-- **Sports, CS2 Esports & Live Match Tracking (`skill_sports_info` / `skill_sports_tracker`)**:
+- **Sports, Formula 1 Telemetry, CS2 Esports & Live Match Tracking (`skill_sports_info` / `skill_sports_tracker`)**:
   - *"What are the Champions League and NHL games today and their odds?"*
-  - *"When is the next F1 race and what are the session times?"*
+  - *"When is the next F1 race and what are the session times?"* / *"Track the F1 race"* (live lap counter, leader changes, Safety Car alerts, and Q1/Q2/Q3 qualifying segment summaries)
   - *"What's happening in CS2 right now and what are Vitality's player stats?"*
   - *"Track the Real Madrid game"* / *"Which games are we tracking right now?"* / *"Stop tracking the Real Madrid game"*
 - **Flights, Airfare Calendars & Live Radar Tracking (`skill_flight_info` / `skill_flight_tracker`)**:
@@ -270,13 +280,19 @@ The bot can join any Discord voice channel and participate as a real-time, voice
 
 ## 🧪 Running the Test Suite
 
-The repository includes **370+ unit, concurrency, combinatorial, and architectural boundary tests** (executing completely offline in ~15 seconds):
+The repository includes **395+ unit, concurrency, combinatorial, security, and architectural boundary tests** (executing completely offline in ~15 seconds):
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-To run the architectural & module boundary guardrails specifically:
+Or on Windows PowerShell:
+
+```powershell
+python -m unittest @(Get-ChildItem tests\test_*.py | ForEach-Object { "tests/$($_.Name)" })
+```
+
+To run the architectural, security & module boundary guardrails specifically:
 
 ```bash
 python -m unittest tests/test_architecture_and_boundaries.py

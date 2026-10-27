@@ -6,7 +6,6 @@ import socket
 import sys
 import requests
 import urllib.parse as urlparse
-from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from typing import Optional, Set, Tuple
 from bs4 import BeautifulSoup

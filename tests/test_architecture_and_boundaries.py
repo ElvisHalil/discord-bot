@@ -216,7 +216,7 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
                         func_name = node.func.attr
                         if (
                             isinstance(node.func.value, ast.Name)
-                            and node.func.value.id in ("WORKER_POOL", "SUB_WORKER_POOL", "SPORTS_EXECUTOR", "_PROBE_EXECUTOR")
+                            and node.func.value.id in ("WORKER_POOL", "SUB_WORKER_POOL", "LEAF_WORKER_POOL", "SPORTS_EXECUTOR", "_PROBE_EXECUTOR")
                             and func_name in ("submit", "map")
                         ):
                             violations.append(
