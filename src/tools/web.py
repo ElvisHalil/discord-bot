@@ -365,6 +365,14 @@ def read_website(url: str) -> str:
         if _is_private_or_local_host(parsed.hostname):
             return "❌ Security Block: Access to localhost or private network addresses is not permitted."
 
+    # Redirect direct YouTube video links passed to read_website straight to read_youtube_video
+    host_low = (parsed.hostname or "").lower()
+    if host_low in ("youtu.be", "youtube.com", "www.youtube.com", "m.youtube.com") and (
+        host_low == "youtu.be"
+        or any(p in parsed.path for p in ("/watch", "/shorts/", "/embed/", "/live/"))
+    ):
+        return read_youtube_video(url)
+
     # 3. Session Cache / Loop Detection
     if url in URL_CACHE:
         print(f"⚡ [Web Cache Hit]: Reusing cached content for {url}")
@@ -542,11 +550,404 @@ def read_website(url: str) -> str:
     except Exception as e:
         return f"❌ Unexpected Error parsing website: {str(e)}. Try a different search result."
 
-def read_youtube_video(url: str) -> str:
-    """Extract the transcript text and title from a YouTube video to summarize it.
+_YOUTUBE_SHORT_TRANSCRIPT_CHAR_LIMIT = 12500
+_YOUTUBE_MAX_OUTPUT_CHARS = 13800
+_MAX_TRANSCRIPT_SNIPPETS = 6000
+_MAX_TRANSCRIPT_WINDOWS = 400
+_YOUTUBE_RAW_CACHE = BoundedCache(maxsize=50)
+
+_YT_STOPWORDS = frozenset({
+    "the", "and", "that", "this", "with", "from", "your", "have", "what", "when", "where",
+    "which", "there", "their", "they", "them", "were", "been", "being", "would", "could",
+    "should", "about", "into", "over", "after", "before", "under", "between", "through",
+    "just", "like", "know", "really", "going", "think", "right", "actually", "basically",
+    "literally", "mean", "well", "yeah", "okay", "very", "much", "some", "more", "most",
+    "other", "than", "then", "also", "only", "even", "back", "down", "here", "make",
+    "made", "want", "need", "look", "take", "good", "time", "people", "thing", "things",
+    "something", "because", "does", "didn", "don", "isn", "wasn", "aren", "won", "can",
+    "will", "you", "for", "not", "are", "but", "all", "out", "who", "how", "why", "way",
+})
+
+_YT_THESIS_SIGNAL_RE = re.compile(
+    r"\b(?:in\s+summary|in\s+conclusion|to\s+summarize|the\s+key\s+(?:point|takeaway|thing)|"
+    r"most\s+important(?:ly)?|main\s+reason|bottom\s+line|first\s+of\s+all|second(?:ly)?|"
+    r"third(?:ly)?|finally|my\s+verdict|final\s+thoughts?|my\s+prediction|here\s+is\s+why|"
+    r"the\s+problem\s+is|the\s+solution\s+is|big\s+picture|number\s+one|takeaway)\b",
+    re.IGNORECASE,
+)
+
+_YT_SPONSOR_BOILERPLATE_RE = re.compile(
+    r"\b(?:sponsored\s+by|today'?s\s+sponsor|use\s+(?:my\s+)?(?:promo\s+|discount\s+)?code|"
+    r"smash\s+that\s+like\s+button|don'?t\s+forget\s+to\s+subscribe|hit\s+the\s+bell|"
+    r"link\s+in\s+the\s+description|special\s+offer\s+for\s+our\s+listeners|"
+    r"money[-\s]?back\s+guarantee|data\s+brokers?|remove\s+your\s+(?:personal\s+)?(?:data|information)|"
+    r"unlimited\s+plan|free\s+trial|\d+%\s+off\s+your\s+first)\b",
+    re.IGNORECASE,
+)
+
+_YT_NUMBER_OR_METRIC_RE = re.compile(
+    r"(?:\$\d[\d,.]*|\b\d+(?:\.\d+)?%|\b(?:19|20)\d{2}\b|\b\d[\d,]*(?:\.\d+)?\s*(?:million|billion|trillion|thousand|k|m|b|x|bps|ms|gb|tb|mw|gw|fps|hz)\b)",
+    re.IGNORECASE,
+)
+
+
+def _format_yt_timestamp(seconds: float) -> str:
+    """Format seconds into MM:SS or H:MM:SS."""
+    sec = max(0, int(round(float(seconds or 0.0))))
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
+def _extract_transcript_segments(transcript) -> list[tuple[Optional[float], float, str]]:
+    """Extract (start_sec, duration_sec, text) tuples from YouTubeTranscriptApi output with stride-sampling safety for extreme 10h+ streams."""
+    from itertools import islice
+
+    raw_items = list(islice(transcript, 100000)) if not isinstance(transcript, (list, tuple)) else list(transcript[:100000])
+    total_raw = len(raw_items)
+    if total_raw > _MAX_TRANSCRIPT_SNIPPETS:
+        # Uniformly stride-sample across 0%..100% of extreme multi-hour streams (always preserving opening & closing snippets)
+        sampled_indices = [
+            int(round(i * (total_raw - 1) / (_MAX_TRANSCRIPT_SNIPPETS - 1)))
+            for i in range(_MAX_TRANSCRIPT_SNIPPETS)
+        ]
+        raw_items = [raw_items[idx] for idx in sampled_indices]
+
+    segments: list[tuple[Optional[float], float, str]] = []
+    for t in raw_items:
+        if isinstance(t, dict):
+            snippet_text = t.get("text")
+            raw_start = t.get("start")
+            raw_dur = t.get("duration")
+        else:
+            snippet_text = getattr(t, "text", None)
+            if not isinstance(snippet_text, str):
+                snippet_text = str(t) if t is not None else ""
+            raw_start = getattr(t, "start", None)
+            raw_dur = getattr(t, "duration", None)
+
+        clean_piece = re.sub(r"\s+", " ", str(snippet_text or "")).strip()
+        if not clean_piece:
+            continue
+        start_sec = (
+            float(raw_start)
+            if isinstance(raw_start, (int, float)) and not isinstance(raw_start, bool)
+            else None
+        )
+        dur_sec = (
+            float(raw_dur)
+            if isinstance(raw_dur, (int, float)) and not isinstance(raw_dur, bool)
+            else 0.0
+        )
+        segments.append((start_sec, dur_sec, clean_piece))
+    return segments
+
+
+def _format_short_transcript_with_timestamps(
+    segments: list[tuple[Optional[float], float, str]],
+    plain_text: str,
+) -> str:
+    """Render short/medium transcripts verbatim, inserting [MM:SS] markers every ~60s when real timestamps exist."""
+    has_real_ts = any(s[0] is not None for s in segments)
+    if not has_real_ts:
+        return plain_text
+
+    max_end = max(((s[0] or 0.0) + max(0.0, s[1])) for s in segments)
+    if max_end < 60.0:
+        return plain_text
+
+    out_parts: list[str] = []
+    last_marker_sec = -60.0
+    for start_sec, _dur_sec, piece in segments:
+        if start_sec is not None and (start_sec - last_marker_sec) >= 60.0:
+            out_parts.append(f"[{_format_yt_timestamp(start_sec)}]")
+            last_marker_sec = start_sec
+        out_parts.append(piece)
+
+    rendered = " ".join(out_parts).strip()
+    return rendered if len(rendered) <= _YOUTUBE_MAX_OUTPUT_CHARS else plain_text
+
+
+def _parse_query_timestamp_seconds(query: str) -> Optional[float]:
+    """Parse an explicit timestamp (e.g. '1:15:00', '45:30', '32m', 'minute 45') from a query string."""
+    if not query:
+        return None
+    m_colon = re.search(r"\b(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\b", query)
+    if m_colon:
+        h = int(m_colon.group(1) or 0)
+        m = int(m_colon.group(2))
+        s = int(m_colon.group(3))
+        return float(h * 3600 + m * 60 + s)
+    m_min = re.search(r"\b(?:at\s+|around\s+|minute\s+|min\s+)?(\d{1,3})\s*(?:m|min|mins|minutes?)\b", query, re.IGNORECASE)
+    if m_min:
+        return float(int(m_min.group(1)) * 60)
+    return None
+
+
+def _build_long_transcript_digest(
+    segments: list[tuple[Optional[float], float, str]],
+    plain_text: str,
+    query: Optional[str] = None,
+    max_chars: int = _YOUTUBE_MAX_OUTPUT_CHARS,
+) -> str:
+    """
+    Build a full-timeline (0%–100%) multi-chapter transcript digest for long-form YouTube videos
+    so the LLM sees the beginning, middle chapters, and final conclusion without overflowing context.
+    Optionally prepends verbatim excerpts matching `query` (topic keywords or timestamp).
+    """
+    import math
+
+    # 1. Group snippets into contiguous micro-windows (adaptively sized so extreme streams never exceed _MAX_TRANSCRIPT_WINDOWS)
+    windows: list[dict] = []
+    has_real_ts = any(s[0] is not None for s in segments)
+    total_words = len(plain_text.split())
+    target_win_words = max(55, (total_words + _MAX_TRANSCRIPT_WINDOWS - 1) // _MAX_TRANSCRIPT_WINDOWS)
+    target_win_chars = max(360, (len(plain_text) + _MAX_TRANSCRIPT_WINDOWS - 1) // _MAX_TRANSCRIPT_WINDOWS)
+
+    if has_real_ts and len(segments) > 1:
+        cur_words: list[str] = []
+        cur_word_count = 0
+        win_start: Optional[float] = None
+        win_end: float = 0.0
+        cum_words = 0
+        for start_sec, dur_sec, piece in segments:
+            piece_words = piece.split()
+            if not piece_words:
+                continue
+            est_start = start_sec if start_sec is not None else (cum_words / 155.0) * 60.0
+            if win_start is None:
+                win_start = est_start
+            win_end = max(win_end, est_start + (dur_sec if dur_sec > 0 else (len(piece_words) / 155.0) * 60.0))
+            cur_words.append(piece)
+            cur_word_count += len(piece_words)
+            cum_words += len(piece_words)
+            if cur_word_count >= target_win_words or sum(len(x) for x in cur_words) >= target_win_chars:
+                windows.append({
+                    "idx": len(windows),
+                    "start": float(win_start),
+                    "end": float(max(win_start, win_end)),
+                    "text": " ".join(cur_words).strip(),
+                })
+                cur_words = []
+                cur_word_count = 0
+                win_start = None
+        if cur_words:
+            s_val = float(win_start if win_start is not None else win_end)
+            windows.append({
+                "idx": len(windows),
+                "start": s_val,
+                "end": float(max(s_val, win_end)),
+                "text": " ".join(cur_words).strip(),
+            })
+    else:
+        all_words = plain_text.split()
+        step_w = target_win_words
+        for w_i in range(0, len(all_words), step_w):
+            chunk_w = all_words[w_i : w_i + step_w]
+            s_sec = (w_i / 155.0) * 60.0
+            e_sec = ((w_i + len(chunk_w)) / 155.0) * 60.0
+            windows.append({
+                "idx": len(windows),
+                "start": s_sec,
+                "end": e_sec,
+                "text": " ".join(chunk_w),
+            })
+
+    if not windows:
+        return _smart_truncate(plain_text, max_chars)
+
+    total_duration_sec = max(w["end"] for w in windows)
+    n_win = len(windows)
+
+    # 2. Compute IDF weights & information salience score for each micro-window
+    doc_freq: dict[str, int] = {}
+    win_tokens_list: list[set[str]] = []
+    for w in windows:
+        toks = {
+            tok for tok in re.findall(r"[a-zA-Z0-9]{3,}", w["text"].lower())
+            if tok not in _YT_STOPWORDS
+        }
+        win_tokens_list.append(toks)
+        for tok in toks:
+            doc_freq[tok] = doc_freq.get(tok, 0) + 1
+
+    for i, w in enumerate(windows):
+        txt = w["text"]
+        toks = win_tokens_list[i]
+        if toks:
+            idf_sum = sum(math.log(1.0 + n_win / (1.0 + doc_freq.get(t, 1))) for t in toks)
+            vocab_score = idf_sum / math.sqrt(len(toks) + 4.0)
+        else:
+            vocab_score = 0.0
+
+        metric_hits = len(_YT_NUMBER_OR_METRIC_RE.findall(txt))
+        metric_bonus = min(5.6, metric_hits * 1.4)
+        thesis_bonus = 2.2 if _YT_THESIS_SIGNAL_RE.search(txt) else 0.0
+        has_sponsor = bool(_YT_SPONSOR_BOILERPLATE_RE.search(txt))
+        if has_sponsor:
+            metric_bonus = 0.0
+        sponsor_penalty = -8.0 if has_sponsor else 0.0
+        w["salience"] = vocab_score + metric_bonus + thesis_bonus + sponsor_penalty
+
+    # 3. Optional Query / Timestamp Targeted Excerpts
+    clean_query = (query or "").strip()
+    query_section = ""
+    if clean_query:
+        target_sec = _parse_query_timestamp_seconds(clean_query)
+        q_low = clean_query.lower()
+        wants_end = bool(re.search(r"\b(?:end|ending|conclusion|final|verdict|last\s+part|wrap\s*up|closing)\b", q_low))
+        wants_start = bool(re.search(r"\b(?:start|beginning|intro|introduction|opening)\b", q_low))
+        q_terms = [
+            t for t in re.findall(r"[a-zA-Z0-9]{2,}", q_low)
+            if t not in _YT_STOPWORDS and t not in ("video", "youtube", "watch", "transcript", "summary", "summarize", "tell", "said", "say", "talk", "talked")
+        ]
+
+        raw_q_scores = [0.0] * n_win
+        for i, w in enumerate(windows):
+            txt_low = w["text"].lower()
+            score = 0.0
+            if target_sec is not None:
+                dist = abs(((w["start"] + w["end"]) * 0.5) - target_sec)
+                if dist <= 150.0:
+                    score += max(0.0, 12.0 - (dist / 15.0))
+            if wants_end and i >= int(n_win * 0.82):
+                score += 6.0
+            if wants_start and i <= max(1, int(n_win * 0.15)):
+                score += 5.0
+            for qt in q_terms:
+                if qt in win_tokens_list[i] or (len(qt) >= 4 and qt in txt_low):
+                    idf_w = math.log(1.5 + n_win / (1.0 + doc_freq.get(qt, 1)))
+                    score += 3.0 * idf_w
+            raw_q_scores[i] = score
+
+        # Bleed neighbor context so matching windows pull adjacent explanation
+        smoothed_q_scores = [0.0] * n_win
+        for i in range(n_win):
+            prev_s = raw_q_scores[i - 1] * 0.35 if i > 0 else 0.0
+            next_s = raw_q_scores[i + 1] * 0.35 if i + 1 < n_win else 0.0
+            smoothed_q_scores[i] = raw_q_scores[i] + prev_s + next_s
+
+        ranked_q = [
+            i for i in sorted(range(n_win), key=lambda idx: (smoothed_q_scores[idx], windows[idx]["salience"]), reverse=True)
+            if smoothed_q_scores[i] > 0.5
+        ]
+        if ranked_q:
+            q_budget = min(4200, int(max_chars * 0.33))
+            chosen_q: list[int] = []
+            used_q_chars = 0
+            for idx in ranked_q:
+                w_len = len(windows[idx]["text"]) + 28
+                if used_q_chars + w_len > q_budget and chosen_q:
+                    break
+                chosen_q.append(idx)
+                used_q_chars += w_len
+            chosen_q.sort()
+            q_lines = [f"=== TARGETED VERBATIM EXCERPTS (Query: '{clean_query}') ==="]
+            for idx in chosen_q:
+                w = windows[idx]
+                pct = int(round((idx / max(1, n_win - 1)) * 100))
+                q_lines.append(f"[{_format_yt_timestamp(w['start'])} – {_format_yt_timestamp(w['end'])} | {pct}%] {w['text']}")
+            query_section = "\n".join(q_lines) + "\n\n"
+
+    # 4. Full-Timeline Multi-Chapter Breakdown (0% to 100% of video)
+    char_len = len(plain_text)
+    if char_len < 28000:
+        num_chapters = min(6, n_win)
+    elif char_len < 75000:
+        num_chapters = min(8, n_win)
+    else:
+        num_chapters = min(10, n_win)
+    num_chapters = max(1, num_chapters)
+
+    header_note = (
+        f"[Long-Form Video Coverage: ~{total_words:,} words ({_format_yt_timestamp(total_duration_sec)} duration) "
+        f"mapped across {num_chapters} chronological chapters spanning 0%–100% of the video.]\n\n"
+    )
+
+    footer_instructions = (
+        "\n\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
+        f"This is a full-video transcript breakdown ({_format_yt_timestamp(total_duration_sec)} duration, ~{total_words:,} words) "
+        f"spanning all {num_chapters} chapters from start to finish.\n"
+        "1. Write a thorough, detailed analysis organized by **### Thematic Section Headings** covering EVERY major topic discussed across the entire video (beginning, middle chapters, and final conclusion).\n"
+        "2. Under each `###` heading, write **2–4 detailed bullet points** explaining the speaker's exact arguments, reasoning, real-world examples, numbers, percentages, tickers, and takeaways.\n"
+        "3. Do NOT write a shallow 1-line-per-chapter overview, do NOT include percentage ranges like `(12%–50%)`, and do NOT end with 'let me know if you want me to summarize a specific section'.\n"
+        f"4. Ensure the topics and conclusions from the second half and final chapter (Chapter {num_chapters}/{num_chapters}) are covered with the same depth as the opening.\n"
+        "5. Ignore any sponsor/advertiser read segments."
+    )
+
+    remaining_budget = max(3500, max_chars - len(header_note) - len(query_section) - len(footer_instructions) - 120)
+    per_chapter_budget = max(420, remaining_budget // num_chapters)
+
+    chapter_blocks: list[str] = ["=== FULL-TIMELINE CHRONOLOGICAL CHAPTER BREAKDOWN (0%–100%) ==="]
+    for c_idx in range(num_chapters):
+        start_w = (c_idx * n_win) // num_chapters
+        end_w = ((c_idx + 1) * n_win) // num_chapters
+        if end_w <= start_w:
+            end_w = min(n_win, start_w + 1)
+        c_windows = windows[start_w:end_w]
+        if not c_windows:
+            continue
+
+        ch_start_ts = _format_yt_timestamp(c_windows[0]["start"])
+        ch_end_ts = _format_yt_timestamp(c_windows[-1]["end"])
+        pct_start = int(round((c_idx / num_chapters) * 100))
+        pct_end = int(round(((c_idx + 1) / num_chapters) * 100))
+        ch_header = f"--- Chapter {c_idx + 1}/{num_chapters} [{ch_start_ts} – {ch_end_ts} | {pct_start}%–{pct_end}%] ---"
+
+        # Always anchor the chapter opening, and in the final chapter always anchor the video conclusion
+        mandatory_local_indices: list[int] = [0]
+        if c_idx == num_chapters - 1 and len(c_windows) > 1:
+            mandatory_local_indices.append(len(c_windows) - 1)
+
+        selected_local: set[int] = set()
+        used_ch_chars = len(ch_header) + 2
+
+        for m_i in mandatory_local_indices:
+            w_txt = c_windows[m_i]["text"]
+            selected_local.add(m_i)
+            used_ch_chars += len(w_txt) + 16
+
+        # Fill remaining chapter budget with highest-salience windows in this chapter
+        candidate_locals = sorted(
+            (i for i in range(len(c_windows)) if i not in selected_local),
+            key=lambda i: c_windows[i]["salience"],
+            reverse=True,
+        )
+        for cand_i in candidate_locals:
+            w_len = len(c_windows[cand_i]["text"]) + 16
+            if used_ch_chars + w_len > per_chapter_budget:
+                continue
+            selected_local.add(cand_i)
+            used_ch_chars += w_len
+
+        ordered_locals = sorted(selected_local)
+        ch_pieces: list[str] = []
+        prev_local = -1
+        for loc_i in ordered_locals:
+            w = c_windows[loc_i]
+            prefix_ellipsis = "... " if (prev_local != -1 and loc_i > prev_local + 1) else ""
+            ch_pieces.append(f"{prefix_ellipsis}[{_format_yt_timestamp(w['start'])}] {w['text']}")
+            prev_local = loc_i
+
+        chapter_line = f"{ch_header}\n" + " ".join(ch_pieces)
+        if len(chapter_line) > per_chapter_budget + 180:
+            chapter_line = _smart_truncate(chapter_line, per_chapter_budget + 140)
+        chapter_blocks.append(chapter_line)
+
+    assembled = header_note + query_section + "\n\n".join(chapter_blocks)
+    if len(assembled) + len(footer_instructions) > max_chars:
+        assembled = _smart_truncate(assembled, max(2000, max_chars - len(footer_instructions) - 20))
+    return assembled + footer_instructions
+
+
+def read_youtube_video(url: str, query: Optional[str] = None) -> str:
+    """Extract the transcript text and title from a YouTube video to summarize or analyze it.
 
     Args:
         url: The YouTube video link (watch, youtu.be, shorts, embed or live) or the 11-character video ID.
+        query: Optional topic, question, or timestamp (e.g. 'Nvidia margins', '45:00', 'conclusion') to pull verbatim segments from long videos.
     """
     global YOUTUBE_CACHE
 
@@ -581,44 +982,99 @@ def read_youtube_video(url: str) -> str:
     if not video_id or not re.match(r'^[a-zA-Z0-9_-]{11}$', video_id):
         return "❌ Failed to extract valid YouTube video ID from the provided URL. CRITICAL: Do NOT guess or invent a YouTube link! Tell the user you couldn't find it."
 
+    clean_query = (query or "").strip()
+
     if video_id in YOUTUBE_CACHE:
         print(f"⚡ [YouTube Cache Hit]: Reusing cached transcript for {video_id}")
+        if not clean_query:
+            return YOUTUBE_CACHE[video_id]
+        raw_entry = _YOUTUBE_RAW_CACHE.get(video_id)
+        if isinstance(raw_entry, dict) and raw_entry.get("segments"):
+            cached_title = raw_entry.get("title", "Unknown Video Title")
+            cached_segments = raw_entry["segments"]
+            cached_plain = " ".join(s[2] for s in cached_segments).strip()
+            if len(cached_plain) <= _YOUTUBE_SHORT_TRANSCRIPT_CHAR_LIMIT:
+                body = _format_short_transcript_with_timestamps(cached_segments, cached_plain)
+            else:
+                body = _build_long_transcript_digest(
+                    cached_segments,
+                    cached_plain,
+                    query=clean_query,
+                    max_chars=_YOUTUBE_MAX_OUTPUT_CHARS - len(cached_title) - 40,
+                )
+            return f"Video Title: {cached_title}\n\nTranscript:\n{body}"
         return YOUTUBE_CACHE[video_id]
 
     print(f"📺 [Fetching YouTube Transcript & Metadata]: Video ID {video_id}")
-    video_title = "Unknown Video Title"
-    try:
-        oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
-        response = requests.get(oembed_url, timeout=5)
-        if response.status_code == 200:
-            video_title = response.json().get("title", "Unknown Video Title")
-    except Exception as e:
-        print(f"⚠️ [oEmbed Metadata Error]: Could not fetch title: {e}")
+    from src.utils.workers import submit_to_worker
 
-    try:
+    def _fetch_oembed_title(vid: str) -> str:
+        try:
+            oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json"
+            response = requests.get(oembed_url, timeout=5)
+            if response.status_code == 200:
+                return response.json().get("title", "Unknown Video Title")
+        except Exception as e:
+            print(f"⚠️ [oEmbed Metadata Error]: Could not fetch title: {e}")
+        return "Unknown Video Title"
+
+    def _fetch_raw_transcript(vid: str):
         ytt_api = YouTubeTranscriptApi()
         try:
-            transcript = ytt_api.fetch(video_id)
+            return ytt_api.fetch(vid)
         except Exception:
-            transcript_list = ytt_api.list(video_id)
-            transcript = next(iter(transcript_list)).fetch()
+            transcript_list = ytt_api.list(vid)
+            return next(iter(transcript_list)).fetch()
 
-        parts = []
-        for t in transcript:
-            snippet_text = getattr(t, 'text', None) or (t.get('text') if isinstance(t, dict) else str(t))
-            if snippet_text:
-                parts.append(snippet_text)
+    # Dispatch oEmbed metadata and YouTube transcript fetch concurrently in worker threads
+    title_fut = submit_to_worker(_fetch_oembed_title, video_id)
+    transcript_fut = submit_to_worker(_fetch_raw_transcript, video_id)
 
-        text = " ".join(parts).strip()
+    try:
+        video_title = title_fut.result(timeout=6.0)
+    except Exception:
+        video_title = "Unknown Video Title"
+
+    try:
+        transcript = transcript_fut.result(timeout=15.0)
+
+        segments = _extract_transcript_segments(transcript)
+        text = " ".join(s[2] for s in segments).strip()
         if not text:
             return f"Video Title: {video_title}\n\nTranscript: [Empty transcript returned for this video]"
 
-        truncated_text = _smart_truncate(text, 18000)
-        final_output = f"Video Title: {video_title}\n\nTranscript:\n{truncated_text}"
+        body_budget = _YOUTUBE_MAX_OUTPUT_CHARS - len(video_title) - 40
+        if len(text) <= _YOUTUBE_SHORT_TRANSCRIPT_CHAR_LIMIT:
+            default_body = _format_short_transcript_with_timestamps(segments, text)
+            active_body = default_body
+        else:
+            default_body = _build_long_transcript_digest(
+                segments,
+                text,
+                query=None,
+                max_chars=body_budget,
+            )
+            active_body = (
+                _build_long_transcript_digest(
+                    segments,
+                    text,
+                    query=clean_query,
+                    max_chars=body_budget,
+                )
+                if clean_query
+                else default_body
+            )
 
-        if len(YOUTUBE_CACHE) >= 50:
+        default_output = f"Video Title: {video_title}\n\nTranscript:\n{default_body}"
+        final_output = f"Video Title: {video_title}\n\nTranscript:\n{active_body}"
+
+        while len(YOUTUBE_CACHE) >= 50:
             YOUTUBE_CACHE.pop(next(iter(YOUTUBE_CACHE)))
-        YOUTUBE_CACHE[video_id] = final_output
+        YOUTUBE_CACHE[video_id] = default_output
+        _YOUTUBE_RAW_CACHE[video_id] = {
+            "title": video_title,
+            "segments": segments,
+        }
         return final_output
 
     except Exception as e:
@@ -638,6 +1094,99 @@ def read_youtube_video(url: str) -> str:
             return f"{prefix}Transcript Failed: YouTube temporarily blocked the bot's IP for rate limiting."
 
         return f"{prefix}Failed to fetch transcript: {error_msg}"
+
+
+_YT_GENERIC_SUMMARY_WORDS = frozenset({
+    "summarize", "summary", "tldr", "tl", "dr", "watch", "read", "check", "look",
+    "video", "youtube", "clip", "link", "url", "transcript", "what", "is", "this",
+    "that", "the", "about", "can", "you", "please", "tell", "me", "give", "breakdown",
+    "recap", "overview", "explain", "analyze", "analysis", "in", "on", "of", "for",
+    "from", "to", "and", "or", "a", "an", "it", "he", "she", "they", "say", "said",
+    "says", "talk", "talks", "talking", "talked", "does", "did", "do", "again",
+    "retry", "try", "more", "detail", "details", "detailed", "full", "whole", "entire",
+    "deep", "deeper", "dive", "thoughts", "think", "opinion", "take", "takeaways",
+    "key", "points", "notes", "listen", "hear", "see", "show", "get", "pull", "fetch",
+    "extract", "user", "hey", "bot", "pls", "now", "here",
+})
+
+_YT_URL_IN_TEXT_RE = re.compile(
+    r"https?://(?:www\.|m\.)?(?:youtube\.com/\S+|youtu\.be/\S+)|(?:www\.)?(?:youtube\.com/\S+|youtu\.be/\S+)",
+    re.IGNORECASE,
+)
+
+_DISCORD_USER_WRAPPER_RE = re.compile(
+    r"^(?:User\s+[^\n:]+?\s+says|[^\n:]+?\(User ID:\s*\d+\))"
+    r"(?:\s*\[[^\]]*\])*"
+    r"(?:\s*\(replying to message:\s*\"[\s\S]*?\"\))?"
+    r"\s*:\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_discord_user_wrapper(raw_content: str) -> str:
+    """Strip the 'User <Name> says (replying to ...): ' wrapper added by main.py to isolate the user's actual prompt."""
+    txt = str(raw_content or "").strip()
+    txt = _DISCORD_USER_WRAPPER_RE.sub("", txt).strip()
+    txt = re.sub(r"\[Spoken (?:in Discord )?Voice[^\]]*\]", " ", txt, flags=re.IGNORECASE).strip()
+    return txt
+
+
+def enrich_youtube_tool_args(args: dict, history: list) -> dict:
+    """Auto-populate `query` (and recover prior YouTube URL on follow-ups) when the user asks a specific question or timestamp about a video."""
+    enriched = dict(args or {})
+    latest_user_text = ""
+    for msg in reversed(history or []):
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        if role == "user":
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+            latest_user_text = _strip_discord_user_wrapper(str(content or ""))
+            break
+
+    # Recover prior YouTube URL from history if the user is asking a follow-up question without re-pasting the link
+    raw_url = str(enriched.get("url") or "").strip().strip("\"'`<>()")
+    if not raw_url:
+        for msg in reversed(history or []):
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+            m_yt = _YT_URL_IN_TEXT_RE.search(str(content or ""))
+            if m_yt:
+                enriched["url"] = m_yt.group(0).rstrip(".,;)>\"'")
+                break
+
+    existing_q = _strip_discord_user_wrapper(str(enriched.get("query") or "")).strip()
+    if existing_q:
+        # Clear accidental model-passed wrapper or generic 'do it again' / 'summarize' queries
+        q_clean_check = _YT_URL_IN_TEXT_RE.sub(" ", existing_q)
+        q_clean_check = re.sub(r"https?://\S+|<@!?\d+>", " ", q_clean_check).strip()
+        q_has_ts = _parse_query_timestamp_seconds(q_clean_check) is not None
+        q_spec = [
+            tok for tok in re.findall(r"[a-zA-Z0-9]{3,}", q_clean_check.lower())
+            if tok not in _YT_GENERIC_SUMMARY_WORDS
+        ]
+        if q_has_ts or q_spec:
+            enriched["query"] = q_clean_check
+            return enriched
+        enriched.pop("query", None)
+
+    if not latest_user_text:
+        return enriched
+
+    # Strip URLs and Discord mentions from user prompt to inspect whether they asked a specific topic/timestamp question
+    cleaned = _YT_URL_IN_TEXT_RE.sub(" ", latest_user_text)
+    cleaned = re.sub(r"https?://\S+", " ", cleaned)
+    cleaned = re.sub(r"<@!?\d+>", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return enriched
+
+    has_ts = _parse_query_timestamp_seconds(cleaned) is not None
+    specific_tokens = [
+        tok for tok in re.findall(r"[a-zA-Z0-9]{3,}", cleaned.lower())
+        if tok not in _YT_GENERIC_SUMMARY_WORDS
+    ]
+    if has_ts or specific_tokens:
+        enriched["query"] = cleaned
+
+    return enriched
 
 
 # =========================================================

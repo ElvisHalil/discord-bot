@@ -385,6 +385,195 @@ class TestWebTools(unittest.TestCase):
         self.assertIn("Disabled Video", res)
         self.assertIn("creator disabled transcripts", res)
 
+    @patch("src.tools.web.YouTubeTranscriptApi")
+    @patch("src.tools.web.requests.get")
+    def test_read_youtube_video_long_form_chapter_digest_and_query_zoom(self, mock_requests_get, mock_ytt_cls):
+        from src.tools.web import enrich_youtube_tool_args
+        from src.utils.timezones import enrich_tool_output_with_time_context
+
+        oembed_resp = MagicMock()
+        oembed_resp.status_code = 200
+        oembed_resp.json.return_value = {"title": "2-Hour Deep Tech & Macro Podcast"}
+        mock_requests_get.return_value = oembed_resp
+
+        # Build a realistic 60-minute (120 snippets x 30s = 3600s, ~45,000 chars) long-form transcript
+        snippets = []
+        for idx in range(120):
+            start_s = float(idx * 30)
+            if idx == 0:
+                txt = (
+                    "Welcome everyone to the opening chapter of our two hour deep dive where we introduce "
+                    "semiconductor lithography roadmaps and global foundry capital expenditure trends for sixty words "
+                    + ("foundry wafer capacity allocation " * 12)
+                )
+            elif idx == 60:
+                # 30:00 mark (50% through the video — previously completely truncated beyond 10k/18k chars!)
+                txt = (
+                    "In the middle of the episode at thirty minutes we examine quantum error correction breakthroughs "
+                    "achieving 99.94% logical qubit fidelity with superconducting surface codes and $4.2 billion R&D "
+                    + ("logical qubit surface code threshold " * 10)
+                )
+            elif idx == 90:
+                # 45:00 mark (75% through the video)
+                txt = (
+                    "At the forty five minute mark our focus shifts to sovereign bond auctions and why 10-year yields "
+                    "hit 4.65% after the central bank balance sheet runoff accelerated by $60 billion per month "
+                    + ("treasury auction term premium yield " * 10)
+                )
+            elif idx == 119:
+                # 59:30 mark (99%-100% final conclusion at the very end of the video!)
+                txt = (
+                    "In conclusion our final verdict at the end of this podcast is that optical interconnects "
+                    "will replace copper backplanes by 2028 with a 35% power efficiency gain across data centers "
+                    + ("final closing takeaway optical interconnect " * 10)
+                )
+            else:
+                txt = (
+                    f"Segment {idx} general discussion covering hardware architecture pipeline stage {idx} "
+                    + ("system throughput latency benchmark analysis " * 12)
+                )
+            snippets.append({"text": txt.strip(), "start": start_s, "duration": 30.0})
+
+        mock_ytt_instance = MagicMock()
+        mock_ytt_instance.fetch.return_value = snippets
+        mock_ytt_cls.return_value = mock_ytt_instance
+
+        # 1. Default long-video call: must cover 0%–100% across all chapters AND survive enrich_tool_output_with_time_context
+        YOUTUBE_CACHE.clear()
+        res_default = read_youtube_video("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        enriched_out = enrich_tool_output_with_time_context(res_default)
+
+        self.assertIn("Long-Form Video Coverage", enriched_out)
+        self.assertIn("FULL-TIMELINE CHRONOLOGICAL CHAPTER BREAKDOWN (0%–100%)", enriched_out)
+        self.assertIn("Chapter 1/8", enriched_out)
+        self.assertIn("Chapter 8/8", enriched_out)
+        # Opening, midpoint (30:00), 45:00 mark, and final closing verdict (59:30) must ALL be present!
+        self.assertIn("semiconductor lithography roadmaps", enriched_out)
+        self.assertIn("quantum error correction breakthroughs", enriched_out)
+        self.assertIn("sovereign bond auctions", enriched_out)
+        self.assertIn("optical interconnects will replace copper backplanes by 2028", enriched_out)
+        self.assertNotIn("...[tool output truncated to fit context window]...", enriched_out)
+
+        # 2. Follow-up call with a topic/timestamp query: must reuse cached raw transcript (fetch count stays 1)
+        # and prepend TARGETED VERBATIM EXCERPTS for the requested topic/timestamp!
+        res_query = call_as_model(
+            read_youtube_video,
+            video_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            topic="45:00 sovereign bond auctions",
+        )
+        self.assertEqual(mock_ytt_instance.fetch.call_count, 1)
+        self.assertIn("TARGETED VERBATIM EXCERPTS (Query: '45:00 sovereign bond auctions')", res_query)
+        self.assertIn("sovereign bond auctions", res_query)
+        self.assertIn("45:00", res_query)
+
+        # 3. Verify enrich_youtube_tool_args keeps generic summary prompts with query=None,
+        # but auto-populates `query` and recovers prior URL when user asks a specific question
+        generic_hist = [{"role": "user", "content": "Can you summarize this YouTube video https://youtu.be/dQw4w9WgXcQ"}]
+        gen_args = enrich_youtube_tool_args({"url": "https://youtu.be/dQw4w9WgXcQ"}, generic_hist)
+        self.assertIsNone(gen_args.get("query"))
+
+        specific_hist = [
+            {"role": "user", "content": "Check https://youtu.be/dQw4w9WgXcQ"},
+            {"role": "assistant", "content": "Here is the summary."},
+            {"role": "user", "content": "What did they say at 45:00 about sovereign bond auctions?"},
+        ]
+        spec_args = enrich_youtube_tool_args({}, specific_hist)
+        self.assertEqual(spec_args.get("url"), "https://youtu.be/dQw4w9WgXcQ")
+        self.assertIn("45:00", spec_args.get("query", ""))
+        self.assertIn("sovereign bond auctions", spec_args.get("query", ""))
+
+    @patch("src.tools.web.YouTubeTranscriptApi")
+    @patch("src.tools.web.requests.get")
+    def test_read_youtube_video_short_medium_and_extreme_10h_safety_and_concurrency(
+        self, mock_requests_get, mock_ytt_cls
+    ):
+        import threading
+        import time
+        from src.tools.web import _MAX_TRANSCRIPT_SNIPPETS, _YOUTUBE_RAW_CACHE
+
+        observed_threads: list[str] = []
+        t_lock = threading.Lock()
+
+        def fake_oembed(*args, **kwargs):
+            with t_lock:
+                observed_threads.append(threading.current_thread().name)
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"title": "Tiered Length & Concurrency Video"}
+            return resp
+
+        mock_requests_get.side_effect = fake_oembed
+        mock_ytt_instance = MagicMock()
+        mock_ytt_cls.return_value = mock_ytt_instance
+
+        # 1. SHORT VIDEO (< 60s): plain verbatim transcript without unnecessary [00:00] markers
+        YOUTUBE_CACHE.clear()
+        _YOUTUBE_RAW_CACHE.clear()
+        mock_ytt_instance.fetch.return_value = [
+            {"text": "Quick thirty second clip intro.", "start": 0.0, "duration": 15.0},
+            {"text": "And here is the punchline right away.", "start": 15.0, "duration": 15.0},
+        ]
+        short_out = read_youtube_video("https://youtu.be/shortVideo1")
+        self.assertIn("Quick thirty second clip intro. And here is the punchline right away.", short_out)
+        self.assertNotIn("[00:00]", short_out)
+        self.assertNotIn("FULL-TIMELINE CHRONOLOGICAL CHAPTER BREAKDOWN", short_out)
+        # Verify oEmbed ran on a daemon worker thread via submit_to_worker
+        self.assertTrue(any(name.startswith(("BotWorker", "BotSubWorker", "BotLeafWorker")) for name in observed_threads))
+
+        # 2. MEDIUM VIDEO (4 minutes, ~1,800 chars <= 12,500 limit): 100% verbatim with periodic [MM:SS] markers every ~60s
+        YOUTUBE_CACHE.clear()
+        _YOUTUBE_RAW_CACHE.clear()
+        medium_snippets = [
+            {
+                "text": f"Minute {m} segment {s} verbatim explanation of distributed consensus protocols.",
+                "start": float(m * 60 + s * 20),
+                "duration": 20.0,
+            }
+            for m in range(4)
+            for s in range(3)
+        ]
+        mock_ytt_instance.fetch.return_value = medium_snippets
+        med_out = read_youtube_video("https://youtu.be/medVideo123")
+        self.assertNotIn("FULL-TIMELINE CHRONOLOGICAL CHAPTER BREAKDOWN", med_out)
+        self.assertIn("[00:00]", med_out)
+        self.assertIn("[01:00]", med_out)
+        self.assertIn("[02:00]", med_out)
+        self.assertIn("[03:00]", med_out)
+        self.assertIn("Minute 0 segment 0 verbatim explanation", med_out)
+        self.assertIn("Minute 3 segment 2 verbatim explanation", med_out)
+
+        # 3. EXTREME 10-HOUR LIVESTREAM ARCHIVE (18,000 snippets = 36,000s = 10h00m, > 900,000 chars):
+        # Must stride-sample down to _MAX_TRANSCRIPT_SNIPPETS (6,000), cap micro-windows at <= 400,
+        # complete in < 0.5s, and preserve 0% (00:00) through 100% (10:00:00) across 10 chapters.
+        YOUTUBE_CACHE.clear()
+        _YOUTUBE_RAW_CACHE.clear()
+        extreme_snippets = []
+        for idx in range(18000):
+            start_s = float(idx * 2)
+            if idx == 0:
+                txt = "Opening hour zero kickoff of the ten hour endurance engineering livestream."
+            elif idx == 9000:
+                txt = "Midstream five hour milestone reviewing fusion plasma confinement at 150 million degrees."
+            elif idx == 17999:
+                txt = "In conclusion at hour ten our final closing verdict is that the marathon test succeeded 100%."
+            else:
+                txt = f"Stream tick {idx} telemetry check nominal."
+            extreme_snippets.append({"text": txt, "start": start_s, "duration": 2.0})
+
+        mock_ytt_instance.fetch.return_value = extreme_snippets
+        t0 = time.perf_counter()
+        extreme_out = read_youtube_video("https://youtu.be/extreme10hr")
+        elapsed = time.perf_counter() - t0
+
+        self.assertLess(elapsed, 0.8, f"Extreme 10h transcript took too long: {elapsed:.3f}s")
+        self.assertEqual(len(_YOUTUBE_RAW_CACHE["extreme10hr"]["segments"]), _MAX_TRANSCRIPT_SNIPPETS)
+        self.assertIn("10:00:00 duration", extreme_out)
+        self.assertIn("Chapter 1/10", extreme_out)
+        self.assertIn("Chapter 10/10", extreme_out)
+        self.assertIn("Opening hour zero kickoff of the ten hour endurance engineering livestream.", extreme_out)
+        self.assertIn("In conclusion at hour ten our final closing verdict is that the marathon test succeeded 100%.", extreme_out)
+        self.assertLessEqual(len(extreme_out), 14000)
+
     def test_suppress_discord_embeds(self):
         sample = (
             "Canada Top Headlines Today:\n"

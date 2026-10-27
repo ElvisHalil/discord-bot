@@ -87,6 +87,7 @@ from src.orchestrator import (
     enrich_voice_tool_args,
     enrich_job_tool_args,
     enrich_image_tool_args,
+    enrich_youtube_tool_args,
     enrich_tool_output_with_time_context,
     detect_missed_sports_tool_call,
     detect_missed_music_shift_tool_call,
@@ -1445,6 +1446,36 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                             )
                         )
                     ]
+                elif (
+                    "read_youtube_video" in active_tools
+                    and any(c.function.name in ("skill_youtube_search", "read_website", "search_web") for c in tool_calls)
+                    and not any(c.function.name == "read_youtube_video" for c in tool_calls)
+                    and ("youtube.com/watch" in last_u_raw.lower() or "youtu.be/" in last_u_raw.lower() or "youtube.com/live/" in last_u_raw.lower() or "youtube.com/shorts/" in last_u_raw.lower())
+                    and "music.youtube.com/watch" not in last_u_raw.lower()
+                    and not re.search(r"\b(?:similar\s+to|like\s+this|like\s+that|same\s+vibe|songs?\s+like|tracks?\s+like|play\s+something)\b", last_u_raw, re.IGNORECASE)
+                ):
+                    m_yt_link = re.search(
+                        r"https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?[^\s<>\"'`)]+|live/[^\s<>\"'`)]+|shorts/[^\s<>\"'`)]+)|youtu\.be/[^\s<>\"'`)]+)",
+                        last_u_raw,
+                        re.IGNORECASE,
+                    )
+                    if m_yt_link:
+                        yt_direct_url = m_yt_link.group(0).rstrip(".,;)>\"'")
+                        print(
+                            f"⚡ [{current_mode.upper()}] Intercepted {tool_calls[0].function.name} on direct YouTube video link "
+                            f"-> redirecting to read_youtube_video(url='{yt_direct_url}')"
+                        )
+                        tool_calls = [
+                            c for c in tool_calls
+                            if c.function.name not in ("skill_youtube_search", "read_website", "search_web")
+                        ] + [
+                            types.SimpleNamespace(
+                                function=types.SimpleNamespace(
+                                    name="read_youtube_video",
+                                    arguments={"url": yt_direct_url},
+                                )
+                            )
+                        ]
 
         # Unrequested Autoplay Guardrail: when Autoplay is NOT active in the channel and the user did NOT
         # explicitly ask to start Autoplay (e.g. user simply said "play dnb", "play liquid dnb", or asked
@@ -1630,6 +1661,8 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     args = enrich_job_tool_args(args, history, active_channel_id=channel_id)
                 elif tool_name == "search_images":
                     args = enrich_image_tool_args(args, history, active_channel_id=channel_id)
+                elif tool_name == "read_youtube_video":
+                    args = enrich_youtube_tool_args(args, history)
                 elif tool_name == "skill_voice_info":
                     args = enrich_voice_tool_args(args, history, active_channel_id=channel_id)
                     if (

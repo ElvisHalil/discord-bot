@@ -265,6 +265,8 @@ TOOL_ARG_ALIASES: Dict[str, Dict[str, str]] = {
     "read_youtube_video": {
         "link": "url", "video_url": "url", "video": "url", "uri": "url",
         "href": "url", "video_id": "url", "id": "url",
+        "q": "query", "topic": "query", "focus": "query", "question": "query",
+        "search": "query", "timestamp": "query", "section": "query",
     },
     "skill_news_headlines": {
         "country": "region", "location": "region", "place": "region", "nation": "region",

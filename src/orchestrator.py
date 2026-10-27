@@ -54,6 +54,7 @@ from src.skills.jobs import (
 from src.tools.web import (
     detect_missed_image_tool_call,
     enrich_image_tool_args,
+    enrich_youtube_tool_args,
 )
 from src.utils.domain_vocab import (
     EPHEMERAL_SPORTS_TOOLS as _EPHEMERAL_SPORTS_TOOLS,

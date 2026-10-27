@@ -353,6 +353,7 @@ def _infer_nearest_year(mon: int, day: int, ref_date: date) -> int:
 
 
 MAX_TURN_TOOL_CHARS = 10000
+MAX_YOUTUBE_TRANSCRIPT_TOOL_CHARS = 14500
 _RAW_HTML_DOC_RE = re.compile(r'(?is)<!doctype\s+html\b.*?</html>|<html\b.*?</html>')
 
 
@@ -361,6 +362,8 @@ def _sanitize_and_bound_tool_output(text: str, max_chars: int = MAX_TURN_TOOL_CH
     while preserving any trailing '=== ... INSTRUCTIONS ... ===' footer block."""
     if not text:
         return text
+    if max_chars == MAX_TURN_TOOL_CHARS and text.startswith("Video Title: "):
+        max_chars = MAX_YOUTUBE_TRANSCRIPT_TOOL_CHARS
     if "<!doctype html" in text.lower() or "<html" in text.lower():
         def _strip_html(m: re.Match) -> str:
             raw = m.group(0)
@@ -398,6 +401,7 @@ def enrich_tool_output_with_time_context(
         or "PARALLEL_EXECUTION_BLOCKED" in tool_output
         or "=== VERIFIED YOUTUBE" in tool_output
         or "=== TOP " in tool_output
+        or tool_output.startswith("Video Title: ")
     ):
         return tool_output
 
