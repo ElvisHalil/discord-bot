@@ -2,6 +2,7 @@ import os
 import requests
 from dotenv import load_dotenv
 from src.skills.youtube.aggregators.base import BaseYouTubeAggregator
+from src.utils.http import redact_secrets
 
 load_dotenv()
 
@@ -39,6 +40,6 @@ class YouTubeApiAggregator(BaseYouTubeAggregator):
                     })
             return results
         except Exception as e:
-            print(f"⚠️ [YouTube API Error]: {e}")
+            print(f"⚠️ [YouTube API Error]: {redact_secrets(e)}")
             return []
 

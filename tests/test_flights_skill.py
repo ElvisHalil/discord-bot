@@ -1572,10 +1572,10 @@ class TestFlightsSkill(unittest.TestCase):
         self.assertIn("$920 USD Round-Trip", out_802)
         self.assertEqual((state_802.origin[0], state_802.destination[0], state_802.max_stops, state_802.cabin, state_802.currency), ("YYC", "HND", 0, "business", "USD"))
 
-        # 2. Verify all inner sub-worker probes ran on BotSubWorker daemon threads and preserved ACTIVE_CHANNEL_ID
+        # 2. Verify all inner sub-worker/leaf-worker probes ran on daemon worker threads and preserved ACTIVE_CHANNEL_ID
         self.assertTrue(len(observed_subworker_threads) >= 20)
         self.assertTrue(all(is_daemon for _, _, is_daemon in observed_subworker_threads))
-        self.assertTrue(all(t_name.startswith("BotSubWorker") for _, t_name, _ in observed_subworker_threads))
+        self.assertTrue(all(t_name.startswith(("BotSubWorker", "BotLeafWorker")) for _, t_name, _ in observed_subworker_threads))
         seen_channels = {ch for ch, _, _ in observed_subworker_threads}
         self.assertEqual(seen_channels, {801, 802})
 

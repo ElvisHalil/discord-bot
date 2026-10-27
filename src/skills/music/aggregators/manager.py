@@ -252,11 +252,11 @@ class MusicAggregatorManager:
             fut_lfm = submit_to_worker(lastfm.get_similar, query)
             fut_ytm = submit_to_worker(ytmusic.get_similar, query)
             try:
-                lfm_tracks = fut_lfm.result() or []
+                lfm_tracks = fut_lfm.result(timeout=20) or []
             except Exception as e:
                 logger.debug("Last.fm get_similar failed for %r: %s", query, e)
             try:
-                ytm_tracks = fut_ytm.result() or []
+                ytm_tracks = fut_ytm.result(timeout=20) or []
             except Exception as e:
                 logger.debug("YTMusic get_similar failed for %r: %s", query, e)
         elif lastfm:
@@ -434,7 +434,7 @@ class MusicAggregatorManager:
             futures = [submit_to_worker(fn, genre=arg) for fn, arg in tasks]
             for fut in futures:
                 try:
-                    all_tracks.extend(fut.result() or [])
+                    all_tracks.extend(fut.result(timeout=20) or [])
                 except Exception as e:
                     logger.debug("Mood track worker failed: %s", e)
 
@@ -468,7 +468,7 @@ class MusicAggregatorManager:
             futures = [submit_to_worker(prov.get_charts, genre=parsed_genre) for prov in active_providers]
             for fut in futures:
                 try:
-                    all_tracks.extend(fut.result() or [])
+                    all_tracks.extend(fut.result(timeout=20) or [])
                 except Exception as e:
                     logger.debug("Chart provider worker failed: %s", e)
 
@@ -533,7 +533,7 @@ class MusicAggregatorManager:
             futs = {name: submit_to_worker(fn, artist) for name, fn in tasks}
             for name, fut in futs.items():
                 try:
-                    res = fut.result() or []
+                    res = fut.result(timeout=20) or []
                     if name == "lastfm":
                         lfm_tracks = res
                     elif name == "deezer":
@@ -750,7 +750,7 @@ class MusicAggregatorManager:
             fut_map = {submit_to_worker(fn, arg): tag_label for fn, arg, tag_label in tasks}
             for fut, tag_label in fut_map.items():
                 try:
-                    res = fut.result() or []
+                    res = fut.result(timeout=20) or []
                     for trk in res:
                         if not trk.genre:
                             trk.genre = tag_label

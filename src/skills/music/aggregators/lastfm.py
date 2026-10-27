@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from src.skills.music.aggregators.base import BaseMusicAggregator
 from src.skills.music.models import Track
 from src.skills.music.engine.formatting import parse_song_meta
+from src.utils.http import redact_secrets
 from src.utils.workers import map_in_workers, submit_to_worker
 
 load_dotenv()
@@ -72,7 +73,7 @@ class LastFmAggregator(BaseMusicAggregator):
             else:
                 print(f"  └─ ⚠️ [Last.fm]: API returned status {r.status_code} for method '{method}'")
         except Exception as e:
-            print(f"  └─ ⚠️ [Last.fm Error]: {e}")
+            print(f"  └─ ⚠️ [Last.fm Error]: {redact_secrets(e)}")
         return {}
 
     def _parse_similar_tracks(self, data: dict, exclude_song: str = "") -> list[Track]:
@@ -396,8 +397,8 @@ class LastFmAggregator(BaseMusicAggregator):
 
             f_tracks = submit_to_worker(self._call, "tag.gettoptracks", {"tag": tag, "limit": 50, "page": 1})
             f_artists = submit_to_worker(self._call, "tag.gettopartists", {"tag": tag, "limit": 50})
-            res = f_tracks.result()
-            art_res = f_artists.result()
+            res = f_tracks.result(timeout=15)
+            art_res = f_artists.result(timeout=15)
 
             raw = res.get("tracks", {}).get("track", [])
             if isinstance(raw, dict):
@@ -535,7 +536,7 @@ class LastFmAggregator(BaseMusicAggregator):
             if all_cand_artist_names:
                 futs = [submit_to_worker(_fetch_high_tags, a) for a in all_cand_artist_names]
                 for fut in futs:
-                    clean_a, high_set = fut.result()
+                    clean_a, high_set = fut.result(timeout=15)
                     artist_high_tags[clean_a] = high_set
                     for h in high_set:
                         tag_counter[h] += 1

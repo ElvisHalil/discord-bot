@@ -4,12 +4,14 @@ Centralized stealth HTTP client and network safety utilities.
 Provides TLS-fingerprinted requests via curl_cffi (Chrome impersonation),
 thread-local HTTP session pooling, SSRF protection across IPv4 and IPv6
 against loopback/private/metadata IP addresses, redirect hop validation,
-and shared Google News redirect decoding.
+shared Google News redirect decoding, and API secret log/URL redaction.
 """
 
 from html import unescape
 import ipaddress
 import json
+import logging
+import os
 import re
 import socket
 import threading
@@ -22,6 +24,71 @@ from curl_cffi import requests as cffi_requests
 import requests
 
 from src.utils.cache import BoundedCache
+
+
+_SECRET_URL_QUERY_RE = re.compile(
+    r'([?&](?:api_?key|key|token|access_token|secret|appid)=)[^&\s"\'>)]+',
+    re.IGNORECASE,
+)
+_TELEGRAM_BOT_TOKEN_RE = re.compile(
+    r'(https?://api\.telegram\.org/bot)[^/\s"\'>)]+|(\bbot)\d{6,15}:[A-Za-z0-9_-]{15,}',
+    re.IGNORECASE,
+)
+_ENV_SECRET_KEYS = (
+    "TELEGRAM_BOT_TOKEN",
+    "LASTFM_API_KEY",
+    "THE_ODDS_API_KEY",
+    "YOUTUBE_API_KEY",
+    "BRAVE_SEARCH_API_KEY",
+    "JINA_API_KEY",
+    "FREQBLOG_API_KEY",
+    "DISCORD_TOKEN",
+)
+
+
+def redact_secrets(text: Any) -> str:
+    """Scrub API keys, Telegram bot tokens, and configured env secrets from URLs, log lines, or exceptions."""
+    s = str(text or "")
+    if not s:
+        return s
+    s = _SECRET_URL_QUERY_RE.sub(r"\1<REDACTED>", s)
+    s = _TELEGRAM_BOT_TOKEN_RE.sub(
+        lambda m: f"{m.group(1)}<REDACTED_TOKEN>" if m.group(1) else "bot<REDACTED_TOKEN>",
+        s,
+    )
+    for env_name in _ENV_SECRET_KEYS:
+        val = os.getenv(env_name, "").strip()
+        if len(val) >= 8 and val not in ("your_telegram_bot_token_here", "your_api_key_here") and val in s:
+            s = s.replace(val, "<REDACTED>")
+    return s
+
+
+class SecretRedactingFilter(logging.Filter):
+    """Logging filter that scrubs API keys and tokens from all LogRecord messages and arguments."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if record.args:
+                if isinstance(record.args, dict):
+                    record.args = {
+                        k: redact_secrets(v) if isinstance(v, (str, BaseException)) else v
+                        for k, v in record.args.items()
+                    }
+                elif isinstance(record.args, tuple):
+                    record.args = tuple(
+                        redact_secrets(a) if isinstance(a, (str, BaseException)) else a
+                        for a in record.args
+                    )
+            if isinstance(record.msg, str):
+                record.msg = redact_secrets(record.msg)
+        except Exception:
+            pass
+        return True
+
+
+_root_logger = logging.getLogger()
+if not any(isinstance(f, SecretRedactingFilter) for f in _root_logger.filters):
+    _root_logger.addFilter(SecretRedactingFilter())
 
 
 DEFAULT_UA = (

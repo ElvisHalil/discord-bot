@@ -123,7 +123,13 @@ ensure_ollama_running()
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
-client = discord.Client(intents=intents)
+allowed_mentions = discord.AllowedMentions(
+    everyone=False,
+    roles=False,
+    users=True,
+    replied_user=True,
+)
+client = discord.Client(intents=intents, allowed_mentions=allowed_mentions)
 ollama_client = AsyncClient()
 
 # Global state

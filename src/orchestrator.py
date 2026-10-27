@@ -742,5 +742,8 @@ def sanitize_agent_reply(reply: str) -> str:
     text = re.sub(r'(?m)^([ \t]*[-*•][ \t]+):\s+', r'\1', text)
     # Strip standalone Markdown horizontal rules (*** / ___) which Discord parses as unclosed bold/underline tags
     text = re.sub(r'(?m)^[ \t]*(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})[ \t]*$\n?', '', text)
+    # Neutralize mass-ping mentions (@everyone, @here, and <@&role_id>) in LLM output
+    text = re.sub(r'@(everyone|here)\b', '@\u200b\\1', text, flags=re.IGNORECASE)
+    text = re.sub(r'<@&\d+>', '@\u200brole', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()

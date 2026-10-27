@@ -10,6 +10,7 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 import re
+import threading
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
@@ -818,6 +819,7 @@ class SportsTrackerService:
 
     def __init__(self, poll_interval: int = DEFAULT_POLL_INTERVAL_SECONDS) -> None:
         self.poll_interval = poll_interval
+        self._lock = threading.RLock()
         # Keyed by (channel_id, event_id)
         self.tracked_matches: Dict[Tuple[int, str], TrackedMatch] = {}
         self._tracker_task: Optional[asyncio.Task] = None
@@ -852,18 +854,24 @@ class SportsTrackerService:
                 await asyncio.sleep(self.poll_interval)
                 if not self.tracked_matches:
                     break
-                await self.poll_once()
+                try:
+                    await self.poll_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.debug("Live Tracker poll_once error: %s", e)
+                    print(f"⚠️ [Live Tracker Loop Error]: {e}")
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            print(f"⚠️ [Live Tracker Loop Error]: {e}")
         finally:
             self._tracker_task = None
-            print("🛑 [Live Tracker]: No active matches remaining. Background polling task self-stopped.")
+            if not self.tracked_matches:
+                print("🛑 [Live Tracker]: No active matches remaining. Background polling task self-stopped.")
 
     def shutdown(self) -> None:
         """Cleanly cancel the background polling task and clear tracked state on process exit."""
-        self.tracked_matches.clear()
+        with self._lock:
+            self.tracked_matches.clear()
         if self._tracker_task is not None and not self._tracker_task.done():
             self._tracker_task.cancel()
             self._tracker_task = None
@@ -871,14 +879,16 @@ class SportsTrackerService:
     async def poll_once(self) -> None:
         """Poll all currently tracked matches once in parallel, fire notifications on changes, and prune finished games."""
         now = time.time()
-        items = list(self.tracked_matches.items())
+        with self._lock:
+            items = list(self.tracked_matches.items())
         active_items: List[Tuple[Tuple[int, str], TrackedMatch]] = []
 
         for key, match in items:
             # 1. Check 4-hour safety timeout
             if now - match.created_at > SAFETY_TIMEOUT_SECONDS:
                 print(f"⏱️ [Live Tracker]: Match {match.home_team} vs {match.away_team} exceeded 4-hour safety limit; auto-stopping.")
-                self.tracked_matches.pop(key, None)
+                with self._lock:
+                    self.tracked_matches.pop(key, None)
                 continue
             active_items.append((key, match))
 
@@ -918,33 +928,38 @@ class SportsTrackerService:
             if not payload:
                 continue
 
-            if match.sport_path == "esports":
-                if not isinstance(payload, CsLiveSeries):
-                    continue
-                curr_snapshot = extract_snapshot_from_cs_series(payload)
-            elif match.sport_path == "f1":
-                if not isinstance(payload, dict) or not isinstance(payload.get("snapshot"), MatchSnapshot):
-                    continue
-                curr_snapshot = payload["snapshot"]
-            else:
-                if not isinstance(payload, dict):
-                    continue
-                curr_snapshot = extract_snapshot_from_summary(payload)
+            try:
+                if match.sport_path == "esports":
+                    if not isinstance(payload, CsLiveSeries):
+                        continue
+                    curr_snapshot = extract_snapshot_from_cs_series(payload)
+                elif match.sport_path == "f1":
+                    if not isinstance(payload, dict) or not isinstance(payload.get("snapshot"), MatchSnapshot):
+                        continue
+                    curr_snapshot = payload["snapshot"]
+                else:
+                    if not isinstance(payload, dict):
+                        continue
+                    curr_snapshot = extract_snapshot_from_summary(payload)
 
-            print(
-                f"🔄 [Live Tracker Poll]: {match.home_team} {curr_snapshot.home_score} - "
-                f"{curr_snapshot.away_score} {match.away_team} ({curr_snapshot.status_detail}) [{match.league_name}]"
-            )
-            prev_state = match.last_snapshot.state
-            prev_detail = match.last_snapshot.status_detail
-            prev_score = (match.last_snapshot.home_score, match.last_snapshot.away_score)
-            prev_stats = match.last_snapshot.stats_summary
-            # Carry forward all previously seen event IDs so we never re-alert old goals/cards/milestones
-            merged_seen = set(match.last_snapshot.seen_event_ids) | set(curr_snapshot.seen_event_ids)
+                print(
+                    f"🔄 [Live Tracker Poll]: {match.home_team} {curr_snapshot.home_score} - "
+                    f"{curr_snapshot.away_score} {match.away_team} ({curr_snapshot.status_detail}) [{match.league_name}]"
+                )
+                prev_state = match.last_snapshot.state
+                prev_detail = match.last_snapshot.status_detail
+                prev_score = (match.last_snapshot.home_score, match.last_snapshot.away_score)
+                prev_stats = match.last_snapshot.stats_summary
+                # Carry forward all previously seen event IDs so we never re-alert old goals/cards/milestones
+                merged_seen = set(match.last_snapshot.seen_event_ids) | set(curr_snapshot.seen_event_ids)
 
-            triggers = diff_snapshots(match, curr_snapshot)
-            curr_snapshot.seen_event_ids = merged_seen
-            match.last_snapshot = curr_snapshot
+                triggers = diff_snapshots(match, curr_snapshot)
+                curr_snapshot.seen_event_ids = merged_seen
+                match.last_snapshot = curr_snapshot
+            except Exception as e:
+                logger.debug("Live Tracker snapshot/diff error for %s vs %s: %s", match.home_team, match.away_team, e)
+                print(f"  └─ ⚠️ [Live Tracker Snapshot Error ({match.home_team} vs {match.away_team})]: {e}")
+                continue
 
             # Prevent mid-game 4-hour cutoff:
             # 1) Reset timer at Kickoff (pre -> in) so pre-game wait never eats into live match duration.
@@ -974,7 +989,8 @@ class SportsTrackerService:
                     f"🏁 [Live Tracker]: Match finished ({match.home_team} {curr_snapshot.home_score} - "
                     f"{curr_snapshot.away_score} {match.away_team}). Auto-removed from tracker."
                 )
-                self.tracked_matches.pop(key, None)
+                with self._lock:
+                    self.tracked_matches.pop(key, None)
 
     def start_tracking(
         self,
@@ -1039,7 +1055,8 @@ class SportsTrackerService:
             away_team=snap.away_team,
             last_snapshot=snap,
         )
-        self.tracked_matches[key] = tracked
+        with self._lock:
+            self.tracked_matches[key] = tracked
         self.ensure_loop_running()
 
         extra_details = ""
@@ -1102,13 +1119,13 @@ class SportsTrackerService:
     def stop_tracking(self, channel_id: int, query: str = "") -> str:
         """Stop tracking a specific match or all matches in channel_id."""
         q_clean = _clean_tracking_query(query).lower()
-        channel_keys = [k for k in self.tracked_matches if k[0] == channel_id]
-        if not channel_keys:
+        with self._lock:
+            channel_items = [(k, m) for k, m in self.tracked_matches.items() if k[0] == channel_id]
+        if not channel_items:
             return "ℹ️ No matches are currently being tracked in this channel."
 
         removed: List[str] = []
-        for key in channel_keys:
-            m = self.tracked_matches[key]
+        for key, m in channel_items:
             haystack = f"{m.home_team} {m.away_team} {m.sport_path} {m.league_name}".lower()
             if not q_clean or q_clean in ("all", "everything", "stop") or (
                 q_clean in haystack
@@ -1116,7 +1133,8 @@ class SportsTrackerService:
             ):
                 label = f"**{m.home_team} — {m.away_team}**" if m.sport_path == "f1" else f"**{m.home_team} vs {m.away_team}**"
                 removed.append(f"{label} ({m.league_name})")
-                self.tracked_matches.pop(key, None)
+                with self._lock:
+                    self.tracked_matches.pop(key, None)
 
         if not removed:
             return f"⚠️ Could not find an actively tracked match matching '{query}' in this channel."
@@ -1125,7 +1143,8 @@ class SportsTrackerService:
 
     def list_tracked(self, channel_id: int) -> str:
         """List all matches currently tracked in channel_id (refreshing live display snapshots in parallel first)."""
-        matches = [m for k, m in self.tracked_matches.items() if k[0] == channel_id]
+        with self._lock:
+            matches = [m for k, m in self.tracked_matches.items() if k[0] == channel_id]
         if not matches:
             return "ℹ️ No live matches are currently being tracked in this channel."
 

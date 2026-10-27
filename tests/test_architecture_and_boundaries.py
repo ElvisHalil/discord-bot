@@ -639,6 +639,275 @@ class TestArchitectureAndBoundaries(unittest.TestCase):
         )
 
 
+class TestHighSeverityCodeReviewFixes(unittest.TestCase):
+    """Regression and security tests covering High-Severity Code Review findings H-1 through H-6."""
+
+    def test_h1_nested_worker_fanout_never_deadlocks_sub_worker_pool(self):
+        """H-1: Saturating SUB_WORKER_POOL (24 threads) with 30 concurrent parent tasks that each
+        spawn nested child and grandchild tasks via submit_to_worker / map_in_workers must never deadlock."""
+        import threading
+        from src.utils.workers import map_in_workers, submit_to_worker
+
+        barrier = threading.Event()
+
+        def _depth3_grandchild(x: int) -> tuple[int, str]:
+            return (x * 2, threading.current_thread().name)
+
+        def _depth2_child(x: int) -> tuple[int, str, str]:
+            fut = submit_to_worker(_depth3_grandchild, x)
+            val, gc_thread = fut.result(timeout=5)
+            return (val, threading.current_thread().name, gc_thread)
+
+        def _depth1_parent(idx: int) -> list[tuple[int, str, str]]:
+            # Wait briefly so all 24 BotSubWorker threads are simultaneously occupied by parents
+            barrier.wait(timeout=0.15)
+            return map_in_workers(_depth2_child, [idx, idx + 1, idx + 2], timeout=5)
+
+        parent_futs = [submit_to_worker(_depth1_parent, i) for i in range(30)]
+        barrier.set()
+        results = [f.result(timeout=10) for f in parent_futs]
+        self.assertEqual(len(results), 30)
+        for idx, res_list in enumerate(results):
+            self.assertEqual([r[0] for r in res_list], [idx * 2, (idx + 1) * 2, (idx + 2) * 2])
+
+    def test_h2_api_secrets_redacted_from_logs_exceptions_and_cache_keys(self):
+        """H-2: Telegram bot tokens and API keys in URLs/exceptions must be scrubbed by redact_secrets,
+        SecretRedactingFilter, and parallel_fetch_json cache keys."""
+        import logging
+        from src.skills.sports.aggregators.espn_utils import _CACHE, clear_espn_cache, parallel_fetch_json
+        from src.utils.http import SecretRedactingFilter, redact_secrets
+
+        clear_espn_cache()
+        tg_err = (
+            "HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries exceeded with url: "
+            "https://api.telegram.org/bot987654321:AAH_SuperSecretBotToken_XYZ123456/getUpdates"
+        )
+        redacted_tg = redact_secrets(tg_err)
+        self.assertNotIn("AAH_SuperSecretBotToken_XYZ123456", redacted_tg)
+        self.assertIn("<REDACTED_TOKEN>", redacted_tg)
+
+        odds_url = "https://api.the-odds-api.com/v4/sports/mma/odds/?apiKey=SUPER_SECRET_ODDS_KEY_999&regions=us"
+        lfm_url = "https://ws.audioscrobbler.com/2.0/?method=tag.gettoptracks&api_key=SECRET_LASTFM_KEY_123&format=json"
+        yt_url = "https://www.googleapis.com/youtube/v3/search?part=snippet&key=SECRET_YOUTUBE_KEY_456"
+        for raw_u, secret_val in (
+            (odds_url, "SUPER_SECRET_ODDS_KEY_999"),
+            (lfm_url, "SECRET_LASTFM_KEY_123"),
+            (yt_url, "SECRET_YOUTUBE_KEY_456"),
+        ):
+            scrubbed = redact_secrets(raw_u)
+            self.assertNotIn(secret_val, scrubbed)
+            self.assertIn("<REDACTED>", scrubbed)
+
+        # Verify SecretRedactingFilter scrubs LogRecord messages and args
+        filt = SecretRedactingFilter()
+        rec = logging.LogRecord(
+            name="test",
+            level=logging.DEBUG,
+            pathname=__file__,
+            lineno=1,
+            msg="Fetch failed for %s: %s",
+            args=(odds_url, RuntimeError(tg_err)),
+            exc_info=None,
+        )
+        filt.filter(rec)
+        formatted = rec.getMessage()
+        self.assertNotIn("SUPER_SECRET_ODDS_KEY_999", formatted)
+        self.assertNotIn("AAH_SuperSecretBotToken_XYZ123456", formatted)
+
+        # Verify parallel_fetch_json never stores raw apiKey in _CACHE keys
+        parallel_fetch_json(lambda u, timeout=6.0: [{"id": "1"}], [odds_url], ttl=60)
+        for k in _CACHE.keys():
+            self.assertNotIn("SUPER_SECRET_ODDS_KEY_999", k)
+        clear_espn_cache()
+
+    def test_h3_discord_allowed_mentions_and_mass_ping_sanitization(self):
+        """H-3: discord.Client must disable @everyone and role mentions, and sanitize_agent_reply must neutralize mass pings."""
+        import main as bot_main
+        from src.orchestrator import sanitize_agent_reply
+
+        am = bot_main.client.allowed_mentions
+        self.assertIsNotNone(am)
+        self.assertFalse(am.everyone)
+        self.assertFalse(am.roles)
+        self.assertTrue(am.users)
+
+        raw_reply = "Hey @everyone and @here and <@&123456789>, check this out <@555666777>!"
+        cleaned = sanitize_agent_reply(raw_reply)
+        self.assertNotIn("@everyone", cleaned)
+        self.assertNotIn("@here", cleaned)
+        self.assertNotIn("<@&123456789>", cleaned)
+        # Direct user mention from apply_auto_ping must remain intact
+        self.assertIn("<@555666777>", cleaned)
+
+    def test_h4_audio_preview_download_blocks_ssrf_and_enforces_size_cap(self):
+        """H-4: _download_safe_audio_preview must reject private/loopback/metadata URLs, non-audio Content-Types, and oversized streams."""
+        from unittest.mock import MagicMock, patch
+        from src.skills.music.engine.dsp import _download_safe_audio_preview
+
+        # 1. Private/loopback/metadata URLs blocked before network call
+        with patch("src.skills.music.engine.dsp.requests.get") as mock_get:
+            self.assertEqual(_download_safe_audio_preview("http://127.0.0.1:8080/audio.mp3"), b"")
+            self.assertEqual(_download_safe_audio_preview("http://169.254.169.254/latest/meta-data/"), b"")
+            self.assertEqual(_download_safe_audio_preview("file:///etc/passwd"), b"")
+            mock_get.assert_not_called()
+
+        # 2. Redirect to private IP blocked
+        redir_resp = MagicMock(status_code=302, headers={"Location": "http://127.0.0.1/internal.mp3"})
+        with (
+            patch("src.skills.music.engine.dsp._is_private_or_local_host", side_effect=lambda h: h == "127.0.0.1"),
+            patch("src.skills.music.engine.dsp.requests.get", return_value=redir_resp),
+        ):
+            self.assertEqual(_download_safe_audio_preview("https://cdnt-preview.dzcdn.net/stream/test.mp3"), b"")
+
+        # 3. Non-audio Content-Type rejected
+        html_resp = MagicMock(
+            status_code=200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            content=b"<html>not audio</html>",
+        )
+        with (
+            patch("src.skills.music.engine.dsp._is_private_or_local_host", return_value=False),
+            patch("src.skills.music.engine.dsp.requests.get", return_value=html_resp),
+        ):
+            self.assertEqual(_download_safe_audio_preview("https://cdnt-preview.dzcdn.net/stream/test.mp3"), b"")
+
+        # 4. Oversized stream (> max_bytes) aborted immediately
+        big_resp = MagicMock(
+            status_code=200,
+            headers={"Content-Type": "audio/mpeg"},
+        )
+        big_resp.iter_content.return_value = [b"x" * 600, b"y" * 600]
+        with (
+            patch("src.skills.music.engine.dsp._is_private_or_local_host", return_value=False),
+            patch("src.skills.music.engine.dsp.requests.get", return_value=big_resp),
+        ):
+            self.assertEqual(
+                _download_safe_audio_preview("https://cdnt-preview.dzcdn.net/stream/test.mp3", max_bytes=1000),
+                b"",
+            )
+
+    def test_h5_audio_feature_cache_is_bounded_and_never_retains_raw_mp3_bytes(self):
+        """H-5: AUDIO_FEATURE_CACHE must be a BoundedCache and must strip _mp3_bytes before caching."""
+        from unittest.mock import MagicMock, patch
+        from src.skills.music.engine.dsp import (
+            AUDIO_FEATURE_CACHE,
+            clear_audio_feature_cache,
+            get_track_acoustic_profile,
+        )
+        from src.utils.cache import BoundedCache
+
+        self.assertIsInstance(AUDIO_FEATURE_CACHE, BoundedCache)
+        clear_audio_feature_cache()
+        fake_dz = MagicMock()
+        fake_dz.resolve_track_details.return_value = {
+            "id": 123,
+            "title": "Strobe",
+            "artist": "Deadmau5",
+            "album": "For Lack of a Better Name",
+            "preview": "https://cdnt-preview.dzcdn.net/stream/strobe.mp3",
+            "bpm": 128.0,
+            "gain": -7.5,
+        }
+        with (
+            patch("src.skills.music.engine.dsp._download_safe_audio_preview", return_value=b"fake-mp3-bytes"),
+            patch(
+                "src.skills.music.engine.dsp.analyze_mp3_bytes",
+                return_value={"bpm": 128.0, "speed_score": 6.5, "intensity_score": 6.0, "gain_db": -7.5, "ui_zone": "mid_mid"},
+            ),
+        ):
+            prof = get_track_acoustic_profile("Strobe", "Deadmau5", deezer_agg=fake_dz)
+            self.assertIsNotNone(prof)
+            self.assertEqual(prof.get("_mp3_bytes"), b"fake-mp3-bytes")
+            # Inspect cached entry in AUDIO_FEATURE_CACHE -> must NOT store raw _mp3_bytes
+            self.assertEqual(len(AUDIO_FEATURE_CACHE), 1)
+            for cached_entry in AUDIO_FEATURE_CACHE.values():
+                self.assertNotIn("_mp3_bytes", cached_entry)
+        clear_audio_feature_cache()
+
+    def test_h6_sports_tracker_poll_once_isolates_malformed_match_payload(self):
+        """H-6: If extract_snapshot_from_summary or diff_snapshots raises on one match in poll_once,
+        other tracked matches must continue polling and firing alerts."""
+        import asyncio
+        from unittest.mock import patch
+        from src.skills.sports.enums import MatchState
+        from src.skills.sports.models import MatchSnapshot, TrackedMatch
+        from src.skills.sports.tracker import SportsTrackerService
+
+        tracker = SportsTrackerService(poll_interval=15)
+        snap_bad = MatchSnapshot(
+            state=MatchState.IN,
+            status_detail="1st 10:00",
+            home_team="Broken FC",
+            away_team="Glitch United",
+            home_score="0",
+            away_score="0",
+        )
+        snap_good = MatchSnapshot(
+            state=MatchState.IN,
+            status_detail="1st 20:00",
+            home_team="Arsenal",
+            away_team="Chelsea",
+            home_score="0",
+            away_score="0",
+        )
+        tracker.tracked_matches[(100, "bad_1")] = TrackedMatch(
+            channel_id=100,
+            sport_path="soccer",
+            league_code="eng.1",
+            league_name="EPL",
+            event_id="bad_1",
+            home_team="Broken FC",
+            away_team="Glitch United",
+            last_snapshot=snap_bad,
+        )
+        tracker.tracked_matches[(100, "good_2")] = TrackedMatch(
+            channel_id=100,
+            sport_path="soccer",
+            league_code="eng.1",
+            league_name="EPL",
+            event_id="good_2",
+            home_team="Arsenal",
+            away_team="Chelsea",
+            last_snapshot=snap_good,
+        )
+
+        fired_alerts = []
+
+        async def _on_notify(match, snap, triggers):
+            fired_alerts.append((match.event_id, snap.home_score, triggers))
+
+        tracker.set_notify_callback(_on_notify)
+
+        def _fake_extract(payload):
+            if payload.get("corrupt"):
+                raise ValueError("Corrupted ESPN summary structure")
+            return MatchSnapshot(
+                state=MatchState.IN,
+                status_detail="35'",
+                home_team="Arsenal",
+                away_team="Chelsea",
+                home_score="1",
+                away_score="0",
+            )
+
+        def _fake_fetch(url, timeout=8):
+            if "bad_1" in url:
+                return {"corrupt": True}
+            return {"ok": True}
+
+        with (
+            patch("src.skills.sports.tracker.fetch_json", side_effect=_fake_fetch),
+            patch("src.skills.sports.tracker.extract_snapshot_from_summary", side_effect=_fake_extract),
+        ):
+            asyncio.run(tracker.poll_once())
+
+        # Match 2 must still fire its alert despite Match 1 raising inside extract_snapshot_from_summary
+        self.assertEqual(len(fired_alerts), 1)
+        self.assertEqual(fired_alerts[0][0], "good_2")
+        self.assertEqual(fired_alerts[0][1], "1")
+        self.assertEqual(len(tracker.tracked_matches), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
 

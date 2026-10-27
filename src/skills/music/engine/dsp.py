@@ -30,6 +30,7 @@ import logging
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import urllib.parse as urlparse
 
 import miniaudio
 import numpy as np
@@ -37,12 +38,107 @@ import requests
 
 from src.skills.music.models import Track
 from src.skills.music.context import _norm_track_token
+from src.utils.cache import BoundedCache
+from src.utils.http import MAX_REDIRECTS, _REDIRECT_CODES, _is_private_or_local_host
 
 logger = logging.getLogger(__name__)
 
-# Session cache for analyzed tracks: { "norm_title|norm_artist": dict }
-AUDIO_FEATURE_CACHE: Dict[str, Dict[str, Any]] = {}
+# Bounded session cache for analyzed tracks: { "norm_title|norm_artist": dict } (never stores raw _mp3_bytes)
+AUDIO_FEATURE_CACHE: BoundedCache = BoundedCache(maxsize=500)
 _CACHE_TTL_SECONDS = 1800.0
+_MAX_AUDIO_PREVIEW_BYTES = 2 * 1024 * 1024  # 2 MB hard cap for 30s audio previews
+
+
+def _download_safe_audio_preview(
+    url: str,
+    max_bytes: int = _MAX_AUDIO_PREVIEW_BYTES,
+    timeout: float = 5.0,
+) -> bytes:
+    """
+    Download an audio preview safely with SSRF validation on every redirect hop,
+    Content-Type / Content-Length checks, and a strict `max_bytes` streaming cap.
+    """
+    if not url or not isinstance(url, str):
+        return b""
+    current = url.strip()
+    for _ in range(MAX_REDIRECTS + 1):
+        parsed = urlparse.urlparse(current)
+        if parsed.scheme not in ("http", "https"):
+            return b""
+        if _is_private_or_local_host(parsed.hostname or ""):
+            logger.debug("Blocked private/local audio preview URL: %r", current)
+            return b""
+
+        try:
+            r = requests.get(current, timeout=timeout, stream=True, allow_redirects=False)
+        except TypeError:
+            r = requests.get(current, timeout=timeout)
+
+        try:
+            if r.status_code in _REDIRECT_CODES:
+                headers = getattr(r, "headers", None) or {}
+                location = headers.get("Location") or headers.get("location") if isinstance(headers, dict) or hasattr(headers, "get") else None
+                if not location:
+                    return b""
+                current = urlparse.urljoin(current, str(location))
+                continue
+
+            if r.status_code != 200:
+                return b""
+
+            headers = getattr(r, "headers", None) or {}
+            if hasattr(headers, "get"):
+                cl_raw = headers.get("Content-Length") or headers.get("content-length")
+                if isinstance(cl_raw, (str, int)):
+                    try:
+                        if int(cl_raw) > max_bytes:
+                            logger.debug("Rejected oversized audio preview (%s bytes > %s): %r", cl_raw, max_bytes, current)
+                            return b""
+                    except ValueError:
+                        pass
+                ct_raw = headers.get("Content-Type") or headers.get("content-type")
+                if isinstance(ct_raw, str) and ct_raw.strip():
+                    ct_low = ct_raw.split(";", 1)[0].strip().lower()
+                    if ct_low and not (
+                        ct_low.startswith("audio/")
+                        or ct_low in ("application/octet-stream", "binary/octet-stream", "video/mp4")
+                    ):
+                        logger.debug("Rejected non-audio Content-Type %r for %r", ct_low, current)
+                        return b""
+
+            iter_fn = getattr(r, "iter_content", None)
+            if callable(iter_fn):
+                chunks = []
+                total = 0
+                used_iter = False
+                for chunk in iter_fn(chunk_size=65536):
+                    if not isinstance(chunk, (bytes, bytearray)):
+                        break
+                    used_iter = True
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_bytes:
+                        logger.debug("Aborted streaming audio preview exceeding %s bytes: %r", max_bytes, current)
+                        return b""
+                    chunks.append(bytes(chunk))
+                if used_iter and chunks:
+                    return b"".join(chunks)
+
+            raw_content = getattr(r, "content", b"")
+            if isinstance(raw_content, (bytes, bytearray)):
+                if len(raw_content) > max_bytes:
+                    return b""
+                return bytes(raw_content)
+            return b""
+        finally:
+            close_fn = getattr(r, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+    return b""
 
 
 def clear_audio_feature_cache() -> None:
@@ -318,9 +414,7 @@ def get_track_acoustic_profile(
     mp3_bytes = b""
     if mp3_url:
         try:
-            r = requests.get(mp3_url, timeout=5)
-            if r.status_code == 200 and r.content:
-                mp3_bytes = r.content
+            mp3_bytes = _download_safe_audio_preview(mp3_url, timeout=5.0)
         except Exception as e:
             logger.debug("MP3 preview fetch failed for %r: %s", mp3_url, e)
 
@@ -333,11 +427,13 @@ def get_track_acoustic_profile(
     profile["album"] = (detail or {}).get("album")
     profile["deezer_id"] = (detail or {}).get("id") or deezer_id
     profile["preview_url"] = mp3_url
-    profile["_mp3_bytes"] = mp3_bytes
     profile["_ts"] = now
 
-    AUDIO_FEATURE_CACHE[c_key] = profile
-    return dict(profile)
+    # Store only lightweight acoustic metadata in AUDIO_FEATURE_CACHE (never retain raw _mp3_bytes)
+    AUDIO_FEATURE_CACHE[c_key] = dict(profile)
+    ret = dict(profile)
+    ret["_mp3_bytes"] = mp3_bytes
+    return ret
 
 
 def rank_candidates_by_acoustic_shift(
@@ -604,9 +700,7 @@ def listen_with_gemma_audio(
     audio_bytes = mp3_bytes
     if not audio_bytes and preview_url:
         try:
-            r = requests.get(preview_url, timeout=5)
-            if r.status_code == 200:
-                audio_bytes = r.content
+            audio_bytes = _download_safe_audio_preview(preview_url, timeout=5.0)
         except Exception as e:
             logger.debug("Gemma audio preview fetch failed for %r: %s", preview_url, e)
             return None

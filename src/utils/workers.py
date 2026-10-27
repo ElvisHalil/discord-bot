@@ -68,9 +68,26 @@ if callable(_orig_threading_shutdown) and not getattr(_orig_threading_shutdown, 
 # Top-level executor for agent tool turns (`run_in_worker`)
 WORKER_POOL = _DaemonThreadPoolExecutor(max_workers=16, thread_name_prefix="BotTurnWorker")
 
-# Sub-worker executor for synchronous fan-out inside skills (`submit_to_worker`, `map_in_workers`)
+# Sub-worker executor for first-level synchronous fan-out inside skills (`submit_to_worker`, `map_in_workers`)
 # Separated from WORKER_POOL so parent tool threads waiting on child futures can never starve or deadlock.
 SUB_WORKER_POOL = _DaemonThreadPoolExecutor(max_workers=24, thread_name_prefix="BotSubWorker")
+
+# Leaf-worker executor for second-level nested fan-out (e.g. manager -> provider -> parallel sub-requests).
+# Any deeper nesting beyond LEAF_WORKER_POOL executes synchronously inline, forming a strict DAG that
+# makes thread-pool starvation deadlock impossible at any concurrency level.
+LEAF_WORKER_POOL = _DaemonThreadPoolExecutor(max_workers=32, thread_name_prefix="BotLeafWorker")
+
+DEFAULT_WORKER_TIMEOUT: float = 25.0
+
+
+def _run_inline_future(ctx: contextvars.Context, func: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
+    """Execute `func` synchronously in the current thread and wrap the outcome in a resolved Future."""
+    fut: Future[T] = Future()
+    try:
+        fut.set_result(ctx.run(func, *args, **kwargs))
+    except BaseException as exc:
+        fut.set_exception(exc)
+    return fut
 
 
 async def run_in_worker(func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
@@ -85,37 +102,60 @@ async def run_in_worker(func: Callable[..., T], /, *args: Any, **kwargs: Any) ->
 
 def submit_to_worker(func: Callable[..., T], /, *args: Any, **kwargs: Any) -> Future[T]:
     """
-    Submit a callable to SUB_WORKER_POOL from synchronous code, giving the worker task
-    its own isolated copy of the caller's contextvars.Context.
+    Submit a callable from synchronous code with isolated contextvars propagation:
+    - From MainThread / BotTurnWorker -> dispatches to SUB_WORKER_POOL
+    - From BotSubWorker (nested fan-out) -> dispatches to LEAF_WORKER_POOL (or inline if saturated)
+    - From BotLeafWorker (depth >= 3) -> executes inline to guarantee zero cyclic pool waiting
     """
     ctx = contextvars.copy_context()
+    t_name = threading.current_thread().name
+    if t_name.startswith("BotLeafWorker"):
+        return _run_inline_future(ctx, func, *args, **kwargs)
+    if t_name.startswith("BotSubWorker"):
+        if (
+            len(LEAF_WORKER_POOL._threads) >= LEAF_WORKER_POOL._max_workers - 2
+            and not LEAF_WORKER_POOL._work_queue.empty()
+        ):
+            return _run_inline_future(ctx, func, *args, **kwargs)
+        return LEAF_WORKER_POOL.submit(ctx.run, func, *args, **kwargs)
+    if (
+        len(SUB_WORKER_POOL._threads) >= SUB_WORKER_POOL._max_workers - 2
+        and not SUB_WORKER_POOL._work_queue.empty()
+    ):
+        return LEAF_WORKER_POOL.submit(ctx.run, func, *args, **kwargs)
     return SUB_WORKER_POOL.submit(ctx.run, func, *args, **kwargs)
 
 
 def map_in_workers(
     func: Callable[[Any], T],
     iterable: Iterable[Any],
-    timeout: Optional[float] = None,
+    timeout: Optional[float] = DEFAULT_WORKER_TIMEOUT,
 ) -> List[T]:
     """
-    Map a callable across an iterable concurrently in SUB_WORKER_POOL, giving each item
-    its own isolated copy of the caller's contextvars.Context.
+    Map a callable across an iterable concurrently using the tiered worker hierarchy, giving each item
+    its own isolated copy of the caller's contextvars.Context and enforcing a default timeout.
     """
     items = list(iterable)
     if not items:
         return []
-    if len(items) == 1 or (
-        threading.current_thread().name.startswith("BotSubWorker")
-        and len(SUB_WORKER_POOL._threads) >= SUB_WORKER_POOL._max_workers - 4
-    ):
+    t_name = threading.current_thread().name
+    if len(items) == 1 or t_name.startswith("BotLeafWorker"):
         return [func(item) for item in items]
     futures = [submit_to_worker(func, item) for item in items]
-    return [fut.result(timeout=timeout) for fut in futures]
+    results: List[T] = []
+    try:
+        for fut in futures:
+            results.append(fut.result(timeout=timeout))
+        return results
+    except BaseException:
+        for fut in futures:
+            fut.cancel()
+        raise
 
 
 def shutdown_worker_pool() -> None:
     """Cleanly shut down the shared worker pools and signal any stdlib executor queues on exit."""
-    for pool in (WORKER_POOL, SUB_WORKER_POOL):
+    for pool in (WORKER_POOL, SUB_WORKER_POOL, LEAF_WORKER_POOL):
         try:
             pool.shutdown(wait=False, cancel_futures=True)
         except Exception:
@@ -129,4 +169,3 @@ def shutdown_worker_pool() -> None:
         _cft._threads_queues.clear()
     except Exception:
         pass
-

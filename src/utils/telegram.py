@@ -37,6 +37,7 @@ from src.context import (
     set_active_user,
 )
 from src.jobs import JOB_ENGINE
+from src.utils.http import redact_secrets
 from src.skills.flights import (
     FLIGHT_TRACKER,
     skill_flight_tracker,

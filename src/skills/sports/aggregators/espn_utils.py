@@ -10,7 +10,7 @@ from src.context import get_active_channel_id, set_active_channel_id
 from src.utils import timezones
 from src.utils.cache import BoundedCache
 from src.utils.domain_vocab import compile_phrase_stripper, compile_word_boundary_re
-from src.utils.http import ThreadLocalRequestsSession
+from src.utils.http import ThreadLocalRequestsSession, redact_secrets
 from src.utils.workers import map_in_workers
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,8 @@ def clear_espn_cache() -> None:
 def cached_espn_get(url: str, params: Optional[Dict[str, Any]] = None, ttl: int = 300) -> Optional[Dict[str, Any]]:
     """Fetch JSON from an ESPN public API endpoint with in-memory TTL caching."""
     param_str = "&".join(f"{k}={v}" for k, v in sorted((params or {}).items()))
-    cache_key = f"{url}?{param_str}" if param_str else url
+    raw_key = f"{url}?{param_str}" if param_str else url
+    cache_key = redact_secrets(raw_key)
     now = time.time()
 
     if ttl > 0 and cache_key in _CACHE:
@@ -51,7 +52,7 @@ def cached_espn_get(url: str, params: Optional[Dict[str, Any]] = None, ttl: int 
             _CACHE[cache_key] = (now, data)
             return data
     except Exception as e:
-        logger.debug(f"ESPN GET failed for {url}: {e}")
+        logger.debug(f"ESPN GET failed for {redact_secrets(url)}: {redact_secrets(e)}")
         return None
     return None
 
@@ -81,17 +82,18 @@ def parallel_fetch_json(
 
     def _get_one(u: str) -> Any:
         now = time.time()
-        if ttl > 0 and u in _CACHE:
-            ts, cached_val = _CACHE[u]
+        c_key = redact_secrets(u)
+        if ttl > 0 and c_key in _CACHE:
+            ts, cached_val = _CACHE[c_key]
             if now - ts < ttl:
                 return cached_val
         try:
             val = fetch_fn(u, timeout=timeout)
             if val is not None and ttl > 0:
-                _CACHE[u] = (now, val)
+                _CACHE[c_key] = (now, val)
             return val
         except Exception as e:
-            logger.debug(f"Parallel JSON fetch failed for {u}: {e}")
+            logger.debug(f"Parallel JSON fetch failed for {c_key}: {redact_secrets(e)}")
             return {}
 
     if len(urls) == 1:
