@@ -257,6 +257,13 @@ class JobEngine:
                     m_num = re.match(r"^J-(\d+)$", job.job_id)
                     if m_num:
                         self._seq_counter = max(self._seq_counter, int(m_num.group(1)))
+                    if (
+                        job.trigger_type == TriggerType.DAILY_SCHEDULE
+                        and job.expires_at is not None
+                        and job.run_count == 0
+                        and job.expires_at <= job.next_fire_at
+                    ):
+                        job.expires_at = None
                     # Drop expired jobs on startup
                     if job.expires_at is not None and now_ts >= job.expires_at:
                         continue
@@ -401,6 +408,14 @@ class JobEngine:
                 continue
 
             # Guardrail Layer 1 & 2: Check TTL expiration (`expires_at`) and `max_runs`
+            if (
+                job.trigger_type == TriggerType.DAILY_SCHEDULE
+                and job.expires_at is not None
+                and job.run_count == 0
+                and job.expires_at <= job.next_fire_at
+            ):
+                job.expires_at = None
+                dirty = True
             if job.expires_at is not None and eff_now >= job.expires_at:
                 with self._lock:
                     self.jobs.pop(job_id, None)

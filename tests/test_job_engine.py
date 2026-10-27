@@ -1676,8 +1676,52 @@ class TestOrchestratorAndDispatcherJobIntegration(unittest.TestCase):
         self.assertEqual(job_thu.trigger_type, TriggerType.DAILY_SCHEDULE)
         self.assertEqual(job_thu.action_type, ActionType.AGENT_TASK)
         self.assertEqual(job_thu.schedule_spec["days"], [3])
+        self.assertIsNone(job_thu.expires_at)
         self.assertIn("Task (Live AI Task)", confirm_thu)
         self.assertIn("Every Thu", confirm_thu)
+
+        # Case 4: Multi-weekday schedules ("every thursday, friday and saturday") with task-internal durations
+        # ("for 10 minutes", "for a day") or words like "house"/"minimal" must NEVER get a short `expires_at`
+        # that causes "Reached maximum time window / expiration limit" before the scheduled days arrive.
+        t0 = 1761523200.0  # Monday
+        j_multi, _ = engine.create_user_job(
+            channel_id=944,
+            query="every thursday, friday and saturday give me a cognition task for 10 minutes",
+            now_ts=t0,
+        )
+        self.assertEqual(j_multi.trigger_type, TriggerType.DAILY_SCHEDULE)
+        self.assertEqual(j_multi.schedule_spec["days"], [3, 4, 5])
+        self.assertIsNone(j_multi.expires_at)
+
+        j_week_on, _ = engine.create_user_job(
+            channel_id=944,
+            query="every week on Thursday summarize the market moves for a day",
+            now_ts=t0,
+        )
+        self.assertEqual(j_week_on.trigger_type, TriggerType.DAILY_SCHEDULE)
+        self.assertEqual(j_week_on.schedule_spec["days"], [3])
+        self.assertIsNone(j_week_on.expires_at)
+
+        j_plurals, _ = engine.create_user_job(
+            channel_id=944,
+            query="on Thursdays, Fridays, and Saturdays remind me to clean the house",
+            now_ts=t0,
+        )
+        self.assertEqual(j_plurals.trigger_type, TriggerType.DAILY_SCHEDULE)
+        self.assertEqual(j_plurals.schedule_spec["days"], [3, 4, 5])
+        self.assertIsNone(j_plurals.expires_at)
+
+        fired_msgs = []
+
+        async def _capture(job, msg):
+            fired_msgs.append(msg)
+
+        engine.set_fire_callback(_capture)
+        # Advance 1 hour and 25 hours: none of the Thu/Fri/Sat routines may auto-stop!
+        asyncio.run(engine.tick_once(now=t0 + 3600))
+        asyncio.run(engine.tick_once(now=t0 + 90000))
+        self.assertEqual(fired_msgs, [])
+        self.assertEqual(len([j for j in engine.jobs.values() if j.channel_id == 944]), 3)
 
 
 if __name__ == "__main__":

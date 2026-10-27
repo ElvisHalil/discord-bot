@@ -708,7 +708,72 @@ def parse_job_request(
     if autoplay_parsed is not None:
         return autoplay_parsed
 
-    # 2. Check Recurring Interval Loop ("every 5 mins", "every 2 hours", "every hour")
+    # 2. Check Recurring Daily / Weekly Clock Schedule FIRST ("every day at 8am", "every weekday at 9:30am",
+    #    "every Thursday, Friday and Saturday", "every week on Thursday", "on Thursdays and Fridays at 9am")
+    has_daily_or_weekly_schedule = bool(
+        re.search(
+            r"\b(?:"
+            r"every\s+(?:single\s+|other\s+)?(?:day|morning|afternoon|evening|night|weekday|weekend|week(?:\s+on)?|(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*)"
+            r"|daily|weekly"
+            r"|(?:on\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s"
+            r"|(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\s*(?:,\s*|\s+and\s+|\s*&\s*)(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*"
+            r")\b",
+            low,
+        )
+    )
+    if has_daily_or_weekly_schedule:
+        clock = _parse_clock_time(when or combined) or (9, 0)
+        hr, mn = clock
+        days_list: Optional[List[int]] = None
+        if "weekday" in low:
+            days_list = [0, 1, 2, 3, 4]
+        elif "weekend" in low:
+            days_list = [5, 6]
+        else:
+            matched_days = [
+                day_idx
+                for day_name, day_idx in _WEEKDAY_MAP.items()
+                if re.search(rf"\b{day_name}s?\b", low)
+            ]
+            if matched_days:
+                days_list = sorted(set(matched_days))
+
+        next_ts = compute_next_schedule_timestamp(hr, mn, days_of_week=days_list, now_dt=eff_now_dt)
+        clean_task = task or re.sub(
+            r"\b(?:every\s+(?:single\s+|other\s+)?(?:day|morning|afternoon|evening|night|weekday|weekend|week(?:\s+on)?|(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*(?:(?:\s*,\s*|\s+and\s+|\s*&\s*|\s*,\s*and\s+)(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*)*)|daily|weekly|(?:on\s+)?(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*s(?:(?:\s*,\s*|\s+and\s+|\s*&\s*|\s*,\s*and\s+)(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*s?)*)"
+            r"(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?)?",
+            "",
+            combined,
+            flags=re.IGNORECASE,
+        ).strip()
+        clean_task = _clean_task_description(clean_task)
+        act_type = classify_action_type(clean_task)
+        explicit_runs, explicit_dur = _extract_explicit_limits(combined)
+        # Do NOT let task-internal durations (e.g. "a cognition task for 10 minutes", "summary for a day")
+        # set a short `expires_at` that kills a daily/weekly routine before its scheduled day!
+        min_valid_schedule_ttl = (7 * 86400) if days_list else (2 * 86400)
+        has_explicit_next_horizon = bool(
+            explicit_dur
+            and explicit_dur >= min_valid_schedule_ttl
+            and re.search(r"\bfor\s+the\s+next\s+\d+\s*(?:days?|weeks?)\b", low)
+        )
+
+        return {
+            "trigger_type": TriggerType.DAILY_SCHEDULE,
+            "action_type": act_type,
+            "description": f"{clean_task} (scheduled at {hr:02d}:{mn:02d})",
+            "payload_text": clean_task,
+            "next_fire_at": next_ts,
+            "schedule_spec": {
+                "hour": hr,
+                "minute": mn,
+                "days": days_list,
+            },
+            "max_runs": explicit_runs,
+            "expires_at": (eff_now_ts + explicit_dur) if has_explicit_next_horizon else None,
+        }
+
+    # 3. Check Recurring Interval Loop ("every 5 mins", "every 2 hours", "every hour")
     m_every_interval = re.search(
         r"\bevery\s+(?:(\d+(?:\.\d+)?|a|an|one|two|couple(?:\s+of)?|three|few|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty-five)\s+)?"
         r"(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b",
@@ -763,51 +828,6 @@ def parse_job_request(
             "expires_at": eff_now_ts + eff_ttl,
             "clamped_sub_minute": clamped_sub_minute,
             "requested_seconds": raw_interval_sec,
-        }
-
-    # 3. Check Recurring Daily / Weekly Clock Schedule ("every day at 8am", "every weekday at 9:30am", "every Friday at 5pm", "every Thursday")
-    if re.search(r"\b(?:every\s+(?:day|morning|afternoon|evening|night|weekday|weekend|(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*)|daily|weekly)\b", low):
-        clock = _parse_clock_time(when or combined) or (9, 0)
-        hr, mn = clock
-        days_list: Optional[List[int]] = None
-        if "weekday" in low:
-            days_list = [0, 1, 2, 3, 4]
-        elif "weekend" in low:
-            days_list = [5, 6]
-        else:
-            matched_days = [
-                day_idx
-                for day_name, day_idx in _WEEKDAY_MAP.items()
-                if re.search(rf"\b{day_name}\b", low)
-            ]
-            if matched_days:
-                days_list = sorted(set(matched_days))
-
-        next_ts = compute_next_schedule_timestamp(hr, mn, days_of_week=days_list, now_dt=eff_now_dt)
-        clean_task = task or re.sub(
-            r"\b(?:every\s+(?:day|morning|afternoon|evening|night|weekday|weekend|(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*)|daily)"
-            r"(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?)?",
-            "",
-            combined,
-            flags=re.IGNORECASE,
-        ).strip()
-        clean_task = _clean_task_description(clean_task)
-        act_type = classify_action_type(clean_task)
-        explicit_runs, explicit_dur = _extract_explicit_limits(combined)
-
-        return {
-            "trigger_type": TriggerType.DAILY_SCHEDULE,
-            "action_type": act_type,
-            "description": f"{clean_task} (scheduled at {hr:02d}:{mn:02d})",
-            "payload_text": clean_task,
-            "next_fire_at": next_ts,
-            "schedule_spec": {
-                "hour": hr,
-                "minute": mn,
-                "days": days_list,
-            },
-            "max_runs": explicit_runs,
-            "expires_at": (eff_now_ts + explicit_dur) if explicit_dur else None,
         }
 
     # 4. Check Conditional Trigger ("when BTC hits $100k", "if it snows in Calgary", "when @channel uploads")
@@ -877,7 +897,7 @@ def parse_job_request(
     if parsed_fallback_dur is None and not when:
         is_personal_reminder = bool(
             re.search(
-                r"\b(?:remind|reminder|timer|alarm|alert|notify|ping|wake|call|text|email|buy|pick\s+up|take\s+out|check|submit|pay|meeting|oven|laundry)\b",
+                r"\b(?:remind|reminder|timer|alarm|alert|notify|ping|wake|call|text|email|buy|pick\s+up|take\s+out|check|submit|pay|meeting|oven|laundry|schedule|task|tasks|think|brainstorm|suggest|create|send|give|post|write|summarize|report|clean|workout|stretch|every|daily|weekly)\b",
                 low,
             )
         )
