@@ -1374,12 +1374,24 @@ async def process_song_card_next(
 
         async with channel_locks[channel_id]:
             system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
+            clean_seed_content = re.sub(
+                r"(?im)^[^\S\n]*📻\s*\*{0,2}(?:MUSIC\s+AUTOPLAY\s+STARTED|Autoplay)\b[^\n]*(?:\n•[^\n]+)*\n*",
+                "",
+                message_content or "",
+            ).lstrip()
             if channel_id not in chat_history:
                 chat_history[channel_id] = [system_msg]
-                if message_content and extract_song_card_target(message_content) is not None:
-                    chat_history[channel_id].append({"role": "assistant", "content": message_content})
+                if clean_seed_content and extract_song_card_target(clean_seed_content) is not None:
+                    chat_history[channel_id].append({"role": "assistant", "content": clean_seed_content})
             else:
                 chat_history[channel_id][0] = system_msg
+                for hist_m in chat_history[channel_id]:
+                    if isinstance(hist_m, dict) and hist_m.get("role") == "assistant" and "📻" in str(hist_m.get("content", "")):
+                        hist_m["content"] = re.sub(
+                            r"(?im)^[^\S\n]*📻\s*\*{0,2}(?:MUSIC\s+AUTOPLAY\s+STARTED|Autoplay)\b[^\n]*(?:\n•[^\n]+)*\n*",
+                            "",
+                            str(hist_m["content"]),
+                        ).lstrip()
             turn_history = list(chat_history[channel_id])
 
         turn_history.append({"role": "user", "content": user_msg})

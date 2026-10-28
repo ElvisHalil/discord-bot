@@ -863,7 +863,14 @@ class JobEngine:
             return reply_text
         job = self.get_active_autoplay_job(channel_id)
         if job is None:
-            return reply_text
+            # Autoplay is OFF in this channel: strip any stale `📻 **Autoplay ...**` banner
+            # that the LLM may have parroted from earlier messages in `chat_history`.
+            cleaned = re.sub(
+                r"(?im)^[^\S\n]*📻\s*\*{0,2}(?:MUSIC\s+AUTOPLAY\s+STARTED|Autoplay)\b[^\n]*(?:\n•[^\n]+)*\n*",
+                "",
+                reply_text,
+            ).lstrip()
+            return cleaned or reply_text
 
         # Check if `reply_text` contains a verified song card with a YouTube watch link
         if not re.search(r"(?im)^[^\S\n]*(?:\*\*)?(?:Song|Track):", reply_text):

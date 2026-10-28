@@ -591,6 +591,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         )
 
         next_card_reply = (
+            "📻 **Autoplay (`J-108` — similar to Breathing by Chase & Status)** — Next track in `3:45`:\n\n"
             "Here is the next track:\n\n"
             "**Song:** Timewarp\n"
             "**Artist:** Sub Focus\n"
@@ -610,6 +611,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("next" in str(m.get("content", "")).lower() for m in passed_history if m.get("role") == "user"))
         self.assertEqual(channel.send.await_count, 1)
         self.assertIn("**Song:** Timewarp", channel.send.call_args.args[0])
+        self.assertNotIn("📻 **Autoplay", channel.send.call_args.args[0])
         self.assertIsInstance(channel.send.call_args.kwargs.get("view"), bot_main.SongCardView)
 
     async def test_mixed_next_like_and_random_song_request_chain_only_keeps_latest_next_enabled(self):
