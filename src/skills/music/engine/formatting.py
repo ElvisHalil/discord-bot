@@ -419,7 +419,11 @@ def standardize_song_reply(reply: str) -> str:
         if m_gen:
             clean_g = re.sub(r'[\U00010000-\U0010ffff\u2600-\u26ff\u2700-\u27bf]', '', m_gen.group(1)).strip()
             clean_g = re.sub(r'^(?:\*\*|\b)Genre:\*{0,2}\s*', '', clean_g, flags=re.IGNORECASE).strip(" *-_#:`\"'")
-            if clean_g and not is_placeholder_text(clean_g):
+            if (
+                clean_g
+                and not is_placeholder_text(clean_g)
+                and not clean_g.lower().startswith(("similar to", "songs similar", "tracks similar", "music similar"))
+            ):
                 extracted_genre = clean_g
 
         music_url = None

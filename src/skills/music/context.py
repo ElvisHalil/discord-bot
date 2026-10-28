@@ -123,8 +123,13 @@ def record_channel_played_song(
     speed_score: Optional[float] = None,
     intensity_score: Optional[float] = None,
     gain_db: Optional[float] = None,
+    active_genre: Optional[str] = None,
+    active_mood: Optional[str] = None,
+    active_artist: Optional[str] = None,
+    active_similar_to: Optional[str] = None,
 ) -> None:
-    """Record the most recently served song in a channel along with its genre, spectrum zone, and acoustic metrics."""
+    """Record the most recently served song in a channel along with its genre, spectrum zone,
+    acoustic metrics, and active discovery session state."""
     from src.skills.music.engine.spectrum import classify_genre_to_zone
 
     s_clean = (song or "").strip()
@@ -150,6 +155,25 @@ def record_channel_played_song(
     if not eff_zone and eff_genre:
         eff_zone = classify_genre_to_zone(eff_genre)
 
+    has_session_update = any(
+        x is not None for x in (active_genre, active_mood, active_artist, active_similar_to)
+    )
+    if has_session_update:
+        eff_active_genre = (active_genre or "").strip() or None
+        eff_active_mood = (active_mood or "").strip() or None
+        eff_active_artist = (active_artist or "").strip() or None
+        eff_active_sim = (active_similar_to or "").strip() or None
+    elif same_track and prev:
+        eff_active_genre = prev.active_genre
+        eff_active_mood = prev.active_mood
+        eff_active_artist = prev.active_artist
+        eff_active_sim = prev.active_similar_to
+    else:
+        eff_active_genre = None
+        eff_active_mood = None
+        eff_active_artist = None
+        eff_active_sim = None
+
     entry = PlayedSongRecord(
         song=s_clean,
         alt_song=alt_clean or (prev.alt_song if same_track and prev else None),
@@ -160,6 +184,10 @@ def record_channel_played_song(
         speed_score=speed_score if speed_score is not None else (prev.speed_score if same_track and prev else None),
         intensity_score=intensity_score if intensity_score is not None else (prev.intensity_score if same_track and prev else None),
         gain_db=gain_db if gain_db is not None else (prev.gain_db if same_track and prev else None),
+        active_genre=eff_active_genre,
+        active_mood=eff_active_mood,
+        active_artist=eff_active_artist,
+        active_similar_to=eff_active_sim,
     )
     _CHANNEL_LAST_PLAYED_SONG[cid] = entry
 
@@ -353,7 +381,8 @@ def _extract_genre_or_music_request_from_user_text(u_text: str) -> Optional[dict
 
     cand = re.sub(
         r"^\s*(?:can\s+you\s+|could\s+you\s+|please\s+|yo\s+|hey\s+)?"
-        r"(?:play|put\s+on|queue|drop|recommend|give\s+me|stream)\s+(?:me\s+|us\s+)?(?:some\s+|a\s+|an\s+|more\s+)?",
+        r"(?:play|put\s+on|queue|drop|recommend|give\s+me|stream|stay\s+with|stick\s+with|stick\s+to|keep\s+playing|switch\s+to|change\s+to|back\s+to)\s+"
+        r"(?:me\s+|us\s+)?(?:some\s+|a\s+|an\s+|more\s+)?",
         "",
         u_text,
         flags=re.IGNORECASE,
@@ -426,7 +455,22 @@ def _resolve_next_turn_music_args(history: list, channel_id: Optional[int] = Non
     except Exception:
         pass
 
-    # Walk backwards through prior user messages in history (excluding the current 'next'/'skip' message)
+    last_song = get_channel_last_played_song(cid)
+    if last_song:
+        if last_song.active_genre or last_song.active_mood:
+            res_active: dict = {}
+            if last_song.active_genre:
+                res_active["genre"] = clean_playlist_genre_label(last_song.active_genre)
+            if last_song.active_mood:
+                res_active["mood"] = last_song.active_mood
+            return res_active
+        if last_song.active_artist:
+            return {"artist": last_song.active_artist}
+        if last_song.active_similar_to:
+            return {"similar_to": last_song.active_similar_to}
+
+    # Fallback when in-memory session state was not populated via skill_music_discovery:
+    # walk backwards through prior user messages in history (excluding the current 'next'/'skip' message)
     if history and len(history) > 1:
         for m in reversed(history[:-1]):
             role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
@@ -436,7 +480,6 @@ def _resolve_next_turn_music_args(history: list, channel_id: Optional[int] = Non
                 if req is not None:
                     return req
 
-    last_song = get_channel_last_played_song(cid)
     if last_song and last_song.genre:
         lp_g = last_song.genre.strip()
         if lp_g and not lp_g.lower().startswith("similar to") and lp_g.lower() not in ("unknown", "detected", "acoustic dsp"):

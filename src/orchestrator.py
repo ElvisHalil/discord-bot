@@ -49,6 +49,9 @@ from src.skills.voice.context import (
     detect_missed_voice_tool_call,
     enrich_voice_tool_args,
 )
+from src.skills.youtube import (
+    detect_missed_youtube_tool_call,
+)
 from src.skills.jobs import (
     detect_missed_job_tool_call,
     enrich_job_tool_args,

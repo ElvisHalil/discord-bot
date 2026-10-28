@@ -36,6 +36,10 @@ def _pre_resolve_top_candidate(
     ui_zone: Optional[str] = None,
     d_tempo: int = 0,
     anchor_bpm: Optional[float] = None,
+    active_genre: Optional[str] = None,
+    active_mood: Optional[str] = None,
+    active_artist: Optional[str] = None,
+    active_similar_to: Optional[str] = None,
 ) -> str:
     """
     Pre-resolves a verified, Discord-embeddable YouTube Music link for the top candidate track
@@ -74,7 +78,15 @@ def _pre_resolve_top_candidate(
                 if cand in candidates and candidates[0] is not cand:
                     candidates.remove(cand)
                     candidates.insert(0, cand)
-                return _format_pre_resolved_entry(cand, r, ui_zone=ui_zone)
+                return _format_pre_resolved_entry(
+                    cand,
+                    r,
+                    ui_zone=ui_zone,
+                    active_genre=active_genre,
+                    active_mood=active_mood,
+                    active_artist=active_artist,
+                    active_similar_to=active_similar_to,
+                )
         except Exception as e:
             print(f"  └─ ⚠️ [Music Discovery Pre-Resolver]: Error resolving '{query}': {e}")
             continue
@@ -84,11 +96,27 @@ def _pre_resolve_top_candidate(
         if win_c in candidates and candidates[0] is not win_c:
             candidates.remove(win_c)
             candidates.insert(0, win_c)
-        return _format_pre_resolved_entry(win_c, win_r, ui_zone=ui_zone)
+        return _format_pre_resolved_entry(
+            win_c,
+            win_r,
+            ui_zone=ui_zone,
+            active_genre=active_genre,
+            active_mood=active_mood,
+            active_artist=active_artist,
+            active_similar_to=active_similar_to,
+        )
     return ""
 
 
-def _format_pre_resolved_entry(cand: Track, r: dict, ui_zone: Optional[str] = None) -> str:
+def _format_pre_resolved_entry(
+    cand: Track,
+    r: dict,
+    ui_zone: Optional[str] = None,
+    active_genre: Optional[str] = None,
+    active_mood: Optional[str] = None,
+    active_artist: Optional[str] = None,
+    active_similar_to: Optional[str] = None,
+) -> str:
     record_played_track(cand.title, cand.artist)
     record_played_track(r["title"], r["artist"])
     vid = r.get("id")
@@ -110,6 +138,10 @@ def _format_pre_resolved_entry(cand: Track, r: dict, ui_zone: Optional[str] = No
         speed_score=cand.speed_score,
         intensity_score=cand.intensity_score,
         gain_db=cand.gain,
+        active_genre=active_genre,
+        active_mood=active_mood,
+        active_artist=active_artist,
+        active_similar_to=active_similar_to,
     )
 
     lines = [
@@ -323,11 +355,17 @@ def skill_music_discovery(
                 print(f"  └─ ⚠️ [Spectrum Acoustic Re-Ranker]: {e}")
 
             top_sample = candidate_pool[:15]
+            target_tags = target_zone.get("deep_cut_tags", []) if at_boundary else target_zone.get("mainstream_tags", [])
+            shift_active_genre = (top_sample[0].genre if top_sample and top_sample[0].genre else None) or (target_tags[0] if target_tags else resolved_genre) or ""
             pre_resolved = _pre_resolve_top_candidate(
                 top_sample,
                 ui_zone=target_zone_name,
                 d_tempo=d_tempo,
                 anchor_bpm=(anchor_profile or {}).get("bpm"),
+                active_genre=shift_active_genre,
+                active_mood="",
+                active_artist="",
+                active_similar_to="",
             )
 
             styles_preview = ", ".join(
@@ -378,6 +416,10 @@ def skill_music_discovery(
                     speed_score=top_sample[0].speed_score,
                     intensity_score=top_sample[0].intensity_score,
                     gain_db=top_sample[0].gain,
+                    active_genre=shift_active_genre,
+                    active_mood="",
+                    active_artist="",
+                    active_similar_to="",
                 )
 
             for t in top_sample:
@@ -405,9 +447,25 @@ def skill_music_discovery(
                 enforce_artist_diversity=False,
             )
             output = f"=== TOP TRACKS BY '{artist.title()}' ===\n\n"
-            pre_resolved = _pre_resolve_top_candidate(top_sample)
+            pre_resolved = _pre_resolve_top_candidate(
+                top_sample,
+                active_genre="",
+                active_mood="",
+                active_artist=artist.strip(),
+                active_similar_to="",
+            )
             if pre_resolved:
                 output += pre_resolved + "\n"
+            elif top_sample:
+                record_channel_played_song(
+                    song=top_sample[0].title,
+                    artist=top_sample[0].artist,
+                    genre=top_sample[0].genre,
+                    active_genre="",
+                    active_mood="",
+                    active_artist=artist.strip(),
+                    active_similar_to="",
+                )
 
             for t in top_sample:
                 output += t.display_line() + "\n"
@@ -459,6 +517,23 @@ def skill_music_discovery(
     if similar_to:
         print(f"🎵 [Executing Music Discovery Skill] Similar to: {similar_to} (match_mood={match_mood}, mood={parsed_mood})")
         try:
+            from src.skills.music.aggregators.deezer import clean_playlist_genre_label
+
+            last_played = get_channel_last_played_song()
+            s_meta = parse_song_meta(similar_to)
+            s_song = s_meta.get("song", "")
+            s_artist = s_meta.get("artist", "")
+            seed_matches_last_played = False
+            if last_played:
+                lp_s = _norm_track_token(last_played.get("song") or "")
+                lp_alt = _norm_track_token(last_played.get("alt_song") or "")
+                norm_s = _norm_track_token(s_song)
+                if norm_s and (norm_s in (lp_s, lp_alt) or lp_s in norm_s):
+                    seed_matches_last_played = True
+
+            prev_active_genre = last_played.active_genre if (last_played and seed_matches_last_played) else None
+            prev_active_mood = last_played.active_mood if (last_played and seed_matches_last_played) else None
+
             mood_tag = None
             if parsed_mood:
                 tracks = manager.get_mood_tracks(mood=parsed_mood, genre=parsed_genre, similar_to=similar_to)
@@ -474,6 +549,16 @@ def skill_music_discovery(
                 mood_tag = parsed_genre.title()
             else:
                 tracks = manager.get_similar_tracks(similar_to)
+                # When the channel is in an active subgenre/mood session (e.g. 'liquid drum and bass')
+                # and the user liked (👍) the active song, blend/prioritize tracks matching that subgenre
+                if prev_active_genre and tracks and not all(t.source == "fallback_unrelated" for t in tracks):
+                    inh_g, inh_m = parse_mood_and_genre(prev_active_genre, prev_active_mood)
+                    if inh_m and inh_g:
+                        subgenre_tracks = manager.get_mood_tracks(mood=inh_m, genre=inh_g, similar_to=similar_to) or []
+                        if subgenre_tracks:
+                            sub_artists = {_norm_track_token(t.artist) for t in subgenre_tracks if t.artist}
+                            matching_sim = [t for t in tracks if _norm_track_token(t.artist) in sub_artists]
+                            tracks = matching_sim + subgenre_tracks + [t for t in tracks if _norm_track_token(t.artist) not in sub_artists][:4]
 
             if not tracks:
                 return f"No similar songs found for '{similar_to}'."
@@ -488,34 +573,24 @@ def skill_music_discovery(
 
             if not is_unrelated_fallback and top_sample:
                 try:
-                    s_meta = parse_song_meta(similar_to)
-                    s_song = s_meta.get("song", "")
-                    s_artist = s_meta.get("artist", "")
                     sim_anchor = None
-                    inferred_sim_genre = s_meta.get("genre")
-                    last_played = get_channel_last_played_song()
-                    if last_played:
-                        lp_s = _norm_track_token(last_played.get("song") or "")
-                        lp_alt = _norm_track_token(last_played.get("alt_song") or "")
-                        norm_s = _norm_track_token(s_song)
-                        if norm_s and (norm_s in (lp_s, lp_alt) or lp_s in norm_s):
-                            if not inferred_sim_genre and last_played.get("genre"):
-                                inferred_sim_genre = last_played.get("genre")
-                            if last_played.get("bpm"):
-                                sim_anchor = {
-                                    "bpm": float(last_played["bpm"]),
-                                    "speed_score": float(last_played.get("speed_score") or 5.5),
-                                    "intensity_score": float(last_played.get("intensity_score") or 5.5),
-                                }
+                    inferred_sim_genre = prev_active_genre or s_meta.get("genre")
+                    if last_played and seed_matches_last_played:
+                        if not inferred_sim_genre and last_played.get("genre"):
+                            inferred_sim_genre = last_played.get("genre")
+                        if last_played.get("bpm"):
+                            sim_anchor = {
+                                "bpm": float(last_played["bpm"]),
+                                "speed_score": float(last_played.get("speed_score") or 5.5),
+                                "intensity_score": float(last_played.get("intensity_score") or 5.5),
+                            }
                     if not inferred_sim_genre:
                         inferred_sim_genre = manager._infer_seed_genre(similar_to)
                     if inferred_sim_genre:
-                        from src.skills.music.aggregators.deezer import clean_playlist_genre_label
-
                         clean_sim_g = clean_playlist_genre_label(inferred_sim_genre)
                         for t in top_sample:
-                            if not t.genre:
-                                t.genre = clean_sim_g
+                            if not t.genre or (prev_active_genre and t.genre.lower() in ("dnb", "drum and bass", "drum & bass", "electronic", "dance")):
+                                t.genre = clean_sim_g.title() if clean_sim_g == clean_sim_g.lower() else clean_sim_g
                     top_sample = audio_analyzer.rank_candidates_by_acoustic_similarity(
                         top_sample,
                         seed_song=s_song,
@@ -534,9 +609,28 @@ def skill_music_discovery(
                 header = f"=== SONGS SIMILAR TO '{similar_to}' ===\n\n"
 
             output = header
-            pre_resolved = _pre_resolve_top_candidate(top_sample)
+            sim_active_genre = prev_active_genre or ""
+            sim_active_mood = prev_active_mood or ""
+            sim_active_seed = "" if prev_active_genre else similar_to
+            pre_resolved = _pre_resolve_top_candidate(
+                top_sample,
+                active_genre=sim_active_genre,
+                active_mood=sim_active_mood,
+                active_artist="",
+                active_similar_to=sim_active_seed,
+            )
             if pre_resolved:
                 output += pre_resolved + "\n"
+            elif top_sample:
+                record_channel_played_song(
+                    song=top_sample[0].title,
+                    artist=top_sample[0].artist,
+                    genre=top_sample[0].genre,
+                    active_genre=sim_active_genre,
+                    active_mood=sim_active_mood,
+                    active_artist="",
+                    active_similar_to=sim_active_seed,
+                )
 
             for t in top_sample:
                 output += t.display_line() + "\n"
@@ -558,20 +652,43 @@ def skill_music_discovery(
             all_tracks = manager.get_top_charts(genre=parsed_genre)
             output = f"=== TODAY'S TOP CHARTING MUSIC ({parsed_genre.upper() if parsed_genre else 'ALL GENRES'}) ===\n\n"
         if all_tracks:
+            from src.skills.music.aggregators.deezer import clean_playlist_genre_label
+
+            raw_req_genre = clean_playlist_genre_label((genre or parsed_genre or "").strip())
+            session_genre = raw_req_genre or (parsed_genre or "")
+            session_mood = (mood or "").strip() if mood else (parsed_mood or "" if not session_genre else "")
+            display_genre_label = session_genre.title() if session_genre == session_genre.lower() else session_genre
+
             featured_sample = MusicAggregatorManager.sample_tiered_tracks(
                 all_tracks,
                 k=15,
                 weights=(0.45, 0.35, 0.20),
                 enforce_artist_diversity=True,
             )
-            if parsed_genre:
+            if display_genre_label:
                 for t in featured_sample:
-                    if not t.genre or t.genre.strip().lower() in ("unknown", "music", "electronic", "dance"):
-                        t.genre = parsed_genre.title()
+                    if not t.genre or t.genre.strip().lower() in ("unknown", "music", "electronic", "dance", "dnb", "drum and bass", "drum & bass"):
+                        t.genre = display_genre_label
 
-            pre_resolved = _pre_resolve_top_candidate(featured_sample)
+            pre_resolved = _pre_resolve_top_candidate(
+                featured_sample,
+                active_genre=session_genre,
+                active_mood=session_mood,
+                active_artist="",
+                active_similar_to="",
+            )
             if pre_resolved:
                 output += pre_resolved + "\n"
+            elif featured_sample:
+                record_channel_played_song(
+                    song=featured_sample[0].title,
+                    artist=featured_sample[0].artist,
+                    genre=featured_sample[0].genre,
+                    active_genre=session_genre,
+                    active_mood=session_mood,
+                    active_artist="",
+                    active_similar_to="",
+                )
 
             output += f"[FEATURED DIVERSE SELECTION ({len(featured_sample)} Different Artists)]\n"
             for t in featured_sample:

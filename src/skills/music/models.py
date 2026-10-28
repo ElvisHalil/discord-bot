@@ -61,7 +61,8 @@ class SpectrumZone(DictLikeMixin):
 
 @dataclass(slots=True)
 class PlayedSongRecord(DictLikeMixin):
-    """Per-channel record of the most recently served track and its acoustic/spectrum metadata."""
+    """Per-channel record of the most recently served track, its acoustic/spectrum metadata,
+    and the active discovery session state (`active_genre`, `active_mood`, `active_artist`, `active_similar_to`)."""
     song: str
     artist: str
     alt_song: Optional[str] = None
@@ -71,6 +72,10 @@ class PlayedSongRecord(DictLikeMixin):
     speed_score: Optional[float] = None
     intensity_score: Optional[float] = None
     gain_db: Optional[float] = None
+    active_genre: Optional[str] = None
+    active_mood: Optional[str] = None
+    active_artist: Optional[str] = None
+    active_similar_to: Optional[str] = None
 
 
 @dataclass(slots=True)

@@ -98,6 +98,7 @@ from src.orchestrator import (
     detect_missed_voice_tool_call,
     detect_missed_job_tool_call,
     detect_missed_image_tool_call,
+    detect_missed_youtube_tool_call,
     trim_history,
     compact_intra_turn_tool_history,
     apply_auto_ping,
@@ -1976,6 +1977,7 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                     or detect_missed_music_shift_tool_call(history)
                     or detect_missed_flight_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_graphing_tool_call(history, active_channel_id=channel_id)
+                    or detect_missed_youtube_tool_call(history)
                     or detect_missed_markets_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_image_tool_call(history, active_channel_id=channel_id)
                     or detect_missed_voice_tool_call(history, active_channel_id=channel_id)
@@ -2124,6 +2126,35 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                         function=types.SimpleNamespace(
                             name="skill_graphing_info",
                             arguments=missed_graph[1],
+                        )
+                    )
+                ]
+
+        # Explicit YouTube Video / Live Feed Interception: when the user explicitly asks to post/find/watch
+        # a YouTube video, live feed, or stream (e.g. "post the federal reserve live Youtube feed") and the
+        # model called `skill_markets_info`, `search_web`, `read_website`, or `get_current_datetime` instead
+        # of `skill_youtube_search`, redirect to `skill_youtube_search(is_music=False)`.
+        if (
+            iterations == 0
+            and supports_tools
+            and "skill_youtube_search" in active_tools
+            and not any(c.function.name in ("skill_youtube_search", "read_youtube_video") for c in tool_calls)
+            and any(c.function.name in ("skill_markets_info", "search_web", "read_website", "get_current_datetime") for c in tool_calls)
+        ):
+            missed_yt = detect_missed_youtube_tool_call(history)
+            if missed_yt and missed_yt[0] == "skill_youtube_search":
+                print(
+                    f"⚡ [{current_mode.upper()}] Intercepted {[c.function.name for c in tool_calls]} on explicit YouTube video/feed prompt "
+                    f"-> redirecting to skill_youtube_search: {missed_yt[1]}"
+                )
+                tool_calls = [
+                    c for c in tool_calls
+                    if c.function.name not in ("skill_markets_info", "search_web", "read_website", "get_current_datetime")
+                ] + [
+                    types.SimpleNamespace(
+                        function=types.SimpleNamespace(
+                            name="skill_youtube_search",
+                            arguments=missed_yt[1],
                         )
                     )
                 ]

@@ -40,6 +40,12 @@ _MACRO_CALENDAR_VIEW_ALIASES: frozenset[str] = frozenset({
     "calendar", "macro", "rates", "central_bank", "central_banks", "fomc", "boc", "economic_calendar",
 })
 
+_NON_MARKET_MEDIA_VIDEO_RE = re.compile(
+    r"\b(?:youtube|youtu\.be|video|videos|livestream|live\s+stream|live\s+feed|youtube\s+feed|"
+    r"stream\s+link|watch\s+live|music|song|songs|track|tracks|playlist|spotify|deezer|soundcloud)\b",
+    re.IGNORECASE,
+)
+
 _MACRO_CALENDAR_INTENT_RE = re.compile(
     r"\b(?:"
     r"federal\s+reserve|fomc|the\s+fed\b|bank\s+of\s+canada|\bboc\b|"
@@ -140,14 +146,17 @@ def clear_channel_market_state(channel_id: Optional[int] = None) -> None:
 
 def is_macro_calendar_query(query: str, view: str = "") -> bool:
     """Return True when the query or view requests Central Bank Rate Decisions or Economic Calendar data."""
+    q_clean = (query or "").strip()
+    q_low = q_clean.lower()
+    if q_low and (
+        contains_domain_terms(q_low, _NON_MARKET_SPORT_FLIGHT_WORDS)
+        or _NON_MARKET_MEDIA_VIDEO_RE.search(q_low)
+    ):
+        return False
     v_low = (view or "").strip().lower()
     if v_low in _MACRO_CALENDAR_VIEW_ALIASES:
         return True
-    q_clean = (query or "").strip()
     if not q_clean:
-        return False
-    q_low = q_clean.lower()
-    if contains_domain_terms(q_low, _NON_MARKET_SPORT_FLIGHT_WORDS):
         return False
     return bool(_MACRO_CALENDAR_INTENT_RE.search(q_low))
 
@@ -198,7 +207,7 @@ def detect_macro_calendar_tool_call(
     q_low = latest_user_text.lower()
     if q_low.startswith("!"):
         return None
-    if contains_domain_terms(q_low, _NON_MARKET_SPORT_FLIGHT_WORDS):
+    if contains_domain_terms(q_low, _NON_MARKET_SPORT_FLIGHT_WORDS) or _NON_MARKET_MEDIA_VIDEO_RE.search(q_low):
         return None
     # Do not intercept explicit graphing or scheduled-job creation commands
     if re.search(r"\b(?:graph|plot|chart|heatmap|monte\s+carlo|diagram|remind\s+me|set\s+a\s+reminder|every\s+\d+\s*[mhd]|every\s+(?:morning|day|monday|weekday))\b", q_low):
@@ -310,7 +319,7 @@ def detect_missed_markets_tool_call(
         return None
 
     # Avoid intercepting sports or aviation queries
-    if contains_domain_terms(q_low, _NON_MARKET_SPORT_FLIGHT_WORDS):
+    if contains_domain_terms(q_low, _NON_MARKET_SPORT_FLIGHT_WORDS) or _NON_MARKET_MEDIA_VIDEO_RE.search(q_low):
         return None
 
     # 1. Central Bank Rate Decisions & Economic Calendar (or follow-up in active macro context)

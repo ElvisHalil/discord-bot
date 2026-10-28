@@ -49,6 +49,7 @@ TRUSTED_VIDEO_CHANNELS: frozenset[str] = frozenset({
     "hbo", "max", "apple", "apple tv", "sony pictures entertainment",
     "warner bros. pictures", "universal pictures", "paramount pictures",
     "a24", "bbc", "bbc sport", "itvx", "channel 4",
+    "federal reserve", "bank of canada", "european central bank",
 })
 
 # Shorthand query tokens mapped to their official YouTube channel names (lowercase)
@@ -63,6 +64,8 @@ CHANNEL_QUERY_ALIASES: dict[str, str] = {
     "ucl": "cbs sports golazo",
     "champions league": "cbs sports golazo",
     "cs2": "esl counter-strike",
+    "fomc": "federal reserve",
+    "boc": "bank of canada",
 }
 
 

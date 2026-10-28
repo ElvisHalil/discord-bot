@@ -860,6 +860,48 @@ class TestMarketsSkill(unittest.TestCase):
         self.assertIn("9:45 a.m. Eastern Daylight Time (Today 7:45 AM MDT", enriched)
         self.assertIn("2 p.m. Eastern Time (Today 12:00 PM MDT", enriched)
 
+    def test_federal_reserve_youtube_live_feed_does_not_route_to_macro_calendar(self):
+        """Asking to 'post the federal reserve live Youtube feed' must NOT trigger Central Bank Rate
+        Decisions (`skill_markets_info(view='calendar')`) and must route to `skill_youtube_search`."""
+        from src.skills.youtube import (
+            clean_youtube_video_search_query,
+            detect_missed_youtube_tool_call,
+        )
+        from src.skills.youtube.aggregators.ddg import (
+            has_video_query_relevance,
+            is_trusted_or_requested_video_channel,
+        )
+
+        prompt = "post the federal reserve live Youtube feed"
+        history = [{"role": "user", "content": f"User jubkill says: {prompt}"}]
+
+        # 1. Must not be classified as a macro calendar query even if view='calendar' was proposed
+        self.assertFalse(is_macro_calendar_query(prompt))
+        self.assertFalse(is_macro_calendar_query(prompt, view="calendar"))
+        self.assertIsNone(detect_macro_calendar_tool_call(history))
+        self.assertIsNone(detect_missed_markets_tool_call(history))
+
+        # 2. Must route to skill_youtube_search(query='federal reserve live', is_music=False)
+        self.assertEqual(clean_youtube_video_search_query(prompt), "federal reserve live")
+        yt_call = detect_missed_youtube_tool_call(history)
+        self.assertEqual(
+            yt_call,
+            ("skill_youtube_search", {"query": "federal reserve live", "is_music": False}),
+        )
+
+        # 3. Official Federal Reserve YouTube channel upload ('FOMC Press Conference, October 28, 2026')
+        # must pass video relevance and official channel checks even when 'live' is not in the video title
+        self.assertTrue(
+            is_trusted_or_requested_video_channel("federal reserve live", "Federal Reserve")
+        )
+        self.assertTrue(
+            has_video_query_relevance(
+                "federal reserve live",
+                "FOMC Press Conference, October 28, 2026",
+                "Federal Reserve",
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

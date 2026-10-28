@@ -7,6 +7,8 @@ from src.skills.youtube.catalogs import CHANNEL_QUERY_ALIASES, TRUSTED_VIDEO_CHA
 _VIDEO_QUERY_STOPWORDS = frozenset({
     "youtube", "channel", "video", "videos", "watch", "official", "pull", "up",
     "from", "the", "for", "me", "show", "find", "please", "can", "you", "on", "in", "of", "to", "a", "an",
+    "post", "get", "give", "send", "share", "link", "feed", "stream", "streams", "livestream", "broadcast",
+    "play", "put",
 })
 
 
@@ -72,6 +74,12 @@ def has_video_query_relevance(query: str, title: str, channel: str) -> bool:
     chan_words = set(re.findall(r"[a-z0-9]+", (channel or "").lower()))
     subject_tokens = [w for w in q_words if w not in chan_words and w not in CHANNEL_QUERY_ALIASES]
     if subject_tokens and title_words and not any(w in title_words for w in subject_tokens):
+        # If the candidate comes from the explicitly requested/trusted official channel (e.g. 'Federal Reserve')
+        # and the only remaining token in the query is a generic live/recency indicator ('live', 'today', 'now'),
+        # accept the official channel's upload even when YouTube doesn't include 'LIVE' in the video title.
+        non_live_subjects = [w for w in subject_tokens if w not in ("live", "today", "now", "latest")]
+        if not non_live_subjects and is_trusted_or_requested_video_channel(query, channel):
+            return True
         # Allow if at least one raw q_word (such as 'fp1') is in title_words
         if not any(w in title_words for w in q_words):
             return False
