@@ -371,7 +371,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(first_view, bot_main.SongCardView)
         self.assertEqual(
             [(c.custom_id, c.disabled, c.label) for c in first_view.children],
-            [("song_card:next", False, "Next"), ("song_card:like", False, "Like"), ("song_card:autoplay", False, "Autoplay")],
+            [("song_card:next", False, None), ("song_card:like", False, None), ("song_card:autoplay", False, "Autoplay")],
         )
         msg1.edit.assert_not_awaited()
 
@@ -382,7 +382,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(disabled_view, bot_main.SongCardView)
         self.assertEqual(
             [(c.custom_id, c.disabled, c.label) for c in disabled_view.children],
-            [("song_card:next", True, "Next"), ("song_card:like", False, "Like"), ("song_card:autoplay", False, "Autoplay")],
+            [("song_card:next", True, None), ("song_card:like", False, None), ("song_card:autoplay", False, "Autoplay")],
         )
         self.assertIs(bot_main._last_song_card_messages.get(777100), msg2)
 

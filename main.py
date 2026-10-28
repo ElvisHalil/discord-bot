@@ -180,7 +180,7 @@ class SongCardView(discord.ui.View):
                     child.disabled = True
 
     @discord.ui.button(
-        label="Next",
+        label=None,
         emoji="⏭️",
         style=discord.ButtonStyle.secondary,
         custom_id="song_card:next",
@@ -189,7 +189,7 @@ class SongCardView(discord.ui.View):
         await handle_song_card_button_interaction(interaction, action="next")
 
     @discord.ui.button(
-        label="Like",
+        label=None,
         emoji="👍",
         style=discord.ButtonStyle.secondary,
         custom_id="song_card:like",
