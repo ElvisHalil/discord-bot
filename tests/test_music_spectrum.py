@@ -374,7 +374,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             [
                 ("song_card:next", False, None),
                 ("song_card:like", False, None),
-                ("song_card:spacer", True, "\u2800" * 5),
+                ("song_card:spacer", True, "\u2800"),
                 ("song_card:autoplay", False, "Autoplay"),
             ],
         )
@@ -390,7 +390,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             [
                 ("song_card:next", True, None),
                 ("song_card:like", False, None),
-                ("song_card:spacer", True, "\u2800" * 5),
+                ("song_card:spacer", True, "\u2800"),
                 ("song_card:autoplay", False, "Autoplay"),
             ],
         )

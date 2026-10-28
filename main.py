@@ -198,7 +198,7 @@ class SongCardView(discord.ui.View):
         await handle_song_card_button_interaction(interaction, action="like")
 
     @discord.ui.button(
-        label="\u2800" * 5,
+        label="\u2800",
         style=discord.ButtonStyle.secondary,
         disabled=True,
         custom_id="song_card:spacer",
