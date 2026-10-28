@@ -186,7 +186,7 @@ def _fmt_rate_val(val: object, unit: str = "") -> Optional[str]:
         return s if s.endswith("%") or not unit else f"{s}{unit}"
 
 
-def _compute_bps_change_label(actual_str: Optional[str], prev_str: Optional[str]) -> str:
+def _compute_bps_change_label(actual_str: Optional[str], prev_str: Optional[str], is_forecast: bool = False) -> str:
     """Compute basis points change label (e.g. '+25 bps hike', '-25 bps cut', 'Unchanged / Hold') when both are % rates."""
     if not actual_str or not prev_str:
         return ""
@@ -194,11 +194,17 @@ def _compute_bps_change_label(actual_str: Optional[str], prev_str: Optional[str]
         act = float(str(actual_str).replace("%", "").strip())
         prv = float(str(prev_str).replace("%", "").strip())
         diff_bps = int(round((act - prv) * 100))
+        if is_forecast:
+            if diff_bps > 0:
+                return f" (Forecasted +{diff_bps} bps rate hike from {prev_str})"
+            if diff_bps < 0:
+                return f" (Forecasted {diff_bps} bps rate cut from {prev_str})"
+            return f" (Forecasted Hold / Unchanged at {actual_str})"
         if diff_bps > 0:
-            return f" (**+{diff_bps} bps rate hike**)"
+            return f" (**RAISED +{diff_bps} bps rate hike from {prev_str} to {actual_str}**)"
         if diff_bps < 0:
-            return f" (**{diff_bps} bps rate cut**)"
-        return " (**Unchanged / Hold**)"
+            return f" (**CUT {diff_bps} bps rate cut from {prev_str} to {actual_str}**)"
+        return f" (**HELD UNCHANGED at {actual_str}**)"
     except ValueError:
         return ""
 
@@ -487,7 +493,7 @@ class MacroCalendarAggregator(BaseMarketAggregator):
     def get_merged_calendar_events(
         self,
         now_utc: datetime,
-        days_back: int = 7,
+        days_back: int = 2,
         days_ahead: int = 45,
     ) -> Tuple[List[MacroCalendarEvent], List[Dict[str, object]], List[Dict[str, str]], List[Dict[str, object]]]:
         """Fetch and merge TradingView, ForexFactory, Official FOMC, and Official BoC schedules in parallel."""
@@ -504,26 +510,42 @@ class MacroCalendarAggregator(BaseMarketAggregator):
         fomc_schedule = fut_fomc.result()
         boc_history, boc_schedule = fut_boc.result()
 
-        # Merge TradingView and ForexFactory events, avoiding duplicates on same (country, timestamp_hour, role)
+        # Merge TradingView and ForexFactory events, consolidating central bank rate decisions & press conferences per country+date
         merged: List[MacroCalendarEvent] = list(tv_events)
 
         def _event_sig(ev: MacroCalendarEvent) -> Tuple[str, str, str]:
             t_low = ev.title.lower()
             if "press conference" in t_low:
-                role = "press_conference"
-            elif "statement" in t_low and "rate" not in t_low:
-                role = "statement"
-            elif "monetary policy report" in t_low:
-                role = "mpr"
-            elif ev.category == "rate_decision":
-                role = "rate_decision"
-            else:
-                role = re.sub(r"[^a-z0-9]+", "", t_low)[:24]
+                return (ev.country, ev.timestamp_utc.strftime("%Y-%m-%d"), "press_conference")
+            if ev.category == "rate_decision":
+                return (ev.country, ev.timestamp_utc.strftime("%Y-%m-%d"), "rate_decision")
+            if "statement" in t_low and "rate" not in t_low:
+                return (ev.country, ev.timestamp_utc.strftime("%Y-%m-%d"), "statement")
+            if "monetary policy report" in t_low or "outlook report" in t_low:
+                return (ev.country, ev.timestamp_utc.strftime("%Y-%m-%d"), "mpr")
+            role = re.sub(r"[^a-z0-9]+", "", t_low)[:24]
             return (ev.country, ev.timestamp_utc.strftime("%Y-%m-%dT%H:%M"), role)
 
-        by_sig: Dict[Tuple[str, str, str], MacroCalendarEvent] = {_event_sig(e): e for e in merged}
+        by_sig: Dict[Tuple[str, str, str], MacroCalendarEvent] = {}
+        deduped: List[MacroCalendarEvent] = []
+        for ev in merged:
+            sig = _event_sig(ev)
+            if sig not in by_sig:
+                by_sig[sig] = ev
+                deduped.append(ev)
+            else:
+                existing = by_sig[sig]
+                if not existing.actual and ev.actual:
+                    existing.actual = ev.actual
+                if not existing.forecast and ev.forecast:
+                    existing.forecast = ev.forecast
+                if not existing.previous and ev.previous:
+                    existing.previous = ev.previous
+        merged = deduped
 
         for ff in ff_events:
+            if not (start_utc <= ff.timestamp_utc <= end_utc):
+                continue
             sig = _event_sig(ff)
             if sig in by_sig:
                 existing = by_sig[sig]
@@ -541,7 +563,7 @@ class MacroCalendarAggregator(BaseMarketAggregator):
         for m in fomc_schedule:
             dec_utc: datetime = m["decision_utc"]  # type: ignore[assignment]
             if start_utc <= dec_utc <= end_utc:
-                sig = ("US", dec_utc.strftime("%Y-%m-%dT%H:%M"), "rate_decision")
+                sig = ("US", dec_utc.strftime("%Y-%m-%d"), "rate_decision")
                 if sig not in by_sig:
                     ev = MacroCalendarEvent(
                         title="Fed Interest Rate Decision (FOMC)",
@@ -554,10 +576,10 @@ class MacroCalendarAggregator(BaseMarketAggregator):
                     merged.append(ev)
                     by_sig[sig] = ev
                 pc_utc: datetime = m["press_conf_utc"]  # type: ignore[assignment]
-                pc_sig = ("US", pc_utc.strftime("%Y-%m-%dT%H:%M"), "press_conference")
+                pc_sig = ("US", pc_utc.strftime("%Y-%m-%d"), "press_conference")
                 if pc_sig not in by_sig:
                     pc_ev = MacroCalendarEvent(
-                        title="Fed FOMC Press Conference",
+                        title="Fed Press Conference",
                         country="US",
                         timestamp_utc=pc_utc,
                         importance=1,
@@ -572,7 +594,7 @@ class MacroCalendarAggregator(BaseMarketAggregator):
         for b in boc_schedule:
             dec_utc = b["decision_utc"]  # type: ignore[assignment]
             if start_utc <= dec_utc <= end_utc:
-                sig = ("CA", dec_utc.strftime("%Y-%m-%dT%H:%M"), "rate_decision")
+                sig = ("CA", dec_utc.strftime("%Y-%m-%d"), "rate_decision")
                 if sig not in by_sig:
                     ev = MacroCalendarEvent(
                         title="BoC Interest Rate Decision",
@@ -594,6 +616,7 @@ class MacroCalendarAggregator(BaseMarketAggregator):
         ev: MacroCalendarEvent,
         local_now: datetime,
         tz_override: Optional[str] = None,
+        press_conf_ev: Optional[MacroCalendarEvent] = None,
     ) -> str:
         """Format a single `MacroCalendarEvent` with flag, multi-timezone local-first timestamp, and Actual/Forecast/Previous."""
         flag, country_name = _COUNTRY_FLAG_MAP.get(ev.country, ("🌐", ev.country))
@@ -609,18 +632,32 @@ class MacroCalendarAggregator(BaseMarketAggregator):
         if ev.actual is not None:
             metrics.append(f"**Actual: {ev.actual}**{bps_tag}")
         if ev.forecast is not None:
-            metrics.append(f"Forecast: **{ev.forecast}**")
+            f_bps_tag = (
+                _compute_bps_change_label(ev.forecast, ev.previous, is_forecast=True)
+                if ev.category == "rate_decision" and ev.actual is None
+                else ""
+            )
+            metrics.append(f"Forecast: **{ev.forecast}**{f_bps_tag}")
         if ev.previous is not None:
             metrics.append(f"Previous: **{ev.previous}**")
+
+        if press_conf_ev is not None:
+            local_tz = resolve_configured_timezone(tz_override=tz_override, ref_utc=press_conf_ev.timestamp_utc)
+            et_tz = _resolve_tz_token("ET", ref_utc=press_conf_ev.timestamp_utc) or timezone(timedelta(hours=-4), "EDT")
+            pc_local = press_conf_ev.timestamp_utc.astimezone(local_tz)
+            pc_et = press_conf_ev.timestamp_utc.astimezone(et_tz)
+            pc_local_str = f"{pc_local.strftime('%I:%M %p').lstrip('0')} {_short_tz_abbr(pc_local)}"
+            pc_et_str = f"{pc_et.strftime('%I:%M %p').lstrip('0')} {_short_tz_abbr(pc_et)}"
+            metrics.append(f"Press Conference: **{pc_local_str} ({pc_et_str})**")
 
         local_ev_date = ev.timestamp_utc.astimezone(resolve_configured_timezone(tz_override=tz_override, ref_utc=ev.timestamp_utc)).date()
         is_past = ev.timestamp_utc <= utc_now
         if ev.actual is not None or is_past:
             status_badge = "✅ RELEASED TODAY" if local_ev_date == local_now.date() else "✅ RELEASED"
         elif local_ev_date == local_now.date():
-            status_badge = "⏳ UPCOMING TODAY"
+            status_badge = "⏳ UPCOMING TODAY — NOT YET RELEASED"
         else:
-            status_badge = "📅 SCHEDULED"
+            status_badge = "📅 UPCOMING SCHEDULED"
 
         metric_str = (" | " + " | ".join(metrics)) if metrics else ""
         return f"- {flag} **{ev.title} ({country_name})** — {ts_str}{metric_str} [{status_badge}]"
@@ -643,6 +680,28 @@ class MacroCalendarAggregator(BaseMarketAggregator):
         q_low = f"{query} {region}".lower()
         focus_us = bool(re.search(r"\b(?:fed\b|fomc|federal\s+reserve|powell|united\s+states|\bus\b|american)\b", q_low))
         focus_ca = bool(re.search(r"\b(?:bank\s+of\s+canada|\bboc\b|canada|canadian|macklem|overnight\s+rate)\b", q_low))
+        wants_non_cb_macro = bool(
+            re.search(r"\b(?:cpi|inflation|pce|ppi|jobs|nfp|payrolls?|unemployment|gdp|retail\s+sales|economic\s+calendar|macro\s+calendar)\b", q_low)
+        )
+
+        # Pair each rate_decision with any same-day press conference for that country
+        press_confs_by_day: Dict[Tuple[str, str], MacroCalendarEvent] = {
+            (e.country, e.timestamp_utc.strftime("%Y-%m-%d")): e
+            for e in events
+            if "press conference" in e.title.lower()
+        }
+        rate_decisions = [e for e in events if e.category == "rate_decision"]
+
+        def _ev_local_date(ev: MacroCalendarEvent) -> date:
+            ltz = resolve_configured_timezone(tz_override=tz_override, ref_utc=ev.timestamp_utc)
+            return ev.timestamp_utc.astimezone(ltz).date()
+
+        def _is_released(ev: MacroCalendarEvent) -> bool:
+            return ev.actual is not None or ev.timestamp_utc <= utc_now
+
+        def _fmt_rd(ev: MacroCalendarEvent) -> str:
+            pc = press_confs_by_day.get((ev.country, ev.timestamp_utc.strftime("%Y-%m-%d")))
+            return self.format_event_line(ev, local_now, tz_override=tz_override, press_conf_ev=pc)
 
         sections: List[str] = [
             f"[{build_reference_clock(now=local_now, tz_override=tz_override)}]",
@@ -650,27 +709,27 @@ class MacroCalendarAggregator(BaseMarketAggregator):
             f"- **User / Bot Local Timezone:** **{local_abbr}** (All event times below are pre-converted to **{local_abbr}** first, alongside Eastern Time `ET` and `UTC`).",
         ]
 
-        # 1. TODAY'S CENTRAL BANK & HIGH-IMPACT EVENTS BANNER
-        def _ev_local_date(ev: MacroCalendarEvent) -> date:
-            ltz = resolve_configured_timezone(tz_override=tz_override, ref_utc=ev.timestamp_utc)
-            return ev.timestamp_utc.astimezone(ltz).date()
+        # 1. TODAY'S CENTRAL BANK DECISIONS — STRICTLY SEPARATED INTO UPCOMING LATER TODAY VS. ALREADY RELEASED TODAY
+        todays_rds = [e for e in rate_decisions if _ev_local_date(e) == local_now.date()]
+        todays_upcoming_rds = [e for e in todays_rds if not _is_released(e)]
+        todays_released_rds = [e for e in todays_rds if _is_released(e)]
 
-        todays_events = [e for e in events if _ev_local_date(e) == local_now.date()]
-        todays_cb = [e for e in todays_events if e.category in ("rate_decision", "central_bank")]
-        todays_other = [e for e in todays_events if e.category not in ("rate_decision", "central_bank")]
-
-        if todays_cb or todays_other:
+        if todays_upcoming_rds or todays_released_rds:
             today_lines = [
-                f"=== 🚨 TODAY'S SCHEDULED DECISIONS & RELEASES ({local_now.strftime('%A, %b %d, %Y')}) ==="
+                f"=== 🚨 TODAY'S SCHEDULED DECISIONS & RELEASES ({local_now.strftime('%A, %b %d, %Y')}) ===",
+                "🔥 **CENTRAL BANK RATE DECISION DAY TODAY:**",
             ]
-            if todays_cb:
-                today_lines.append("🔥 **CENTRAL BANK RATE DECISION DAY TODAY:**")
-                for ev in todays_cb:
-                    today_lines.append(self.format_event_line(ev, local_now, tz_override=tz_override))
-            if todays_other:
-                today_lines.append("📊 **Other Major Macro Releases Today:**")
-                for ev in todays_other[:8]:
-                    today_lines.append(self.format_event_line(ev, local_now, tz_override=tz_override))
+            if todays_upcoming_rds:
+                today_lines.append("⏳ **HAPPENING LATER TODAY (UPCOMING — NOT YET RELEASED):**")
+                for ev in todays_upcoming_rds:
+                    today_lines.append(_fmt_rd(ev))
+                    pc = press_confs_by_day.get((ev.country, ev.timestamp_utc.strftime("%Y-%m-%d")))
+                    if pc is not None:
+                        today_lines.append(self.format_event_line(pc, local_now, tz_override=tz_override))
+            if todays_released_rds:
+                today_lines.append("✅ **ALREADY RELEASED EARLIER TODAY:**")
+                for ev in todays_released_rds:
+                    today_lines.append(_fmt_rd(ev))
             sections.append("\n".join(today_lines))
         else:
             sections.append(
@@ -678,21 +737,35 @@ class MacroCalendarAggregator(BaseMarketAggregator):
                 "- No G10 central bank interest rate decision is scheduled on today's calendar."
             )
 
-        # 2. FEDERAL RESERVE (FOMC) RATE DECISION & SCHEDULE SECTION
-        fomc_events = [
-            e for e in events
-            if e.country == "US" and e.category in ("rate_decision", "central_bank")
-        ]
-        fomc_lines = ["=== 🇺🇸 US FEDERAL RESERVE (FOMC) INTEREST RATE DECISION & SCHEDULE ==="]
+        # 2. ALL UPCOMING CENTRAL BANK RATE DECISIONS (CHRONOLOGICAL — STARTING WITH TODAY'S UPCOMING DECISION!)
+        upcoming_rds = [e for e in rate_decisions if not _is_released(e)]
+        if upcoming_rds:
+            up_lines = [
+                "=== ⏳ ALL UPCOMING CENTRAL BANK RATE DECISIONS (CHRONOLOGICAL — STARTING WITH TODAY) ==="
+            ]
+            for ev in upcoming_rds[:10]:
+                up_lines.append(_fmt_rd(ev))
+            sections.append("\n".join(up_lines))
+
+        # 3. RECENTLY COMPLETED / RELEASED CENTRAL BANK DECISIONS
+        released_rds = [e for e in rate_decisions if _is_released(e)]
+        if released_rds:
+            rel_lines = [
+                "=== ✅ RECENTLY RELEASED CENTRAL BANK RATE DECISIONS (ALREADY ANNOUNCED) ==="
+            ]
+            for ev in reversed(released_rds):
+                rel_lines.append(_fmt_rd(ev))
+            sections.append("\n".join(rel_lines))
+
+        # 4. US FEDERAL RESERVE (FOMC) & BANK OF CANADA (BoC) OFFICIAL SCHEDULES
+        fomc_lines = ["=== 🇺🇸 US FEDERAL RESERVE (FOMC) SCHEDULE & RELEASE RULES ==="]
         fomc_lines.append(
-            f"- **Standard FOMC Release Time:** Rate decisions & FOMC Statements are always released on **Day 2 of the meeting at 2:00 PM Eastern Time**, which is **12:00 PM {local_abbr} (Local Time)** (18:00 UTC during EDT / 19:00 UTC during EST). Chair Jerome Powell's Press Conference follows 30 minutes later at **12:30 PM {local_abbr} (2:30 PM ET)**."
+            f"- **Standard FOMC Release Time:** Rate decisions & FOMC Statements are always released on **Day 2 of the meeting at 12:00 PM {local_abbr} (Local Time)** (**2:00 PM Eastern Time** / 18:00 UTC during EDT). Chair Jerome Powell's Press Conference follows 30 minutes later at **12:30 PM {local_abbr} (2:30 PM ET)**."
         )
-        if fomc_events:
-            for ev in fomc_events:
-                fomc_lines.append(self.format_event_line(ev, local_now, tz_override=tz_override))
+        for ev in [e for e in rate_decisions if e.country == "US"]:
+            fomc_lines.append(_fmt_rd(ev))
         if fomc_schedule:
             upcoming_fomc = [m for m in fomc_schedule if m["decision_date"] >= local_now.date()]  # type: ignore[operator]
-            past_fomc = [m for m in fomc_schedule if m["decision_date"] < local_now.date()]  # type: ignore[operator]
             if upcoming_fomc:
                 sched_items: List[str] = []
                 for m in upcoming_fomc[:4]:
@@ -703,40 +776,19 @@ class MacroCalendarAggregator(BaseMarketAggregator):
                         f"  • **{m['decision_date'].strftime('%B')} {m['days_label']}, {m['year']} Meeting:** Decision on {ts_lbl}{sep_tag}"  # type: ignore[union-attr]
                     )
                 fomc_lines.append("- **Official Remaining/Upcoming FOMC Meeting Schedule:**\n" + "\n".join(sched_items))
-            elif past_fomc:
-                last_m = past_fomc[-1]
-                fomc_lines.append(
-                    f"- **Most Recent FOMC Meeting:** {last_m['decision_date'].strftime('%b %d, %Y')}"  # type: ignore[union-attr]
-                )
 
-        # 3. BANK OF CANADA (BoC) OVERNIGHT RATE DECISION & SCHEDULE SECTION
-        boc_events = [
-            e for e in events
-            if e.country == "CA" and e.category in ("rate_decision", "central_bank")
-        ]
-        boc_lines = ["=== 🇨🇦 BANK OF CANADA (BoC) INTEREST RATE DECISION & SCHEDULE ==="]
+        boc_lines = ["=== 🇨🇦 BANK OF CANADA (BoC) SCHEDULE & RATE HISTORY ==="]
         boc_lines.append(
-            f"- **Standard BoC Release Time:** Bank of Canada Overnight Rate decisions are released at **9:45 AM Eastern Time**, which is **7:45 AM {local_abbr} (Local Time)**, with Monetary Policy Report (MPR) Press Conferences at **8:30 AM {local_abbr} (10:30 AM ET)**."
+            f"- **Standard BoC Release Time:** Bank of Canada Overnight Rate decisions are released at **7:45 AM {local_abbr} (Local Time)** (**9:45 AM Eastern Time**), with Monetary Policy Report (MPR) Press Conferences at **8:30 AM {local_abbr} (10:30 AM ET)**."
         )
-        if boc_events:
-            for ev in boc_events:
-                boc_lines.append(self.format_event_line(ev, local_now, tz_override=tz_override))
+        for ev in [e for e in rate_decisions if e.country == "CA"]:
+            boc_lines.append(_fmt_rd(ev))
         if boc_history:
             hist_str = " | ".join(
                 f"**{h['date']}:** {h['target']} ({h['change']})"
                 for h in boc_history[:5]
             )
             boc_lines.append(f"- **Official Bank of Canada Target Overnight Rate History:** {hist_str}")
-        if boc_schedule:
-            upcoming_boc = [b for b in boc_schedule if b["decision_date"] >= local_now.date()]  # type: ignore[operator]
-            if upcoming_boc:
-                b_items: List[str] = []
-                for b in upcoming_boc[:4]:
-                    dec_utc = b["decision_utc"]  # type: ignore[assignment]
-                    ts_lbl = _format_event_timestamp_multi_tz(dec_utc, local_now, tz_override=tz_override)
-                    mpr_tag = " *(+ Monetary Policy Report & 8:30 AM Local / 10:30 AM ET Press Conference)*" if b.get("has_mpr") else ""
-                    b_items.append(f"  • **{b['decision_date'].strftime('%b %d, %Y')}:** Decision on {ts_lbl}{mpr_tag}")  # type: ignore[union-attr]
-                boc_lines.append("- **Official Remaining/Upcoming BoC Announcement Dates:**\n" + "\n".join(b_items))
 
         if focus_ca and not focus_us:
             sections.append("\n".join(boc_lines))
@@ -745,34 +797,24 @@ class MacroCalendarAggregator(BaseMarketAggregator):
             sections.append("\n".join(fomc_lines))
             sections.append("\n".join(boc_lines))
 
-        # 4. OTHER GLOBAL CENTRAL BANKS (ECB, BoE, BoJ, RBA, RBNZ, SNB)
-        other_cb_events = [
-            e for e in events
-            if e.country not in ("US", "CA") and e.category in ("rate_decision", "central_bank")
-        ]
-        if other_cb_events:
-            g10_lines = ["=== 🌍 OTHER G10 CENTRAL BANK DECISIONS (ECB, BoE, BoJ, RBA, RBNZ) ==="]
-            for ev in other_cb_events[:10]:
-                g10_lines.append(self.format_event_line(ev, local_now, tz_override=tz_override))
-            sections.append("\n".join(g10_lines))
+        # 5. HIGH-IMPACT MACROECONOMIC INDICATORS (Only when user asks about CPI, Jobs, GDP, PCE, or full Economic Calendar)
+        if wants_non_cb_macro:
+            near_cutoff_past = utc_now - timedelta(days=2)
+            near_cutoff_future = utc_now + timedelta(days=14)
+            macro_events = [
+                e for e in events
+                if (e.category in ("inflation", "labor", "growth") or (e.importance >= 1 and e.category == "macro"))
+                and near_cutoff_past <= e.timestamp_utc <= near_cutoff_future
+                and (e.country in ("US", "CA") or e.importance >= 1)
+            ]
+            macro_events.sort(key=lambda e: (0 if e.country in ("US", "CA") else 1, e.timestamp_utc))
+            if macro_events:
+                macro_lines = ["=== 📊 HIGH-IMPACT MACROECONOMIC RELEASES (CPI, JOBS, GDP, PCE) ==="]
+                for ev in macro_events[:10]:
+                    macro_lines.append(self.format_event_line(ev, local_now, tz_override=tz_override))
+                sections.append("\n".join(macro_lines))
 
-        # 5. HIGH-IMPACT MACROECONOMIC INDICATORS (CPI, Jobs/NFP, GDP, PCE, Retail Sales — US/CA & Near-Term Priority)
-        near_cutoff_past = utc_now - timedelta(days=2)
-        near_cutoff_future = utc_now + timedelta(days=14)
-        macro_events = [
-            e for e in events
-            if (e.category in ("inflation", "labor", "growth") or (e.importance >= 1 and e.category == "macro"))
-            and near_cutoff_past <= e.timestamp_utc <= near_cutoff_future
-            and (e.country in ("US", "CA") or e.importance >= 1)
-        ]
-        macro_events.sort(key=lambda e: (0 if e.country in ("US", "CA") else 1, e.timestamp_utc))
-        if macro_events:
-            macro_lines = ["=== 📊 HIGH-IMPACT MACROECONOMIC RELEASES (CPI, JOBS, GDP, PCE) ==="]
-            for ev in macro_events[:10]:
-                macro_lines.append(self.format_event_line(ev, local_now, tz_override=tz_override))
-            sections.append("\n".join(macro_lines))
-
-        # 6. LIVE TREASURY YIELDS, FX & BENCHMARK REACTION
+        # 6. LIVE TREASURY YIELDS, FX & BENCHMARK REACTION (Only when live_rate_quotes is provided)
         if live_rate_quotes:
             q_lines = ["=== 📈 LIVE RATES, FX & MARKET BENCHMARK REACTION ==="]
             for sym, lbl in (
