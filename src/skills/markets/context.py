@@ -45,7 +45,7 @@ _MACRO_CALENDAR_INTENT_RE = re.compile(
     r"federal\s+reserve|fomc|the\s+fed\b|bank\s+of\s+canada|\bboc\b|"
     r"european\s+central\s+bank|\becb\b|bank\s+of\s+england|\bboe\b|bank\s+of\s+japan|\bboj\b|"
     r"reserve\s+bank\s+of\s+(?:australia|new\s+zealand)|\brba\b|\brbnz\b|swiss\s+national\s+bank|\bsnb\b|"
-    r"central\s+banks?|jerome\s+powell|chair\s+powell|tiff\s+macklem|christine\s+lagarde|"
+    r"central\s+banks?|jerome\s+powell|chair\s+powell|kevin\s+warsh|chair\s+warsh|tiff\s+macklem|christine\s+lagarde|"
     r"fed\s+(?:rate|rates|interest|decision|decisions|meeting|meetings|announcement|announcements|cut|cuts|hike|hikes|hold|pause|pivot|funds|minutes|press\s+conference|chair|policy|schedule|calendar|today)|"
     r"(?:next|today'?s|upcoming|latest|recent|last)\s+fed\b|"
     r"interest\s+rates?\s+(?:decision|decisions|announcement|meeting|cut|cuts|hike|hikes|raise|raised|raising|lower|lowered|hold|held|pause|paused|schedule|calendar|today|change|move|target|outlook)|"
