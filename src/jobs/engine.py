@@ -539,18 +539,28 @@ class JobEngine:
             auto_spec["last_duration"] = track_duration
             job.interval_seconds = track_duration
 
+            will_stop = (
+                (queue_only and not queue_list)
+                or (job.max_runs is not None and job.run_count >= job.max_runs)
+                or (
+                    job.expires_at is not None
+                    and (now_ts + track_duration) > job.expires_at
+                    and job.run_count >= 1
+                    and now_ts >= job.expires_at
+                )
+            )
+            if will_stop:
+                with self._lock:
+                    self.jobs.pop(job.job_id, None)
+
             if card_text and self._fire_callback is not None:
                 try:
                     await self._fire_callback(job, card_text)
                 except Exception as e:
                     print(f"⚠️ [Job Engine Autoplay Callback Error]: {e}")
 
-            if (queue_only and not queue_list) or (job.max_runs is not None and job.run_count >= job.max_runs):
+            if will_stop:
                 return (True, now_ts)
-            if job.expires_at is not None and (now_ts + track_duration) > job.expires_at and job.run_count >= 1:
-                # Allow next tick only if before expires_at
-                if now_ts >= job.expires_at:
-                    return (True, now_ts)
             return (False, now_ts + track_duration)
 
         # Case C: One-Shot, Interval, or Daily Schedule Reminder / Agent Task
