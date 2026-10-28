@@ -3,9 +3,26 @@ Typed slotted dataclasses for global market indices, ticker snapshots, commoditi
 """
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
 from src.utils.domain_vocab import DictLikeMixin
+
+
+@dataclass(slots=True)
+class MacroCalendarEvent(DictLikeMixin):
+    """Normalized global economic calendar & central bank rate decision event."""
+
+    title: str
+    country: str  # ISO 2-letter code: 'US', 'CA', 'EU', 'GB', 'JP', 'AU', 'NZ', 'CH'
+    timestamp_utc: datetime
+    importance: int = 1  # 1 = High, 0 = Medium, -1 = Low
+    actual: Optional[str] = None
+    forecast: Optional[str] = None
+    previous: Optional[str] = None
+    unit: str = ""
+    category: str = "macro"  # 'rate_decision' | 'central_bank' | 'inflation' | 'labor' | 'growth' | 'macro'
+    source: str = "TradingView"
 
 
 @dataclass(slots=True)

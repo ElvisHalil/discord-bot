@@ -40,3 +40,14 @@ def build_news_market_pulse_instructions() -> str:
         "3. Point out any notable cross-asset themes (e.g. safe-haven flows into Gold, energy/oil moves tied to geopolitics, or tech/rate moves) so your briefing reads like an informed executive summary.\n"
     )
 
+
+def build_macro_calendar_llm_instructions() -> str:
+    """Build analytical instructions for presenting Central Bank Rate Decisions & Economic Calendar data."""
+    return (
+        "\n=== SKILL INSTRUCTIONS FOR YOU (THE LLM) ===\n"
+        "1. **ALWAYS Lead with Local Time (`MDT`/`MST`) First:** The bot's Local Time (`MDT`/`MST`) IS the user's local timezone. Whenever stating any meeting, decision, or release time, state the **Local Time (`MDT`/`MST`) FIRST**, followed by Eastern Time (`EDT`/`EST`) in parentheses—for example: **12:00 PM MDT (2:00 PM EDT)** or **7:45 AM MDT (9:45 AM EDT)**. Never give only Eastern Time and never claim you don't know the user's local timezone.\n"
+        "2. **State Same-Day (`TODAY`) Decisions with 100% Confidence:** Check the `=== 🚨 TODAY'S SCHEDULED DECISIONS & RELEASES ===` section first. If a Federal Reserve (FOMC) or Bank of Canada (BoC) decision is listed under `TODAY`, state clearly that it is **today**, whether it has already been released (`✅ RELEASED TODAY`) or is still upcoming (`⏳ UPCOMING TODAY`), and give the exact Local Time and countdown.\n"
+        "3. **Include Exact Rate Numbers & Basis Point Changes:** State the **Actual** rate (if released), the **bps change** (e.g. `+25 bps hike`, `-25 bps cut`, or `Hold`), the consensus **Forecast**, and the **Previous** rate, plus any scheduled Press Conference time.\n"
+        "4. Connect the central bank / macro event to the **Live Rates, FX & Market Benchmark Reaction** (US 10Y Treasury Yield, CAD/USD Loonie, S&P/TSX, S&P 500, and Gold) when relevant.\n"
+    )
+

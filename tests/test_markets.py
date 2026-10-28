@@ -5,10 +5,12 @@ from unittest.mock import patch
 from src.skills.markets import (
     clear_channel_market_state,
     clear_markets_cache,
+    detect_macro_calendar_tool_call,
     detect_missed_markets_tool_call,
     enrich_markets_tool_args,
     get_channel_market_state,
     get_daily_market_pulse,
+    is_macro_calendar_query,
     skill_markets_info,
     update_channel_market_state,
 )
@@ -19,10 +21,12 @@ from src.skills.markets.markets import (
     _extract_candidate_ticker_query,
     _extract_comparison_tickers,
     _extract_timeframe,
+    _macro_agg,
     _yahoo_agg,
 )
-from src.skills.markets.models import CryptoAssetQuote, HistoricalSummary, TickerQuote
+from src.skills.markets.models import CryptoAssetQuote, HistoricalSummary, MacroCalendarEvent, TickerQuote
 from src.utils.domain_vocab import TOOL_ARG_ALIASES
+from src.utils.timezones import enrich_tool_output_with_time_context
 
 
 
@@ -682,6 +686,179 @@ class TestMarketsSkill(unittest.TestCase):
         self.assertIn("Dual-Listed Quote (`RXD-CAD`", out)
         self.assertIn("0.00004155 CAD", out)
         self.assertIn("50-Day MA: **0.00002710**", out)
+
+    def test_macro_calendar_intent_and_followup_routing(self):
+        """Verify central bank rate decision prompts and follow-ups route cleanly to skill_markets_info(view='calendar')."""
+        self.assertTrue(is_macro_calendar_query("did bank of Canada raise rates today?"))
+        self.assertTrue(is_macro_calendar_query("what time is federal reserve rate decision"))
+        self.assertTrue(is_macro_calendar_query("when is the next FOMC meeting?"))
+        self.assertTrue(is_macro_calendar_query("did the ECB cut interest rates?"))
+        self.assertTrue(is_macro_calendar_query("when is the next US CPI report?"))
+        # Negative cases: casual speech, sports, flights, graphing
+        self.assertFalse(is_macro_calendar_query("I am fed up with this weather"))
+        self.assertFalse(is_macro_calendar_query("when is the next Oilers game?"))
+        self.assertFalse(is_macro_calendar_query("flights from YYC to LHR"))
+
+        # Turn-0 missed tool call detection on direct prompts
+        res_boc = detect_missed_markets_tool_call(
+            [{"role": "user", "content": "did bank of Canada raise rates today?"}],
+            active_channel_id=777,
+        )
+        self.assertEqual(res_boc, ("skill_markets_info", {"query": "did bank of Canada raise rates today?", "view": "calendar"}))
+
+        res_fed = detect_missed_markets_tool_call(
+            [{"role": "user", "content": "what time is federal reserve rate decision"}],
+            active_channel_id=777,
+        )
+        self.assertEqual(res_fed, ("skill_markets_info", {"query": "what time is federal reserve rate decision", "view": "calendar"}))
+
+        # Follow-up prompts in an active central bank conversation ("is it today??", "my local time what time", "convert it to your local time")
+        followup_hist = [
+            {"role": "user", "content": "what time is federal reserve rate decision"},
+            {"role": "assistant", "content": "The Federal Reserve FOMC interest rate decision is released at 2:00 PM Eastern Time."},
+            {"role": "user", "content": "is it today??"},
+        ]
+        res_today = detect_macro_calendar_tool_call(followup_hist, active_channel_id=777)
+        self.assertIsNotNone(res_today)
+        self.assertEqual(res_today[0], "skill_markets_info")
+        self.assertEqual(res_today[1]["view"], "calendar")
+        self.assertIn("Federal Reserve FOMC", res_today[1]["query"])
+
+        local_time_hist = followup_hist + [
+            {"role": "assistant", "content": "The FOMC meeting is today at 2:00 PM Eastern Time."},
+            {"role": "user", "content": "my local time what time"},
+        ]
+        res_local = detect_macro_calendar_tool_call(local_time_hist, active_channel_id=777)
+        self.assertIsNotNone(res_local)
+        self.assertEqual(res_local[0], "skill_markets_info")
+        self.assertEqual(res_local[1]["view"], "calendar")
+
+        convert_hist = local_time_hist + [
+            {"role": "assistant", "content": "Here is the current time."},
+            {"role": "user", "content": "convert it to your local time the meeting time today"},
+        ]
+        res_conv = detect_macro_calendar_tool_call(convert_hist, active_channel_id=777)
+        self.assertIsNotNone(res_conv)
+        self.assertEqual(res_conv[0], "skill_markets_info")
+        self.assertEqual(res_conv[1]["view"], "calendar")
+
+        # enrich_markets_tool_args automatically sets view='calendar' on macro queries
+        enriched = enrich_markets_tool_args(
+            {"query": "what time is federal reserve rate decision"},
+            [{"role": "user", "content": "what time is federal reserve rate decision"}],
+            active_channel_id=777,
+        )
+        self.assertEqual(enriched["view"], "calendar")
+
+    def test_macro_calendar_aggregator_and_skill_execution(self):
+        """Verify MacroCalendarAggregator merges TradingView + ForexFactory + Official Fed/BoC schedules with Local MDT time first."""
+        ref_now = datetime(2026, 10, 28, 15, 36, tzinfo=timezone.utc)  # 9:36 AM MDT on Wed Oct 28, 2026
+        tv_mock = [
+            MacroCalendarEvent(
+                title="BoC Interest Rate Decision",
+                country="CA",
+                timestamp_utc=datetime(2026, 10, 28, 13, 45, tzinfo=timezone.utc),  # 7:45 AM MDT / 9:45 AM EDT
+                importance=1,
+                actual="2.50%",
+                forecast="2.50%",
+                previous="2.25%",
+                unit="%",
+                category="rate_decision",
+                source="TradingView",
+            ),
+            MacroCalendarEvent(
+                title="Fed Interest Rate Decision",
+                country="US",
+                timestamp_utc=datetime(2026, 10, 28, 18, 0, tzinfo=timezone.utc),  # 12:00 PM MDT / 2:00 PM EDT
+                importance=1,
+                actual=None,
+                forecast="4.00%",
+                previous="4.00%",
+                unit="%",
+                category="rate_decision",
+                source="TradingView",
+            ),
+            MacroCalendarEvent(
+                title="Fed Press Conference",
+                country="US",
+                timestamp_utc=datetime(2026, 10, 28, 18, 30, tzinfo=timezone.utc),  # 12:30 PM MDT / 2:30 PM EDT
+                importance=1,
+                category="central_bank",
+                source="TradingView",
+            ),
+        ]
+        boc_hist_mock = [
+            {"date": "October 28, 2026", "target": "2.50%", "change": "+0.25%"},
+            {"date": "September 2, 2026", "target": "2.25%", "change": "---"},
+        ]
+        with (
+            patch.object(_macro_agg, "fetch_tradingview_events", return_value=tv_mock),
+            patch.object(_macro_agg, "fetch_forexfactory_week_events", return_value=[]),
+            patch.object(
+                _macro_agg,
+                "fetch_official_boc_data",
+                return_value=(boc_hist_mock, _macro_agg.fetch_official_boc_data(2026)[1]),
+            ),
+            patch.object(_macro_agg, "fetch_official_fomc_schedule", wraps=_macro_agg.fetch_official_fomc_schedule),
+        ):
+            report = _macro_agg.format_macro_calendar_report(
+                query="what time is federal reserve rate decision",
+                now=ref_now,
+                tz_override="America/Edmonton",
+                live_rate_quotes={"^TNX": _make_quote("^TNX", "10Y Yield", 4.28, 1.2)},
+            )
+
+        self.assertIn("TODAY'S SCHEDULED DECISIONS & RELEASES (Wednesday, Oct 28, 2026)", report)
+        self.assertIn("CENTRAL BANK RATE DECISION DAY TODAY", report)
+        # Verify Bank of Canada shows 7:45 AM MDT (Local), +25 bps rate hike, and RELEASED TODAY
+        self.assertIn("BoC Interest Rate Decision (Canada)", report)
+        self.assertIn("TODAY, Wed Oct 28, 2026 at 7:45 AM MDT (Local)", report)
+        self.assertIn("9:45 AM EDT / 13:45 UTC", report)
+        self.assertIn("Actual: 2.50%", report)
+        self.assertIn("+25 bps rate hike", report)
+        self.assertIn("✅ RELEASED TODAY", report)
+        # Verify Federal Reserve shows 12:00 PM MDT (Local), 2:00 PM EDT / 18:00 UTC, and UPCOMING TODAY
+        self.assertIn("Fed Interest Rate Decision (United States)", report)
+        self.assertIn("TODAY, Wed Oct 28, 2026 at 12:00 PM MDT (Local)", report)
+        self.assertIn("2:00 PM EDT / 18:00 UTC", report)
+        self.assertIn("⏳ UPCOMING TODAY", report)
+        self.assertIn("TODAY, Wed Oct 28, 2026 at 12:30 PM MDT (Local)", report)
+
+        # Verify end-to-end skill_markets_info routing and channel state update
+        with (
+            patch.object(_macro_agg, "format_macro_calendar_report", return_value=report) as mock_fmt,
+            patch.object(_yahoo_agg, "fetch_quotes", return_value={}),
+            patch.object(_yahoo_agg, "fetch_macro_market_headlines", return_value=["Fed set to announce October rate decision [Reuters]"]),
+        ):
+            skill_out = skill_markets_info(query="what time is federal reserve rate decision")
+
+        mock_fmt.assert_called_once()
+        self.assertIn("TODAY, Wed Oct 28, 2026 at 12:00 PM MDT (Local)", skill_out)
+        self.assertIn("ALWAYS Lead with Local Time (`MDT`/`MST`) First", skill_out)
+        st = get_channel_market_state()
+        self.assertIsNotNone(st)
+        self.assertEqual(st.last_view, MarketView.CALENDAR)
+
+    def test_spelled_out_eastern_time_and_dotted_ampm_timezone_enrichment(self):
+        """Verify '2:00 PM Eastern Time', '2:00 p.m. ET', and '2 p.m. Eastern Daylight Time' are inline-converted to Local MDT."""
+        ref_now = datetime(2026, 10, 28, 15, 37, tzinfo=timezone.utc)  # 9:37 AM MDT on Wed Oct 28, 2026
+        raw_snippet = (
+            "=== SEARCH RESULTS FOR 'Federal Reserve rate decision' ===\n"
+            "1. Decisions are generally released around 2:00 PM Eastern Time following the FOMC meeting.\n"
+            "2. Chair Powell's press conference begins at 2:30 p.m. ET.\n"
+            "3. Bank of Canada announced its rate hike at 9:45 a.m. Eastern Daylight Time.\n"
+            "4. Live coverage starts at 2 p.m. Eastern Time."
+        )
+        enriched = enrich_tool_output_with_time_context(
+            raw_snippet,
+            now=ref_now,
+            tz_override="America/Edmonton",
+        )
+        self.assertIn("🕒 Current Time:", enriched)
+        self.assertIn("2:00 PM Eastern Time (Today 12:00 PM MDT", enriched)
+        self.assertIn("2:30 p.m. ET (Today 12:30 PM MDT", enriched)
+        self.assertIn("9:45 a.m. Eastern Daylight Time (Today 7:45 AM MDT", enriched)
+        self.assertIn("2 p.m. Eastern Time (Today 12:00 PM MDT", enriched)
 
 
 if __name__ == "__main__":

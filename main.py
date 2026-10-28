@@ -92,6 +92,7 @@ from src.orchestrator import (
     detect_missed_sports_tool_call,
     detect_missed_music_shift_tool_call,
     detect_missed_flight_tool_call,
+    detect_macro_calendar_tool_call,
     detect_missed_markets_tool_call,
     detect_missed_graphing_tool_call,
     detect_missed_voice_tool_call,
@@ -2115,6 +2116,37 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                         function=types.SimpleNamespace(
                             name="skill_graphing_info",
                             arguments=missed_graph[1],
+                        )
+                    )
+                ]
+
+        # Central Bank Rate Decisions & Economic Calendar Interception: when the user asks about central bank
+        # rate decisions (Fed/FOMC, Bank of Canada/BoC, ECB, BoE, BoJ), rate schedules/times, CPI/Jobs/GDP
+        # releases, or local-time follow-ups to a rate decision turn, and the 4B/8B model called `search_web`
+        # or `get_current_datetime` instead of `skill_markets_info`, redirect to `skill_markets_info(view='calendar')`
+        # so authoritative TradingView + ForexFactory + Official Fed/BoC schedule data with pre-converted Local
+        # MDT/MST timestamps is used.
+        if (
+            iterations == 0
+            and supports_tools
+            and "skill_markets_info" in active_tools
+            and not any(c.function.name == "skill_markets_info" for c in tool_calls)
+            and any(c.function.name in ("search_web", "get_current_datetime") for c in tool_calls)
+        ):
+            missed_macro = detect_macro_calendar_tool_call(history, active_channel_id=channel_id)
+            if missed_macro and missed_macro[0] == "skill_markets_info":
+                print(
+                    f"⚡ [{current_mode.upper()}] Intercepted {[c.function.name for c in tool_calls]} on Central Bank / Macro Calendar prompt "
+                    f"-> redirecting to skill_markets_info: {missed_macro[1]}"
+                )
+                tool_calls = [
+                    c for c in tool_calls
+                    if c.function.name not in ("search_web", "get_current_datetime")
+                ] + [
+                    types.SimpleNamespace(
+                        function=types.SimpleNamespace(
+                            name="skill_markets_info",
+                            arguments=missed_macro[1],
                         )
                     )
                 ]

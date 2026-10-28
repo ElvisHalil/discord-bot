@@ -157,16 +157,37 @@ def _short_tz_abbr(dt: datetime) -> str:
 
 
 def _resolve_tz_token(tz_str: str, ref_utc: datetime | None = None) -> tzinfo | None:
-    """Resolve an IANA name, timezone abbreviation, or UTC±N offset into a Python tzinfo."""
+    """Resolve an IANA name, timezone abbreviation, spelled-out zone name, or UTC±N offset into a Python tzinfo."""
     clean = (tz_str or "").strip()
     if not clean:
         return None
     ref = (ref_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    up = clean.upper()
+    clean_no_dots = re.sub(r"\.", "", clean).strip()
+    up = re.sub(r"\s+", " ", clean_no_dots.upper())
 
-    # 1. Fixed abbreviation table
+    # 1. Fixed abbreviation & spelled-out standard/daylight table
     if up in _FIXED_TZ_MAP:
         spec = _FIXED_TZ_MAP[up]
+        return timezone(timedelta(hours=spec.hours, minutes=spec.minutes), spec.label)
+
+    _SPELLED_FIXED_MAP: dict[str, FixedTimezoneSpec] = {
+        "COORDINATED UNIVERSAL TIME": _FIXED_TZ_MAP["UTC"],
+        "GREENWICH MEAN TIME": _FIXED_TZ_MAP["GMT"],
+        "BRITISH SUMMER TIME": _FIXED_TZ_MAP["BST"],
+        "CENTRAL EUROPEAN TIME": _FIXED_TZ_MAP["CET"],
+        "CENTRAL EUROPEAN STANDARD TIME": _FIXED_TZ_MAP["CET"],
+        "CENTRAL EUROPEAN SUMMER TIME": _FIXED_TZ_MAP["CEST"],
+        "EASTERN DAYLIGHT TIME": _FIXED_TZ_MAP["EDT"],
+        "EASTERN STANDARD TIME": _FIXED_TZ_MAP["EST"],
+        "CENTRAL DAYLIGHT TIME": _FIXED_TZ_MAP["CDT"],
+        "CENTRAL STANDARD TIME": _FIXED_TZ_MAP["CST"],
+        "MOUNTAIN DAYLIGHT TIME": _FIXED_TZ_MAP["MDT"],
+        "MOUNTAIN STANDARD TIME": _FIXED_TZ_MAP["MST"],
+        "PACIFIC DAYLIGHT TIME": _FIXED_TZ_MAP["PDT"],
+        "PACIFIC STANDARD TIME": _FIXED_TZ_MAP["PST"],
+    }
+    if up in _SPELLED_FIXED_MAP:
+        spec = _SPELLED_FIXED_MAP[up]
         return timezone(timedelta(hours=spec.hours, minutes=spec.minutes), spec.label)
 
     # 2. UTC±HH[:MM] or GMT±HH[:MM]
@@ -179,19 +200,19 @@ def _resolve_tz_token(tz_str: str, ref_utc: datetime | None = None) -> tzinfo | 
         return timezone(timedelta(minutes=sign * (hh * 60 + mm)), label)
 
     # 3. Dynamic DST-aware regional aliases & IANA names (works even on Windows without tzdata)
-    low = clean.lower().replace(" ", "_")
+    low = clean_no_dots.lower().replace(" ", "_")
     us_dst = _is_us_dst(ref)
     eu_dst = _is_eu_dst(ref)
 
-    if up == "ET" or low in _ET_IANA_ZONES:
+    if up in ("ET", "EASTERN TIME", "US EASTERN TIME", "EASTERN") or low in _ET_IANA_ZONES:
         return timezone(timedelta(hours=-4 if us_dst else -5), "EDT" if us_dst else "EST")
-    if up == "CT" or low in _CT_IANA_ZONES:
+    if up in ("CT", "CENTRAL TIME", "US CENTRAL TIME", "CENTRAL") or low in _CT_IANA_ZONES:
         return timezone(timedelta(hours=-5 if us_dst else -6), "CDT" if us_dst else "CST")
-    if up == "MT" or low in _MT_IANA_ZONES:
+    if up in ("MT", "MOUNTAIN TIME", "US MOUNTAIN TIME", "MOUNTAIN") or low in _MT_IANA_ZONES:
         return timezone(timedelta(hours=-6 if us_dst else -7), "MDT" if us_dst else "MST")
     if low in _AZ_IANA_ZONES:
         return timezone(timedelta(hours=-7), "MST")
-    if up == "PT" or low in _PT_IANA_ZONES:
+    if up in ("PT", "PACIFIC TIME", "US PACIFIC TIME", "PACIFIC") or low in _PT_IANA_ZONES:
         return timezone(timedelta(hours=-7 if us_dst else -8), "PDT" if us_dst else "PST")
     if up in ("CE", "CET/CEST", "EUROPE") or low in _CET_IANA_ZONES:
         return timezone(timedelta(hours=2 if eu_dst else 1), "CEST" if eu_dst else "CET")
@@ -308,26 +329,38 @@ _SECTION_DATE_HEADER_RE = re.compile(
     r')\b'
 )
 
+_TZ_TOKEN_PAT = (
+    r'(?:(?:US\s+)?(?:Eastern|Central|Mountain|Pacific)\s+(?:Daylight|Standard)\s+Time'
+    r'|(?:US\s+)?(?:Eastern|Central|Mountain|Pacific)\s+Time'
+    r'|Central\s+European\s+(?:Summer|Standard)\s+Time'
+    r'|Central\s+European\s+Time'
+    r'|British\s+Summer\s+Time'
+    r'|Greenwich\s+Mean\s+Time'
+    r'|Coordinated\s+Universal\s+Time'
+    r'|UTC|GMT|BST|CEST|CET|EEST|EET|EDT|EST|CDT|CST|MDT|MST|PDT|PST|ET|CT|MT|PT)'
+)
+_CLOCK_TOKEN_PAT = r'(?:\d{1,2}:\d{2}(?::\d{2})?\s*(?:A\.?M\.?|P\.?M\.?)?|\d{1,2}\s*(?:A\.?M\.?|P\.?M\.?))'
+
 _TIMESTAMP_TOKEN_RE = re.compile(
     r'(?P<iso>\b(?P<iso_y>\d{4})-(?P<iso_m>\d{2})-(?P<iso_d>\d{2})[T\s](?P<iso_t>\d{2}:\d{2})(?::\d{2})?(?:Z|\s*UTC)\b)'
-    r'|(?P<md>(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+)?'
-    r'(?P<md_mon>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(?P<md_day>\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(?P<md_year>\d{4}))?'
-    r'\s*(?:at\b|-|–|,)?\s*(?P<md_time>\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*(?P<md_tz>UTC|GMT|BST|CEST|CET|EEST|EET|EDT|EST|CDT|CST|MDT|MST|PDT|PST|ET|CT|MT|PT)\b)'
-    r'|(?P<sl>\b(?P<sl_m>\d{1,2})/(?P<sl_d>\d{1,2})(?:/(?P<sl_y>\d{2,4}))?\s*(?:at\b|-|–|,)?\s*(?P<sl_time>\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*(?P<sl_tz>UTC|GMT|BST|CEST|CET|EEST|EET|EDT|EST|CDT|CST|MDT|MST|PDT|PST|ET|CT|MT|PT)\b)'
-    r'|(?P<to>\b(?P<to_time>\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*(?P<to_tz>UTC|GMT|BST|CEST|CET|EEST|EET|EDT|EST|CDT|CST|MDT|MST|PDT|PST|ET|CT|MT|PT)\b)',
+    rf'|(?P<md>(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+)?'
+    rf'(?P<md_mon>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(?P<md_day>\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s*(?P<md_year>\d{{4}}))?'
+    rf'\s*(?:at\b|-|–|,)?\s*(?P<md_time>{_CLOCK_TOKEN_PAT})\s*(?P<md_tz>{_TZ_TOKEN_PAT})\b)'
+    rf'|(?P<sl>\b(?P<sl_m>\d{{1,2}})/(?P<sl_d>\d{{1,2}})(?:/(?P<sl_y>\d{{2,4}}))?\s*(?:at\b|-|–|,)?\s*(?P<sl_time>{_CLOCK_TOKEN_PAT})\s*(?P<sl_tz>{_TZ_TOKEN_PAT})\b)'
+    rf'|(?P<to>\b(?P<to_time>{_CLOCK_TOKEN_PAT})\s*(?P<to_tz>{_TZ_TOKEN_PAT})\b)',
     re.IGNORECASE,
 )
 
 
 def _parse_clock_str(clock_raw: str) -> tuple[int, int] | None:
-    """Parse '10:00 PM', '19:00', or '14:30:00' into (hour_24, minute)."""
-    s = (clock_raw or "").strip().upper()
-    m = re.match(r'^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)?$', s)
+    """Parse '10:00 PM', '2:00 p.m.', '2 PM', '19:00', or '14:30:00' into (hour_24, minute)."""
+    s = re.sub(r'\.', '', (clock_raw or "")).strip().upper()
+    m = re.match(r'^(\d{1,2})(?::(\d{2})(?::\d{2})?\s*(AM|PM)?|\s*(AM|PM))$', s)
     if not m:
         return None
     hh = int(m.group(1))
-    mm = int(m.group(2))
-    ampm = m.group(3)
+    mm = int(m.group(2) or 0)
+    ampm = m.group(3) or m.group(4)
     if ampm == "PM" and hh < 12:
         hh += 12
     elif ampm == "AM" and hh == 12:

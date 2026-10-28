@@ -17,8 +17,10 @@ from typing import Dict, List, Optional, Tuple
 
 from src.skills.markets.aggregators import (
     CryptoAggregator,
+    MacroCalendarAggregator,
     YahooFinanceAggregator,
     clear_crypto_market_cache,
+    clear_macro_calendar_cache,
     clear_yahoo_market_cache,
 )
 from src.skills.markets.catalogs import (
@@ -33,6 +35,7 @@ from src.skills.markets.catalogs import (
 from src.skills.markets.context import (
     clear_channel_market_state,
     get_channel_market_state,
+    is_macro_calendar_query,
     update_channel_market_state,
 )
 from src.skills.markets.enums import MarketRegion, MarketView
@@ -43,6 +46,7 @@ from src.skills.markets.models import (
     TickerQuote,
 )
 from src.skills.markets.templates import (
+    build_macro_calendar_llm_instructions,
     build_markets_llm_instructions,
     build_news_market_pulse_instructions,
 )
@@ -51,12 +55,14 @@ from src.utils.workers import submit_to_worker
 
 _yahoo_agg = YahooFinanceAggregator()
 _crypto_agg = CryptoAggregator()
+_macro_agg = MacroCalendarAggregator()
 
 
 def clear_markets_cache() -> None:
-    """Clear all in-memory market, screener, crypto, and per-channel market state caches."""
+    """Clear all in-memory market, screener, crypto, macro calendar, and per-channel market state caches."""
     clear_yahoo_market_cache()
     clear_crypto_market_cache()
+    clear_macro_calendar_cache()
     clear_channel_market_state()
 
 
@@ -884,13 +890,13 @@ def skill_markets_info(
     timeframe: Optional[str] = None,
 ) -> str:
     """
-    Fetch real-time and historical global stock indices (Canada TSX, US S&P 500/NASDAQ/Dow/VIX, Europe, Asia), daily market movers, precious metals & commodities (Gold, Silver, Oil, NatGas, Copper), FX rates, crypto (BTC, ETH, SOL, 24h movers), multi-asset comparisons, and single-ticker fundamentals & historical returns.
+    Fetch real-time Central Bank Rate Decisions & Economic Calendar (US Fed/FOMC, Bank of Canada/BoC, ECB, BoE, BoJ, CPI, Jobs/NFP, GDP, PCE with Local MDT/MST & ET timestamps), global stock indices (Canada TSX, US S&P 500/NASDAQ/Dow/VIX, Europe, Asia), daily market movers, precious metals & commodities (Gold, Silver, Oil, NatGas, Copper), FX rates, crypto (BTC, ETH, SOL, 24h movers), multi-asset comparisons, and single-ticker fundamentals & historical returns.
 
     Args:
-        query: What to look up (e.g. 'market overview', 'compare SHOP.TO vs NVDA over 5 years', 'how has gold performed over 6 months').
+        query: What to look up (e.g. 'did Bank of Canada raise rates today?', 'what time is the Federal Reserve rate decision?', 'market overview', 'compare SHOP.TO vs NVDA over 5 years').
         ticker: Specific stock, ETF, index, commodity, crypto, or comma/vs-separated comparison list (e.g. 'SHOP.TO', 'NVDA, AMD', 'GC=F', 'BTC-USD').
         region: Optional regional focus: 'global' (default), 'canada', 'us', 'europe', 'asia'.
-        view: Optional view mode: 'overview' (default), 'ticker', 'history', 'compare', 'movers', 'commodities', 'crypto', or 'pulse'.
+        view: Optional view mode: 'overview' (default), 'calendar' (central bank rate decisions & economic calendar), 'ticker', 'history', 'compare', 'movers', 'commodities', 'crypto', or 'pulse'.
         timeframe: Optional historical window: '1d', '5d', '1mo', '3mo', '6mo', 'ytd', '1y', '2y', '3y', '5y', '10y', 'max', a year ('2024'), or date range.
     """
     q_raw = (query or "").strip()
@@ -917,6 +923,32 @@ def skill_markets_info(
 
     if v_raw == MarketView.PULSE:
         return get_daily_market_pulse()
+
+    # 0. Check if this is a Central Bank Rate Decision or Economic Calendar request
+    if is_macro_calendar_query(q_raw, v_raw) and not t_raw:
+        rate_bench_syms = ["^TNX", "^IRX", "CADUSD=X", "USDCAD=X", "^GSPTSE", "^GSPC", "GC=F"]
+        fut_rate_quotes = submit_to_worker(_yahoo_agg.fetch_quotes, rate_bench_syms)
+        fut_macro_news = submit_to_worker(_yahoo_agg.fetch_macro_market_headlines, 5)
+        rate_quotes = fut_rate_quotes.result()
+        macro_news = fut_macro_news.result()
+
+        report = _macro_agg.format_macro_calendar_report(
+            query=q_raw,
+            region=r_raw,
+            live_rate_quotes=rate_quotes,
+        )
+        out_parts = [report]
+        if macro_news:
+            h_lines = ["=== 📰 LATEST CENTRAL BANK & MACRO HEADLINES ==="]
+            for idx, h in enumerate(macro_news, start=1):
+                h_lines.append(f"{idx}. {h}")
+            out_parts.append("\n".join(h_lines))
+        out_parts.append(build_macro_calendar_llm_instructions())
+        update_channel_market_state(
+            region=r_raw or None,
+            view=MarketView.CALENDAR,
+        )
+        return "\n\n".join(out_parts)
 
     # 1. Check if this is a Multi-Ticker Comparison request (2 to 5 tickers)
     comparison_targets = (

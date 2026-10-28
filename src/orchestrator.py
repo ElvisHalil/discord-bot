@@ -31,8 +31,10 @@ from src.skills.flights.context import (
     detect_missed_flight_tool_call,
 )
 from src.skills.markets.context import (
+    detect_macro_calendar_tool_call,
     detect_missed_markets_tool_call,
     enrich_markets_tool_args,
+    is_macro_calendar_query,
 )
 from src.skills.music.context import (
     detect_missed_music_shift_tool_call,

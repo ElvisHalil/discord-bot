@@ -14,6 +14,7 @@ class MarketView(StrEnum):
     MOVERS = "movers"
     COMMODITIES = "commodities"
     CRYPTO = "crypto"
+    CALENDAR = "calendar"
 
 
 class MarketRegion(StrEnum):
