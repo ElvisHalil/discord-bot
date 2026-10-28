@@ -324,5 +324,465 @@ class TestSkillMusicDiscoverySpectrumIntegration(unittest.TestCase):
         self.assertEqual(enriched.get("mood"), "banger")
 
 
+class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
+    """Tests for the Discord Song Card `👍 Like` and `⏭️ Next` button interactions."""
+
+    async def test_build_song_card_view_and_send_discord_message(self):
+        from unittest.mock import AsyncMock, MagicMock
+        import main as bot_main
+
+        song_card = (
+            "Here is a track:\n\n"
+            "**Song:** Solar System\n"
+            "**Artist:** Sub Focus\n"
+            "**Genre:** Drum and Bass\n\n"
+            "https://music.youtube.com/watch?v=dQw4w9WgXcQ"
+        )
+        plain_text = "The Oilers won 4-2 last night."
+
+        view_card = bot_main.build_song_card_view(song_card)
+        self.assertIsNotNone(view_card)
+        custom_ids = [c.custom_id for c in view_card.children]
+        self.assertEqual(custom_ids, ["song_card:like", "song_card:next"])
+
+        self.assertIsNone(bot_main.build_song_card_view(plain_text))
+
+        channel = MagicMock()
+        channel.send = AsyncMock()
+
+        await bot_main._send_discord_message(channel, plain_text)
+        channel.send.assert_awaited_once_with(plain_text)
+
+        channel.send.reset_mock()
+        bot_main._last_song_card_messages.clear()
+        msg1 = MagicMock(id=1001, edit=AsyncMock())
+        msg2 = MagicMock(id=1002, edit=AsyncMock())
+        channel.id = 777100
+        channel.send = AsyncMock(side_effect=[msg1, msg2])
+
+        await bot_main._send_discord_message(channel, song_card)
+        self.assertEqual(channel.send.await_count, 1)
+        sent_args, sent_kwargs = channel.send.call_args
+        self.assertEqual(sent_args[0], song_card)
+        first_view = sent_kwargs.get("view")
+        self.assertIsInstance(first_view, bot_main.SongCardView)
+        self.assertEqual([(c.custom_id, c.disabled) for c in first_view.children], [("song_card:like", False), ("song_card:next", False)])
+        msg1.edit.assert_not_awaited()
+
+        # Sending a second Song Card disables the `⏭️ Next` button on `msg1` while keeping `👍 Like` enabled
+        await bot_main._send_discord_message(channel, song_card)
+        msg1.edit.assert_awaited_once()
+        disabled_view = msg1.edit.call_args.kwargs.get("view")
+        self.assertIsInstance(disabled_view, bot_main.SongCardView)
+        self.assertEqual([(c.custom_id, c.disabled) for c in disabled_view.children], [("song_card:like", False), ("song_card:next", True)])
+        self.assertIs(bot_main._last_song_card_messages.get(777100), msg2)
+
+    async def test_like_button_interaction_matches_reaction_flow_and_deduplicates(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
+        import main as bot_main
+
+        channel_id = 777101
+        msg_id = 888202
+        user_id = 999303
+        bot_main.handled_reactions.clear()
+        bot_main.chat_history.pop(channel_id, None)
+
+        card_text = (
+            "**Song:** Solar System\n"
+            "**Artist:** Sub Focus\n"
+            "**Genre:** Drum and Bass\n\n"
+            "https://music.youtube.com/watch?v=dQw4w9WgXcQ"
+        )
+
+        channel = MagicMock()
+        channel.id = channel_id
+        channel.send = AsyncMock()
+        typing_cm = MagicMock()
+        typing_cm.__aenter__ = AsyncMock(return_value=None)
+        typing_cm.__aexit__ = AsyncMock(return_value=None)
+        channel.typing = MagicMock(return_value=typing_cm)
+
+        interaction = MagicMock()
+        interaction.guild_id = 12345
+        interaction.channel = channel
+        interaction.channel_id = channel_id
+        interaction.user = SimpleNamespace(
+            id=user_id,
+            name="halil",
+            display_name="Halil",
+            mention=f"<@{user_id}>",
+            voice=None,
+        )
+        interaction.message = SimpleNamespace(id=msg_id, content=card_text)
+        interaction.response = SimpleNamespace(
+            is_done=MagicMock(return_value=False),
+            defer=AsyncMock(),
+        )
+
+        fake_rec = {
+            "verified_url": "https://music.youtube.com/watch?v=abc123def45",
+            "chosen_track": "Desire by Sub Focus",
+            "vid": "abc123def45",
+            "is_unrelated_fallback": False,
+        }
+        fake_meta = {
+            "song": "Desire",
+            "artist": "Sub Focus",
+            "genre": "Drum and Bass",
+            "album": "Portals",
+        }
+        fake_ollama_resp = SimpleNamespace(
+            message=SimpleNamespace(content="Here is a similar drum and bass roller:")
+        )
+
+        with (
+            patch.object(bot_main, "resolve_reaction_recommendation", AsyncMock(return_value=fake_rec)),
+            patch.object(bot_main, "get_music_metadata", return_value=fake_meta),
+            patch.object(bot_main.ollama_client, "chat", AsyncMock(return_value=fake_ollama_resp)),
+        ):
+            await bot_main.handle_song_card_button_interaction(interaction, action="like")
+            # Second click by same user on same message is deduplicated via handled_reactions
+            await bot_main.handle_song_card_button_interaction(interaction, action="like")
+
+        self.assertEqual(channel.send.await_count, 1)
+        sent_text = channel.send.call_args.args[0]
+        sent_view = channel.send.call_args.kwargs.get("view")
+        self.assertIn("**Song:** Desire", sent_text)
+        self.assertIn("https://music.youtube.com/watch?v=abc123def45", sent_text)
+        self.assertIsInstance(sent_view, bot_main.SongCardView)
+        self.assertIn((msg_id, user_id), bot_main.handled_reactions)
+        self.assertEqual(len(bot_main.chat_history[channel_id]), 3)  # system + user 👍 + assistant card
+
+    async def test_next_button_during_autoplay_uses_skip_command(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
+        import main as bot_main
+
+        channel_id = 777102
+        user_id = 999304
+        bot_main.chat_history.pop(channel_id, None)
+
+        channel = MagicMock()
+        channel.id = channel_id
+        channel.send = AsyncMock()
+        typing_cm = MagicMock()
+        typing_cm.__aenter__ = AsyncMock(return_value=None)
+        typing_cm.__aexit__ = AsyncMock(return_value=None)
+        channel.typing = MagicMock(return_value=typing_cm)
+
+        interaction = MagicMock()
+        interaction.guild_id = 12345
+        interaction.channel = channel
+        interaction.channel_id = channel_id
+        interaction.user = SimpleNamespace(
+            id=user_id,
+            name="halil",
+            display_name="Halil",
+            mention=f"<@{user_id}>",
+            voice=None,
+        )
+        interaction.message = SimpleNamespace(
+            id=888203,
+            content="**Song:** Solar System\n**Artist:** Sub Focus\nhttps://music.youtube.com/watch?v=dQw4w9WgXcQ",
+        )
+        interaction.response = SimpleNamespace(
+            is_done=MagicMock(return_value=False),
+            defer=AsyncMock(),
+        )
+
+        autoplay_skip_card = (
+            "📻 **Autoplay (dnb)** — Next track in `3:30`:\n\n"
+            "**Song:** Wilkinson - Afterglow\n"
+            "**Artist:** Wilkinson\n"
+            "**Genre:** Drum and Bass\n\n"
+            "https://music.youtube.com/watch?v=1234567890a"
+        )
+
+        with (
+            patch.object(bot_main.JOB_ENGINE, "get_active_autoplay_job", return_value=SimpleNamespace(job_id="J-101", payload_text="dnb")),
+            patch.object(bot_main, "dispatch_voice_command", AsyncMock(return_value=autoplay_skip_card)) as mock_skip,
+            patch.object(bot_main, "run_agent_turn", AsyncMock()) as mock_turn,
+        ):
+            await bot_main.handle_song_card_button_interaction(interaction, action="next")
+
+        mock_skip.assert_awaited_once()
+        self.assertEqual(mock_skip.call_args.kwargs.get("text"), "!skip")
+        mock_turn.assert_not_awaited()
+        self.assertEqual(channel.send.await_count, 1)
+        self.assertEqual(channel.send.call_args.args[0], autoplay_skip_card)
+        self.assertIsInstance(channel.send.call_args.kwargs.get("view"), bot_main.SongCardView)
+
+    async def test_next_button_outside_autoplay_runs_conversational_next_turn(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
+        import main as bot_main
+
+        channel_id = 777103
+        user_id = 999305
+        bot_main.chat_history.pop(channel_id, None)
+        clear_channel_played_songs(channel_id)
+
+        channel = MagicMock()
+        channel.id = channel_id
+        channel.send = AsyncMock()
+        typing_cm = MagicMock()
+        typing_cm.__aenter__ = AsyncMock(return_value=None)
+        typing_cm.__aexit__ = AsyncMock(return_value=None)
+        channel.typing = MagicMock(return_value=typing_cm)
+
+        card_text = (
+            "**Song:** Solar System\n"
+            "**Artist:** Sub Focus\n"
+            "**Genre:** Drum and Bass\n\n"
+            "https://music.youtube.com/watch?v=dQw4w9WgXcQ"
+        )
+        interaction = MagicMock()
+        interaction.guild_id = 12345
+        interaction.channel = channel
+        interaction.channel_id = channel_id
+        interaction.user = SimpleNamespace(
+            id=user_id,
+            name="halil",
+            display_name="Halil",
+            mention=f"<@{user_id}>",
+            voice=None,
+        )
+        interaction.message = SimpleNamespace(id=888204, content=card_text)
+        interaction.response = SimpleNamespace(
+            is_done=MagicMock(return_value=False),
+            defer=AsyncMock(),
+        )
+
+        next_card_reply = (
+            "Here is the next track:\n\n"
+            "**Song:** Timewarp\n"
+            "**Artist:** Sub Focus\n"
+            "**Genre:** Drum and Bass\n\n"
+            "https://music.youtube.com/watch?v=z9876543210"
+        )
+
+        with (
+            patch.object(bot_main.JOB_ENGINE, "get_active_autoplay_job", return_value=None),
+            patch.object(bot_main, "run_agent_turn", AsyncMock(return_value=next_card_reply)) as mock_turn,
+            patch.object(bot_main, "standardize_song_reply", side_effect=lambda r: r),
+        ):
+            await bot_main.handle_song_card_button_interaction(interaction, action="next")
+
+        mock_turn.assert_awaited_once()
+        passed_history = mock_turn.call_args.kwargs.get("turn_history")
+        self.assertTrue(any("next" in str(m.get("content", "")).lower() for m in passed_history if m.get("role") == "user"))
+        self.assertEqual(channel.send.await_count, 1)
+        self.assertIn("**Song:** Timewarp", channel.send.call_args.args[0])
+        self.assertIsInstance(channel.send.call_args.kwargs.get("view"), bot_main.SongCardView)
+
+    async def test_mixed_next_like_and_random_song_request_chain_only_keeps_latest_next_enabled(self):
+        """Verify across a multi-step chain (initial song -> Next button -> Like button -> random specific song
+        request in chat -> liking an old card -> Next button) that EVERY previous song card always has its
+        `⏭️ Next` button disabled while `👍 Like` stays enabled, and ONLY the most recent song card has `⏭️ Next` enabled."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
+        import main as bot_main
+
+        channel_id = 777104
+        user_id = 999306
+        bot_user = SimpleNamespace(id=111000, name="Bot", display_name="Bot")
+        bot_main.chat_history.pop(channel_id, None)
+        bot_main.handled_reactions.clear()
+        bot_main._last_song_card_messages.clear()
+        clear_channel_played_songs(channel_id)
+
+        sent_cards = []
+
+        async def _fake_send(text="", **kwargs):
+            view = kwargs.get("view")
+            msg_obj = SimpleNamespace(
+                id=2000 + len(sent_cards) + 1,
+                content=text,
+                view=view,
+                author=bot_user,
+            )
+
+            async def _edit_msg(**edit_kwargs):
+                if "view" in edit_kwargs:
+                    msg_obj.view = edit_kwargs["view"]
+                return msg_obj
+
+            msg_obj.edit = AsyncMock(side_effect=_edit_msg)
+            sent_cards.append(msg_obj)
+            return msg_obj
+
+        channel = MagicMock()
+        channel.id = channel_id
+        channel.send = AsyncMock(side_effect=_fake_send)
+        typing_cm = MagicMock()
+        typing_cm.__aenter__ = AsyncMock(return_value=None)
+        typing_cm.__aexit__ = AsyncMock(return_value=None)
+        channel.typing = MagicMock(return_value=typing_cm)
+
+        user_obj = SimpleNamespace(
+            id=user_id,
+            name="halil",
+            display_name="Halil",
+            mention=f"<@{user_id}>",
+            voice=None,
+        )
+
+        def _button_states(msg_obj):
+            return {c.custom_id: c.disabled for c in msg_obj.view.children}
+
+        def _assert_only_last_card_next_enabled():
+            self.assertGreaterEqual(len(sent_cards), 1)
+            for idx, card_msg in enumerate(sent_cards):
+                states = _button_states(card_msg)
+                # `👍 Like` must always remain enabled on every card (old and new)
+                self.assertFalse(states["song_card:like"], f"Card #{idx + 1} Like button should be enabled")
+                if idx < len(sent_cards) - 1:
+                    self.assertTrue(states["song_card:next"], f"Previous Card #{idx + 1} Next button must be disabled")
+                else:
+                    self.assertFalse(states["song_card:next"], f"Latest Card #{idx + 1} Next button must be enabled")
+
+        card1_text = (
+            "**Song:** Solar System\n"
+            "**Artist:** Sub Focus\n"
+            "**Genre:** Drum and Bass\n\n"
+            "https://music.youtube.com/watch?v=vid_card_001"
+        )
+        card2_text = (
+            "**Song:** Timewarp\n"
+            "**Artist:** Sub Focus\n"
+            "**Genre:** Drum and Bass\n\n"
+            "https://music.youtube.com/watch?v=vid_card_002"
+        )
+        card3_meta = {
+            "song": "Desire",
+            "artist": "Sub Focus",
+            "genre": "Drum and Bass",
+            "album": "Portals",
+        }
+        card4_text = (
+            "**Song:** Strobe\n"
+            "**Artist:** deadmau5\n"
+            "**Genre:** Progressive House\n\n"
+            "https://music.youtube.com/watch?v=vid_card_004"
+        )
+        card5_meta = {
+            "song": "iren",
+            "artist": "Sub Focus",
+            "genre": "Drum and Bass",
+            "album": "Torus",
+        }
+        card6_text = (
+            "**Song:** I Remember\n"
+            "**Artist:** deadmau5\n"
+            "**Genre:** Progressive House\n\n"
+            "https://music.youtube.com/watch?v=vid_card_006"
+        )
+
+        def _make_interaction(target_msg):
+            inter = MagicMock()
+            inter.guild_id = 12345
+            inter.channel = channel
+            inter.channel_id = channel_id
+            inter.user = user_obj
+            inter.message = target_msg
+            inter.response = SimpleNamespace(
+                is_done=MagicMock(return_value=False),
+                defer=AsyncMock(),
+            )
+            return inter
+
+        with (
+            patch.object(bot_main, "client", SimpleNamespace(user=bot_user, get_channel=lambda _cid: channel, get_user=lambda _uid: user_obj)),
+            patch.object(bot_main.JOB_ENGINE, "get_active_autoplay_job", return_value=None),
+            patch.object(bot_main, "standardize_song_reply", side_effect=lambda r: r),
+            patch.object(
+                bot_main.ollama_client,
+                "chat",
+                AsyncMock(return_value=SimpleNamespace(message=SimpleNamespace(content="Here is a similar track:"))),
+            ),
+        ):
+            # Step 1: User asks in chat to play dnb -> Card #1 posted
+            msg_prompt_1 = SimpleNamespace(
+                author=user_obj,
+                channel=channel,
+                content=f"<@{bot_user.id}> play some dnb",
+                mentions=[bot_user],
+                reference=None,
+                attachments=[],
+                guild=None,
+            )
+            with patch.object(bot_main, "run_agent_turn", AsyncMock(return_value=card1_text)):
+                await bot_main.on_message(msg_prompt_1)
+            self.assertEqual(len(sent_cards), 1)
+            _assert_only_last_card_next_enabled()
+
+            # Step 2: User clicks `⏭️ Next` on Card #1 -> Card #2 posted, Card #1 Next disabled
+            with patch.object(bot_main, "run_agent_turn", AsyncMock(return_value=card2_text)):
+                await bot_main.handle_song_card_button_interaction(_make_interaction(sent_cards[0]), action="next")
+            self.assertEqual(len(sent_cards), 2)
+            _assert_only_last_card_next_enabled()
+
+            # Step 3: User clicks `👍 Like` on Card #2 -> Card #3 posted, Card #2 Next disabled
+            fake_rec_3 = {
+                "verified_url": "https://music.youtube.com/watch?v=vid_card_003",
+                "chosen_track": "Desire by Sub Focus",
+                "vid": "vid_card_003",
+                "is_unrelated_fallback": False,
+            }
+            with (
+                patch.object(bot_main, "resolve_reaction_recommendation", AsyncMock(return_value=fake_rec_3)),
+                patch.object(bot_main, "get_music_metadata", return_value=card3_meta),
+            ):
+                await bot_main.handle_song_card_button_interaction(_make_interaction(sent_cards[1]), action="like")
+            self.assertEqual(len(sent_cards), 3)
+            _assert_only_last_card_next_enabled()
+
+            # Step 4: Someone randomly asks in chat for a specific song ("play Strobe by Deadmau5") mid-chain -> Card #4 posted, Card #3 Next disabled
+            msg_specific_song = SimpleNamespace(
+                author=user_obj,
+                channel=channel,
+                content=f"<@{bot_user.id}> play Strobe by Deadmau5",
+                mentions=[bot_user],
+                reference=None,
+                attachments=[],
+                guild=None,
+            )
+            with patch.object(bot_main, "run_agent_turn", AsyncMock(return_value=card4_text)):
+                await bot_main.on_message(msg_specific_song)
+            self.assertEqual(len(sent_cards), 4)
+            _assert_only_last_card_next_enabled()
+
+            # Step 5: Clicking `⏭️ Next` on an OLD card (Card #2) does NOT spawn a new turn and keeps only Card #4 Next enabled
+            with patch.object(bot_main, "run_agent_turn", AsyncMock(return_value=card6_text)) as mock_stale_turn:
+                await bot_main.handle_song_card_button_interaction(_make_interaction(sent_cards[1]), action="next")
+            mock_stale_turn.assert_not_awaited()
+            self.assertEqual(len(sent_cards), 4)
+            _assert_only_last_card_next_enabled()
+
+            # Step 6: Clicking `👍 Like` on an OLD card (Card #1) still works -> posts Card #5, disables Card #4 Next, enables Card #5 Next
+            fake_rec_5 = {
+                "verified_url": "https://music.youtube.com/watch?v=vid_card_005",
+                "chosen_track": "Siren by Sub Focus",
+                "vid": "vid_card_005",
+                "is_unrelated_fallback": False,
+            }
+            with (
+                patch.object(bot_main, "resolve_reaction_recommendation", AsyncMock(return_value=fake_rec_5)),
+                patch.object(bot_main, "get_music_metadata", return_value=card5_meta),
+            ):
+                await bot_main.handle_song_card_button_interaction(_make_interaction(sent_cards[0]), action="like")
+            self.assertEqual(len(sent_cards), 5)
+            _assert_only_last_card_next_enabled()
+
+            # Step 7: Clicking `⏭️ Next` on the newest card (Card #5) -> posts Card #6, disables Card #5 Next, enables Card #6 Next
+            with patch.object(bot_main, "run_agent_turn", AsyncMock(return_value=card6_text)):
+                await bot_main.handle_song_card_button_interaction(_make_interaction(sent_cards[4]), action="next")
+            self.assertEqual(len(sent_cards), 6)
+            _assert_only_last_card_next_enabled()
+
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -141,6 +141,90 @@ channel_locks = defaultdict(asyncio.Lock)
 # (message_id, user_id) pairs already handled by the 👍 recommender, to avoid duplicate runs.
 MAX_HANDLED_REACTIONS = 2000
 handled_reactions = BoundedSet(maxsize=MAX_HANDLED_REACTIONS)
+# Per-channel in-flight guard so rapid double-clicks on the ⏭️ Next button don't spawn duplicate turns.
+_active_next_channels = set()
+# Tracks the most recent Song Card message object per channel so previous cards have their ⏭️ Next button disabled.
+_last_song_card_messages = BoundedCache(maxsize=128)
+
+
+class SongCardView(discord.ui.View):
+    """Persistent Discord UI View attached to Song Card messages with 👍 Like and ⏭️ Next buttons."""
+
+    def __init__(self, next_disabled: bool = False) -> None:
+        super().__init__(timeout=None)
+        if next_disabled:
+            for child in self.children:
+                if getattr(child, "custom_id", None) == "song_card:next":
+                    child.disabled = True
+
+    @discord.ui.button(
+        label="Like",
+        emoji="👍",
+        style=discord.ButtonStyle.secondary,
+        custom_id="song_card:like",
+    )
+    async def like_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await handle_song_card_button_interaction(interaction, action="like")
+
+    @discord.ui.button(
+        label="Next",
+        emoji="⏭️",
+        style=discord.ButtonStyle.secondary,
+        custom_id="song_card:next",
+    )
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await handle_song_card_button_interaction(interaction, action="next")
+
+
+def build_song_card_view(text: str, next_disabled: bool = False):
+    """Return a `SongCardView` instance if `text` is a valid Song Card, else `None`."""
+    if not text:
+        return None
+    if extract_song_card_target(text) is not None or VOICE_COHOST.extract_song_card_track(text) is not None:
+        return SongCardView(next_disabled=next_disabled)
+    return None
+
+
+async def _disable_song_card_next_button(message) -> None:
+    """Edit an earlier Song Card message so its `⏭️ Next` button is disabled while `👍 Like` stays active."""
+    if message is None or not hasattr(message, "edit"):
+        return
+    try:
+        await message.edit(view=SongCardView(next_disabled=True))
+    except Exception:
+        pass
+
+
+async def _send_discord_message(channel, text: str = "", files=None):
+    """Send `text` (and optional `files`) to `channel`, automatically attaching `SongCardView` if `text` is a Song Card
+    and disabling the `⏭️ Next` button on the previous Song Card in that channel."""
+    card_view = build_song_card_view(text)
+    channel_id = getattr(channel, "id", None)
+    prev_card_msg = _last_song_card_messages.get(channel_id) if (card_view is not None and channel_id is not None) else None
+    kwargs = {}
+    if files:
+        kwargs["files"] = files
+    if card_view is not None:
+        kwargs["view"] = card_view
+    sent_msg = None
+    try:
+        if text:
+            sent_msg = await channel.send(text, **kwargs)
+        elif files:
+            sent_msg = await channel.send(**kwargs)
+    except TypeError:
+        kwargs.pop("view", None)
+        if text:
+            sent_msg = await channel.send(text, **kwargs)
+        elif files:
+            sent_msg = await channel.send(**kwargs)
+
+    if card_view is not None and channel_id is not None:
+        if prev_card_msg is not None and (sent_msg is None or getattr(prev_card_msg, "id", None) != getattr(sent_msg, "id", None)):
+            await _disable_song_card_next_button(prev_card_msg)
+        if sent_msg is not None:
+            _last_song_card_messages[channel_id] = sent_msg
+    return sent_msg
 
 _default_profile = os.getenv("DEFAULT_PROFILE", "").lower()
 if _default_profile in MODES:
@@ -162,11 +246,14 @@ except ValueError:
 def clear_tool_caches(channel_id: int = None):
     clear_channel_attachments(channel_id)
     if channel_id is None:
+        _last_song_card_messages.clear()
         tools.VISITED_URLS.clear()
         tools.URL_CACHE.clear()
         tools.SEARCH_CACHE.clear()
         tools.YOUTUBE_CACHE.clear()
         clear_http_caches()
+    else:
+        _last_song_card_messages.pop(channel_id, None)
     try:
         from src.skills.youtube.engine.client import clear_youtube_caches
         from src.skills.music.playback.youtube_music import clear_resolved_music_cache
@@ -452,12 +539,13 @@ async def handle_job_fire(job, message_text: str):
         ]
         if chunks:
             for idx, chunk in enumerate(chunks):
-                if idx == len(chunks) - 1 and discord_files:
-                    await channel.send(chunk, files=discord_files)
-                else:
-                    await channel.send(chunk)
+                await _send_discord_message(
+                    channel,
+                    chunk,
+                    files=discord_files if idx == len(chunks) - 1 and discord_files else None,
+                )
         elif discord_files:
-            await channel.send(files=discord_files)
+            await _send_discord_message(channel, "", files=discord_files)
 
     if not is_music_card:
         await VOICE_COHOST.announce_tracker_event(channel_id, final_output, profile_or_mode=current_mode)
@@ -538,7 +626,7 @@ async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
         channel = client.get_channel(channel_id)
         if channel is not None:
             header = f"🎙️ **Voice Co-Host (replying to {utterance.display_name} — *\"{utterance.transcript}\"*):**\n"
-            asyncio.create_task(channel.send(header + fast_ctrl_reply))
+            asyncio.create_task(_send_discord_message(channel, header + fast_ctrl_reply))
         return None
 
     voice_prompt_hint = (
@@ -647,10 +735,11 @@ async def handle_voice_utterance_turn(session, utterance, cleaned_query: str):
         async def _send_voice_text_reply():
             try:
                 for idx, chunk in enumerate(chunks):
-                    if idx == len(chunks) - 1 and discord_files:
-                        await channel.send(chunk, files=discord_files)
-                    else:
-                        await channel.send(chunk)
+                    await _send_discord_message(
+                        channel,
+                        chunk,
+                        files=discord_files if idx == len(chunks) - 1 and discord_files else None,
+                    )
             except Exception as e:
                 print(f"⚠️ [Voice Co-Host Text Reply Error]: {e}")
 
@@ -665,6 +754,10 @@ async def on_ready():
     print(f"🔥 Active Mode: {current_mode.upper()} (Switch with '!mode <name>': {', '.join(MODES)})")
     loop = asyncio.get_running_loop()
     bind_event_loop(loop)
+    try:
+        client.add_view(SongCardView())
+    except Exception:
+        pass
     SPORTS_TRACKER.set_notify_callback(handle_live_match_update)
     SPORTS_TRACKER.ensure_loop_running()
     FLIGHT_TRACKER.bind_event_loop(loop)
@@ -699,6 +792,427 @@ async def on_ready():
     asyncio.create_task(start_telegram_bridge(sys.modules[__name__]))
 
 
+def _resolve_author_voice_channel(author, guild, text_hint: str = ""):
+    """Resolve the active Discord voice channel for `author` or `guild`."""
+    author_voice_state = getattr(author, "voice", None)
+    author_voice_channel = getattr(author_voice_state, "channel", None) if author_voice_state else None
+    if author_voice_channel is None:
+        guild_vcs = list(getattr(guild, "voice_channels", None) or [])
+        if guild_vcs:
+            low_in = (text_hint or "").lower()
+            author_voice_channel = (
+                next((vc for vc in guild_vcs if low_in and str(getattr(vc, "name", "") or "").lower() in low_in), None)
+                or next((vc for vc in guild_vcs if getattr(vc, "voice_states", None) or getattr(vc, "members", None)), None)
+                or guild_vcs[0]
+            )
+    return author_voice_channel
+
+
+async def process_song_card_like(
+    channel,
+    message_id: int,
+    message_content: str,
+    user_id: int,
+    user=None,
+) -> bool:
+    """
+    Shared handler for both the 👍 emoji reaction and the 👍 Like button on a Song Card.
+    Preserves identical behavior across normal chat and active Autoplay/Voice states.
+    """
+    card_target = extract_song_card_target(message_content)
+    if not card_target:
+        return False
+
+    # Only recommend once per (message, user), even if they click the button and/or react with 👍.
+    reaction_key = (message_id, user_id)
+    if reaction_key in handled_reactions:
+        return False
+    handled_reactions.add(reaction_key)
+
+    if user is None:
+        try:
+            user = client.get_user(user_id) or await client.fetch_user(user_id)
+        except Exception:
+            return False
+
+    user_name = getattr(user, "name", None) or getattr(user, "display_name", None) or str(user_id)
+    user_display = getattr(user, "display_name", None) or user_name
+    user_tag = getattr(user, "mention", None) or f"<@{user_id}>"
+    print(f"👍 [Reaction Caught]: {user_name} liked a song. Finding a verified similar track...")
+
+    async with channel.typing():
+        try:
+            orig_title = card_target["orig_title"]
+            orig_artist = card_target["orig_artist"]
+            clean_title = card_target["clean_title"]
+            orig_display = card_target["orig_display"]
+            print(f"🎵 [Reaction Target]: Cleaned '{clean_title}' by '{orig_artist}'")
+
+            rec = await resolve_reaction_recommendation(
+                channel_id=channel.id,
+                card_target=card_target,
+                music_discovery_fn=tools.skill_music_discovery,
+                youtube_search_fn=tools.skill_youtube_search,
+                allow_chart_fallback=True,
+                max_candidates=6,
+            )
+            verified_url = rec["verified_url"]
+            chosen_track = rec["chosen_track"]
+            vid = rec["vid"]
+            is_unrelated_fallback = rec["is_unrelated_fallback"]
+
+            if not verified_url or not chosen_track:
+                await channel.send(f"{user_tag} ⚠️ Found similar songs, but couldn't verify a working YouTube link. Please try again!")
+                return False
+
+            # 4. Generate natural persona intro in parallel with metadata lookup
+            mode_config = MODES[current_mode]
+            if is_unrelated_fallback:
+                intro_prompt = (
+                    f"User {user_display} reacted with 👍 to {orig_display}, "
+                    f"but no directly related songs could be found for it. "
+                    f"Write a single short sentence letting them know you couldn't find any related songs for {orig_display}, "
+                    f"and suggest '{chosen_track}' as a track they might like instead. "
+                    "Do NOT include any links, URLs, or markdown links."
+                )
+                default_intro = (
+                    f"Couldn't find any directly related songs for **{orig_title}**"
+                    + (f" by **{orig_artist}**" if orig_artist else "")
+                    + ", but here is a track you might like instead:"
+                )
+            else:
+                intro_prompt = (
+                    f"User {user_display} reacted with 👍 to the song {orig_display}. "
+                    f"Write a single short sentence recommending the similar song '{chosen_track}'. "
+                    "Do NOT include any links, URLs, or markdown links."
+                )
+                default_intro = f"Here is a song similar to **{orig_title}** by **{orig_artist}**:"
+
+            if current_mode == "chat":
+                light_sys_prompt = "you are a casual, opinionated human in discord. write 1 short, lowercase sentence with modern slang. no links, no emojis."
+            else:
+                light_sys_prompt = "You are a helpful music assistant in Discord. Write a single natural, concise 1-sentence recommendation intro. No links, no markdown URLs, no emojis."
+
+            reaction_options = {
+                **mode_config["ollama_options"],
+                "num_ctx": 1024,
+                "num_predict": 96,
+            }
+
+            async def _generate_intro():
+                try:
+                    resp = await ollama_client.chat(
+                        model=mode_config["model"],
+                        messages=[
+                            {"role": "system", "content": light_sys_prompt},
+                            {"role": "user", "content": intro_prompt}
+                        ],
+                        options=reaction_options
+                    )
+                    text = resp.message.content.strip()
+                    return re.sub(r'https?:\/\/\S+', '', text).strip()
+                except Exception as e:
+                    print(f"⚠️ [Reaction Ollama Error]: {e}")
+                    return default_intro
+
+            intro_text, meta = await asyncio.gather(
+                _generate_intro(),
+                run_in_worker(get_music_metadata, vid, fallback_text=chosen_track)
+            )
+
+            if not intro_text:
+                intro_text = default_intro
+
+            # Prepend user @ mention so the channel knows who triggered the recommendation
+            if user_tag not in intro_text:
+                intro_text = f"{user_tag} {intro_text}"
+
+            final_reply = format_song_card(
+                song=meta["song"],
+                artist=meta["artist"],
+                url=verified_url,
+                genre=meta.get("genre"),
+                album=meta.get("album"),
+                intro=intro_text
+            )
+
+            final_reply = JOB_ENGINE.sync_channel_autoplay_on_track_played(channel.id, final_reply)
+            if VOICE_COHOST.get_session(channel.id) is not None:
+                voice_badge = await VOICE_COHOST.stream_music_from_card_async(
+                    channel.id,
+                    final_reply,
+                    replace_current=False,
+                    active_mode=current_mode,
+                )
+                if voice_badge and voice_badge not in final_reply:
+                    final_reply = f"{final_reply.rstrip()}\n{voice_badge}"
+            await _send_discord_message(channel, final_reply)
+
+            # Record it under the channel lock so it can't land between a
+            # tool call and its results while a message turn is in progress.
+            async with channel_locks[channel.id]:
+                if channel.id not in chat_history:
+                    system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
+                    chat_history[channel.id] = [system_msg]
+
+                chat_history[channel.id].append({
+                    "role": "user",
+                    "content": f"{user_display} reacted with 👍 to '{orig_display}' requesting a similar track."
+                })
+                chat_history[channel.id].append({
+                    "role": "assistant",
+                    "content": final_reply
+                })
+            return True
+
+        except Exception as e:
+            print(f"❌ [Reaction Error]: {e}")
+            await channel.send(f"{user_tag} ⚠️ Something went wrong while finding a similar song. Please try again!")
+            return False
+
+
+async def process_song_card_next(
+    channel,
+    message_content: str,
+    user_id: int,
+    user_display_name: str,
+    author_voice_channel=None,
+) -> bool:
+    """
+    Handler for the ⏭️ Next button on a Song Card:
+    - When Autoplay is active (or tracks are queued in Voice), behaves identically to `!skip` / `!next`.
+    - Outside of Autoplay, behaves identically to saying `"next"` in chat.
+    """
+    channel_id = channel.id
+    if channel_id in _active_next_channels:
+        return False
+    _active_next_channels.add(channel_id)
+    try:
+        has_voice_queue = bool(VOICE_COHOST._music_queues.get(channel_id))
+        has_autoplay = JOB_ENGINE.get_active_autoplay_job(channel_id) is not None
+
+        # State 1: Autoplay active (or Voice queue populated) -> exact `!skip` / `!next` behavior
+        if has_autoplay or has_voice_queue:
+            async with channel.typing():
+                voice_res = await dispatch_voice_command(
+                    text="!skip",
+                    channel_id=channel_id,
+                    voice_info_fn=skill_voice_info,
+                    voice_cohost_service=VOICE_COHOST,
+                    author_voice_channel=author_voice_channel,
+                    active_mode=current_mode,
+                )
+                if voice_res:
+                    await _send_discord_message(channel, voice_res)
+                    mode_config = MODES[current_mode]
+                    async with channel_locks[channel_id]:
+                        if channel_id not in chat_history:
+                            system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
+                            chat_history[channel_id] = [system_msg]
+                        chat_history[channel_id].append({
+                            "role": "assistant",
+                            "content": voice_res,
+                        })
+                    return True
+            return False
+
+        # State 2: Outside of Autoplay -> exact conversational `"next"` behavior
+        from src.skills.music.context import (
+            get_channel_last_played_song,
+            record_channel_played_song,
+            record_played_track,
+        )
+
+        # If in-memory channel state was cleared (e.g. after a restart), seed from the clicked Song Card
+        if get_channel_last_played_song(channel_id) is None and message_content:
+            card_target = extract_song_card_target(message_content)
+            if card_target:
+                m_gen = re.search(r"(?im)^\s*(?:\*\*)?Genre:\*{0,2}\s*(.+)$", message_content)
+                card_genre = m_gen.group(1).strip() if m_gen else None
+                record_played_track(card_target["clean_title"], card_target["orig_artist"], channel_id=channel_id)
+                record_channel_played_song(
+                    song=card_target["clean_title"],
+                    artist=card_target["orig_artist"],
+                    genre=card_genre,
+                    channel_id=channel_id,
+                )
+
+        mode_config = MODES[current_mode]
+        is_research = mode_config.get("is_research", False)
+        tools.set_memory_file(mode_config["memory_file"])
+        set_active_channel_id(channel_id)
+
+        if current_mode == "chat":
+            user_msg = f"{user_display_name} (User ID: {user_id}): next"
+        else:
+            user_msg = f"User {user_display_name} says: next"
+
+        async with channel_locks[channel_id]:
+            system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
+            if channel_id not in chat_history:
+                chat_history[channel_id] = [system_msg]
+                if message_content and extract_song_card_target(message_content) is not None:
+                    chat_history[channel_id].append({"role": "assistant", "content": message_content})
+            else:
+                chat_history[channel_id][0] = system_msg
+            turn_history = list(chat_history[channel_id])
+
+        turn_history.append({"role": "user", "content": user_msg})
+        turn_history = trim_history(turn_history, mode_config.get("history_limit", 40))
+        turn_start_idx = len(turn_history) - 1
+
+        async with channel.typing():
+            clear_channel_attachments(channel_id)
+            reply = await run_agent_turn(channel_id, mode_config, turn_history=turn_history)
+            attachments = pop_channel_attachments(channel_id)
+
+            is_empty_fallback = False
+            if not reply.strip():
+                is_empty_fallback = current_mode != "chat"
+                reply = "Don't leave me hanging—what's on your mind?" if current_mode == "chat" else "⚠️ Generated an empty response."
+
+            if current_mode == "chat":
+                reply = apply_auto_ping(reply, known_users)
+            if is_research:
+                reply = join_orphan_bullets(reply)
+
+            reply = suppress_discord_embeds(reply)
+            set_active_channel_id(channel_id)
+            reply = await run_in_worker(standardize_song_reply, reply)
+            reply = JOB_ENGINE.sync_channel_autoplay_on_track_played(channel_id, reply, new_query_hint="next")
+            reply = sanitize_agent_reply(reply)
+
+            is_song_card_reply = VOICE_COHOST.extract_song_card_track(reply) is not None
+            if is_song_card_reply:
+                voice_stream_badge = await VOICE_COHOST.stream_music_from_card_async(
+                    channel_id,
+                    reply,
+                    replace_current=True,
+                    allow_auto_join=False,
+                    active_mode=current_mode,
+                )
+                if voice_stream_badge and voice_stream_badge not in reply:
+                    reply = f"{reply.rstrip()}\n{voice_stream_badge}"
+
+            if not is_empty_fallback:
+                turn_delta = turn_history[turn_start_idx:]
+                if len(turn_delta) == 1:
+                    turn_delta.append({"role": "assistant", "content": reply})
+                else:
+                    turn_delta[-1] = {"role": "assistant", "content": reply}
+
+                async with channel_locks[channel_id]:
+                    if channel_id not in chat_history:
+                        chat_history[channel_id] = [system_msg]
+                    chat_history[channel_id].extend(turn_delta)
+                    chat_history[channel_id] = trim_history(
+                        chat_history[channel_id], mode_config.get("history_limit", 40)
+                    )
+
+            chunks = [c for c in chunk_message(reply) if c]
+            discord_files = [
+                discord.File(io.BytesIO(att["data"]), filename=att["filename"])
+                for att in attachments
+                if att.get("data")
+            ]
+            if chunks:
+                for idx, chunk in enumerate(chunks):
+                    await _send_discord_message(
+                        channel,
+                        chunk,
+                        files=discord_files if idx == len(chunks) - 1 and discord_files else None,
+                    )
+            elif discord_files:
+                await _send_discord_message(channel, "", files=discord_files)
+            return True
+    except Exception as e:
+        print(f"❌ [Song Card Next Error]: {e}")
+        await channel.send(f"<@{user_id}> ⚠️ Something went wrong while advancing to the next song. Please try again!")
+        return False
+    finally:
+        _active_next_channels.discard(channel_id)
+
+
+async def handle_song_card_button_interaction(interaction: discord.Interaction, action: str) -> None:
+    """Entry point for clicks on the Song Card `👍 Like` and `⏭️ Next` buttons."""
+    user = getattr(interaction, "user", None)
+    if user is None or (client.user and getattr(user, "id", None) == client.user.id):
+        return
+
+    if getattr(interaction, "guild_id", "present") is None:
+        if BOT_OWNER_ID is None or user.id != BOT_OWNER_ID:
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass
+            return
+
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+    except Exception:
+        pass
+
+    channel = getattr(interaction, "channel", None)
+    channel_id = getattr(channel, "id", None) or getattr(interaction, "channel_id", None)
+    if channel is None and channel_id is not None:
+        channel = client.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await client.fetch_channel(channel_id)
+            except Exception:
+                return
+    if channel is None:
+        return
+
+    record_channel_human_activity(channel.id)
+    user_display = getattr(user, "display_name", None) or getattr(user, "name", None) or str(user.id)
+    set_active_user(user.id, user_display)
+    set_active_channel_id(channel.id)
+    active_channels.add(channel.id)
+
+    if getattr(user, "name", None):
+        known_users[user.name.lower()] = user.id
+    if getattr(user, "display_name", None):
+        known_users[user.display_name.lower()] = user.id
+
+    author_voice_channel = _resolve_author_voice_channel(user, getattr(interaction, "guild", None))
+    VOICE_COHOST.register_author_voice_channel(channel.id, author_voice_channel)
+
+    msg = getattr(interaction, "message", None)
+    msg_id = getattr(msg, "id", 0) or 0
+    msg_content = getattr(msg, "content", "") or ""
+
+    if action == "like":
+        await process_song_card_like(
+            channel=channel,
+            message_id=msg_id,
+            message_content=msg_content,
+            user_id=user.id,
+            user=user,
+        )
+    elif action == "next":
+        active_card_msg = _last_song_card_messages.get(channel.id)
+        if (
+            active_card_msg is not None
+            and getattr(active_card_msg, "id", None)
+            and msg_id
+            and active_card_msg.id != msg_id
+        ):
+            # Clicked Next on an older Song Card after a newer one was already posted -> disable its Next button
+            await _disable_song_card_next_button(msg)
+            return
+        if msg is not None and channel.id not in _last_song_card_messages:
+            _last_song_card_messages[channel.id] = msg
+        await process_song_card_next(
+            channel=channel,
+            message_content=msg_content,
+            user_id=user.id,
+            user_display_name=user_display,
+            author_voice_channel=author_voice_channel,
+        )
+
+
 @client.event
 async def on_raw_reaction_add(payload):
     if payload.user_id == client.user.id:
@@ -724,151 +1238,12 @@ async def on_raw_reaction_add(payload):
         if message.author.id != client.user.id:
             return
             
-        card_target = extract_song_card_target(message.content)
-        if card_target:
-            # Only recommend once per (message, user), even if they remove and re-add the reaction.
-            reaction_key = (payload.message_id, payload.user_id)
-            if reaction_key in handled_reactions:
-                return
-            handled_reactions.add(reaction_key)
-
-            try:
-                user = client.get_user(payload.user_id) or await client.fetch_user(payload.user_id)
-            except Exception:
-                return
-
-            print(f"👍 [Reaction Caught]: {user.name} liked a song. Finding a verified similar track...")
-
-            async with channel.typing():
-                try:
-                    orig_title = card_target["orig_title"]
-                    orig_artist = card_target["orig_artist"]
-                    clean_title = card_target["clean_title"]
-                    orig_display = card_target["orig_display"]
-                    print(f"🎵 [Reaction Target]: Cleaned '{clean_title}' by '{orig_artist}'")
-
-                    rec = await resolve_reaction_recommendation(
-                        channel_id=channel.id,
-                        card_target=card_target,
-                        music_discovery_fn=tools.skill_music_discovery,
-                        youtube_search_fn=tools.skill_youtube_search,
-                        allow_chart_fallback=True,
-                        max_candidates=6,
-                    )
-                    verified_url = rec["verified_url"]
-                    chosen_track = rec["chosen_track"]
-                    vid = rec["vid"]
-                    is_unrelated_fallback = rec["is_unrelated_fallback"]
-
-                    user_tag = user.mention if user else f"<@{payload.user_id}>"
-
-                    if not verified_url or not chosen_track:
-                        await channel.send(f"{user_tag} ⚠️ Found similar songs, but couldn't verify a working YouTube link. Please try again!")
-                        return
-
-                    # 4. Generate natural persona intro in parallel with metadata lookup
-                    mode_config = MODES[current_mode]
-                    if is_unrelated_fallback:
-                        intro_prompt = (
-                            f"User {user.display_name} reacted with 👍 to {orig_display}, "
-                            f"but no directly related songs could be found for it. "
-                            f"Write a single short sentence letting them know you couldn't find any related songs for {orig_display}, "
-                            f"and suggest '{chosen_track}' as a track they might like instead. "
-                            "Do NOT include any links, URLs, or markdown links."
-                        )
-                        default_intro = (
-                            f"Couldn't find any directly related songs for **{orig_title}**"
-                            + (f" by **{orig_artist}**" if orig_artist else "")
-                            + ", but here is a track you might like instead:"
-                        )
-                    else:
-                        intro_prompt = (
-                            f"User {user.display_name} reacted with 👍 to the song {orig_display}. "
-                            f"Write a single short sentence recommending the similar song '{chosen_track}'. "
-                            "Do NOT include any links, URLs, or markdown links."
-                        )
-                        default_intro = f"Here is a song similar to **{orig_title}** by **{orig_artist}**:"
-
-                    if current_mode == "chat":
-                        light_sys_prompt = "you are a casual, opinionated human in discord. write 1 short, lowercase sentence with modern slang. no links, no emojis."
-                    else:
-                        light_sys_prompt = "You are a helpful music assistant in Discord. Write a single natural, concise 1-sentence recommendation intro. No links, no markdown URLs, no emojis."
-
-                    reaction_options = {
-                        **mode_config["ollama_options"],
-                        "num_ctx": 1024,
-                        "num_predict": 96,
-                    }
-
-                    async def _generate_intro():
-                        try:
-                            resp = await ollama_client.chat(
-                                model=mode_config["model"],
-                                messages=[
-                                    {"role": "system", "content": light_sys_prompt},
-                                    {"role": "user", "content": intro_prompt}
-                                ],
-                                options=reaction_options
-                            )
-                            text = resp.message.content.strip()
-                            return re.sub(r'https?:\/\/\S+', '', text).strip()
-                        except Exception as e:
-                            print(f"⚠️ [Reaction Ollama Error]: {e}")
-                            return default_intro
-
-                    intro_text, meta = await asyncio.gather(
-                        _generate_intro(),
-                        run_in_worker(get_music_metadata, vid, fallback_text=chosen_track)
-                    )
-
-                    if not intro_text:
-                        intro_text = default_intro
-
-                    # Prepend user @ mention so the channel knows who triggered the recommendation
-                    if user_tag not in intro_text:
-                        intro_text = f"{user_tag} {intro_text}"
-
-                    final_reply = format_song_card(
-                        song=meta["song"],
-                        artist=meta["artist"],
-                        url=verified_url,
-                        genre=meta.get("genre"),
-                        album=meta.get("album"),
-                        intro=intro_text
-                    )
-
-                    final_reply = JOB_ENGINE.sync_channel_autoplay_on_track_played(channel.id, final_reply)
-                    if VOICE_COHOST.get_session(channel.id) is not None:
-                        voice_badge = await VOICE_COHOST.stream_music_from_card_async(
-                            channel.id,
-                            final_reply,
-                            replace_current=False,
-                            active_mode=current_mode,
-                        )
-                        if voice_badge and voice_badge not in final_reply:
-                            final_reply = f"{final_reply.rstrip()}\n{voice_badge}"
-                    await channel.send(final_reply)
-
-                    # Record it under the channel lock so it can't land between a
-                    # tool call and its results while a message turn is in progress.
-                    async with channel_locks[channel.id]:
-                        if channel.id not in chat_history:
-                            system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
-                            chat_history[channel.id] = [system_msg]
-
-                        chat_history[channel.id].append({
-                            "role": "user",
-                            "content": f"{user.display_name} reacted with 👍 to '{orig_display}' requesting a similar track."
-                        })
-                        chat_history[channel.id].append({
-                            "role": "assistant",
-                            "content": final_reply
-                        })
-
-                except Exception as e:
-                    print(f"❌ [Reaction Error]: {e}")
-                    user_tag = user.mention if 'user' in locals() and user else f"<@{payload.user_id}>"
-                    await channel.send(f"{user_tag} ⚠️ Something went wrong while finding a similar song. Please try again!")
+        await process_song_card_like(
+            channel=channel,
+            message_id=payload.message_id,
+            message_content=message.content,
+            user_id=payload.user_id,
+        )
 
 
 async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_turn: bool = False):
@@ -1906,18 +2281,7 @@ async def on_message(message):
         return
 
     # Register author's voice channel early so both tracker commands (!autoplay) and voice commands (!join) can use it
-    author_voice_state = getattr(message.author, "voice", None)
-    author_voice_channel = getattr(author_voice_state, "channel", None) if author_voice_state else None
-    if author_voice_channel is None:
-        guild = getattr(message, "guild", None)
-        guild_vcs = list(getattr(guild, "voice_channels", None) or [])
-        if guild_vcs:
-            low_in = user_input.lower()
-            author_voice_channel = (
-                next((vc for vc in guild_vcs if str(getattr(vc, "name", "") or "").lower() in low_in), None)
-                or next((vc for vc in guild_vcs if getattr(vc, "voice_states", None) or getattr(vc, "members", None)), None)
-                or guild_vcs[0]
-            )
+    author_voice_channel = _resolve_author_voice_channel(message.author, getattr(message, "guild", None), user_input)
     VOICE_COHOST.register_author_voice_channel(message.channel.id, author_voice_channel)
 
     # Direct Flight & Live Sports Tracker Commands (!trackflight, !untrackflight, !trackedflights, !track, !untrack, !tracked, !autoplay, !stopautoplay)
@@ -1943,7 +2307,7 @@ async def on_message(message):
             )
             if voice_badge and voice_badge not in tracker_res:
                 tracker_res = f"{tracker_res.rstrip()}\n{voice_badge}"
-        await message.channel.send(tracker_res)
+        await _send_discord_message(message.channel, tracker_res)
         return
 
     # Direct Voice Co-Host & Music Playback Commands (!join, !leave, !speak, !vmode, !vrecap, !vstatus, !vmute, !vunmute, !pause, !resume, !skip, !stop, !queue)
@@ -1957,7 +2321,7 @@ async def on_message(message):
     )
     if voice_res is not None:
         active_channels.add(message.channel.id)
-        await message.channel.send(voice_res)
+        await _send_discord_message(message.channel, voice_res)
         return
 
     is_mentioned = client.user in message.mentions
@@ -2104,12 +2468,13 @@ async def on_message(message):
             ]
             if chunks:
                 for idx, chunk in enumerate(chunks):
-                    if idx == len(chunks) - 1 and discord_files:
-                        await message.channel.send(chunk, files=discord_files)
-                    else:
-                        await message.channel.send(chunk)
+                    await _send_discord_message(
+                        message.channel,
+                        chunk,
+                        files=discord_files if idx == len(chunks) - 1 and discord_files else None,
+                    )
             elif discord_files:
-                await message.channel.send(files=discord_files)
+                await _send_discord_message(message.channel, "", files=discord_files)
 
             # If an active unmuted voice co-host session is connected for this channel, speak non-music replies aloud
             # (never run TTS over an active ad-free music stream or read a song card URL aloud!)
