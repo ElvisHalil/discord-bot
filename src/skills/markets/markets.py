@@ -926,24 +926,25 @@ def skill_markets_info(
 
     # 0. Check if this is a Central Bank Rate Decision or Economic Calendar request
     if is_macro_calendar_query(q_raw, v_raw) and not t_raw:
-        rate_bench_syms = ["^TNX", "^IRX", "CADUSD=X", "USDCAD=X", "^GSPTSE", "^GSPC", "GC=F"]
-        fut_rate_quotes = submit_to_worker(_yahoo_agg.fetch_quotes, rate_bench_syms)
-        fut_macro_news = submit_to_worker(_yahoo_agg.fetch_macro_market_headlines, 5)
-        rate_quotes = fut_rate_quotes.result()
-        macro_news = fut_macro_news.result()
+        wants_market_reaction = bool(
+            re.search(
+                r"\b(?:markets?|stocks?|tsx|s&p|nasdaq|dow|dollar|loonie|cad|usd|gold|yields?|reaction|react|impact)\b",
+                q_raw,
+                re.IGNORECASE,
+            )
+        )
+        rate_quotes = {}
+        if wants_market_reaction:
+            rate_bench_syms = ["^TNX", "^IRX", "CADUSD=X", "USDCAD=X", "^GSPTSE", "^GSPC", "GC=F"]
+            fut_rate_quotes = submit_to_worker(_yahoo_agg.fetch_quotes, rate_bench_syms)
+            rate_quotes = fut_rate_quotes.result()
 
         report = _macro_agg.format_macro_calendar_report(
             query=q_raw,
             region=r_raw,
-            live_rate_quotes=rate_quotes,
+            live_rate_quotes=rate_quotes if wants_market_reaction else None,
         )
-        out_parts = [report]
-        if macro_news:
-            h_lines = ["=== 📰 LATEST CENTRAL BANK & MACRO HEADLINES ==="]
-            for idx, h in enumerate(macro_news, start=1):
-                h_lines.append(f"{idx}. {h}")
-            out_parts.append("\n".join(h_lines))
-        out_parts.append(build_macro_calendar_llm_instructions())
+        out_parts = [report, build_macro_calendar_llm_instructions()]
         update_channel_market_state(
             region=r_raw or None,
             view=MarketView.CALENDAR,

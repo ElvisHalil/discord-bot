@@ -352,6 +352,13 @@ async def _update_song_card_buttons(
     if message is None:
         return
     state = _get_song_card_button_state(message)
+    msg_id = getattr(message, "id", None)
+    has_known_state = (
+        (msg_id is not None and msg_id in _song_card_button_states)
+        or getattr(message, "view", None) is not None
+        or bool(getattr(message, "components", None))
+    )
+    prev_state = dict(state)
     if next_disabled is not None:
         state["next_disabled"] = bool(next_disabled)
     if like_disabled is not None:
@@ -360,9 +367,10 @@ async def _update_song_card_buttons(
         state["autoplay_disabled"] = bool(autoplay_disabled)
     if autoplay_active is not None:
         state["autoplay_active"] = bool(autoplay_active)
-    msg_id = getattr(message, "id", None)
     if msg_id is not None:
         _song_card_button_states[msg_id] = state
+    if has_known_state and state == prev_state:
+        return
     if not hasattr(message, "edit"):
         return
     try:
