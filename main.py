@@ -239,6 +239,15 @@ async def _disable_song_card_next_button(message) -> None:
     await _update_song_card_buttons(message, next_disabled=True)
 
 
+async def _disable_channel_active_song_card_next_button(channel_id) -> None:
+    """Immediately disable the `⏭️ Next` button on the active Song Card in `channel_id` (if any)."""
+    if channel_id is None:
+        return
+    active_card_msg = _last_song_card_messages.get(channel_id)
+    if active_card_msg is not None:
+        await _disable_song_card_next_button(active_card_msg)
+
+
 async def _send_discord_message(channel, text: str = "", files=None):
     """Send `text` (and optional `files`) to `channel`, automatically attaching `SongCardView` if `text` is a Song Card
     and disabling the `⏭️ Next` button on the previous Song Card in that channel."""
@@ -861,6 +870,7 @@ async def process_song_card_like(
     message_content: str,
     user_id: int,
     user=None,
+    message=None,
 ) -> bool:
     """
     Shared handler for both the 👍 emoji reaction and the 👍 Like button on a Song Card.
@@ -875,6 +885,11 @@ async def process_song_card_like(
     if reaction_key in handled_reactions:
         return False
     handled_reactions.add(reaction_key)
+
+    channel_id = getattr(channel, "id", None)
+    if message is not None:
+        await _update_song_card_buttons(message, next_disabled=True, like_disabled=True)
+    await _disable_channel_active_song_card_next_button(channel_id)
 
     if user is None:
         try:
@@ -1035,6 +1050,7 @@ async def process_song_card_next(
         return False
     _active_next_channels.add(channel_id)
     try:
+        await _disable_channel_active_song_card_next_button(channel_id)
         has_voice_queue = bool(VOICE_COHOST._music_queues.get(channel_id))
         has_autoplay = JOB_ENGINE.get_active_autoplay_job(channel_id) is not None
 
@@ -1238,22 +1254,27 @@ async def handle_song_card_button_interaction(interaction: discord.Interaction, 
     )
 
     if action == "like":
+        # Pressing Like triggers a new song recommendation -> immediately disable BOTH Like and Next on this card
+        # as well as Next on the channel's active Song Card.
         await _update_song_card_buttons(
             msg,
             like_disabled=True,
-            next_disabled=True if is_older_card else None,
+            next_disabled=True,
         )
+        await _disable_channel_active_song_card_next_button(channel.id)
         await process_song_card_like(
             channel=channel,
             message_id=msg_id,
             message_content=msg_content,
             user_id=user.id,
             user=user,
+            message=msg,
         )
     elif action == "next":
         await _update_song_card_buttons(msg, next_disabled=True)
         if is_older_card:
             return
+        await _disable_channel_active_song_card_next_button(channel.id)
         if msg is not None and channel.id not in _last_song_card_messages:
             _last_song_card_messages[channel.id] = msg
         await process_song_card_next(
@@ -1295,6 +1316,7 @@ async def on_raw_reaction_add(payload):
             message_id=payload.message_id,
             message_content=message.content,
             user_id=payload.user_id,
+            message=message,
         )
 
 
@@ -1550,6 +1572,11 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                             forced_args = dict(forced_args)
                             forced_args["voice_profile"] = current_mode
                     set_active_channel_id(channel_id)
+                    if forced_tool_name in ("skill_music_discovery", "skill_youtube_search") or (
+                        forced_tool_name == "skill_job_manager"
+                        and str(forced_args.get("action") or "").lower() in ("autoplay", "skip", "next")
+                    ):
+                        await _disable_channel_active_song_card_next_button(channel_id)
                     print(f"⚡ [{current_mode.upper()}] Intercepted missed tool on turn 0 -> forcing {forced_tool_name}({forced_args})")
                     try:
                         tool_output = await run_in_worker(func, **forced_args)
@@ -2099,6 +2126,15 @@ async def run_agent_turn(channel_id, mode_config, turn_history=None, fast_voice_
                         args = dict(args)
                         args["voice_profile"] = current_mode
                 set_active_channel_id(channel_id)
+                if (
+                    tool_name == "skill_music_discovery"
+                    or (tool_name == "skill_youtube_search" and bool(args.get("is_music")))
+                    or (
+                        tool_name == "skill_job_manager"
+                        and str(args.get("action") or "").lower() in ("autoplay", "skip", "next")
+                    )
+                ):
+                    await _disable_channel_active_song_card_next_button(channel_id)
                 print(f"  └─ 🤖 Running tool: {tool_name} with args: {args}")
                 try:
                     topic_arg = str(args.get("topic") or "").strip().lower()
@@ -2337,6 +2373,8 @@ async def on_message(message):
     VOICE_COHOST.register_author_voice_channel(message.channel.id, author_voice_channel)
 
     # Direct Flight & Live Sports Tracker Commands (!trackflight, !untrackflight, !trackedflights, !track, !untrack, !tracked, !autoplay, !stopautoplay)
+    if user_input.strip().lower().startswith("!autoplay"):
+        await _disable_channel_active_song_card_next_button(message.channel.id)
     tracker_res = await dispatch_tracker_command(
         text=user_input,
         channel_id=message.channel.id,
@@ -2363,6 +2401,8 @@ async def on_message(message):
         return
 
     # Direct Voice Co-Host & Music Playback Commands (!join, !leave, !speak, !vmode, !vrecap, !vstatus, !vmute, !vunmute, !pause, !resume, !skip, !stop, !queue)
+    if user_input.strip().lower().startswith(("!skip", "!next")):
+        await _disable_channel_active_song_card_next_button(message.channel.id)
     voice_res = await dispatch_voice_command(
         text=user_input,
         channel_id=message.channel.id,
@@ -2442,6 +2482,8 @@ async def on_message(message):
     turn_start_idx = len(turn_history) - 1
 
     # Phase 2: Lock-free turn execution and reply post-processing
+    if detect_missed_music_shift_tool_call(turn_history) is not None or has_explicit_autoplay_start_intent(user_input):
+        await _disable_channel_active_song_card_next_button(channel_id)
     async with message.channel.typing():
         try:
             clear_channel_attachments(channel_id)
