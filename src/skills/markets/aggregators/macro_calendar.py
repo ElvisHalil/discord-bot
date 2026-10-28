@@ -490,55 +490,6 @@ class MacroCalendarAggregator(BaseMarketAggregator):
         _OFFICIAL_SCHEDULE_CACHE[cache_key] = result
         return result
 
-    def fetch_central_bank_leadership(self) -> Dict[str, str]:
-        """Fetch current live Federal Reserve Chair and Bank of Canada Governor from official government pages."""
-        cache_key = ("cb_leadership", "live")
-        if cache_key in _OFFICIAL_SCHEDULE_CACHE:
-            return dict(_OFFICIAL_SCHEDULE_CACHE[cache_key])
-
-        leaders: Dict[str, str] = {
-            "fed_chair": "Kevin Warsh",
-            "boc_governor": "Tiff Macklem",
-        }
-        try:
-            resp = cffi_requests.get(
-                "https://www.federalreserve.gov/aboutthefed/bios/board/default.htm",
-                impersonate="chrome120",
-                timeout=6,
-            )
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, "html.parser")
-                text = re.sub(r"\s+", " ", soup.get_text("\n"))
-                m = re.search(
-                    r"\b([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z\-]+),\s*Chair(?:man|person)?\b",
-                    text,
-                )
-                if m:
-                    leaders["fed_chair"] = m.group(1).strip()
-        except Exception:
-            pass
-
-        try:
-            resp_ca = cffi_requests.get(
-                "https://www.bankofcanada.ca/about/governing-council/",
-                impersonate="chrome120",
-                timeout=6,
-            )
-            if resp_ca.status_code == 200:
-                soup_ca = BeautifulSoup(resp_ca.text, "html.parser")
-                text_ca = re.sub(r"\s+", " ", soup_ca.get_text(" "))
-                m_ca = re.search(
-                    r"\bGovernor\s+([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z\-]+)\b",
-                    text_ca,
-                )
-                if m_ca:
-                    leaders["boc_governor"] = m_ca.group(1).strip()
-        except Exception:
-            pass
-
-        _OFFICIAL_SCHEDULE_CACHE[cache_key] = leaders
-        return leaders
-
     def get_merged_calendar_events(
         self,
         now_utc: datetime,
@@ -735,13 +686,10 @@ class MacroCalendarAggregator(BaseMarketAggregator):
         local_abbr = _short_tz_abbr(local_now)
 
         events, fomc_schedule, boc_history, boc_schedule = self.get_merged_calendar_events(utc_now)
-        leadership = self.fetch_central_bank_leadership()
-        fed_chair = leadership.get("fed_chair", "Kevin Warsh")
-        boc_governor = leadership.get("boc_governor", "Tiff Macklem")
 
         q_low = f"{query} {region}".lower()
-        focus_us = bool(re.search(r"\b(?:fed\b|fomc|federal\s+reserve|powell|warsh|united\s+states|\bus\b|american)\b", q_low))
-        focus_ca = bool(re.search(r"\b(?:bank\s+of\s+canada|\bboc\b|canada|canadian|macklem|overnight\s+rate)\b", q_low))
+        focus_us = bool(re.search(r"\b(?:fed\b|fomc|federal\s+reserve|united\s+states|\bus\b|american)\b", q_low))
+        focus_ca = bool(re.search(r"\b(?:bank\s+of\s+canada|\bboc\b|canada|canadian|overnight\s+rate)\b", q_low))
         wants_non_cb_macro = bool(
             re.search(r"\b(?:cpi|inflation|pce|ppi|jobs|nfp|payrolls?|unemployment|gdp|retail\s+sales|economic\s+calendar|macro\s+calendar)\b", q_low)
         )
@@ -773,20 +721,14 @@ class MacroCalendarAggregator(BaseMarketAggregator):
             block.append(f"  {_fmt_rd(ev)}")
             pc = press_confs_by_day.get((ev.country, ev.timestamp_utc.strftime("%Y-%m-%d")))
             if pc is not None:
-                speaker_tag = ""
-                if ev.country == "US":
-                    speaker_tag = f" (Federal Reserve Chair **{fed_chair}**)"
-                elif ev.country == "CA":
-                    speaker_tag = f" (Bank of Canada Governor **{boc_governor}**)"
                 pc_ts = _format_event_timestamp_multi_tz(pc.timestamp_utc, local_now, tz_override=tz_override)
-                block.append(f"  - 🎙️ **{pc.title}{speaker_tag}** — {pc_ts}")
+                block.append(f"  - 🎙️ **{pc.title}** — {pc_ts}")
             return block
 
         sections: List[str] = [
             f"[{build_reference_clock(now=local_now, tz_override=tz_override)}]",
             "=== 🏦 CENTRAL BANK RATE DECISIONS & ECONOMIC CALENDAR INTELLIGENCE ===",
             f"- **User / Bot Local Timezone:** **{local_abbr}** (All event times below are pre-converted to **{local_abbr}** first, alongside Eastern Time `ET` and `UTC`).",
-            f"- **Live Official Central Bank Leadership:** US Federal Reserve Chair: **{fed_chair}** (FederalReserve.gov — **Jerome Powell is NO LONGER Fed Chair; never say 'Chair Powell'**) | Bank of Canada Governor: **{boc_governor}** (BankOfCanada.ca).",
         ]
 
         # 1. TODAY'S CENTRAL BANK DECISIONS — GIVE EVERY TODAY DECISION (BOTH UPCOMING & ALREADY RELEASED) A FULL DEDICATED SECTION
@@ -859,10 +801,7 @@ class MacroCalendarAggregator(BaseMarketAggregator):
         # 4. US FEDERAL RESERVE (FOMC) & BANK OF CANADA (BoC) OFFICIAL SCHEDULES
         fomc_lines = ["=== 🇺🇸 US FEDERAL RESERVE (FOMC) SCHEDULE & RELEASE RULES ==="]
         fomc_lines.append(
-            f"- **Current Federal Reserve Chair (Official FederalReserve.gov):** **Chair {fed_chair}** (IMPORTANT: **{fed_chair}** is the current Chairman of the Federal Reserve — **Jerome Powell is NO LONGER Fed Chair; NEVER refer to 'Chair Powell'**)."
-        )
-        fomc_lines.append(
-            f"- **Standard FOMC Release Time:** Rate decisions & FOMC Statements are always released on **Day 2 of the meeting at 12:00 PM {local_abbr} (Local Time)** (**2:00 PM Eastern Time** / 18:00 UTC during EDT). Federal Reserve Chair **{fed_chair}**'s Press Conference follows 30 minutes later at **12:30 PM {local_abbr} (2:30 PM ET)**."
+            f"- **Standard FOMC Release Time:** Rate decisions & FOMC Statements are always released on **Day 2 of the meeting at 12:00 PM {local_abbr} (Local Time)** (**2:00 PM Eastern Time** / 18:00 UTC during EDT). The FOMC Press Conference follows 30 minutes later at **12:30 PM {local_abbr} (2:30 PM ET)**."
         )
         for ev in [e for e in rate_decisions if e.country == "US"]:
             fomc_lines.append(_fmt_rd(ev))
@@ -881,10 +820,7 @@ class MacroCalendarAggregator(BaseMarketAggregator):
 
         boc_lines = ["=== 🇨🇦 BANK OF CANADA (BoC) SCHEDULE & RATE HISTORY ==="]
         boc_lines.append(
-            f"- **Current Bank of Canada Governor (Official BankOfCanada.ca):** **Governor {boc_governor}**"
-        )
-        boc_lines.append(
-            f"- **Standard BoC Release Time:** Bank of Canada Overnight Rate decisions are released at **7:45 AM {local_abbr} (Local Time)** (**9:45 AM Eastern Time**), with Monetary Policy Report (MPR) Press Conferences by Governor **{boc_governor}** at **8:30 AM {local_abbr} (10:30 AM ET)**."
+            f"- **Standard BoC Release Time:** Bank of Canada Overnight Rate decisions are released at **7:45 AM {local_abbr} (Local Time)** (**9:45 AM Eastern Time**), with Monetary Policy Report (MPR) Press Conferences at **8:30 AM {local_abbr} (10:30 AM ET)**."
         )
         for ev in [e for e in rate_decisions if e.country == "CA"]:
             boc_lines.append(_fmt_rd(ev))
