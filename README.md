@@ -1,6 +1,6 @@
 # 🤖 Local LLM Runtime Harness & Real-Time Voice Engine
 
-A privacy-first, locally hosted **AI Runtime Harness, Real-Time Discord Voice Co-Host, and AST-Enforced Skill Framework** for **Discord** and **Telegram**, powered by **Ollama** (`gemma4:e4b`, `qwen3:8b`, etc.).
+A privacy-first, locally hosted **AI Runtime Harness, Real-Time Discord Voice Co-Host, and AST-Enforced Skill Framework** for **Discord** and **Telegram**, powered by **Ollama**.
 
 Raw `4B–8B` local models frequently skip tool schemas, hallucinate URLs, miscalculate timezones, and overwrite structured outputs—while fast-moving AI codebases often degrade into tightly coupled spaghetti. This project solves both problems with **two interlocking harnesses**:
 
