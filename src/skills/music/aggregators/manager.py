@@ -90,7 +90,8 @@ class MusicAggregatorManager:
                 if not existing.preview_url and t.preview_url:
                     existing.preview_url = t.preview_url
                 # Multi-source consensus boost: track appeared across multiple providers
-                existing.tier = 1
+                if not ((existing.source or "").endswith("_artist") or (t.source or "").endswith("_artist")):
+                    existing.tier = 1
                 existing.verified_genre = True
                 existing.relevance_score = min(1.0, max(existing.relevance_score, t.relevance_score) + 0.15)
                 continue
@@ -638,6 +639,11 @@ class MusicAggregatorManager:
             if not lt.album and norm_t in album_by_title:
                 lt.album = album_by_title[norm_t]
             combined.append(lt)
+
+        if len(lfm_tracks) >= 5:
+            for extra_t in dz_tracks + ytm_tracks:
+                if extra_t.tier == 1:
+                    extra_t.tier = 2
 
         combined.extend(dz_tracks)
         combined.extend(ytm_tracks)

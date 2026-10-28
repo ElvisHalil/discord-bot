@@ -505,12 +505,14 @@ class DeezerAggregator(BaseMusicAggregator):
             top_tracks = r_top.json().get("data", [])
 
             tracks = []
-            for t in top_tracks:
+            for idx, t in enumerate(top_tracks):
+                tier = 1 if idx < 5 else (2 if idx < 12 else 3)
                 tracks.append(Track(
                     title=t.get("title", "Unknown"),
                     artist=resolved_artist_name,
                     album=t.get("album", {}).get("title"),
                     source="deezer_artist",
+                    tier=tier,
                     deezer_id=t.get("id"),
                     preview_url=t.get("preview"),
                 ))

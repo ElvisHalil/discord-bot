@@ -448,9 +448,8 @@ def standardize_song_reply(reply: str) -> str:
                 ext_s = _clean_song_token(extracted_song or "")
                 ext_a = _norm_track_token(extracted_artist or "")
                 is_mismatched_vid = (
-                    bool(meta_s and ext_s and meta_a and ext_a)
+                    bool(meta_s and ext_s)
                     and (meta_s not in ext_s and ext_s not in meta_s)
-                    and (meta_a not in ext_a and ext_a not in meta_a)
                 )
 
                 if is_mismatched_vid:
