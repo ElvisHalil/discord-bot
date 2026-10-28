@@ -1,11 +1,11 @@
 # 🤖 Local LLM Runtime Harness & Real-Time Voice Engine
 
-A privacy-first, locally hosted **AI Runtime Harness, Real-Time Discord Voice Co-Host, and AST-Enforced Skill Framework** for **Discord** and **Telegram**, powered by **Ollama**.
+A privacy-first, locally hosted **AI Runtime Harness, Real-Time Discord Voice Co-Host, and AST-Enforced Skill Framework** for **Discord** and **Telegram**, powered by **Ollama** (`gemma4:e4b`, `qwen3:8b`, etc.).
 
 Raw `4B–8B` local models frequently skip tool schemas, hallucinate URLs, miscalculate timezones, and overwrite structured outputs—while fast-moving AI codebases often degrade into tightly coupled spaghetti. This project solves both problems with **two interlocking harnesses**:
 
-1. **The Agent Runtime Harness (`src/orchestrator.py`, `main.py`, `src/utils/workers.py`, `src/jobs/`)**: Deterministic pre- and post-inference scaffolding that wraps compact `4B–8B` local models so they execute multi-threaded tools, full-timeline video analysis, dynamic background jobs, and **real-time Discord DAVE E2EE voice co-hosting** without hallucinating.
-2. **The AST-Enforced Coding Harness (`src/skills/.example/`, `tests/test_architecture_and_boundaries.py`)**: A strict, constructor-style Python skill contract and **398-test offline verification gate** that mechanically prevents human developers and AI coding agents from introducing cross-skill coupling, thread-pool deadlocks, or architectural drift.
+1. **The Agent Runtime Harness (`src/orchestrator.py`, `main.py`, `src/utils/workers.py`, `src/jobs/`)**: Deterministic pre- and post-inference scaffolding that wraps compact `4B–8B` local models so they execute multi-threaded tools, compound multi-skill turns, full-timeline video analysis, dynamic background jobs, and **real-time Discord DAVE E2EE voice co-hosting** without hallucinating.
+2. **The AST-Enforced Coding Harness (`src/skills/.example/`, `tests/test_architecture_and_boundaries.py`)**: A strict, constructor-style Python skill contract and **397-test offline verification gate** that mechanically prevents human developers and AI coding agents from introducing cross-skill coupling, thread-pool deadlocks, or architectural drift.
 
 ---
 
@@ -23,8 +23,8 @@ Raw `4B–8B` local models frequently skip tool schemas, hallucinate URLs, misca
 
 | Harness Layer | What It Enforces & Solves |
 | :--- | :--- |
-| 🎯 **Pre- & Post-Inference LLM Runtime Harness** | • **Code-First 1-Turn Execution**: Typed Python skills + 3-line `templates.py` suffixes replace fragile multi-turn `SKILL.md` prompt improvisation.<br>• **Turn-0 Missed-Tool Interception**: Automatically detects and executes missed tool calls when a small local model forgets to invoke a schema.<br>• **Stateful Argument & Timezone Enrichment**: Normalizes parameter aliases, recovers multi-turn context, and injects DST-safe dual Local + UTC/CET timestamps.<br>• **Post-Model Output Guardrails**: Preserves verified cards and job confirmations against LLM rewrites and blocks phantom schedule claims. |
-| 🏛️ **AST-Enforced Coding & Skill Harness** | • **Zero Cross-Skill Coupling**: AST static analysis tests fail the build if any domain skill imports from a sibling skill package.<br>• **Strict Module Separation**: Enforces `StrEnum` in `enums.py`, `@dataclass(slots=True)` in `models.py`, and static tables in `catalogs.py`.<br>• **Copy-Paste Skill Contract**: `src/skills/.example/` provides a drop-in skeleton so humans and AI coding agents author skills identically.<br>• **398 Offline Verification Tests**: Full unit, combinatorial, concurrency, and security suite runs completely offline in ~15–25 seconds. |
+| 🎯 **Pre- & Post-Inference LLM Runtime Harness** | • **Code-First 1-Turn Execution**: Typed Python skills + 3-line `templates.py` suffixes replace fragile multi-turn `SKILL.md` prompt improvisation.<br>• **Turn-0 Missed-Tool & Compound Co-Execution**: Automatically intercepts missed tool calls and co-executes paired tools on compound prompts (e.g., `markets` + `graphing`, `voice` + `music`, `news` + `market pulse`).<br>• **Stateful Argument & Timezone Enrichment**: Normalizes parameter aliases, recovers multi-turn context, and injects DST-safe dual Local + UTC/CET timestamps.<br>• **Post-Model Output Guardrails**: Preserves verified cards and job confirmations against LLM rewrites and blocks phantom schedule claims. |
+| 🏛️ **AST-Enforced Coding & Skill Harness** | • **Zero Cross-Skill Coupling**: AST static analysis tests fail the build if any domain skill imports from a sibling skill package.<br>• **Strict Module Separation**: Enforces `StrEnum` in `enums.py`, `@dataclass(slots=True)` in `models.py`, and static tables in `catalogs.py`.<br>• **Copy-Paste Skill Contract**: `src/skills/.example/` provides a drop-in skeleton so humans and AI coding agents author skills identically.<br>• **397 Offline Verification Tests**: Full unit, combinatorial, concurrency, and security suite runs completely offline in ~15–25 seconds. |
 | 🎙️ **Real-Time Discord DAVE E2EE Voice Co-Host & Streamer** | • **DAVE E2EE Decryption**: Real-time `davey` Opus decryption with per-speaker `48 kHz` SSRC demuxing and VAD (`0.30s` silence gap).<br>• **Sub-Second Local STT & 9 Neural Voices**: Pre-warmed `faster-whisper` (`int8`) transcription and 9 `edge-tts` voice/accent presets (`!voice <preset>`).<br>• **3 Listening Modes**: Switch live between `wake_word` (`"Hey bot"`), `conversational` (open mic), and `listen_only` with call recaps (`!vrecap`).<br>• **Ad-Free Voice Music Streaming**: Streams Song Cards and Autoplay radio directly into voice via `yt-dlp` + `FFmpegPCMAudio` (`!pause`, `!skip`, `!queue`). |
 | ⏰ **Unified Background Job, Cron & Condition Harness** | • **One-Shot & Recurring Schedules**: Natural-language reminders and cron/interval routines (`!remind`, *"every Monday at 9am..."*).<br>• **Scheduled Multi-Skill & Graphing Tasks**: Runs full agent turns on schedule and delivers rendered PNG chart attachments automatically.<br>• **Dynamic Condition Evaluators**: Polls market price/move thresholds, weather shifts, YouTube channel uploads, and web keywords.<br>• **Continuous Radio Autoplay**: Background station scheduler (`!autoplay` / `!stopautoplay`) with 1-hour idle protection and real-duration timers. |
 | 🔒 **Hardened Concurrency, Security & Dual-Platform Bridge** | • **3-Tier Deadlock-Free Worker DAG**: Isolates `WORKER_POOL` (`16`) → `SUB_WORKER_POOL` (`24`) → `LEAF_WORKER_POOL` (`32`) with `contextvars` propagation.<br>• **End-to-End SSRF & Redirect Guards**: Blocks private, loopback, link-local, and cloud-metadata IPs on every HTTP hop and media stream.<br>• **Automatic Secret Redaction**: `SecretRedactingFilter` scrubs bot tokens and API keys from logs, exceptions, and cache keys.<br>• **Dual Discord + Telegram Runtime**: Owner-gated DMs (`BOT_OWNER_ID`), mass-ping sanitization, and fail-closed Telegram allowlist security. |
@@ -33,7 +33,7 @@ Raw `4B–8B` local models frequently skip tool schemas, hallucinate URLs, misca
 
 ## 🧩 Built-In Modular Skill Packs (`src/skills/` & `src/tools/`)
 
-Every domain below is an isolated plugin built on the [`src/skills/.example/`](src/skills/.example/) coding harness contract. Don't need a domain? Disable it in `.env` with `DISABLED_SKILLS=flights,sports,music`.
+Every domain below is an isolated package built on the [`src/skills/.example/`](src/skills/.example/) coding harness contract and orchestrated together across single- and multi-tool turns.
 
 | Skill Pack | Capabilities |
 | :--- | :--- |
@@ -47,15 +47,9 @@ Every domain below is an isolated plugin built on the [`src/skills/.example/`](s
 
 ---
 
-## 🛡️ Fault-Tolerant Provider Fallbacks & Skill Toggling (`DISABLED_SKILLS`)
+## 🛡️ Fault-Tolerant Multi-Provider Fallback Chains
 
-External web endpoints change DOM structures and rate limits over time. To prevent upstream changes from breaking the runtime harness, every skill inherits from `Base<Domain>Aggregator` with automatic multi-provider fallback chains—and any skill pack you don't use can be disabled in `.env`:
-
-```ini
-# .env — Disable any domain skill packs you don't need (comma-separated):
-# Available: music, sports, flights, markets, graphing, voice, jobs, news, weather, youtube, images
-DISABLED_SKILLS=flights,sports,music
-```
+External web endpoints change DOM structures and rate limits over time. To prevent upstream changes from breaking the runtime harness, every skill inherits from `Base<Domain>Aggregator` with automatic multi-provider fallback chains:
 
 | Domain | Primary Provider(s) | Automatic Fallback(s) |
 | :--- | :--- | :--- |
@@ -80,7 +74,7 @@ flowchart TD
         TG["src/utils/telegram.py (Telegram Bridge)"]
         DISP["src/utils/dispatcher.py (Shared Command & Reaction Dispatcher)"]
         ORCH["src/orchestrator.py (Pre/Post-Inference Harness: Routing, Enrichment & Sanitization)"]
-        REG["src/registry.py (Tool Schemas & DISABLED_SKILLS Filter)"]
+        REG["src/registry.py (Tool Schemas)"]
         CFG["src/config.py / src/config.example.py"]
     end
 
@@ -191,7 +185,7 @@ pip install -r requirements.txt
 ```
 
 ### 3. Configuration (`.env` and `src/config.py`)
-1. Copy the environment variable template and add your **Discord Bot Token** (and optional API keys or `DISABLED_SKILLS`):
+1. Copy the environment variable template and add your **Discord Bot Token** (and optional API keys):
    ```bash
    cp .env.example .env
    ```
@@ -221,7 +215,7 @@ docker compose up -d --build
 
 ## 🎙️ Discord Voice-Channel AI Co-Host Guide
 
-The runtime harness can join any Discord voice channel and participate as a real-time, voice-activated AI co-host while retaining full access to all enabled domain skills and web tools.
+The runtime harness can join any Discord voice channel and participate as a real-time, voice-activated AI co-host while retaining full access to all domain skills and web tools.
 
 ### How It Works
 1. **Join a Voice Channel**: Hop into any Discord voice channel and type **`!join`** (or **`!join conversational`**), or simply ask in chat: *"@Bot hop into the voice channel"*.
@@ -327,7 +321,7 @@ The runtime harness can join any Discord voice channel and participate as a real
 
 ## 🧪 Running the Coding Harness & Test Suite
 
-The repository includes **398 unit, concurrency, combinatorial, security, and AST architectural boundary tests** (executing completely offline in ~15–25 seconds):
+The repository includes **397 unit, concurrency, combinatorial, security, and AST architectural boundary tests** (executing completely offline in ~15–25 seconds):
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
