@@ -282,7 +282,7 @@ def format_song_card(song: str, artist: str, url: str, genre: str = None, album:
 
     record_played_track(song, artist)
     try:
-        record_channel_played_song(song=song, artist=artist, genre=genre)
+        record_channel_played_song(song=song, artist=artist, genre=genre, preserve_session=True)
     except Exception:
         pass
     m_vid = re.search(r'(?:v=|youtu\.be\/)([0-9A-Za-z_-]{11})', url or "")

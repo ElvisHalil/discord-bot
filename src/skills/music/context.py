@@ -127,6 +127,7 @@ def record_channel_played_song(
     active_mood: Optional[str] = None,
     active_artist: Optional[str] = None,
     active_similar_to: Optional[str] = None,
+    preserve_session: bool = False,
 ) -> None:
     """Record the most recently served song in a channel along with its genre, spectrum zone,
     acoustic metrics, and active discovery session state."""
@@ -163,7 +164,7 @@ def record_channel_played_song(
         eff_active_mood = (active_mood or "").strip() or None
         eff_active_artist = (active_artist or "").strip() or None
         eff_active_sim = (active_similar_to or "").strip() or None
-    elif same_track and prev:
+    elif (same_track or preserve_session) and prev:
         eff_active_genre = prev.active_genre
         eff_active_mood = prev.active_mood
         eff_active_artist = prev.active_artist

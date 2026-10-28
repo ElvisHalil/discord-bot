@@ -634,7 +634,16 @@ class YouTubeMusicAggregator(BaseMusicAggregator):
                 _norm_track_token(str(a.get("name") if isinstance(a, dict) else a or ""))
                 for a in (item.get("artists") or [])
             ]
-            if norm_target and not any(norm_target in tok or tok in norm_target for tok in art_tokens if tok):
+            target_words = re.sub(r"[^a-z0-9\s]", " ", clean_a.lower()).split()
+            art_word_lists = [
+                re.sub(r"[^a-z0-9\s]", " ", str(a.get("name") if isinstance(a, dict) else a or "").lower()).split()
+                for a in (item.get("artists") or [])
+            ]
+            if norm_target and not any(
+                (tok == norm_target or norm_target in tok.split()) and w_list == target_words
+                for tok, w_list in zip(art_tokens, art_word_lists)
+                if tok
+            ):
                 continue
             t_norm = _norm_track_token(title)
             if not t_norm or t_norm in seen_titles:

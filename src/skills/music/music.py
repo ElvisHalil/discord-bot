@@ -637,6 +637,43 @@ def skill_music_discovery(
     print(f"🎵 [Executing Music Discovery Skill] Genre: {parsed_genre or 'All'}, Mood: {parsed_mood or 'None'}")
     try:
         all_tracks = manager.get_top_charts(genre=parsed_genre)
+        is_artist_fallback = bool(
+            parsed_genre
+            and all_tracks
+            and all((t.source or "").endswith("_artist") for t in all_tracks)
+        )
+        if is_artist_fallback:
+            output = f"=== TOP TRACKS BY '{parsed_genre.title()}' ===\n\n"
+            featured_sample = MusicAggregatorManager.sample_tiered_tracks(
+                all_tracks,
+                k=15,
+                weights=(0.45, 0.35, 0.20),
+                enforce_artist_diversity=False,
+            )
+            pre_resolved = _pre_resolve_top_candidate(
+                featured_sample,
+                active_genre="",
+                active_mood="",
+                active_artist=parsed_genre.strip(),
+                active_similar_to="",
+            )
+            if pre_resolved:
+                output += pre_resolved + "\n"
+            elif featured_sample:
+                record_channel_played_song(
+                    song=featured_sample[0].title,
+                    artist=featured_sample[0].artist,
+                    genre=featured_sample[0].genre,
+                    active_genre="",
+                    active_mood="",
+                    active_artist=parsed_genre.strip(),
+                    active_similar_to="",
+                )
+            for t in featured_sample:
+                output += t.display_line() + "\n"
+            output += "\n" + build_music_llm_instructions()
+            return output
+
         output = f"=== TODAY'S TOP CHARTING MUSIC ({parsed_genre.upper() if parsed_genre else 'ALL GENRES'}) ===\n\n"
         if all_tracks:
             from src.skills.music.aggregators.deezer import clean_playlist_genre_label

@@ -529,6 +529,21 @@ class MusicAggregatorManager:
                 except Exception as e:
                     logger.debug("Chart provider worker failed: %s", e)
 
+        # If all genre chart providers returned 0 tracks (e.g. LLM passed an artist name like 'Alokin' as `genre`),
+        # check if `parsed_genre` is a real artist before falling back to generic Deezer playlist search.
+        if not all_tracks and parsed_genre and getattr(self.aggregators.get("lastfm"), "api_key", None):
+            try:
+                norm_g = _norm_track_token(parsed_genre)
+                cand_artist_tracks = [
+                    t for t in (self.get_artist_tracks(parsed_genre) or [])
+                    if _norm_track_token(t.artist) == norm_g
+                ]
+                if cand_artist_tracks:
+                    print(f"  └─ 🎤 [Artist Fallback]: '{parsed_genre}' matched as an artist ({len(cand_artist_tracks)} tracks).")
+                    return cand_artist_tracks
+            except Exception as e:
+                logger.debug("Artist fallback check failed for %r: %s", parsed_genre, e)
+
         # Safety net if Last.fm API key is missing and no other provider returned tracks
         if not all_tracks and self.aggregators.get("deezer"):
             try:
