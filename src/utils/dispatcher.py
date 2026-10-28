@@ -216,23 +216,28 @@ async def dispatch_tracker_command(
         set_active_channel_id(channel_id)
 
         if low in ("!jobs", "!reminders", "!remind"):
-            return await run_in_worker(job_manager_fn, action="list")
+            res = await run_in_worker(job_manager_fn, action="list")
+            return _strip_llm_instructions(res)
 
         if low.startswith("!remind "):
             target_q = text.strip()[8:].strip()
-            return await run_in_worker(job_manager_fn, action="create", query=target_q)
+            res = await run_in_worker(job_manager_fn, action="create", query=target_q)
+            return _strip_llm_instructions(res)
 
         if low == "!autoplay" or low.startswith("!autoplay "):
             target_q = text.strip()[9:].strip() or "dnb"
-            return await run_in_worker(job_manager_fn, action="autoplay", query=f"autoplay {target_q}")
+            res = await run_in_worker(job_manager_fn, action="autoplay", query=f"autoplay {target_q}")
+            return _strip_llm_instructions(res)
 
         if low == "!stopautoplay" or low.startswith("!stopautoplay "):
-            return await run_in_worker(job_manager_fn, action="cancel", query="autoplay")
+            res = await run_in_worker(job_manager_fn, action="cancel", query="autoplay")
+            return _strip_llm_instructions(res)
 
         for prefix in ("!canceljob", "!stopjob", "!unremind"):
             if low == prefix or low.startswith(f"{prefix} "):
                 target_q = text.strip()[len(prefix) :].strip() or "all"
-                return await run_in_worker(job_manager_fn, action="cancel", query=target_q)
+                res = await run_in_worker(job_manager_fn, action="cancel", query=target_q)
+                return _strip_llm_instructions(res)
 
     return None
 

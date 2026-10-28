@@ -382,6 +382,8 @@ async def _sync_channel_song_cards_autoplay_state(
 async def _send_discord_message(channel, text: str = "", files=None):
     """Send `text` (and optional `files`) to `channel`, automatically attaching `SongCardView` if `text` is a Song Card
     and disabling the `⏭️ Next` (and `📻 Autoplay` when Autoplay is ON) buttons on previous Song Cards in that channel."""
+    if text and "\n\n[SYSTEM INSTRUCTION" in text:
+        text = text.split("\n\n[SYSTEM INSTRUCTION")[0].strip()
     channel_id = getattr(channel, "id", None)
     autoplay_on = (
         JOB_ENGINE.get_active_autoplay_job(channel_id) is not None

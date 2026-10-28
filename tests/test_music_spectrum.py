@@ -867,7 +867,8 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
                 "**Song:** Faxing Berlin\n"
                 "**Artist:** deadmau5\n"
                 "**Genre:** Progressive House\n\n"
-                "https://music.youtube.com/watch?v=vid_card_007"
+                "https://music.youtube.com/watch?v=vid_card_007\n\n"
+                "[SYSTEM INSTRUCTION: You MUST include the exact `📻 **Autoplay (...)` header and the full card above in your reply.]"
             )
 
             async def _fake_start_autoplay(**kw):
@@ -886,6 +887,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             with patch.object(bot_main, "dispatch_tracker_command", AsyncMock(side_effect=_fake_start_autoplay)):
                 await bot_main.handle_song_card_button_interaction(_make_interaction(sent_cards[3]), action="autoplay")
             self.assertEqual(len(sent_cards), 7)
+            self.assertNotIn("[SYSTEM INSTRUCTION", sent_cards[6].content)
             _assert_only_last_card_next_enabled()
 
             # Step 9: While Autoplay is ON, user clicks `⏭️ Next` on Card #7 -> Card #7 Next AND Autoplay Off are disabled, Card #8 posted with `Autoplay Off`

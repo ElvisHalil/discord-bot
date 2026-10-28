@@ -179,7 +179,8 @@ def suppress_discord_embeds(text: str) -> str:
 
     text = re.sub(rf'(?<!<)(?<!\]\()({_URL_BODY})', _mask_raw, text)
 
-    # 3. Strip leaked tool-instruction footers
+    # 3. Strip leaked tool-instruction footers and internal [SYSTEM INSTRUCTION ...] blocks
+    text = text.split("\n\n[SYSTEM INSTRUCTION")[0]
     text = _LEAKED_TOOL_FOOTER.sub('', text)
 
     # 4. Clean up any trailing empty separator dashes
