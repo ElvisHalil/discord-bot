@@ -40,6 +40,7 @@ from src.jobs import (
     JOB_ENGINE,
     ActionType,
     SystemJobProvider,
+    TriggerType,
 )
 from src.skills.jobs import (
     ensure_turn_job_confirmation_preserved,
@@ -141,25 +142,42 @@ channel_locks = defaultdict(asyncio.Lock)
 # (message_id, user_id) pairs already handled by the 👍 recommender, to avoid duplicate runs.
 MAX_HANDLED_REACTIONS = 2000
 handled_reactions = BoundedSet(maxsize=MAX_HANDLED_REACTIONS)
-# Per-channel in-flight guard so rapid double-clicks on the ⏭️ Next button don't spawn duplicate turns.
+# Per-channel in-flight guard so rapid double-clicks on the ⏭️ Next or 📻 Autoplay button don't spawn duplicate turns.
 _active_next_channels = set()
 # Tracks the most recent Song Card message object per channel so previous cards have their ⏭️ Next button disabled.
 _last_song_card_messages = BoundedCache(maxsize=128)
-# Tracks per-message button disabled state ({message_id: {"next_disabled": bool, "like_disabled": bool}})
+# Tracks recent Song Card message objects per channel (up to 20 per channel) so Autoplay state transitions update past cards.
+_channel_song_card_messages = BoundedCache(maxsize=128)
+# Tracks per-message button state ({message_id: {"next_disabled": bool, "like_disabled": bool, "autoplay_disabled": bool, "autoplay_active": bool}})
 _song_card_button_states = BoundedCache(maxsize=512)
 
 
 class SongCardView(discord.ui.View):
-    """Persistent Discord UI View attached to Song Card messages with ⏭️ Next and 👍 Like buttons."""
+    """Persistent Discord UI View attached to Song Card messages with ⏭️ Next, 👍 Like, and 📻 Autoplay buttons."""
 
-    def __init__(self, next_disabled: bool = False, like_disabled: bool = False) -> None:
+    def __init__(
+        self,
+        next_disabled: bool = False,
+        like_disabled: bool = False,
+        autoplay_disabled: bool = False,
+        autoplay_active: bool = False,
+    ) -> None:
         super().__init__(timeout=None)
         for child in self.children:
             cid = getattr(child, "custom_id", None)
-            if next_disabled and cid == "song_card:next":
+            if cid == "song_card:next" and next_disabled:
                 child.disabled = True
-            elif like_disabled and cid == "song_card:like":
+            elif cid == "song_card:like" and like_disabled:
                 child.disabled = True
+            elif cid == "song_card:autoplay":
+                if autoplay_active:
+                    child.label = "Autoplay Off"
+                    child.style = discord.ButtonStyle.danger
+                else:
+                    child.label = "Autoplay"
+                    child.style = discord.ButtonStyle.primary
+                if autoplay_disabled:
+                    child.disabled = True
 
     @discord.ui.button(
         label="Next",
@@ -179,20 +197,64 @@ class SongCardView(discord.ui.View):
     async def like_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await handle_song_card_button_interaction(interaction, action="like")
 
+    @discord.ui.button(
+        label="Autoplay",
+        emoji="📻",
+        style=discord.ButtonStyle.primary,
+        custom_id="song_card:autoplay",
+    )
+    async def autoplay_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await handle_song_card_button_interaction(interaction, action="autoplay")
 
-def build_song_card_view(text: str, next_disabled: bool = False, like_disabled: bool = False):
+
+def build_song_card_view(
+    text: str,
+    next_disabled: bool = False,
+    like_disabled: bool = False,
+    autoplay_disabled: bool = False,
+    autoplay_active: bool = False,
+):
     """Return a `SongCardView` instance if `text` is a valid Song Card, else `None`."""
     if not text:
         return None
     if extract_song_card_target(text) is not None or VOICE_COHOST.extract_song_card_track(text) is not None:
-        return SongCardView(next_disabled=next_disabled, like_disabled=like_disabled)
+        return SongCardView(
+            next_disabled=next_disabled,
+            like_disabled=like_disabled,
+            autoplay_disabled=autoplay_disabled,
+            autoplay_active=autoplay_active,
+        )
     return None
 
 
-def _get_song_card_button_state(message) -> dict:
-    """Return the current `{'next_disabled': bool, 'like_disabled': bool}` state for `message`."""
+def _register_channel_song_card_message(channel_id, message) -> None:
+    """Record `message` in `_channel_song_card_messages[channel_id]` (capped at 20 recent cards)."""
+    if channel_id is None or message is None:
+        return
     msg_id = getattr(message, "id", None)
-    state = dict(_song_card_button_states.get(msg_id) or {"next_disabled": False, "like_disabled": False})
+    cards = list(_channel_song_card_messages.get(channel_id) or [])
+    if msg_id is not None:
+        cards = [m for m in cards if getattr(m, "id", None) != msg_id]
+    elif message in cards:
+        cards.remove(message)
+    cards.append(message)
+    if len(cards) > 20:
+        cards = cards[-20:]
+    _channel_song_card_messages[channel_id] = cards
+
+
+def _get_song_card_button_state(message) -> dict:
+    """Return the current button state dict for `message`."""
+    msg_id = getattr(message, "id", None)
+    state = dict(
+        _song_card_button_states.get(msg_id)
+        or {
+            "next_disabled": False,
+            "like_disabled": False,
+            "autoplay_disabled": False,
+            "autoplay_active": False,
+        }
+    )
     existing_view = getattr(message, "view", None)
     if existing_view is not None and hasattr(existing_view, "children"):
         for child in existing_view.children:
@@ -201,6 +263,9 @@ def _get_song_card_button_state(message) -> dict:
                 state["next_disabled"] = True
             elif cid == "song_card:like" and getattr(child, "disabled", False):
                 state["like_disabled"] = True
+            elif cid == "song_card:autoplay":
+                state["autoplay_disabled"] = bool(getattr(child, "disabled", False))
+                state["autoplay_active"] = str(getattr(child, "label", "") or "") == "Autoplay Off"
     return state
 
 
@@ -209,8 +274,10 @@ async def _update_song_card_buttons(
     *,
     next_disabled: bool | None = None,
     like_disabled: bool | None = None,
+    autoplay_disabled: bool | None = None,
+    autoplay_active: bool | None = None,
 ) -> None:
-    """Edit a Song Card message's `SongCardView`, preserving any previously disabled button state."""
+    """Edit a Song Card message's `SongCardView`, preserving any unspecified button state."""
     if message is None:
         return
     state = _get_song_card_button_state(message)
@@ -218,6 +285,10 @@ async def _update_song_card_buttons(
         state["next_disabled"] = bool(next_disabled)
     if like_disabled is not None:
         state["like_disabled"] = bool(like_disabled)
+    if autoplay_disabled is not None:
+        state["autoplay_disabled"] = bool(autoplay_disabled)
+    if autoplay_active is not None:
+        state["autoplay_active"] = bool(autoplay_active)
     msg_id = getattr(message, "id", None)
     if msg_id is not None:
         _song_card_button_states[msg_id] = state
@@ -228,31 +299,96 @@ async def _update_song_card_buttons(
             view=SongCardView(
                 next_disabled=state["next_disabled"],
                 like_disabled=state["like_disabled"],
+                autoplay_disabled=state["autoplay_disabled"],
+                autoplay_active=state["autoplay_active"],
             )
         )
     except Exception:
         pass
 
 
-async def _disable_song_card_next_button(message) -> None:
-    """Edit an earlier Song Card message so its `⏭️ Next` button is disabled while preserving `👍 Like` state."""
-    await _update_song_card_buttons(message, next_disabled=True)
+async def _disable_song_card_next_button(message, channel_id=None) -> None:
+    """Edit an earlier/superseded Song Card message so its `⏭️ Next` button is disabled
+    (and when Autoplay is ON in `channel_id`, also disable its Autoplay button)."""
+    if message is None:
+        return
+    autoplay_on = (
+        JOB_ENGINE.get_active_autoplay_job(channel_id) is not None
+        if channel_id is not None
+        else False
+    )
+    await _update_song_card_buttons(
+        message,
+        next_disabled=True,
+        autoplay_disabled=True if autoplay_on else False,
+        autoplay_active=False,
+    )
 
 
 async def _disable_channel_active_song_card_next_button(channel_id) -> None:
-    """Immediately disable the `⏭️ Next` button on the active Song Card in `channel_id` (if any)."""
+    """Immediately disable the `⏭️ Next` button (and `📻 Autoplay Off` if Autoplay is ON) on the active Song Card in `channel_id`."""
     if channel_id is None:
         return
     active_card_msg = _last_song_card_messages.get(channel_id)
     if active_card_msg is not None:
-        await _disable_song_card_next_button(active_card_msg)
+        await _disable_song_card_next_button(active_card_msg, channel_id=channel_id)
+
+
+async def _sync_channel_song_cards_autoplay_state(
+    channel_id,
+    *,
+    autoplay_on: bool,
+    in_flight_new_song: bool = False,
+) -> None:
+    """Synchronize the Autoplay & Next button states across all tracked Song Cards in `channel_id`:
+    - When `autoplay_on=True`: all previous Song Cards have `📻 Autoplay` disabled; only the latest Song Card
+      (when `not in_flight_new_song`) shows active `📻 Autoplay Off`.
+    - When `autoplay_on=False`: all Song Cards (current and past) have `📻 Autoplay` enabled.
+    """
+    if channel_id is None:
+        return
+    cards = list(_channel_song_card_messages.get(channel_id) or [])
+    last_card = _last_song_card_messages.get(channel_id)
+    if last_card is not None and all(getattr(m, "id", None) != getattr(last_card, "id", None) for m in cards):
+        cards.append(last_card)
+    last_id = getattr(last_card, "id", None) if last_card is not None else None
+
+    for card_msg in cards:
+        cid = getattr(card_msg, "id", None)
+        is_last = last_card is not None and (card_msg is last_card or (cid is not None and cid == last_id))
+        if autoplay_on:
+            if is_last and not in_flight_new_song:
+                await _update_song_card_buttons(
+                    card_msg,
+                    autoplay_disabled=False,
+                    autoplay_active=True,
+                )
+            else:
+                await _update_song_card_buttons(
+                    card_msg,
+                    next_disabled=True,
+                    autoplay_disabled=True,
+                    autoplay_active=False,
+                )
+        else:
+            await _update_song_card_buttons(
+                card_msg,
+                next_disabled=True if (not is_last or in_flight_new_song) else None,
+                autoplay_disabled=False,
+                autoplay_active=False,
+            )
 
 
 async def _send_discord_message(channel, text: str = "", files=None):
     """Send `text` (and optional `files`) to `channel`, automatically attaching `SongCardView` if `text` is a Song Card
-    and disabling the `⏭️ Next` button on the previous Song Card in that channel."""
-    card_view = build_song_card_view(text)
+    and disabling the `⏭️ Next` (and `📻 Autoplay` when Autoplay is ON) buttons on previous Song Cards in that channel."""
     channel_id = getattr(channel, "id", None)
+    autoplay_on = (
+        JOB_ENGINE.get_active_autoplay_job(channel_id) is not None
+        if channel_id is not None
+        else False
+    )
+    card_view = build_song_card_view(text, autoplay_active=autoplay_on)
     prev_card_msg = _last_song_card_messages.get(channel_id) if (card_view is not None and channel_id is not None) else None
     kwargs = {}
     if files:
@@ -273,13 +409,27 @@ async def _send_discord_message(channel, text: str = "", files=None):
             sent_msg = await channel.send(**kwargs)
 
     if card_view is not None and channel_id is not None:
-        if prev_card_msg is not None and (sent_msg is None or getattr(prev_card_msg, "id", None) != getattr(sent_msg, "id", None)):
-            await _disable_song_card_next_button(prev_card_msg)
+        sent_msg_id = getattr(sent_msg, "id", None) if sent_msg is not None else None
+        if autoplay_on:
+            prev_cards = list(_channel_song_card_messages.get(channel_id) or [])
+            if prev_card_msg is not None and all(getattr(m, "id", None) != getattr(prev_card_msg, "id", None) for m in prev_cards):
+                prev_cards.append(prev_card_msg)
+            for old_msg in prev_cards:
+                if sent_msg is None or getattr(old_msg, "id", None) != sent_msg_id:
+                    await _disable_song_card_next_button(old_msg, channel_id=channel_id)
+        elif prev_card_msg is not None and (sent_msg is None or getattr(prev_card_msg, "id", None) != sent_msg_id):
+            await _disable_song_card_next_button(prev_card_msg, channel_id=channel_id)
+
         if sent_msg is not None:
-            sent_msg_id = getattr(sent_msg, "id", None)
             if sent_msg_id is not None:
-                _song_card_button_states[sent_msg_id] = {"next_disabled": False, "like_disabled": False}
+                _song_card_button_states[sent_msg_id] = {
+                    "next_disabled": False,
+                    "like_disabled": False,
+                    "autoplay_disabled": False,
+                    "autoplay_active": autoplay_on,
+                }
             _last_song_card_messages[channel_id] = sent_msg
+            _register_channel_song_card_message(channel_id, sent_msg)
     return sent_msg
 
 _default_profile = os.getenv("DEFAULT_PROFILE", "").lower()
@@ -604,6 +754,11 @@ async def handle_job_fire(job, message_text: str):
             await _send_discord_message(channel, "", files=discord_files)
 
     if not is_music_card:
+        if (
+            getattr(job, "trigger_type", None) == TriggerType.AUTOPLAY
+            and JOB_ENGINE.get_active_autoplay_job(channel_id) is None
+        ):
+            await _sync_channel_song_cards_autoplay_state(channel_id, autoplay_on=False)
         await VOICE_COHOST.announce_tracker_event(channel_id, final_output, profile_or_mode=current_mode)
 
     mode_config = MODES[current_mode]
@@ -887,8 +1042,20 @@ async def process_song_card_like(
     handled_reactions.add(reaction_key)
 
     channel_id = getattr(channel, "id", None)
+    autoplay_on = (
+        JOB_ENGINE.get_active_autoplay_job(channel_id) is not None
+        if channel_id is not None
+        else False
+    )
     if message is not None:
-        await _update_song_card_buttons(message, next_disabled=True, like_disabled=True)
+        _register_channel_song_card_message(channel_id, message)
+        await _update_song_card_buttons(
+            message,
+            next_disabled=True,
+            like_disabled=True,
+            autoplay_disabled=True if autoplay_on else False,
+            autoplay_active=False,
+        )
     await _disable_channel_active_song_card_next_button(channel_id)
 
     if user is None:
@@ -1196,8 +1363,146 @@ async def process_song_card_next(
         _active_next_channels.discard(channel_id)
 
 
+async def process_song_card_autoplay(
+    channel,
+    message,
+    message_content: str,
+    user_id: int,
+    user_display_name: str,
+    author_voice_channel=None,
+) -> bool:
+    """
+    Handler for the 📻 Autoplay / 📻 Autoplay Off button on a Song Card:
+    - When Autoplay is OFF: starts Autoplay seeded from the clicked Song Card (`!autoplay similar to <Song> by <Artist>`),
+      immediately disables `⏭️ Next` and `📻 Autoplay` on all previous Song Cards in the channel, and posts a new Song Card
+      whose button is `📻 Autoplay Off`.
+    - When Autoplay is ON (clicked `📻 Autoplay Off` on the latest Song Card): stops Autoplay (`!stopautoplay`)
+      and re-enables `📻 Autoplay` on all tracked Song Cards in the channel.
+    """
+    channel_id = channel.id
+    if message is not None:
+        _register_channel_song_card_message(channel_id, message)
+
+    active_autoplay = JOB_ENGINE.get_active_autoplay_job(channel_id)
+    msg_id = getattr(message, "id", 0) or 0
+    active_card_msg = _last_song_card_messages.get(channel_id)
+    is_older_card = (
+        active_card_msg is not None
+        and getattr(active_card_msg, "id", None)
+        and msg_id
+        and active_card_msg.id != msg_id
+    )
+
+    # State 1: Autoplay is currently ON -> clicking `📻 Autoplay Off` on the latest Song Card stops Autoplay
+    if active_autoplay is not None:
+        if is_older_card:
+            await _update_song_card_buttons(
+                message,
+                next_disabled=True,
+                autoplay_disabled=True,
+                autoplay_active=False,
+            )
+            return False
+
+        async with channel.typing():
+            stop_res = await dispatch_tracker_command(
+                text="!stopautoplay",
+                channel_id=channel_id,
+                flight_tracker_fn=skill_flight_tracker,
+                flight_tracker_service=FLIGHT_TRACKER,
+                sports_tracker_fn=skill_sports_tracker,
+                sports_tracker_service=SPORTS_TRACKER,
+            )
+            if VOICE_COHOST.is_music_playing(channel_id):
+                VOICE_COHOST.stop_music(channel_id, clear_queue=False)
+            await _sync_channel_song_cards_autoplay_state(channel_id, autoplay_on=False)
+            if stop_res:
+                await _send_discord_message(channel, stop_res)
+            return True
+
+    # State 2: Autoplay is currently OFF -> clicking `📻 Autoplay` on ANY Song Card starts Autoplay and posts a new song immediately
+    if channel_id in _active_next_channels:
+        return False
+    _active_next_channels.add(channel_id)
+    try:
+        if message is not None:
+            await _update_song_card_buttons(
+                message,
+                next_disabled=True,
+                autoplay_disabled=True,
+                autoplay_active=False,
+            )
+        await _sync_channel_song_cards_autoplay_state(
+            channel_id,
+            autoplay_on=True,
+            in_flight_new_song=True,
+        )
+
+        card_target = extract_song_card_target(message_content)
+        if card_target and card_target.get("clean_title"):
+            clean_t = card_target["clean_title"]
+            orig_a = card_target.get("orig_artist") or ""
+            if orig_a and orig_a.lower() not in ("unknown", "unknown artist"):
+                seed_query = f"similar to {clean_t} by {orig_a}"
+            else:
+                seed_query = f"similar to {clean_t}"
+        else:
+            m_gen = re.search(r"(?im)^\s*(?:\*\*)?Genre:\*{0,2}\s*(.+)$", message_content or "")
+            seed_query = m_gen.group(1).strip() if m_gen else "dnb"
+
+        set_active_user(user_id, user_display_name)
+        set_active_channel_id(channel_id)
+        async with channel.typing():
+            tracker_res = await dispatch_tracker_command(
+                text=f"!autoplay {seed_query}",
+                channel_id=channel_id,
+                flight_tracker_fn=skill_flight_tracker,
+                flight_tracker_service=FLIGHT_TRACKER,
+                sports_tracker_fn=skill_sports_tracker,
+                sports_tracker_service=SPORTS_TRACKER,
+            )
+            if JOB_ENGINE.has_active_work():
+                JOB_ENGINE.ensure_loop_running()
+            if tracker_res:
+                if (
+                    VOICE_COHOST.extract_song_card_track(tracker_res) is not None
+                    and VOICE_COHOST.get_session(channel_id) is not None
+                ):
+                    voice_badge = await VOICE_COHOST.stream_music_from_card_async(
+                        channel_id,
+                        tracker_res,
+                        replace_current=True,
+                        allow_auto_join=False,
+                        active_mode=current_mode,
+                    )
+                    if voice_badge and voice_badge not in tracker_res:
+                        tracker_res = f"{tracker_res.rstrip()}\n{voice_badge}"
+                await _send_discord_message(channel, tracker_res)
+                mode_config = MODES[current_mode]
+                async with channel_locks[channel_id]:
+                    if channel_id not in chat_history:
+                        system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
+                        chat_history[channel_id] = [system_msg]
+                    chat_history[channel_id].append({
+                        "role": "assistant",
+                        "content": tracker_res,
+                    })
+                return True
+        if JOB_ENGINE.get_active_autoplay_job(channel_id) is None:
+            await _sync_channel_song_cards_autoplay_state(channel_id, autoplay_on=False)
+        return False
+    except Exception as e:
+        print(f"❌ [Song Card Autoplay Error]: {e}")
+        if JOB_ENGINE.get_active_autoplay_job(channel_id) is None:
+            await _sync_channel_song_cards_autoplay_state(channel_id, autoplay_on=False)
+        await channel.send(f"<@{user_id}> ⚠️ Something went wrong while toggling Autoplay. Please try again!")
+        return False
+    finally:
+        _active_next_channels.discard(channel_id)
+
+
 async def handle_song_card_button_interaction(interaction: discord.Interaction, action: str) -> None:
-    """Entry point for clicks on the Song Card `👍 Like` and `⏭️ Next` buttons."""
+    """Entry point for clicks on the Song Card `⏭️ Next`, `👍 Like`, and `📻 Autoplay` buttons."""
     user = getattr(interaction, "user", None)
     if user is None or (client.user and getattr(user, "id", None) == client.user.id):
         return
@@ -1255,11 +1560,16 @@ async def handle_song_card_button_interaction(interaction: discord.Interaction, 
 
     if action == "like":
         # Pressing Like triggers a new song recommendation -> immediately disable BOTH Like and Next on this card
-        # as well as Next on the channel's active Song Card.
+        # as well as Next (and Autoplay Off if Autoplay is ON) on the channel's active Song Card.
+        autoplay_on = JOB_ENGINE.get_active_autoplay_job(channel.id) is not None
+        if msg is not None:
+            _register_channel_song_card_message(channel.id, msg)
         await _update_song_card_buttons(
             msg,
             like_disabled=True,
             next_disabled=True,
+            autoplay_disabled=True if autoplay_on else False,
+            autoplay_active=False,
         )
         await _disable_channel_active_song_card_next_button(channel.id)
         await process_song_card_like(
@@ -1271,7 +1581,15 @@ async def handle_song_card_button_interaction(interaction: discord.Interaction, 
             message=msg,
         )
     elif action == "next":
-        await _update_song_card_buttons(msg, next_disabled=True)
+        autoplay_on = JOB_ENGINE.get_active_autoplay_job(channel.id) is not None
+        if msg is not None:
+            _register_channel_song_card_message(channel.id, msg)
+        await _update_song_card_buttons(
+            msg,
+            next_disabled=True,
+            autoplay_disabled=True if autoplay_on else False,
+            autoplay_active=False,
+        )
         if is_older_card:
             return
         await _disable_channel_active_song_card_next_button(channel.id)
@@ -1279,6 +1597,15 @@ async def handle_song_card_button_interaction(interaction: discord.Interaction, 
             _last_song_card_messages[channel.id] = msg
         await process_song_card_next(
             channel=channel,
+            message_content=msg_content,
+            user_id=user.id,
+            user_display_name=user_display,
+            author_voice_channel=author_voice_channel,
+        )
+    elif action == "autoplay":
+        await process_song_card_autoplay(
+            channel=channel,
+            message=msg,
             message_content=msg_content,
             user_id=user.id,
             user_display_name=user_display,
@@ -2373,8 +2700,13 @@ async def on_message(message):
     VOICE_COHOST.register_author_voice_channel(message.channel.id, author_voice_channel)
 
     # Direct Flight & Live Sports Tracker Commands (!trackflight, !untrackflight, !trackedflights, !track, !untrack, !tracked, !autoplay, !stopautoplay)
+    was_autoplay_on = JOB_ENGINE.get_active_autoplay_job(message.channel.id) is not None
     if user_input.strip().lower().startswith("!autoplay"):
-        await _disable_channel_active_song_card_next_button(message.channel.id)
+        await _sync_channel_song_cards_autoplay_state(
+            message.channel.id,
+            autoplay_on=True,
+            in_flight_new_song=True,
+        )
     tracker_res = await dispatch_tracker_command(
         text=user_input,
         channel_id=message.channel.id,
@@ -2385,6 +2717,7 @@ async def on_message(message):
     )
     if tracker_res is not None:
         active_channels.add(message.channel.id)
+        is_autoplay_now = JOB_ENGINE.get_active_autoplay_job(message.channel.id) is not None
         if user_input.strip().lower().startswith("!stopautoplay") and VOICE_COHOST.is_music_playing(message.channel.id):
             VOICE_COHOST.stop_music(message.channel.id, clear_queue=False)
         elif VOICE_COHOST.extract_song_card_track(tracker_res) is not None:
@@ -2397,6 +2730,8 @@ async def on_message(message):
             )
             if voice_badge and voice_badge not in tracker_res:
                 tracker_res = f"{tracker_res.rstrip()}\n{voice_badge}"
+        if was_autoplay_on and not is_autoplay_now:
+            await _sync_channel_song_cards_autoplay_state(message.channel.id, autoplay_on=False)
         await _send_discord_message(message.channel, tracker_res)
         return
 
@@ -2482,7 +2817,13 @@ async def on_message(message):
     turn_start_idx = len(turn_history) - 1
 
     # Phase 2: Lock-free turn execution and reply post-processing
-    if detect_missed_music_shift_tool_call(turn_history) is not None or has_explicit_autoplay_start_intent(user_input):
+    if has_explicit_autoplay_start_intent(user_input):
+        await _sync_channel_song_cards_autoplay_state(
+            channel_id,
+            autoplay_on=True,
+            in_flight_new_song=True,
+        )
+    elif detect_missed_music_shift_tool_call(turn_history) is not None:
         await _disable_channel_active_song_card_next_button(channel_id)
     async with message.channel.typing():
         try:
@@ -2520,6 +2861,8 @@ async def on_message(message):
             set_active_channel_id(channel_id)
             reply = await run_in_worker(standardize_song_reply, reply)
             reply = JOB_ENGINE.sync_channel_autoplay_on_track_played(channel_id, reply, new_query_hint=user_input)
+            if was_autoplay_on and JOB_ENGINE.get_active_autoplay_job(channel_id) is None:
+                await _sync_channel_song_cards_autoplay_state(channel_id, autoplay_on=False)
 
             # Scrub internal tool name leaks, meta-refusals, and hallucinated betting links
             reply = sanitize_agent_reply(reply)

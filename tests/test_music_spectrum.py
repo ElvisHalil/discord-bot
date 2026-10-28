@@ -343,8 +343,8 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         view_card = bot_main.build_song_card_view(song_card)
         self.assertIsNotNone(view_card)
         custom_ids = [c.custom_id for c in view_card.children]
-        # `⏭️ Next` must be in front of `👍 Like`
-        self.assertEqual(custom_ids, ["song_card:next", "song_card:like"])
+        # `⏭️ Next` in front of `👍 Like`, with `📻 Autoplay` on the right
+        self.assertEqual(custom_ids, ["song_card:next", "song_card:like", "song_card:autoplay"])
 
         self.assertIsNone(bot_main.build_song_card_view(plain_text))
 
@@ -356,6 +356,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
 
         channel.send.reset_mock()
         bot_main._last_song_card_messages.clear()
+        bot_main._channel_song_card_messages.clear()
         bot_main._song_card_button_states.clear()
         msg1 = MagicMock(id=1001, view=None, edit=AsyncMock())
         msg2 = MagicMock(id=1002, view=None, edit=AsyncMock())
@@ -368,15 +369,21 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent_args[0], song_card)
         first_view = sent_kwargs.get("view")
         self.assertIsInstance(first_view, bot_main.SongCardView)
-        self.assertEqual([(c.custom_id, c.disabled) for c in first_view.children], [("song_card:next", False), ("song_card:like", False)])
+        self.assertEqual(
+            [(c.custom_id, c.disabled, c.label) for c in first_view.children],
+            [("song_card:next", False, "Next"), ("song_card:like", False, "Like"), ("song_card:autoplay", False, "Autoplay")],
+        )
         msg1.edit.assert_not_awaited()
 
-        # Sending a second Song Card disables the `⏭️ Next` button on `msg1` while keeping `👍 Like` enabled
+        # Sending a second Song Card (while Autoplay is OFF) disables `⏭️ Next` on `msg1` while keeping `👍 Like` and `📻 Autoplay` enabled
         await bot_main._send_discord_message(channel, song_card)
         msg1.edit.assert_awaited_once()
         disabled_view = msg1.edit.call_args.kwargs.get("view")
         self.assertIsInstance(disabled_view, bot_main.SongCardView)
-        self.assertEqual([(c.custom_id, c.disabled) for c in disabled_view.children], [("song_card:next", True), ("song_card:like", False)])
+        self.assertEqual(
+            [(c.custom_id, c.disabled, c.label) for c in disabled_view.children],
+            [("song_card:next", True, "Next"), ("song_card:like", False, "Like"), ("song_card:autoplay", False, "Autoplay")],
+        )
         self.assertIs(bot_main._last_song_card_messages.get(777100), msg2)
 
     async def test_like_button_interaction_matches_reaction_flow_and_deduplicates(self):
@@ -460,7 +467,10 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             # Second click by same user on same message is deduplicated via handled_reactions
             await bot_main.handle_song_card_button_interaction(interaction, action="like")
 
-        self.assertEqual(disabled_before_rec, [{"song_card:next": True, "song_card:like": True}])
+        self.assertEqual(
+            disabled_before_rec,
+            [{"song_card:next": True, "song_card:like": True, "song_card:autoplay": False}],
+        )
         self.assertEqual(channel.send.await_count, 1)
         sent_text = channel.send.call_args.args[0]
         sent_view = channel.send.call_args.kwargs.get("view")
@@ -606,11 +616,13 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         bot_main.chat_history.pop(channel_id, None)
         bot_main.handled_reactions.clear()
         bot_main._last_song_card_messages.clear()
+        bot_main._channel_song_card_messages.clear()
         bot_main._song_card_button_states.clear()
         clear_channel_played_songs(channel_id)
 
         sent_cards = []
         liked_card_indices = set()
+        autoplay_active_state = {"job": None}
 
         async def _fake_send(text="", **kwargs):
             view = kwargs.get("view")
@@ -627,7 +639,8 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
                 return msg_obj
 
             msg_obj.edit = AsyncMock(side_effect=_edit_msg)
-            sent_cards.append(msg_obj)
+            if view is not None:
+                sent_cards.append(msg_obj)
             return msg_obj
 
         channel = MagicMock()
@@ -649,14 +662,19 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         def _button_states(msg_obj):
             return {c.custom_id: c.disabled for c in msg_obj.view.children}
 
+        def _button_labels(msg_obj):
+            return {c.custom_id: c.label for c in msg_obj.view.children}
+
         def _assert_only_last_card_next_enabled():
             self.assertGreaterEqual(len(sent_cards), 1)
+            is_auto_on = autoplay_active_state["job"] is not None
             for idx, card_msg in enumerate(sent_cards):
                 self.assertEqual(
                     [c.custom_id for c in card_msg.view.children],
-                    ["song_card:next", "song_card:like"],
+                    ["song_card:next", "song_card:like", "song_card:autoplay"],
                 )
                 states = _button_states(card_msg)
+                labels = _button_labels(card_msg)
                 # `👍 Like` is disabled once pressed on that card, and enabled otherwise
                 if idx in liked_card_indices:
                     self.assertTrue(states["song_card:like"], f"Card #{idx + 1} Like button must be disabled after press")
@@ -664,8 +682,18 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(states["song_card:like"], f"Card #{idx + 1} Like button should be enabled")
                 if idx < len(sent_cards) - 1:
                     self.assertTrue(states["song_card:next"], f"Previous Card #{idx + 1} Next button must be disabled")
+                    if is_auto_on:
+                        self.assertTrue(states["song_card:autoplay"], f"Previous Card #{idx + 1} Autoplay must be disabled when Autoplay is ON")
+                    else:
+                        self.assertFalse(states["song_card:autoplay"], f"Previous Card #{idx + 1} Autoplay must be enabled when Autoplay is OFF")
+                        self.assertEqual(labels["song_card:autoplay"], "Autoplay")
                 else:
                     self.assertFalse(states["song_card:next"], f"Latest Card #{idx + 1} Next button must be enabled")
+                    self.assertFalse(states["song_card:autoplay"], f"Latest Card #{idx + 1} Autoplay button must be enabled")
+                    self.assertEqual(
+                        labels["song_card:autoplay"],
+                        "Autoplay Off" if is_auto_on else "Autoplay",
+                    )
 
         card1_text = (
             "**Song:** Solar System\n"
@@ -719,7 +747,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(bot_main, "client", SimpleNamespace(user=bot_user, get_channel=lambda _cid: channel, get_user=lambda _uid: user_obj)),
-            patch.object(bot_main.JOB_ENGINE, "get_active_autoplay_job", return_value=None),
+            patch.object(bot_main.JOB_ENGINE, "get_active_autoplay_job", side_effect=lambda _cid: autoplay_active_state["job"]),
             patch.object(bot_main, "standardize_song_reply", side_effect=lambda r: r),
             patch.object(
                 bot_main.ollama_client,
@@ -759,7 +787,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             async def _resolve_rec_3(*_a, **_kw):
                 self.assertEqual(
                     _button_states(sent_cards[1]),
-                    {"song_card:next": True, "song_card:like": True},
+                    {"song_card:next": True, "song_card:like": True, "song_card:autoplay": False},
                 )
                 return fake_rec_3
 
@@ -812,7 +840,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             async def _resolve_rec_5(*_a, **_kw):
                 self.assertEqual(
                     _button_states(sent_cards[0]),
-                    {"song_card:next": True, "song_card:like": True},
+                    {"song_card:next": True, "song_card:like": True, "song_card:autoplay": False},
                 )
                 self.assertTrue(_button_states(sent_cards[3])["song_card:next"])
                 return fake_rec_5
@@ -830,6 +858,59 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             with patch.object(bot_main, "run_agent_turn", AsyncMock(return_value=card6_text)):
                 await bot_main.handle_song_card_button_interaction(_make_interaction(sent_cards[4]), action="next")
             self.assertEqual(len(sent_cards), 6)
+            _assert_only_last_card_next_enabled()
+
+            # Step 8: User clicks `📻 Autoplay` on an OLD card (Card #4: Strobe by deadmau5)
+            # -> immediately disables Autoplay & Next on ALL existing cards (Cards #1-#6), starts Autoplay, and posts Card #7 with `Autoplay Off`
+            card7_autoplay_text = (
+                "📻 **Autoplay (similar to Strobe by deadmau5)** — Next track in `3:45`:\n\n"
+                "**Song:** Faxing Berlin\n"
+                "**Artist:** deadmau5\n"
+                "**Genre:** Progressive House\n\n"
+                "https://music.youtube.com/watch?v=vid_card_007"
+            )
+
+            async def _fake_start_autoplay(**kw):
+                # Before the new Autoplay track finishes resolving, all 6 existing cards have Autoplay & Next disabled
+                for existing_c in sent_cards:
+                    st = _button_states(existing_c)
+                    self.assertTrue(st["song_card:next"])
+                    self.assertTrue(st["song_card:autoplay"])
+                autoplay_active_state["job"] = SimpleNamespace(
+                    job_id="J-777",
+                    payload_text="similar to Strobe by deadmau5",
+                )
+                self.assertIn("Strobe", kw.get("text", ""))
+                return card7_autoplay_text
+
+            with patch.object(bot_main, "dispatch_tracker_command", AsyncMock(side_effect=_fake_start_autoplay)):
+                await bot_main.handle_song_card_button_interaction(_make_interaction(sent_cards[3]), action="autoplay")
+            self.assertEqual(len(sent_cards), 7)
+            _assert_only_last_card_next_enabled()
+
+            # Step 9: While Autoplay is ON, user clicks `⏭️ Next` on Card #7 -> Card #7 Next AND Autoplay Off are disabled, Card #8 posted with `Autoplay Off`
+            card8_autoplay_text = (
+                "📻 **Autoplay (similar to Strobe by deadmau5)** — Next track in `4:00`:\n\n"
+                "**Song:** Arguru\n"
+                "**Artist:** deadmau5\n"
+                "**Genre:** Progressive House\n\n"
+                "https://music.youtube.com/watch?v=vid_card_008"
+            )
+            with patch.object(bot_main, "dispatch_voice_command", AsyncMock(return_value=card8_autoplay_text)):
+                await bot_main.handle_song_card_button_interaction(_make_interaction(sent_cards[6]), action="next")
+            self.assertEqual(len(sent_cards), 8)
+            _assert_only_last_card_next_enabled()
+
+            # Step 10: User clicks `📻 Autoplay Off` on the latest card (Card #8)
+            # -> stops Autoplay and re-enables `📻 Autoplay` on ALL 8 cards while keeping `⏭️ Next` enabled only on Card #8
+            async def _fake_stop_autoplay(**kw):
+                self.assertEqual(kw.get("text"), "!stopautoplay")
+                autoplay_active_state["job"] = None
+                return "🛑 Stopped: `J-777` (Music Autoplay)"
+
+            with patch.object(bot_main, "dispatch_tracker_command", AsyncMock(side_effect=_fake_stop_autoplay)):
+                await bot_main.handle_song_card_button_interaction(_make_interaction(sent_cards[7]), action="autoplay")
+            self.assertEqual(len(sent_cards), 8)
             _assert_only_last_card_next_enabled()
 
 
