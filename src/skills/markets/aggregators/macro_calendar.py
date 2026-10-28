@@ -209,6 +209,23 @@ def _compute_bps_change_label(actual_str: Optional[str], prev_str: Optional[str]
         return ""
 
 
+def _compute_consensus_outcome_label(actual_str: Optional[str], forecast_str: Optional[str]) -> str:
+    """Compare an announced Actual rate against the Consensus Forecast ('As Expected' vs. 'Surprise')."""
+    if not actual_str or not forecast_str:
+        return ""
+    try:
+        act = float(str(actual_str).replace("%", "").strip())
+        fc = float(str(forecast_str).replace("%", "").strip())
+        diff_bps = int(round((act - fc) * 100))
+        if diff_bps == 0:
+            return f" (**As Expected — matched {forecast_str} consensus**)"
+        if diff_bps > 0:
+            return f" (**Surprise: +{diff_bps} bps above {forecast_str} consensus**)"
+        return f" (**Surprise: {diff_bps} bps below {forecast_str} consensus**)"
+    except ValueError:
+        return " (**As Expected**)" if str(actual_str).strip() == str(forecast_str).strip() else f" (vs. {forecast_str} consensus)"
+
+
 def _et_to_utc(year: int, month: int, day: int, hour_et: int, minute_et: int) -> datetime:
     """Convert an Eastern Time wall clock `(year, month, day, hour_et, minute_et)` into an exact UTC datetime."""
     prelim_utc = datetime(year, month, day, hour_et + 4, minute_et, tzinfo=timezone.utc)
@@ -640,11 +657,12 @@ class MacroCalendarAggregator(BaseMarketAggregator):
         if ev.actual is not None:
             metrics.append(f"**Actual: {ev.actual}**{bps_tag}")
         if ev.forecast is not None:
-            f_bps_tag = (
-                _compute_bps_change_label(ev.forecast, ev.previous, is_forecast=True)
-                if ev.category == "rate_decision" and ev.actual is None
-                else ""
-            )
+            if ev.category == "rate_decision" and ev.actual is not None:
+                f_bps_tag = _compute_consensus_outcome_label(ev.actual, ev.forecast)
+            elif ev.category == "rate_decision" and ev.actual is None:
+                f_bps_tag = _compute_bps_change_label(ev.forecast, ev.previous, is_forecast=True)
+            else:
+                f_bps_tag = ""
             metrics.append(f"Forecast: **{ev.forecast}**{f_bps_tag}")
         elif ev.category == "rate_decision" and ev.actual is None and ev.previous is not None:
             metrics.append("Forecast: **Consensus pending**")
