@@ -907,6 +907,41 @@ class TestHighSeverityCodeReviewFixes(unittest.TestCase):
         self.assertEqual(fired_alerts[0][1], "1")
         self.assertEqual(len(tracker.tracked_matches), 2)
 
+    def test_disabled_skills_env_filter_in_registry(self):
+        """DISABLED_SKILLS should cleanly exclude specified domain skill packs or individual tools from toolsets."""
+        from src.registry import (
+            _ALL_CHAT_TOOLS,
+            _ALL_RESEARCH_TOOLS,
+            filter_toolset,
+            get_disabled_tool_names,
+        )
+
+        self.assertEqual(get_disabled_tool_names(""), set())
+        disabled = get_disabled_tool_names("flights, sports, music")
+        self.assertEqual(
+            disabled,
+            {
+                "skill_flight_info",
+                "skill_flight_tracker",
+                "skill_sports_esports",
+                "skill_sports_info",
+                "skill_sports_odds",
+                "skill_sports_tracker",
+                "skill_music_discovery",
+                "skill_music_analysis",
+            },
+        )
+        filtered_res = filter_toolset(_ALL_RESEARCH_TOOLS, "flights, sports")
+        self.assertNotIn("skill_flight_info", filtered_res)
+        self.assertNotIn("skill_flight_tracker", filtered_res)
+        self.assertNotIn("skill_sports_info", filtered_res)
+        self.assertIn("skill_markets_info", filtered_res)
+        self.assertIn("skill_graphing_info", filtered_res)
+
+        filtered_chat = filter_toolset(_ALL_CHAT_TOOLS, "voice")
+        self.assertNotIn("skill_voice_info", filtered_chat)
+        self.assertIn("skill_job_manager", filtered_chat)
+
 
 if __name__ == "__main__":
     unittest.main()
