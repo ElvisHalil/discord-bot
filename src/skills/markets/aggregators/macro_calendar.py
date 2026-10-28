@@ -187,7 +187,7 @@ def _fmt_rate_val(val: object, unit: str = "") -> Optional[str]:
 
 
 def _compute_bps_change_label(actual_str: Optional[str], prev_str: Optional[str], is_forecast: bool = False) -> str:
-    """Compute basis points change label (e.g. '+25 bps hike', '-25 bps cut', 'Unchanged / Hold') when both are % rates."""
+    """Compute basis points change label (e.g. '+25 bps hike', '-25 bps cut', '0 bps / Hold') when both are % rates."""
     if not actual_str or not prev_str:
         return ""
     try:
@@ -196,15 +196,15 @@ def _compute_bps_change_label(actual_str: Optional[str], prev_str: Optional[str]
         diff_bps = int(round((act - prv) * 100))
         if is_forecast:
             if diff_bps > 0:
-                return f" (Forecasted +{diff_bps} bps rate hike from {prev_str})"
+                return f" (**+{diff_bps} bps rate hike** from {prev_str} to {actual_str})"
             if diff_bps < 0:
-                return f" (Forecasted {diff_bps} bps rate cut from {prev_str})"
-            return f" (Forecasted Hold / Unchanged at {actual_str})"
+                return f" (**{diff_bps} bps rate cut** from {prev_str} to {actual_str})"
+            return f" (**0 bps / Hold** — unchanged at {actual_str})"
         if diff_bps > 0:
-            return f" (**RAISED +{diff_bps} bps rate hike from {prev_str} to {actual_str}**)"
+            return f" (**RAISED +{diff_bps} bps rate hike** from {prev_str} to {actual_str})"
         if diff_bps < 0:
-            return f" (**CUT {diff_bps} bps rate cut from {prev_str} to {actual_str}**)"
-        return f" (**HELD UNCHANGED at {actual_str}**)"
+            return f" (**CUT {diff_bps} bps rate cut** from {prev_str} to {actual_str})"
+        return f" (**HELD UNCHANGED (0 bps)** at {actual_str})"
     except ValueError:
         return ""
 
@@ -560,6 +560,11 @@ class MacroCalendarAggregator(BaseMarketAggregator):
                 by_sig[sig] = ff
 
         # Backfill official FOMC and BoC rate decisions within [start_utc, end_utc] if not already in `by_sig`
+        latest_us_rate: Optional[str] = None
+        for e in merged:
+            if e.country == "US" and e.category == "rate_decision" and (e.actual or e.forecast or e.previous):
+                latest_us_rate = e.actual or e.forecast or e.previous
+
         for m in fomc_schedule:
             dec_utc: datetime = m["decision_utc"]  # type: ignore[assignment]
             if start_utc <= dec_utc <= end_utc:
@@ -570,6 +575,7 @@ class MacroCalendarAggregator(BaseMarketAggregator):
                         country="US",
                         timestamp_utc=dec_utc,
                         importance=1,
+                        previous=latest_us_rate,
                         category="rate_decision",
                         source="FederalReserve.gov",
                     )
@@ -596,12 +602,14 @@ class MacroCalendarAggregator(BaseMarketAggregator):
             if start_utc <= dec_utc <= end_utc:
                 sig = ("CA", dec_utc.strftime("%Y-%m-%d"), "rate_decision")
                 if sig not in by_sig:
+                    is_past_or_today = dec_utc.date() <= now_utc.date()
                     ev = MacroCalendarEvent(
                         title="BoC Interest Rate Decision",
                         country="CA",
                         timestamp_utc=dec_utc,
                         importance=1,
-                        actual=latest_boc_target if dec_utc.date() <= now_utc.date() else None,
+                        actual=latest_boc_target if is_past_or_today else None,
+                        previous=latest_boc_target if not is_past_or_today else None,
                         category="rate_decision",
                         source="BankOfCanada.ca",
                     )
@@ -638,8 +646,10 @@ class MacroCalendarAggregator(BaseMarketAggregator):
                 else ""
             )
             metrics.append(f"Forecast: **{ev.forecast}**{f_bps_tag}")
+        elif ev.category == "rate_decision" and ev.actual is None and ev.previous is not None:
+            metrics.append("Forecast: **Consensus pending**")
         if ev.previous is not None:
-            metrics.append(f"Previous: **{ev.previous}**")
+            metrics.append(f"Current/Previous Rate: **{ev.previous}**" if ev.actual is None else f"Previous: **{ev.previous}**")
 
         if press_conf_ev is not None:
             local_tz = resolve_configured_timezone(tz_override=tz_override, ref_utc=press_conf_ev.timestamp_utc)
@@ -741,8 +751,34 @@ class MacroCalendarAggregator(BaseMarketAggregator):
         upcoming_rds = [e for e in rate_decisions if not _is_released(e)]
         if upcoming_rds:
             up_lines = [
-                "=== ⏳ ALL UPCOMING CENTRAL BANK RATE DECISIONS (CHRONOLOGICAL — STARTING WITH TODAY) ==="
+                "=== ⏳ ALL UPCOMING CENTRAL BANK RATE DECISIONS (CHRONOLOGICAL — STARTING WITH TODAY) ===",
+                "| Date & Local Time (ET) | Central Bank | Forecast Rate | Expected Change (bps) | Current / Previous Rate |",
+                "| :--- | :--- | :--- | :--- | :--- |",
             ]
+            for ev in upcoming_rds[:10]:
+                flag, country_name = _COUNTRY_FLAG_MAP.get(ev.country, ("🌐", ev.country))
+                local_tz = resolve_configured_timezone(tz_override=tz_override, ref_utc=ev.timestamp_utc)
+                et_tz = _resolve_tz_token("ET", ref_utc=ev.timestamp_utc) or timezone(timedelta(hours=-4), "EDT")
+                ev_l = ev.timestamp_utc.astimezone(local_tz)
+                ev_e = ev.timestamp_utc.astimezone(et_tz)
+                date_prefix = "TODAY, " if ev_l.date() == local_now.date() else ("Tomorrow, " if ev_l.date() == local_now.date() + timedelta(days=1) else "")
+                dt_cell = f"**{date_prefix}{ev_l.strftime('%a %b %d, %Y')} @ {ev_l.strftime('%I:%M %p').lstrip('0')} {_short_tz_abbr(ev_l)}** ({ev_e.strftime('%I:%M %p').lstrip('0')} {_short_tz_abbr(ev_e)})"
+                fc_cell = f"**{ev.forecast}**" if ev.forecast else "*Consensus pending*"
+                prv_cell = f"**{ev.previous}**" if ev.previous else "—"
+                bps_cell = "*Consensus pending*"
+                if ev.forecast and ev.previous:
+                    try:
+                        diff_b = int(round((float(ev.forecast.replace("%", "")) - float(ev.previous.replace("%", ""))) * 100))
+                        if diff_b > 0:
+                            bps_cell = f"**+{diff_b} bps hike** ({ev.previous} → {ev.forecast})"
+                        elif diff_b < 0:
+                            bps_cell = f"**{diff_b} bps cut** ({ev.previous} → {ev.forecast})"
+                        else:
+                            bps_cell = f"**0 bps (Hold at {ev.forecast})**"
+                    except ValueError:
+                        pass
+                up_lines.append(f"| {dt_cell} | {flag} {ev.title} ({country_name}) | {fc_cell} | {bps_cell} | {prv_cell} |")
+            up_lines.append("")
             for ev in upcoming_rds[:10]:
                 up_lines.append(_fmt_rd(ev))
             sections.append("\n".join(up_lines))
