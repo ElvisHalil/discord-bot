@@ -1,12 +1,15 @@
-# 🤖 Local LLM Agent & Real-Time Voice Runtime for Discord & Telegram
+# 🤖 Local LLM Runtime Harness & Real-Time Voice Engine
 
-A privacy-first, locally hosted **AI tool-execution engine and real-time Discord voice co-host** for **Discord** and **Telegram**, powered by **Ollama** (`gemma4:e4b`, `qwen3:8b`, etc.).
+A privacy-first, locally hosted **AI Runtime Harness, Real-Time Discord Voice Co-Host, and AST-Enforced Skill Framework** for **Discord** and **Telegram**, powered by **Ollama** (`gemma4:e4b`, `qwen3:8b`, etc.).
 
-Most small local models (`4B–8B` parameters) struggle with multi-step tool calling, link hallucination, and timezone math. This runtime moves heavy lifting out of fragile multi-turn prompts and into a **deterministic, 3-tier multi-threaded Python skill engine**—paired with a **real-time Discord DAVE E2EE voice co-host** and **10 batteries-included domain skill packs** you can customize or toggle off in one `.env` line.
+Raw `4B–8B` local models frequently skip tool schemas, hallucinate URLs, miscalculate timezones, and overwrite structured outputs—while fast-moving AI codebases often degrade into tightly coupled spaghetti. This project solves both problems with **two interlocking harnesses**:
+
+1. **The Agent Runtime Harness (`src/orchestrator.py`, `main.py`, `src/utils/workers.py`, `src/jobs/`)**: Deterministic pre- and post-inference scaffolding that wraps compact `4B–8B` local models so they execute multi-threaded tools, full-timeline video analysis, dynamic background jobs, and **real-time Discord DAVE E2EE voice co-hosting** without hallucinating.
+2. **The AST-Enforced Coding Harness (`src/skills/.example/`, `tests/test_architecture_and_boundaries.py`)**: A strict, constructor-style Python skill contract and **398-test offline verification gate** that mechanically prevents human developers and AI coding agents from introducing cross-skill coupling, thread-pool deadlocks, or architectural drift.
 
 ---
 
-## 📸 Visual Showcase (Rendered On-Demand by Local `4B–8B` Models)
+## 📸 Visual Showcase (Rendered On-Demand via the Runtime Harness)
 
 | **10,000-Path Monte Carlo Price Simulation** | **Monthly Airfare Deal Calendar Heatmap** |
 | :---: | :---: |
@@ -16,20 +19,21 @@ Most small local models (`4B–8B` parameters) struggle with multi-step tool cal
 
 ---
 
-## 🧠 Core Runtime Capabilities (The Engine)
+## 🧠 The Dual-Harness Architecture (Runtime Harness + Coding Harness)
 
-| Core Subsystem | What It Solves |
+| Harness Layer | What It Enforces & Solves |
 | :--- | :--- |
-| 🎯 **Deterministic Tool Engine for `4B–8B` Local LLMs** | • **Code-First 1-Turn Execution**: Typed Python skills + 3-line `templates.py` suffixes replace multi-turn `SKILL.md` prompt improvisation.<br>• **Turn-0 Missed-Tool Recovery**: Automatically intercepts and executes missed tool calls when a small model forgets to invoke a schema.<br>• **Argument & Timezone Enrichment**: Normalizes parameter aliases, recovers multi-turn context, and injects DST-safe dual Local + UTC/CET timestamps.<br>• **Anti-Hallucination Guardrails**: Pre-verifies external links and preserves deterministic cards against LLM rewrites. |
+| 🎯 **Pre- & Post-Inference LLM Runtime Harness** | • **Code-First 1-Turn Execution**: Typed Python skills + 3-line `templates.py` suffixes replace fragile multi-turn `SKILL.md` prompt improvisation.<br>• **Turn-0 Missed-Tool Interception**: Automatically detects and executes missed tool calls when a small local model forgets to invoke a schema.<br>• **Stateful Argument & Timezone Enrichment**: Normalizes parameter aliases, recovers multi-turn context, and injects DST-safe dual Local + UTC/CET timestamps.<br>• **Post-Model Output Guardrails**: Preserves verified cards and job confirmations against LLM rewrites and blocks phantom schedule claims. |
+| 🏛️ **AST-Enforced Coding & Skill Harness** | • **Zero Cross-Skill Coupling**: AST static analysis tests fail the build if any domain skill imports from a sibling skill package.<br>• **Strict Module Separation**: Enforces `StrEnum` in `enums.py`, `@dataclass(slots=True)` in `models.py`, and static tables in `catalogs.py`.<br>• **Copy-Paste Skill Contract**: `src/skills/.example/` provides a drop-in skeleton so humans and AI coding agents author skills identically.<br>• **398 Offline Verification Tests**: Full unit, combinatorial, concurrency, and security suite runs completely offline in ~15–25 seconds. |
 | 🎙️ **Real-Time Discord DAVE E2EE Voice Co-Host & Streamer** | • **DAVE E2EE Decryption**: Real-time `davey` Opus decryption with per-speaker `48 kHz` SSRC demuxing and VAD (`0.30s` silence gap).<br>• **Sub-Second Local STT & 9 Neural Voices**: Pre-warmed `faster-whisper` (`int8`) transcription and 9 `edge-tts` voice/accent presets (`!voice <preset>`).<br>• **3 Listening Modes**: Switch live between `wake_word` (`"Hey bot"`), `conversational` (open mic), and `listen_only` with call recaps (`!vrecap`).<br>• **Ad-Free Voice Music Streaming**: Streams Song Cards and Autoplay radio directly into voice via `yt-dlp` + `FFmpegPCMAudio` (`!pause`, `!skip`, `!queue`). |
-| ⏰ **Unified Background Job, Cron & Condition Engine** | • **One-Shot & Recurring Schedules**: Natural-language reminders and cron/interval routines (`!remind`, *"every Monday at 9am..."*).<br>• **Scheduled Multi-Skill & Graphing Tasks**: Runs full agent turns on schedule and delivers rendered PNG chart attachments automatically.<br>• **Dynamic Condition Evaluators**: Polls market price/move thresholds, weather shifts, YouTube channel uploads, and web keywords.<br>• **Continuous Radio Autoplay**: Background station scheduler (`!autoplay` / `!stopautoplay`) with 1-hour idle protection and real-duration timers. |
+| ⏰ **Unified Background Job, Cron & Condition Harness** | • **One-Shot & Recurring Schedules**: Natural-language reminders and cron/interval routines (`!remind`, *"every Monday at 9am..."*).<br>• **Scheduled Multi-Skill & Graphing Tasks**: Runs full agent turns on schedule and delivers rendered PNG chart attachments automatically.<br>• **Dynamic Condition Evaluators**: Polls market price/move thresholds, weather shifts, YouTube channel uploads, and web keywords.<br>• **Continuous Radio Autoplay**: Background station scheduler (`!autoplay` / `!stopautoplay`) with 1-hour idle protection and real-duration timers. |
 | 🔒 **Hardened Concurrency, Security & Dual-Platform Bridge** | • **3-Tier Deadlock-Free Worker DAG**: Isolates `WORKER_POOL` (`16`) → `SUB_WORKER_POOL` (`24`) → `LEAF_WORKER_POOL` (`32`) with `contextvars` propagation.<br>• **End-to-End SSRF & Redirect Guards**: Blocks private, loopback, link-local, and cloud-metadata IPs on every HTTP hop and media stream.<br>• **Automatic Secret Redaction**: `SecretRedactingFilter` scrubs bot tokens and API keys from logs, exceptions, and cache keys.<br>• **Dual Discord + Telegram Runtime**: Owner-gated DMs (`BOT_OWNER_ID`), mass-ping sanitization, and fail-closed Telegram allowlist security. |
 
 ---
 
-## 🧩 Batteries-Included Skill Packs (`src/skills/` & `src/tools/`)
+## 🧩 Built-In Modular Skill Packs (`src/skills/` & `src/tools/`)
 
-Every domain below is an isolated plugin following the [`src/skills/.example/`](src/skills/.example/) contract. Don't need a domain? Disable it in `.env` with `DISABLED_SKILLS=flights,sports,music`.
+Every domain below is an isolated plugin built on the [`src/skills/.example/`](src/skills/.example/) coding harness contract. Don't need a domain? Disable it in `.env` with `DISABLED_SKILLS=flights,sports,music`.
 
 | Skill Pack | Capabilities |
 | :--- | :--- |
@@ -45,7 +49,7 @@ Every domain below is an isolated plugin following the [`src/skills/.example/`](
 
 ## 🛡️ Fault-Tolerant Provider Fallbacks & Skill Toggling (`DISABLED_SKILLS`)
 
-External web endpoints change DOM structures and rate limits over time. To prevent upstream hiccups from breaking your assistant, every skill inherits from `Base<Domain>Aggregator` with automatic multi-provider fallback chains—and any skill pack you don't use can be disabled in `.env`:
+External web endpoints change DOM structures and rate limits over time. To prevent upstream changes from breaking the runtime harness, every skill inherits from `Base<Domain>Aggregator` with automatic multi-provider fallback chains—and any skill pack you don't use can be disabled in `.env`:
 
 ```ini
 # .env — Disable any domain skill packs you don't need (comma-separated):
@@ -65,22 +69,22 @@ DISABLED_SKILLS=flights,sports,music
 
 ---
 
-## 🏗️ Architecture Overview
+## 🏗️ Harness Architecture & Skill Contract
 
-Every domain skill under `src/skills/` follows an identical, standardized package layout (`__init__.py`, `<skill_name>.py`, `enums.py`, `models.py`, `catalogs.py`, `templates.py`, `aggregators/`, plus optional `context.py`, `tracker.py`, `engine/`, `playback/`), with a copy-paste-ready skeleton in `src/skills/.example/`. Cross-cutting tools and infrastructure live in `src/tools/`, `src/jobs/`, `src/context.py`, and `src/utils/`.
+Every domain skill under `src/skills/` follows an identical, AST-enforced package layout (`__init__.py`, `<skill_name>.py`, `enums.py`, `models.py`, `catalogs.py`, `templates.py`, `aggregators/`, plus optional `context.py`, `tracker.py`, `engine/`, `playback/`), with a copy-paste-ready skeleton in `src/skills/.example/`. Cross-cutting runtime harness components live in `src/orchestrator.py`, `src/tools/`, `src/jobs/`, `src/context.py`, and `src/utils/`.
 
 ```mermaid
 flowchart TD
-    subgraph Entry["Platform Entry Layer"]
-        MAIN["main.py (Discord Bot & Voice Runtime)"]
+    subgraph Entry["Runtime Harness Entry Layer"]
+        MAIN["main.py (Discord Bot & Voice Runtime Harness)"]
         TG["src/utils/telegram.py (Telegram Bridge)"]
         DISP["src/utils/dispatcher.py (Shared Command & Reaction Dispatcher)"]
-        ORCH["src/orchestrator.py (Tool Routing, Enrichment & Sanitization)"]
+        ORCH["src/orchestrator.py (Pre/Post-Inference Harness: Routing, Enrichment & Sanitization)"]
         REG["src/registry.py (Tool Schemas & DISABLED_SKILLS Filter)"]
         CFG["src/config.py / src/config.example.py"]
     end
 
-    subgraph Core["Shared Core, Tools & Infrastructure Layer"]
+    subgraph Core["Shared Core, Tools & Infrastructure Harness"]
         CTX["src/context.py (ACTIVE_CHANNEL_ID, Attachment Queue & Event Loop Bridge)"]
         JOB["src/jobs/ (Unified Background Job Engine: Cron/Interval/Condition/Autoplay)"]
         TLS["src/tools/ (system.py Clock/Math/Memory + web.py Search, Vision Images, Stealth Reader & Full-Timeline YouTube Reader)"]
@@ -90,7 +94,7 @@ flowchart TD
         TZ["src/utils/timezones.py (DST-Safe Dual Local + UTC/CET Formatter)"]
     end
 
-    subgraph Skills["Standardized Domain Skills (src/skills/)"]
+    subgraph Skills["AST-Enforced Domain Skill Packs (src/skills/)"]
         VCE["🎙️ voice\n(voice.py, enums, models, catalogs, templates,\ncontext, tracker, engine/, aggregators/, playback/)"]
         MUS["🎵 music\n(music.py, enums, models, catalogs, templates,\ncontext, engine/, aggregators/, playback/)"]
         JBS["⏰ jobs\n(jobs.py, enums, models, catalogs, templates,\naggregators/)"]
@@ -151,10 +155,10 @@ src/skills/<skill_name>/
 4. **Implement your tool entrypoint** (`def skill_<your_skill>_info(...) -> str:`) in `<your_skill>.py` and export it in `src/skills/<your_skill>/__init__.py` and `src/skills/__init__.py`.
 5. **Register the tool** in `src/registry.py` (`RESEARCH_TOOLS` / `CHAT_TOOLS`) and add parameter synonyms to `TOOL_ARG_ALIASES` in `src/utils/domain_vocab.py`.
 
-#### 💡 Why Code-First Skill Packages Instead of `SKILL.md`?
+#### 💡 Why a Code-First Runtime Harness Instead of `SKILL.md`?
 Many coding and OS agents (like Claude Code, Cursor, or OpenClaw) use `SKILL.md` files — Markdown instruction manuals that a large cloud model reads at runtime to figure out what shell commands or scripts to run across multiple turns.
 
-This bot intentionally uses **compiled Python skill packages + `templates.py`** instead:
+This runtime harness intentionally uses **compiled Python skill packages + `templates.py`** instead:
 - **Built for Fast Local Models (`4B–8B`)**: Rather than asking a small local model to read a Markdown guide and improvise CLI commands across 3–4 turns, each skill exposes a strict, typed Python function (`<skill_name>.py`) and appends concise formatting rules (`templates.py`) directly to the tool output in a **single turn**.
 - **Deterministic Speed & Concurrency**: Heavy lifting — like 3-tier deadlock-free worker fan-out, API fallback chains, full-timeline transcript salience scoring (`O(1)` stride-sampling safety for 10h+ streams), and in-memory MP3/PCM signal processing — runs in deterministic, unit-tested Python rather than prompt instructions.
 
@@ -195,9 +199,9 @@ pip install -r requirements.txt
    ```bash
    cp src/config.example.py src/config.py
    ```
-   *(If `src/config.py` is omitted, the bot automatically loads the default `research` and `chat` profiles from `src/config.example.py`.)*
+   *(If `src/config.py` is omitted, the harness automatically loads the default `research` and `chat` profiles from `src/config.example.py`.)*
 
-### 4. Run the Bot
+### 4. Run the Harness
 
 #### Option A: Run Natively
 ```bash
@@ -211,13 +215,13 @@ docker compose up -d --build
 ```
 - **Dedicated GPU `ollama` Container**: Runs `ollama/ollama` inside a sibling container on a private internal bridge network (`http://ollama:11434`) with GPU passthrough (`capabilities: [gpu]`) and an isolated `ollama_models` volume. Missing models in `MODES` are pulled automatically on first boot (`OLLAMA_AUTO_PULL=true`).
 - **Zero Host Bind-Mounts**: No host folders are mounted into either container (`ollama_models`, `bot_data`, `bot_workspace`, and `bot_hf_cache` use isolated Docker-managed named volumes).
-- **Read-Only Root Filesystem**: `/`, `/usr`, and `/app` in `discord-bot` are mounted read-only; the bot runs as an unprivileged user (`1000:1000`) with `cap_drop: [ALL]` and `no-new-privileges:true`.
+- **Read-Only Root Filesystem**: `/`, `/usr`, and `/app` in `discord-bot` are mounted read-only; the process runs as an unprivileged user (`1000:1000`) with `cap_drop: [ALL]` and `no-new-privileges:true`.
 
 ---
 
 ## 🎙️ Discord Voice-Channel AI Co-Host Guide
 
-The bot can join any Discord voice channel and participate as a real-time, voice-activated AI co-host while retaining full access to all enabled domain skills and web tools.
+The runtime harness can join any Discord voice channel and participate as a real-time, voice-activated AI co-host while retaining full access to all enabled domain skills and web tools.
 
 ### How It Works
 1. **Join a Voice Channel**: Hop into any Discord voice channel and type **`!join`** (or **`!join conversational`**), or simply ask in chat: *"@Bot hop into the voice channel"*.
@@ -228,7 +232,7 @@ The bot can join any Discord voice channel and participate as a real-time, voice
    - **`conversational` *(Open Mic)***: Replies to every spoken question or statement without requiring a wake word.
    - **`listen_only` *(Passive Scribe)***: Silently logs the conversation in the background so you can generate a speaker-attributed call recap (`!vrecap`) at any time.
 4. **9 Neural Voice & Tone Presets (`!voice <preset>`)**:
-   - Switch the bot's speaking voice, accent, speed, and pitch on the fly with **`!voice <preset>`** (or by asking *"Hey bot, switch to a British accent"*):
+   - Switch the speaking voice, accent, speed, and pitch on the fly with **`!voice <preset>`** (or by asking *"Hey bot, switch to a British accent"*):
      - `research` / `liam` (`en-CA-LiamNeural` — calm Canadian male)
      - `chat` / `andrew` (`en-US-AndrewMultilingualNeural` — warm conversational US male)
      - `sportscaster` / `hype` (`en-US-GuyNeural` — energetic broadcast announcer)
@@ -239,8 +243,8 @@ The bot can join any Discord voice channel and participate as a real-time, voice
      - `deep` / `christopher` (`en-US-ChristopherNeural` — deep authoritative US male)
      - `australian` / `william` (`en-AU-WilliamNeural` — relaxed Australian male)
 5. **Voice-First Spoken Replies + Ad-Free Live Music Streaming (`yt-dlp` + `FFmpegPCMAudio`)**:
-   - When triggered in voice chat for general questions, the bot executes any needed tools, immediately synthesizes and speaks a concise 1–2 sentence answer out loud, and posts the full text answer to the channel.
-   - Whenever the bot is connected to a voice channel (or you ask *"join voice and play dnb"* / *"play house in vc"*), every Song Card—from direct music requests, `faster`/`harder` spectrum shifts, **Music Autoplay (`!autoplay`)**, or spoken voice commands—streams **live, ad-free audio** directly into the Discord voice channel via `yt-dlp` + `discord.FFmpegPCMAudio` (while suppressing TTS so speech never cuts off the music stream).
+   - When triggered in voice chat for general questions, the harness executes any needed tools, immediately synthesizes and speaks a concise 1–2 sentence answer out loud, and posts the full text answer to the channel.
+   - Whenever connected to a voice channel (or when asked *"join voice and play dnb"* / *"play house in vc"*), every Song Card—from direct music requests, `faster`/`harder` spectrum shifts, **Music Autoplay (`!autoplay`)**, or spoken voice commands—streams **live, ad-free audio** directly into the Discord voice channel via `yt-dlp` + `discord.FFmpegPCMAudio` (while suppressing TTS so speech never cuts off the music stream).
    - Reacting with **👍** on a Song Card while music is playing in voice queues the similar track up next (`📥 Queued in Voice`) and automatically advances when the current track finishes.
    - Control playback at any time with **`!pause`**, **`!resume`**, **`!skip`** / **`!next`**, **`!stop`**, and **`!queue`** / **`!np`** (or by speaking *"Hey bot, pause"*, *"Hey bot, skip"*, *"Hey bot, faster"*).
 6. **Live Sports & Flight Tracker Voice Break-Ins**:
@@ -252,7 +256,7 @@ The bot can join any Discord voice channel and participate as a real-time, voice
 
 ## 🎮 Commands & Natural Language Prompts
 
-### Bot Commands & Interactions
+### Commands & Interactions
 | Discord | Telegram | Description |
 | :--- | :--- | :--- |
 | `!mode <profile>` | `/mode <profile>` | Switch active AI model/persona profile (e.g., `research`, `chat`; restricted to `BOT_OWNER_ID`). |
@@ -321,9 +325,9 @@ The bot can join any Discord voice channel and participate as a real-time, voice
 
 ---
 
-## 🧪 Running the Test Suite
+## 🧪 Running the Coding Harness & Test Suite
 
-The repository includes **395+ unit, concurrency, combinatorial, security, and architectural boundary tests** (executing completely offline in ~15 seconds):
+The repository includes **398 unit, concurrency, combinatorial, security, and AST architectural boundary tests** (executing completely offline in ~15–25 seconds):
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -335,10 +339,10 @@ Or on Windows PowerShell:
 python -m unittest @(Get-ChildItem tests\test_*.py | ForEach-Object { "tests/$($_.Name)" })
 ```
 
-To run the architectural, security & module boundary guardrails specifically:
+To run the AST coding harness & security boundary guardrails specifically:
 
 ```bash
 python -m unittest tests/test_architecture_and_boundaries.py
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for code quality standards and skill authoring guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full coding harness rules and skill authoring guidelines.

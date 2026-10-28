@@ -1,19 +1,21 @@
-# Contributing & Architectural Guidelines
+# Coding & Architectural Harness Guidelines
 
-Thank you for contributing! To keep the codebase modular, fast, and maintainable across all skills, every pull request must adhere to the following architectural rules (enforced automatically by `tests/test_architecture_and_boundaries.py`).
+Thank you for contributing! This repository uses an **AST-Enforced Coding Harness** ([`tests/test_architecture_and_boundaries.py`](tests/test_architecture_and_boundaries.py)) alongside its **Agent Runtime Harness** ([`src/orchestrator.py`](src/orchestrator.py), [`main.py`](main.py)) so that both human developers and AI coding agents can add skills rapidly without ever introducing cross-skill coupling, thread-pool deadlocks, or architectural drift.
+
+Every pull request and commit must pass the coding harness rules below.
 
 ---
 
-## 🏛️ Core Architectural Rules
+## 🏛️ Core Coding Harness Rules
 
-### 1. Zero Lateral Cross-Skill Imports
+### 1. Zero Lateral Cross-Skill Imports (AST-Enforced)
 - Domain skill packages under `src/skills/` (`music`, `sports`, `flights`, `markets`, `graphing`, `voice`, `jobs`, `news`, `weather`, `youtube`) must **never** import from a sibling domain skill package.
 - Per-turn channel context (`ACTIVE_CHANNEL_ID`, `get_active_channel_id()`, `set_active_channel_id()`, `record_channel_human_activity()`, `queue_channel_attachment()`, `pop_channel_attachments()`) and main asyncio event-loop binding (`bind_event_loop()`, `get_bound_event_loop()`) live strictly in **`src/context.py`**.
 - Shared background scheduling (`JOB_ENGINE`, `UserJob`, `SystemJobProvider`, cron/interval/condition/autoplay triggers) lives in **`src/jobs/`**.
 - General web research tools (`search_web`, `search_images` with multimodal vision verification, `read_website`, and `read_youtube_video` with full-timeline `0%–100%` chapter digest + `query`/timestamp zoom) live in **`src/tools/web.py`**, and system utilities (`get_current_datetime`, `evaluate_math`, `save_memory`, `recall_memories`) live in **`src/tools/system.py`**.
 - Shared cross-domain vocabulary sets (`TECH_HARDWARE_WORDS`, `SPORTS_DOMAIN_WORDS`, `FLIGHTS_DOMAIN_WORDS`, `has_non_music_domain_signal()`, `has_non_sports_track_signal()`, `TOOL_ARG_ALIASES`) live strictly in **`src/utils/domain_vocab.py`**.
 
-### 2. Standardized Skill Package Layout & Naming (`src/skills/.example/`)
+### 2. Standardized Skill Package Contract (`src/skills/.example/`)
 Every skill package under `src/skills/` must follow the exact same standardized layout and naming conventions (use **`src/skills/.example/`** as a copy-paste skeleton when creating a new skill):
 - **`__init__.py`**: Public skill exports (`skill_<domain>_<capability>` entrypoints, tracker instances, and key models).
 - **`<skill_name>.py`** (e.g., `music.py`, `sports.py`, `flights.py`, `markets.py`, `graphing.py`, `voice.py`, `jobs.py`, `weather.py`, `news.py`, `youtube.py`, `example.py`): Constructor-style primary skill module defining LLM-facing `skill_<domain>_<capability>` tool entrypoint functions (`skill_music_discovery`, `skill_music_analysis`, `skill_sports_info`, `skill_sports_esports`, `skill_sports_odds`, `skill_flight_info`, `skill_markets_info`, `skill_graphing_info`, `skill_voice_info`, `skill_job_manager`, `skill_weather_info`, `skill_news_headlines`, `skill_youtube_search`). Never use generic `skill.py` filenames or scatter tool entrypoints across ad-hoc top-level files.
@@ -28,7 +30,7 @@ Every skill package under `src/skills/` must follow the exact same standardized 
   - **`engine/`** *(for pure domain algorithms/parsers/DSP)*: Internal domain engines (`resolver.py`, `spectrum.py`, `moods.py`, `dsp.py`, `formatting.py`, `client.py`).
   - **`playback/`** *(for media playback resolution)*: Platform-specific playback resolvers and Discord voice streaming sinks.
 
-### 3. Shared 3-Tier Background Worker Pool Discipline
+### 3. Shared 3-Tier Background Worker Pool Discipline (AST-Enforced)
 - Never instantiate ad-hoc `ThreadPoolExecutor` pools inside skills, tools, or aggregators.
 - Use `run_in_worker`, `submit_to_worker`, or `map_in_workers` from **`src/utils/workers.py`**, which route work across a deadlock-free 3-tier executor DAG (`WORKER_POOL` → `SUB_WORKER_POOL` → `LEAF_WORKER_POOL` → inline fallback at depth >= 3) while propagating isolated copies of `contextvars` (including `ACTIVE_CHANNEL_ID` and `ACTIVE_MEMORY_FILE`).
 
@@ -38,7 +40,7 @@ Every skill package under `src/skills/` must follow the exact same standardized 
 - **Bounded Caches**: Always use `BoundedCache` or `BoundedSet` from `src/utils/cache.py` for module-level caches, and strip transient binary payloads (such as raw `_mp3_bytes` or image buffers) before storing entries.
 - **Discord Mention Safety**: Keep `discord.AllowedMentions(everyone=False, roles=False, users=True)` enforced on the Discord client and pass outbound LLM text through `sanitize_agent_reply()`.
 
-### 5. Zero Test-Detection Hacks in Production Code
+### 5. Zero Test-Detection Hacks in Production Code (AST-Enforced)
 - Production code under `src/` must **never** inspect `unittest.mock` attributes (`assert_called`, `_mock_name`, `MagicMock`, `side_effect`).
 - Unit tests under `tests/` must explicitly `@patch` external network/API boundaries (e.g., `fetch_json`, `fetch_soup`, `fetch_flights_html`, `resolve_youtube_music_link`) and clear module caches in `setUp()`.
 
@@ -47,7 +49,7 @@ Every skill package under `src/skills/` must follow the exact same standardized 
 
 ---
 
-## 🧪 Verification Before Submitting
+## 🧪 Pre-Commit Harness Verification
 
 Always run the full test suite before committing and verify 100% of tests pass:
 
