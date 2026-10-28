@@ -145,26 +145,21 @@ handled_reactions = BoundedSet(maxsize=MAX_HANDLED_REACTIONS)
 _active_next_channels = set()
 # Tracks the most recent Song Card message object per channel so previous cards have their ⏭️ Next button disabled.
 _last_song_card_messages = BoundedCache(maxsize=128)
+# Tracks per-message button disabled state ({message_id: {"next_disabled": bool, "like_disabled": bool}})
+_song_card_button_states = BoundedCache(maxsize=512)
 
 
 class SongCardView(discord.ui.View):
-    """Persistent Discord UI View attached to Song Card messages with 👍 Like and ⏭️ Next buttons."""
+    """Persistent Discord UI View attached to Song Card messages with ⏭️ Next and 👍 Like buttons."""
 
-    def __init__(self, next_disabled: bool = False) -> None:
+    def __init__(self, next_disabled: bool = False, like_disabled: bool = False) -> None:
         super().__init__(timeout=None)
-        if next_disabled:
-            for child in self.children:
-                if getattr(child, "custom_id", None) == "song_card:next":
-                    child.disabled = True
-
-    @discord.ui.button(
-        label="Like",
-        emoji="👍",
-        style=discord.ButtonStyle.secondary,
-        custom_id="song_card:like",
-    )
-    async def like_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await handle_song_card_button_interaction(interaction, action="like")
+        for child in self.children:
+            cid = getattr(child, "custom_id", None)
+            if next_disabled and cid == "song_card:next":
+                child.disabled = True
+            elif like_disabled and cid == "song_card:like":
+                child.disabled = True
 
     @discord.ui.button(
         label="Next",
@@ -175,24 +170,73 @@ class SongCardView(discord.ui.View):
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await handle_song_card_button_interaction(interaction, action="next")
 
+    @discord.ui.button(
+        label="Like",
+        emoji="👍",
+        style=discord.ButtonStyle.secondary,
+        custom_id="song_card:like",
+    )
+    async def like_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await handle_song_card_button_interaction(interaction, action="like")
 
-def build_song_card_view(text: str, next_disabled: bool = False):
+
+def build_song_card_view(text: str, next_disabled: bool = False, like_disabled: bool = False):
     """Return a `SongCardView` instance if `text` is a valid Song Card, else `None`."""
     if not text:
         return None
     if extract_song_card_target(text) is not None or VOICE_COHOST.extract_song_card_track(text) is not None:
-        return SongCardView(next_disabled=next_disabled)
+        return SongCardView(next_disabled=next_disabled, like_disabled=like_disabled)
     return None
 
 
-async def _disable_song_card_next_button(message) -> None:
-    """Edit an earlier Song Card message so its `⏭️ Next` button is disabled while `👍 Like` stays active."""
-    if message is None or not hasattr(message, "edit"):
+def _get_song_card_button_state(message) -> dict:
+    """Return the current `{'next_disabled': bool, 'like_disabled': bool}` state for `message`."""
+    msg_id = getattr(message, "id", None)
+    state = dict(_song_card_button_states.get(msg_id) or {"next_disabled": False, "like_disabled": False})
+    existing_view = getattr(message, "view", None)
+    if existing_view is not None and hasattr(existing_view, "children"):
+        for child in existing_view.children:
+            cid = getattr(child, "custom_id", None)
+            if cid == "song_card:next" and getattr(child, "disabled", False):
+                state["next_disabled"] = True
+            elif cid == "song_card:like" and getattr(child, "disabled", False):
+                state["like_disabled"] = True
+    return state
+
+
+async def _update_song_card_buttons(
+    message,
+    *,
+    next_disabled: bool | None = None,
+    like_disabled: bool | None = None,
+) -> None:
+    """Edit a Song Card message's `SongCardView`, preserving any previously disabled button state."""
+    if message is None:
+        return
+    state = _get_song_card_button_state(message)
+    if next_disabled is not None:
+        state["next_disabled"] = bool(next_disabled)
+    if like_disabled is not None:
+        state["like_disabled"] = bool(like_disabled)
+    msg_id = getattr(message, "id", None)
+    if msg_id is not None:
+        _song_card_button_states[msg_id] = state
+    if not hasattr(message, "edit"):
         return
     try:
-        await message.edit(view=SongCardView(next_disabled=True))
+        await message.edit(
+            view=SongCardView(
+                next_disabled=state["next_disabled"],
+                like_disabled=state["like_disabled"],
+            )
+        )
     except Exception:
         pass
+
+
+async def _disable_song_card_next_button(message) -> None:
+    """Edit an earlier Song Card message so its `⏭️ Next` button is disabled while preserving `👍 Like` state."""
+    await _update_song_card_buttons(message, next_disabled=True)
 
 
 async def _send_discord_message(channel, text: str = "", files=None):
@@ -223,6 +267,9 @@ async def _send_discord_message(channel, text: str = "", files=None):
         if prev_card_msg is not None and (sent_msg is None or getattr(prev_card_msg, "id", None) != getattr(sent_msg, "id", None)):
             await _disable_song_card_next_button(prev_card_msg)
         if sent_msg is not None:
+            sent_msg_id = getattr(sent_msg, "id", None)
+            if sent_msg_id is not None:
+                _song_card_button_states[sent_msg_id] = {"next_disabled": False, "like_disabled": False}
             _last_song_card_messages[channel_id] = sent_msg
     return sent_msg
 
@@ -1182,8 +1229,20 @@ async def handle_song_card_button_interaction(interaction: discord.Interaction, 
     msg = getattr(interaction, "message", None)
     msg_id = getattr(msg, "id", 0) or 0
     msg_content = getattr(msg, "content", "") or ""
+    active_card_msg = _last_song_card_messages.get(channel.id)
+    is_older_card = (
+        active_card_msg is not None
+        and getattr(active_card_msg, "id", None)
+        and msg_id
+        and active_card_msg.id != msg_id
+    )
 
     if action == "like":
+        await _update_song_card_buttons(
+            msg,
+            like_disabled=True,
+            next_disabled=True if is_older_card else None,
+        )
         await process_song_card_like(
             channel=channel,
             message_id=msg_id,
@@ -1192,15 +1251,8 @@ async def handle_song_card_button_interaction(interaction: discord.Interaction, 
             user=user,
         )
     elif action == "next":
-        active_card_msg = _last_song_card_messages.get(channel.id)
-        if (
-            active_card_msg is not None
-            and getattr(active_card_msg, "id", None)
-            and msg_id
-            and active_card_msg.id != msg_id
-        ):
-            # Clicked Next on an older Song Card after a newer one was already posted -> disable its Next button
-            await _disable_song_card_next_button(msg)
+        await _update_song_card_buttons(msg, next_disabled=True)
+        if is_older_card:
             return
         if msg is not None and channel.id not in _last_song_card_messages:
             _last_song_card_messages[channel.id] = msg

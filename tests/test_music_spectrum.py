@@ -325,7 +325,7 @@ class TestSkillMusicDiscoverySpectrumIntegration(unittest.TestCase):
 
 
 class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
-    """Tests for the Discord Song Card `👍 Like` and `⏭️ Next` button interactions."""
+    """Tests for the Discord Song Card `⏭️ Next` and `👍 Like` button interactions."""
 
     async def test_build_song_card_view_and_send_discord_message(self):
         from unittest.mock import AsyncMock, MagicMock
@@ -343,7 +343,8 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         view_card = bot_main.build_song_card_view(song_card)
         self.assertIsNotNone(view_card)
         custom_ids = [c.custom_id for c in view_card.children]
-        self.assertEqual(custom_ids, ["song_card:like", "song_card:next"])
+        # `⏭️ Next` must be in front of `👍 Like`
+        self.assertEqual(custom_ids, ["song_card:next", "song_card:like"])
 
         self.assertIsNone(bot_main.build_song_card_view(plain_text))
 
@@ -355,8 +356,9 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
 
         channel.send.reset_mock()
         bot_main._last_song_card_messages.clear()
-        msg1 = MagicMock(id=1001, edit=AsyncMock())
-        msg2 = MagicMock(id=1002, edit=AsyncMock())
+        bot_main._song_card_button_states.clear()
+        msg1 = MagicMock(id=1001, view=None, edit=AsyncMock())
+        msg2 = MagicMock(id=1002, view=None, edit=AsyncMock())
         channel.id = 777100
         channel.send = AsyncMock(side_effect=[msg1, msg2])
 
@@ -366,7 +368,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent_args[0], song_card)
         first_view = sent_kwargs.get("view")
         self.assertIsInstance(first_view, bot_main.SongCardView)
-        self.assertEqual([(c.custom_id, c.disabled) for c in first_view.children], [("song_card:like", False), ("song_card:next", False)])
+        self.assertEqual([(c.custom_id, c.disabled) for c in first_view.children], [("song_card:next", False), ("song_card:like", False)])
         msg1.edit.assert_not_awaited()
 
         # Sending a second Song Card disables the `⏭️ Next` button on `msg1` while keeping `👍 Like` enabled
@@ -374,7 +376,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         msg1.edit.assert_awaited_once()
         disabled_view = msg1.edit.call_args.kwargs.get("view")
         self.assertIsInstance(disabled_view, bot_main.SongCardView)
-        self.assertEqual([(c.custom_id, c.disabled) for c in disabled_view.children], [("song_card:like", False), ("song_card:next", True)])
+        self.assertEqual([(c.custom_id, c.disabled) for c in disabled_view.children], [("song_card:next", True), ("song_card:like", False)])
         self.assertIs(bot_main._last_song_card_messages.get(777100), msg2)
 
     async def test_like_button_interaction_matches_reaction_flow_and_deduplicates(self):
@@ -386,6 +388,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         msg_id = 888202
         user_id = 999303
         bot_main.handled_reactions.clear()
+        bot_main._song_card_button_states.clear()
         bot_main.chat_history.pop(channel_id, None)
 
         card_text = (
@@ -414,7 +417,8 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             mention=f"<@{user_id}>",
             voice=None,
         )
-        interaction.message = SimpleNamespace(id=msg_id, content=card_text)
+        msg_edit = AsyncMock()
+        interaction.message = SimpleNamespace(id=msg_id, content=card_text, view=None, edit=msg_edit)
         interaction.response = SimpleNamespace(
             is_done=MagicMock(return_value=False),
             defer=AsyncMock(),
@@ -436,8 +440,19 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             message=SimpleNamespace(content="Here is a similar drum and bass roller:")
         )
 
+        like_disabled_before_rec = []
+
+        async def _fake_resolve(*_args, **_kwargs):
+            # Verify `👍 Like` button was disabled IMMEDIATELY before `resolve_reaction_recommendation` ran
+            if msg_edit.call_args:
+                edited_view = msg_edit.call_args.kwargs.get("view")
+                like_disabled_before_rec.append(
+                    {c.custom_id: c.disabled for c in edited_view.children}.get("song_card:like")
+                )
+            return fake_rec
+
         with (
-            patch.object(bot_main, "resolve_reaction_recommendation", AsyncMock(return_value=fake_rec)),
+            patch.object(bot_main, "resolve_reaction_recommendation", AsyncMock(side_effect=_fake_resolve)),
             patch.object(bot_main, "get_music_metadata", return_value=fake_meta),
             patch.object(bot_main.ollama_client, "chat", AsyncMock(return_value=fake_ollama_resp)),
         ):
@@ -445,6 +460,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             # Second click by same user on same message is deduplicated via handled_reactions
             await bot_main.handle_song_card_button_interaction(interaction, action="like")
 
+        self.assertEqual(like_disabled_before_rec, [True])
         self.assertEqual(channel.send.await_count, 1)
         sent_text = channel.send.call_args.args[0]
         sent_view = channel.send.call_args.kwargs.get("view")
@@ -590,9 +606,11 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         bot_main.chat_history.pop(channel_id, None)
         bot_main.handled_reactions.clear()
         bot_main._last_song_card_messages.clear()
+        bot_main._song_card_button_states.clear()
         clear_channel_played_songs(channel_id)
 
         sent_cards = []
+        liked_card_indices = set()
 
         async def _fake_send(text="", **kwargs):
             view = kwargs.get("view")
@@ -634,9 +652,16 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         def _assert_only_last_card_next_enabled():
             self.assertGreaterEqual(len(sent_cards), 1)
             for idx, card_msg in enumerate(sent_cards):
+                self.assertEqual(
+                    [c.custom_id for c in card_msg.view.children],
+                    ["song_card:next", "song_card:like"],
+                )
                 states = _button_states(card_msg)
-                # `👍 Like` must always remain enabled on every card (old and new)
-                self.assertFalse(states["song_card:like"], f"Card #{idx + 1} Like button should be enabled")
+                # `👍 Like` is disabled once pressed on that card, and enabled otherwise
+                if idx in liked_card_indices:
+                    self.assertTrue(states["song_card:like"], f"Card #{idx + 1} Like button must be disabled after press")
+                else:
+                    self.assertFalse(states["song_card:like"], f"Card #{idx + 1} Like button should be enabled")
                 if idx < len(sent_cards) - 1:
                     self.assertTrue(states["song_card:next"], f"Previous Card #{idx + 1} Next button must be disabled")
                 else:
@@ -723,7 +748,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(sent_cards), 2)
             _assert_only_last_card_next_enabled()
 
-            # Step 3: User clicks `👍 Like` on Card #2 -> Card #3 posted, Card #2 Next disabled
+            # Step 3: User clicks `👍 Like` on Card #2 -> Card #3 posted, Card #2 Next & Like disabled
             fake_rec_3 = {
                 "verified_url": "https://music.youtube.com/watch?v=vid_card_003",
                 "chosen_track": "Desire by Sub Focus",
@@ -735,6 +760,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
                 patch.object(bot_main, "get_music_metadata", return_value=card3_meta),
             ):
                 await bot_main.handle_song_card_button_interaction(_make_interaction(sent_cards[1]), action="like")
+            liked_card_indices.add(1)
             self.assertEqual(len(sent_cards), 3)
             _assert_only_last_card_next_enabled()
 
@@ -760,7 +786,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(sent_cards), 4)
             _assert_only_last_card_next_enabled()
 
-            # Step 6: Clicking `👍 Like` on an OLD card (Card #1) still works -> posts Card #5, disables Card #4 Next, enables Card #5 Next
+            # Step 6: Clicking `👍 Like` on an OLD card (Card #1) still works -> posts Card #5, disables Card #1 Like and Card #4 Next, enables Card #5 Next
             fake_rec_5 = {
                 "verified_url": "https://music.youtube.com/watch?v=vid_card_005",
                 "chosen_track": "Siren by Sub Focus",
@@ -772,6 +798,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
                 patch.object(bot_main, "get_music_metadata", return_value=card5_meta),
             ):
                 await bot_main.handle_song_card_button_interaction(_make_interaction(sent_cards[0]), action="like")
+            liked_card_indices.add(0)
             self.assertEqual(len(sent_cards), 5)
             _assert_only_last_card_next_enabled()
 
