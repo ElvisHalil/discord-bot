@@ -198,6 +198,15 @@ class SongCardView(discord.ui.View):
         await handle_song_card_button_interaction(interaction, action="like")
 
     @discord.ui.button(
+        label="\u2800" * 5,
+        style=discord.ButtonStyle.secondary,
+        disabled=True,
+        custom_id="song_card:spacer",
+    )
+    async def spacer_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        return
+
+    @discord.ui.button(
         label="Autoplay",
         emoji="📻",
         style=discord.ButtonStyle.primary,

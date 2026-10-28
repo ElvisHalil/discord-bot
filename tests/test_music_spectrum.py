@@ -343,8 +343,8 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         view_card = bot_main.build_song_card_view(song_card)
         self.assertIsNotNone(view_card)
         custom_ids = [c.custom_id for c in view_card.children]
-        # `⏭️ Next` in front of `👍 Like`, with `📻 Autoplay` on the right
-        self.assertEqual(custom_ids, ["song_card:next", "song_card:like", "song_card:autoplay"])
+        # `⏭️` in front of `👍`, disabled spacer in between, and `📻 Autoplay` on the right
+        self.assertEqual(custom_ids, ["song_card:next", "song_card:like", "song_card:spacer", "song_card:autoplay"])
 
         self.assertIsNone(bot_main.build_song_card_view(plain_text))
 
@@ -371,7 +371,12 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(first_view, bot_main.SongCardView)
         self.assertEqual(
             [(c.custom_id, c.disabled, c.label) for c in first_view.children],
-            [("song_card:next", False, None), ("song_card:like", False, None), ("song_card:autoplay", False, "Autoplay")],
+            [
+                ("song_card:next", False, None),
+                ("song_card:like", False, None),
+                ("song_card:spacer", True, "\u2800" * 5),
+                ("song_card:autoplay", False, "Autoplay"),
+            ],
         )
         msg1.edit.assert_not_awaited()
 
@@ -382,7 +387,12 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(disabled_view, bot_main.SongCardView)
         self.assertEqual(
             [(c.custom_id, c.disabled, c.label) for c in disabled_view.children],
-            [("song_card:next", True, None), ("song_card:like", False, None), ("song_card:autoplay", False, "Autoplay")],
+            [
+                ("song_card:next", True, None),
+                ("song_card:like", False, None),
+                ("song_card:spacer", True, "\u2800" * 5),
+                ("song_card:autoplay", False, "Autoplay"),
+            ],
         )
         self.assertIs(bot_main._last_song_card_messages.get(777100), msg2)
 
@@ -469,7 +479,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             disabled_before_rec,
-            [{"song_card:next": True, "song_card:like": True, "song_card:autoplay": False}],
+            [{"song_card:next": True, "song_card:like": True, "song_card:spacer": True, "song_card:autoplay": False}],
         )
         self.assertEqual(channel.send.await_count, 1)
         sent_text = channel.send.call_args.args[0]
@@ -671,9 +681,10 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             for idx, card_msg in enumerate(sent_cards):
                 self.assertEqual(
                     [c.custom_id for c in card_msg.view.children],
-                    ["song_card:next", "song_card:like", "song_card:autoplay"],
+                    ["song_card:next", "song_card:like", "song_card:spacer", "song_card:autoplay"],
                 )
                 states = _button_states(card_msg)
+                self.assertTrue(states["song_card:spacer"])
                 labels = _button_labels(card_msg)
                 # `👍 Like` is disabled once pressed on that card, and enabled otherwise
                 if idx in liked_card_indices:
@@ -787,7 +798,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             async def _resolve_rec_3(*_a, **_kw):
                 self.assertEqual(
                     _button_states(sent_cards[1]),
-                    {"song_card:next": True, "song_card:like": True, "song_card:autoplay": False},
+                    {"song_card:next": True, "song_card:like": True, "song_card:spacer": True, "song_card:autoplay": False},
                 )
                 return fake_rec_3
 
@@ -840,7 +851,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             async def _resolve_rec_5(*_a, **_kw):
                 self.assertEqual(
                     _button_states(sent_cards[0]),
-                    {"song_card:next": True, "song_card:like": True, "song_card:autoplay": False},
+                    {"song_card:next": True, "song_card:like": True, "song_card:spacer": True, "song_card:autoplay": False},
                 )
                 self.assertTrue(_button_states(sent_cards[3])["song_card:next"])
                 return fake_rec_5
