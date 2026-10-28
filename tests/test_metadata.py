@@ -631,7 +631,7 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         self.assertEqual(args, {"mood": "love"})
 
         fake_mgr = MagicMock()
-        fake_mgr.get_mood_tracks.return_value = [
+        fake_mgr.get_top_charts.return_value = [
             Track(title="Adorn", artist="Miguel", genre="R&B", source="deezer_love")
         ]
         with (
@@ -639,8 +639,8 @@ class TestMoodVibeDiscovery(unittest.TestCase):
             patch("src.skills.music.music._pre_resolve_top_candidate", return_value=""),
         ):
             out = skill_music_discovery(mood="love")
-            fake_mgr.get_mood_tracks.assert_called_once_with(mood="love", genre=None)
-            self.assertIn("TOP VIBE / MOOD SELECTION: LOVE (MULTI-GENRE MIX)", out)
+            fake_mgr.get_top_charts.assert_called_once_with(genre="love")
+            self.assertIn("TODAY'S TOP CHARTING MUSIC (LOVE)", out)
             self.assertIn("Adorn by Miguel", out)
 
     @patch("src.skills.music.music.resolve_youtube_music_link")

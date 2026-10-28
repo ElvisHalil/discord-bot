@@ -30,6 +30,27 @@ _ALBUM_FILLER_RE = re.compile(
     re.IGNORECASE,
 )
 
+_LASTFM_CANONICAL_TAGS: dict[str, str] = {
+    "liquid drum and bass": "liquid funk",
+    "liquid drum & bass": "liquid funk",
+    "liquid dnb": "liquid funk",
+    "melodic drum and bass": "liquid funk",
+    "melodic dnb": "liquid funk",
+    "dnb": "drum and bass",
+    "drum & bass": "drum and bass",
+    "drumnbass": "drum and bass",
+    "r&b": "rnb",
+    "r and b": "rnb",
+}
+
+
+def _canonicalize_lastfm_tag(raw_genre: str | None) -> str:
+    if not raw_genre:
+        return ""
+    low = raw_genre.lower().strip()
+    return _LASTFM_CANONICAL_TAGS.get(low, low)
+
+
 def clear_lastfm_cache() -> None:
     _LASTFM_RAW_CACHE.clear()
     _LASTFM_VERIFIED_ARTISTS_CACHE.clear()
@@ -379,8 +400,11 @@ class LastFmAggregator(BaseMusicAggregator):
         """Returns the cached set of verified primary-genre artist names (lowercase) for a genre tag."""
         if not genre:
             return set()
-        tag = genre.lower().strip()
-        return set(_LASTFM_VERIFIED_ARTISTS_CACHE.get(tag, set()))
+        raw_tag = genre.lower().strip()
+        canon_tag = _canonicalize_lastfm_tag(raw_tag)
+        return set(_LASTFM_VERIFIED_ARTISTS_CACHE.get(raw_tag, set())) | set(
+            _LASTFM_VERIFIED_ARTISTS_CACHE.get(canon_tag, set())
+        )
 
     def get_charts(self, genre: str = None) -> list[Track]:
         key = self.api_key or os.getenv("LASTFM_API_KEY")
@@ -392,7 +416,8 @@ class LastFmAggregator(BaseMusicAggregator):
             from collections import Counter
             from src.skills.music.engine.formatting import is_recently_played, RECENTLY_PLAYED_TRACKS, _norm_track_token
             from src.skills.music.playback.youtube_music import is_garbage_music_title
-            tag = genre.lower().strip()
+            raw_tag = genre.lower().strip()
+            tag = _canonicalize_lastfm_tag(raw_tag)
             print(f"  └─ 📻 [Last.fm]: Fetching top tracks & verified genre artists for tag '{tag}'...")
 
             f_tracks = submit_to_worker(self._call, "tag.gettoptracks", {"tag": tag, "limit": 50, "page": 1})
@@ -557,6 +582,7 @@ class LastFmAggregator(BaseMusicAggregator):
             }
             if verified_primary_set:
                 _LASTFM_VERIFIED_ARTISTS_CACHE[tag] = verified_primary_set
+                _LASTFM_VERIFIED_ARTISTS_CACHE[raw_tag] = verified_primary_set
 
             # Finalize Step A tracks -> Shelf 1 (up to 6 verified primary-genre Core tracks)
             artist_seen = set()

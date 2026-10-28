@@ -512,7 +512,14 @@ def skill_music_discovery(
             print(f"🔄 [Music Discovery Skill]: Redirecting specific song query '{genre}' -> skill_youtube_search(query='{spec_q}', is_music=True).")
             return skill_youtube_search(query=spec_q, max_results=1, is_music=True)
 
-    parsed_genre, parsed_mood = parse_mood_and_genre(genre, mood)
+    raw_g = (genre or "").strip()
+    raw_m = (mood or "").strip()
+    if raw_g and raw_m and raw_m.lower() not in raw_g.lower():
+        combined_g = f"{raw_m} {raw_g}".strip()
+    else:
+        combined_g = raw_g or raw_m
+    parsed_genre = None if not combined_g or combined_g.lower() in ("all", "global", "general", "none") else combined_g
+    parsed_mood = None
 
     if similar_to:
         print(f"🎵 [Executing Music Discovery Skill] Similar to: {similar_to} (match_mood={match_mood}, mood={parsed_mood})")
@@ -532,13 +539,9 @@ def skill_music_discovery(
                     seed_matches_last_played = True
 
             prev_active_genre = last_played.active_genre if (last_played and seed_matches_last_played) else None
-            prev_active_mood = last_played.active_mood if (last_played and seed_matches_last_played) else None
 
             mood_tag = None
-            if parsed_mood:
-                tracks = manager.get_mood_tracks(mood=parsed_mood, genre=parsed_genre, similar_to=similar_to)
-                mood_tag = parsed_mood.title()
-            elif match_mood:
+            if match_mood:
                 tracks, mood_info = manager.get_mood_matched_tracks(similar_to)
                 if mood_info.get("mood"):
                     mood_tag = mood_info["mood"].title()
@@ -549,16 +552,6 @@ def skill_music_discovery(
                 mood_tag = parsed_genre.title()
             else:
                 tracks = manager.get_similar_tracks(similar_to)
-                # When the channel is in an active subgenre/mood session (e.g. 'liquid drum and bass')
-                # and the user liked (👍) the active song, blend/prioritize tracks matching that subgenre
-                if prev_active_genre and tracks and not all(t.source == "fallback_unrelated" for t in tracks):
-                    inh_g, inh_m = parse_mood_and_genre(prev_active_genre, prev_active_mood)
-                    if inh_m and inh_g:
-                        subgenre_tracks = manager.get_mood_tracks(mood=inh_m, genre=inh_g, similar_to=similar_to) or []
-                        if subgenre_tracks:
-                            sub_artists = {_norm_track_token(t.artist) for t in subgenre_tracks if t.artist}
-                            matching_sim = [t for t in tracks if _norm_track_token(t.artist) in sub_artists]
-                            tracks = matching_sim + subgenre_tracks + [t for t in tracks if _norm_track_token(t.artist) not in sub_artists][:4]
 
             if not tracks:
                 return f"No similar songs found for '{similar_to}'."
@@ -643,13 +636,8 @@ def skill_music_discovery(
 
     print(f"🎵 [Executing Music Discovery Skill] Genre: {parsed_genre or 'All'}, Mood: {parsed_mood or 'None'}")
     try:
-        if parsed_mood:
-            all_tracks = manager.get_mood_tracks(mood=parsed_mood, genre=parsed_genre)
-            vibe_label = f"{parsed_mood.upper()} {parsed_genre.upper()}" if parsed_genre else f"{parsed_mood.upper()} (MULTI-GENRE MIX)"
-            output = f"=== TOP VIBE / MOOD SELECTION: {vibe_label} ===\n\n"
-        else:
-            all_tracks = manager.get_top_charts(genre=parsed_genre)
-            output = f"=== TODAY'S TOP CHARTING MUSIC ({parsed_genre.upper() if parsed_genre else 'ALL GENRES'}) ===\n\n"
+        all_tracks = manager.get_top_charts(genre=parsed_genre)
+        output = f"=== TODAY'S TOP CHARTING MUSIC ({parsed_genre.upper() if parsed_genre else 'ALL GENRES'}) ===\n\n"
         if all_tracks:
             from src.skills.music.aggregators.deezer import clean_playlist_genre_label
 

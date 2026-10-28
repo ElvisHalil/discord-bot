@@ -1058,7 +1058,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(JOB_ENGINE, "get_active_autoplay_job", return_value=None),
-            patch.object(music_mod.manager, "get_mood_tracks", return_value=[liquid_track]),
+            patch.object(music_mod.manager, "get_top_charts", return_value=[liquid_track]),
             patch.object(music_mod.manager, "get_similar_tracks", return_value=[liked_track]),
             patch.object(
                 music_mod,

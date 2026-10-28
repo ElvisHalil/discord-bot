@@ -512,11 +512,10 @@ class MusicAggregatorManager:
         return deduped
 
     def get_top_charts(self, genre: str = None, mood: str = None) -> list[Track]:
-        """Fetches trending and charting music across Last.fm, Beatport, global charts, and YouTube Music Radio (~50/50 split), or delegates to mood discovery."""
+        """Fetches trending and charting music across Last.fm, Beatport, global charts, and YouTube Music Radio (~50/50 split)."""
         from src.utils.workers import submit_to_worker
-        parsed_genre, parsed_mood = parse_mood_and_genre(genre, mood)
-        if parsed_mood:
-            return self.get_mood_tracks(mood=parsed_mood, genre=parsed_genre)
+        raw_g = (genre or mood or "").strip()
+        parsed_genre = None if not raw_g or raw_g.lower() in ("all", "global", "general", "none") else raw_g
 
         all_tracks = []
         provider_names = ("lastfm", "beatport", "charts")
