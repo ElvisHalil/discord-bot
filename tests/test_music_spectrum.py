@@ -1018,9 +1018,12 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enriched, {"similar_to": "The Trip by Logistics"})
 
     def test_active_genre_persists_in_played_song_record_across_stay_with_and_like_and_next(self):
-        """Verify that active_genre is stored on PlayedSongRecord when skill_music_discovery runs
-        (e.g. 'please stay with LIQUID drum and bass'), persists across a 👍 Like recommendation,
-        and causes a subsequent 'next' turn to return to the active genre rather than chaining similar_to."""
+        """Verify that:
+        1. active_genre is stored on PlayedSongRecord when skill_music_discovery(genre=...) runs,
+           so hitting 'next' during a genre session stays on that genre.
+        2. Clicking 👍 Like on a song anchors active_similar_to to that liked song on PlayedSongRecord,
+           so subsequent 'next' presses stay on the liked song's YouTube Music Radio queue instead of
+           chaining off skipped tracks."""
         from unittest.mock import patch
         from src.context import set_active_channel_id
         from src.jobs.engine import JOB_ENGINE
@@ -1072,14 +1075,24 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(rec1)
             self.assertEqual(rec1.active_genre, "Liquid Drum & Bass")
 
+            # Step 1b: Hitting ⏭️ Next during the genre session resolves to active_genre ('Liquid Drum & Bass')
+            history_genre = [
+                {"role": "user", "content": "User jubkill says: please stay with LIQUID drum and bass"},
+                {"role": "assistant", "content": "**Song:** Desperado\n**Artist:** Artificial Intelligence\nhttps://music.youtube.com/watch?v=vidLiquid01"},
+                {"role": "user", "content": "User jubkill says: next"},
+            ]
+            enriched_genre = enrich_music_tool_args({"similar_to": "Desperado by Artificial Intelligence"}, history_genre)
+            self.assertEqual(enriched_genre, {"genre": "Liquid Drum & Bass"})
+
             # Step 2: User clicks 👍 Like on 'Desperado by Artificial Intelligence'
             music_mod.skill_music_discovery(similar_to="Desperado by Artificial Intelligence")
             rec2 = get_channel_last_played_song(cid)
             self.assertIsNotNone(rec2)
-            # Active station genre must be preserved across the single-track 👍 Like lookup!
-            self.assertEqual(rec2.active_genre, "Liquid Drum & Bass")
+            # Active similarity anchor is now locked to the liked song ('Desperado by Artificial Intelligence')
+            self.assertEqual(rec2.active_similar_to, "Desperado by Artificial Intelligence")
+            self.assertIsNone(rec2.active_genre)
 
-            # Step 3: User hits ⏭️ Next on the recommended track -> must resolve to active_genre ('Liquid Drum & Bass'), NOT similar_to!
+            # Step 3: User hits ⏭️ Next on the recommended track -> stays anchored to the liked song's Radio ('Desperado by Artificial Intelligence'), NOT the skipped track ('By Your Side by S.P.Y')!
             history = [
                 {"role": "user", "content": "User jubkill says: please stay with LIQUID drum and bass"},
                 {"role": "assistant", "content": "**Song:** Desperado\n**Artist:** Artificial Intelligence\nhttps://music.youtube.com/watch?v=vidLiquid01"},
@@ -1088,7 +1101,7 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
                 {"role": "user", "content": "User jubkill says: next"},
             ]
             enriched = enrich_music_tool_args({"similar_to": "By Your Side by S.P.Y"}, history)
-            self.assertEqual(enriched, {"genre": "Liquid Drum & Bass"})
+            self.assertEqual(enriched, {"similar_to": "Desperado by Artificial Intelligence"})
 
         # Step 4: Verify standardize_song_reply strips hallucinated 'Genre: Similar to ...' and restores real cached genre
         MUSIC_METADATA_CACHE["vidLiquid02"] = {

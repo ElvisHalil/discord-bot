@@ -44,7 +44,7 @@ class BeatportAggregator(BaseMusicAggregator):
                     preview_url=dt.preview_url,
                     tier=dt.tier,
                     relevance_score=dt.relevance_score,
-                    verified_genre=True,
+                    verified_genre=dt.verified_genre,
                 ))
         except Exception as err:
             print(f"  └─ ⚠️ [Beatport Playlist Error]: {err}")

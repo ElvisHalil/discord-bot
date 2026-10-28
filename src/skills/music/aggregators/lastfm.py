@@ -396,7 +396,7 @@ class LastFmAggregator(BaseMusicAggregator):
             print(f"  └─ 📻 [Last.fm]: Fetching top tracks & verified genre artists for tag '{tag}'...")
 
             f_tracks = submit_to_worker(self._call, "tag.gettoptracks", {"tag": tag, "limit": 50, "page": 1})
-            f_artists = submit_to_worker(self._call, "tag.gettopartists", {"tag": tag, "limit": 50})
+            f_artists = submit_to_worker(self._call, "tag.gettopartists", {"tag": tag, "limit": 100})
             res = f_tracks.result(timeout=15)
             art_res = f_artists.result(timeout=15)
 

@@ -336,10 +336,19 @@ class YouTubeMusicAggregator(BaseMusicAggregator):
             seed_song_norm = _norm_track_token(meta.get("song", ""))
             seed_art_norm = _norm_track_token(meta.get("artist", ""))
 
-        # Prefer pure studio `MUSIC_VIDEO_TYPE_ATV` tracks first while keeping clean tracks as backup
-        atv_items = [it for it in items if str(it.get("videoType") or "") == "MUSIC_VIDEO_TYPE_ATV"]
-        other_items = [it for it in items if str(it.get("videoType") or "") != "MUSIC_VIDEO_TYPE_ATV"]
-        ordered_items = atv_items + other_items
+        # Prefer pure studio `MUSIC_VIDEO_TYPE_ATV` tracks first unless caller already pre-ordered by genre verification
+        if any(it.get("_genre_rank") is not None for it in items):
+            ordered_items = sorted(
+                items,
+                key=lambda it: (
+                    int(it.get("_genre_rank", 2)),
+                    0 if str(it.get("videoType") or "") == "MUSIC_VIDEO_TYPE_ATV" else 1,
+                ),
+            )
+        else:
+            atv_items = [it for it in items if str(it.get("videoType") or "") == "MUSIC_VIDEO_TYPE_ATV"]
+            other_items = [it for it in items if str(it.get("videoType") or "") != "MUSIC_VIDEO_TYPE_ATV"]
+            ordered_items = atv_items + other_items
 
         tracks: List[Track] = []
         artist_counts: Dict[str, int] = {}
@@ -473,14 +482,19 @@ class YouTubeMusicAggregator(BaseMusicAggregator):
         display_genre = clean_g.title() if clean_g and clean_g.lower() not in ("all", "global", "general", "none") else None
         combined_radio_items: List[dict] = []
 
-        # Step A: Anchor YTMusic Radio using 1-2 verified scene tracks from Last.fm / Beatport
+        # Step A: Anchor YTMusic Radio using 2-3 verified scene tracks (strictly preferring Last.fm canonical tracks over Deezer playlists)
         if seed_tracks:
-            verified_seeds = [
+            lfm_seeds = [
+                t for t in seed_tracks
+                if (t.source or "").startswith("lastfm_") and not is_recently_played(t.title, t.artist)
+            ]
+            verified_seeds = lfm_seeds or [
                 t for t in seed_tracks
                 if getattr(t, "verified_genre", False) and not is_recently_played(t.title, t.artist)
             ] or list(seed_tracks)
             tier1_seeds = [t for t in verified_seeds if getattr(t, "tier", 1) == 1] or verified_seeds
-            chosen_seeds = random.sample(tier1_seeds, min(2, len(tier1_seeds)))
+            chosen_seeds = random.sample(tier1_seeds, min(3, len(tier1_seeds)))
+            seed_queues: List[List[dict]] = []
             for s_trk in chosen_seeds:
                 hits = search_ytmusic_songs(f"{s_trk.title} {s_trk.artist}", limit=3)
                 matched = _match_ytmusic_song_hit(hits, s_trk.title, s_trk.artist)
@@ -491,7 +505,65 @@ class YouTubeMusicAggregator(BaseMusicAggregator):
                         limit=YTMUSIC_GENRE_RADIO_LIMIT + 8,
                     )
                     # Skip index 0 if it is the seed track itself (already in `seed_tracks`)
-                    combined_radio_items.extend(r_items[1:] if len(r_items) > 1 else r_items)
+                    q_slice = r_items[1:] if len(r_items) > 1 else r_items
+                    if q_slice:
+                        seed_queues.append(q_slice)
+            # Interleave round-robin across all resolved seed queues so one seed doesn't monopolize all 15 slots
+            if seed_queues:
+                max_len = max(len(q) for q in seed_queues)
+                interleaved: List[dict] = []
+                for i in range(max_len):
+                    for q in seed_queues:
+                        if i < len(q):
+                            interleaved.append(q[i])
+
+                # Cross-verify radio items against Last.fm's verified genre artist cache for the current genre tags
+                # so YouTube Music Radio's off-genre drift (e.g. pop/breakcore mixed into a Liquid DnB radio queue)
+                # doesn't pollute the pool, and prioritize verified artists not already in `seed_tracks` so
+                # artist-diversity sampling keeps a true 50/50 split.
+                from src.skills.music.aggregators.lastfm import _LASTFM_VERIFIED_ARTISTS_CACHE
+                active_lfm_tags: set[str] = set()
+                if clean_g:
+                    active_lfm_tags.add(clean_g.lower())
+                for t in seed_tracks:
+                    src = (t.source or "").strip().lower()
+                    if src.startswith("lastfm_"):
+                        active_lfm_tags.add(src[len("lastfm_"):].replace("_", " "))
+
+                verified_norms: set[str] = set()
+                for tag_key in active_lfm_tags:
+                    for a_name in _LASTFM_VERIFIED_ARTISTS_CACHE.get(tag_key, set()):
+                        norm_a = _norm_track_token(a_name)
+                        if norm_a:
+                            verified_norms.add(norm_a)
+                seed_artist_norms: set[str] = {
+                    _norm_track_token(t.artist)
+                    for t in seed_tracks
+                    if getattr(t, "verified_genre", False) and t.artist
+                }
+                verified_norms.update(seed_artist_norms)
+
+                if verified_norms:
+                    for it in interleaved:
+                        _, primary_art, _, _ = _extract_clean_title_and_artist(it)
+                        art_norms = [
+                            _norm_track_token(str(a.get("name") if isinstance(a, dict) else a or ""))
+                            for a in (it.get("artists") or [])
+                        ]
+                        if primary_art:
+                            art_norms.append(_norm_track_token(primary_art))
+                        art_norms = [a for a in art_norms if a]
+                        it_copy = dict(it)
+                        if any(a in verified_norms for a in art_norms):
+                            # Rank 0: Verified genre artist NOT already in `seed_tracks` (new artist for pool!)
+                            # Rank 1: Verified genre artist already in `seed_tracks`
+                            it_copy["_genre_rank"] = 1 if any(a in seed_artist_norms for a in art_norms) else 0
+                        else:
+                            # Rank 2: Unverified radio drift track (only used if Ranks 0+1 have < 15 tracks)
+                            it_copy["_genre_rank"] = 2
+                        combined_radio_items.append(it_copy)
+                else:
+                    combined_radio_items.extend(interleaved)
 
         # Step B: If no seed tracks were provided (or Step A yielded nothing), anchor via a YTMusic community playlist
         if not combined_radio_items and clean_g:

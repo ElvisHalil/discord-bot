@@ -440,18 +440,21 @@ class MusicAggregatorManager:
         beatport = self.aggregators.get("beatport")
 
         tasks = []
-        # 1. Deezer curated vibe playlists (sample up to 4 cross-genre or subgenre queries)
+        # 1. Deezer curated vibe playlists
         dz_queries = list(profile.get("deezer_queries", []))
         if deezer and dz_queries:
             selected_dz = random.sample(dz_queries, min(4, len(dz_queries)))
             for q in selected_dz:
                 tasks.append((deezer.get_charts, q))
 
-        # 2. Last.fm vibe/subgenre tags (sample up to 2 tags)
+        # 2. Last.fm vibe/subgenre tags: always include primary canonical tag first (e.g. 'liquid funk') + 1 rotating tag
         lfm_tags = list(profile.get("lastfm_tags", []))
         selected_tags: list[str] = []
         if lastfm and lfm_tags:
-            selected_tags = random.sample(lfm_tags, min(2, len(lfm_tags)))
+            if len(lfm_tags) <= 2:
+                selected_tags = list(lfm_tags)
+            else:
+                selected_tags = [lfm_tags[0]] + random.sample(lfm_tags[1:], 1)
             for tag in selected_tags:
                 tasks.append((lastfm.get_charts, tag))
 
@@ -468,6 +471,21 @@ class MusicAggregatorManager:
                 except Exception as e:
                     logger.debug("Mood track worker failed: %s", e)
 
+        if target_genre:
+            all_tracks = self._apply_genre_gatekeeper(
+                all_tracks,
+                target_genre,
+                extra_tags=selected_tags or lfm_tags,
+            )
+            # Keep non-YTMusic scene pool bounded (~15-18 tracks, prioritizing Last.fm verified tracks)
+            # so YouTube Music Radio (`YTMUSIC_GENRE_RADIO_LIMIT = 15`) maintains a true ~50/50 split!
+            lfm_tracks = [t for t in all_tracks if (t.source or "").startswith("lastfm_")]
+            other_tracks = [t for t in all_tracks if not (t.source or "").startswith("lastfm_")]
+            if lfm_tracks:
+                all_tracks = (lfm_tracks[:14] + other_tracks[:4])[:18]
+            else:
+                all_tracks = other_tracks[:15]
+
         # Blend in YouTube Music Radio tracks seeded from the verified mood/vibe tracks (~50/50 split)
         ytmusic = self.aggregators.get("ytmusic")
         if ytmusic and hasattr(ytmusic, "get_charts") and all_tracks:
@@ -482,21 +500,15 @@ class MusicAggregatorManager:
                 logger.debug("YTMusic mood radio fetch failed: %s", e)
 
         deduped = self._filter_and_deduplicate(all_tracks, exclude_query=similar_to)
-        if target_genre:
-            deduped = self._apply_genre_gatekeeper(
-                deduped,
-                target_genre,
-                extra_tags=selected_tags or lfm_tags,
-            )
-            if vibe_genre_label:
-                for t in deduped:
-                    t_g_low = (t.genre or "").strip().lower()
-                    if (
-                        not t_g_low
-                        or t_g_low in ("dnb", "drum and bass", "drumnbass", "electronic", "dance", "unknown", "music")
-                        or t_g_low.startswith("beatport")
-                    ):
-                        t.genre = vibe_genre_label
+        if target_genre and vibe_genre_label:
+            for t in deduped:
+                t_g_low = (t.genre or "").strip().lower()
+                if (
+                    not t_g_low
+                    or t_g_low in ("dnb", "drum and bass", "drumnbass", "electronic", "dance", "unknown", "music")
+                    or t_g_low.startswith("beatport")
+                ):
+                    t.genre = vibe_genre_label
         return deduped
 
     def get_top_charts(self, genre: str = None, mood: str = None) -> list[Track]:
@@ -524,6 +536,15 @@ class MusicAggregatorManager:
                 all_tracks.extend(self.aggregators["deezer"].get_charts(genre=parsed_genre) or [])
             except Exception as e:
                 logger.debug("Deezer fallback chart fetch failed: %s", e)
+
+        if parsed_genre:
+            all_tracks = self._apply_genre_gatekeeper(all_tracks, parsed_genre)
+            lfm_tracks = [t for t in all_tracks if (t.source or "").startswith("lastfm_")]
+            other_tracks = [t for t in all_tracks if not (t.source or "").startswith("lastfm_")]
+            if lfm_tracks:
+                all_tracks = (lfm_tracks[:14] + other_tracks[:4])[:18]
+            else:
+                all_tracks = other_tracks[:15]
 
         # Blend in YouTube Music Radio (`YTMUSIC_GENRE_RADIO_LIMIT = 15` tracks -> ~50/50 split),
         # seeded from verified scene tracks in `all_tracks` so YTMusic Radio stays anchored to authentic artists

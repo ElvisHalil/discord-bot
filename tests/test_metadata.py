@@ -1397,6 +1397,35 @@ class TestYouTubeMusicAggregatorAndBlendedDiscovery(unittest.TestCase):
         self.assertEqual(radio_tracks[0].genre, "Driving Techno")
         self.assertTrue(radio_tracks[0].verified_genre)
 
+        # Verify Last.fm verified genre artist cache ranks genuine scene artists ahead of off-genre ATV radio drift
+        from src.skills.music.aggregators.lastfm import _LASTFM_VERIFIED_ARTISTS_CACHE
+        _LASTFM_VERIFIED_ARTISTS_CACHE["driving techno"] = {"adam beyer", "charlotte de witte"}
+        mock_radio.return_value = [
+            {
+                "videoId": "ravevid1111",
+                "title": "Rave",
+                "artists": [{"name": "Sam Paganini"}],
+                "length": "6:15",
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+            {
+                "videoId": "driftvid999",
+                "title": "Break It Off",
+                "artists": [{"name": "PinkPantheress"}],
+                "length": "2:10",
+                "videoType": "MUSIC_VIDEO_TYPE_ATV",
+            },
+            {
+                "videoId": "yrvid000001",
+                "title": "Your Mind",
+                "artists": [{"name": "Adam Beyer"}],
+                "length": "5:40",
+                "videoType": "MUSIC_VIDEO_TYPE_OMV",
+            },
+        ]
+        ranked_tracks = agg.get_charts(genre="driving techno", seed_tracks=scene_seeds)
+        self.assertEqual([t.artist for t in ranked_tracks], ["Adam Beyer", "PinkPantheress"])
+
     @patch("src.skills.music.playback.youtube_music.youtube_http_get")
     @patch("src.skills.music.aggregators.ytmusic.search_ytmusic_songs")
     def test_fetch_direct_youtube_video_ids_uses_ytmusic_cache_and_atv_search(

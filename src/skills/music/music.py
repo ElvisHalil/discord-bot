@@ -609,15 +609,14 @@ def skill_music_discovery(
                 header = f"=== SONGS SIMILAR TO '{similar_to}' ===\n\n"
 
             output = header
-            sim_active_genre = prev_active_genre or ""
-            sim_active_mood = prev_active_mood or ""
-            sim_active_seed = "" if prev_active_genre else similar_to
+            # When the user explicitly likes (👍) or requests tracks similar to a song,
+            # anchor subsequent 'next' presses to that liked seed's YouTube Music Radio queue!
             pre_resolved = _pre_resolve_top_candidate(
                 top_sample,
-                active_genre=sim_active_genre,
-                active_mood=sim_active_mood,
+                active_genre="",
+                active_mood="",
                 active_artist="",
-                active_similar_to=sim_active_seed,
+                active_similar_to=similar_to,
             )
             if pre_resolved:
                 output += pre_resolved + "\n"
@@ -626,10 +625,10 @@ def skill_music_discovery(
                     song=top_sample[0].title,
                     artist=top_sample[0].artist,
                     genre=top_sample[0].genre,
-                    active_genre=sim_active_genre,
-                    active_mood=sim_active_mood,
+                    active_genre="",
+                    active_mood="",
                     active_artist="",
-                    active_similar_to=sim_active_seed,
+                    active_similar_to=similar_to,
                 )
 
             for t in top_sample:

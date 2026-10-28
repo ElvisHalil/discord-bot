@@ -402,14 +402,13 @@ class DeezerAggregator(BaseMusicAggregator):
                                 local_tracks = []
                                 p_title_low = (pl.get("title") or "").lower()
                                 p_user_low = ((pl.get("user") or {}).get("name") or "").lower()
-                                trusted_scene_labels = (
-                                    "beatport", "ukf", "hospital", "defected", "drumcode",
-                                    "liquicity", "monstercat", "armada", "spinnin", "anjuna", "afterlife",
+                                # Only official editorial/label accounts (not random user playlist titles) count as pre-verified;
+                                # all other Deezer playlist tracks must pass Last.fm artist gatekeeping in MusicAggregatorManager.
+                                trusted_scene_authors = (
+                                    "beatport", "ukf", "hospital records", "defected records", "drumcode",
+                                    "liquicity", "monstercat", "armada music", "spinnin' records", "anjunadeep", "anjunabeats",
                                 )
-                                is_verified_pl = (
-                                    "beatport" in clean_g
-                                    or any(lbl in p_title_low or lbl in p_user_low for lbl in trusted_scene_labels)
-                                )
+                                is_verified_pl = any(lbl == p_user_low for lbl in trusted_scene_authors)
                                 display_g = clean_playlist_genre_label(clean_g)
                                 for pos_idx, t in sampled_data:
                                     title = t.get("title", "Unknown")
