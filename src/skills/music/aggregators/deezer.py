@@ -24,6 +24,46 @@ def clear_deezer_cache() -> None:
     _DEEZER_RAW_CACHE.clear()
     _DEEZER_TRACK_DETAIL_CACHE.clear()
 
+
+def clean_playlist_genre_label(raw_genre: str | None) -> str:
+    """Clean a playlist/chart search query into a human-readable musical genre label."""
+    if not raw_genre:
+        return "Electronic"
+    raw_low = raw_genre.strip().lower()
+    if "liquicity" in raw_low or "hospital records" in raw_low:
+        return "Liquid Drum & Bass"
+    cleaned = re.sub(
+        r"^(?:beatport(?:\s+(?:top|hype)\s+\d+)?|ukf|liquicity|hospital\s+records)\s*",
+        "",
+        raw_genre.strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+    cleaned = re.sub(
+        r"\s+(?:bangers|hits|songs|tracks|anthems|essentials|workout)\s*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    low = cleaned.lower()
+    if not low or low in ("top 100", "hype 100", "all", "global", "general", "none"):
+        return "Electronic"
+    if low in ("dnb", "drumnbass", "drum and bass", "drum & bass"):
+        return "Drum & Bass"
+    if low in (
+        "liquid dnb",
+        "liquid drum and bass",
+        "liquid drum & bass",
+        "melodic drum and bass",
+        "melodic dnb",
+        "liquid funk drum & bass",
+    ):
+        return "Liquid Drum & Bass"
+    if low in ("ukg", "uk garage"):
+        return "UK Garage"
+    if low in ("rnb", "r&b", "r and b"):
+        return "R&B"
+    return cleaned.title()
+
 def _get_cached_deezer_data(cache_key: str, url: str) -> list:
     now = time.monotonic()
     if cache_key in _DEEZER_RAW_CACHE:
@@ -360,7 +400,17 @@ class DeezerAggregator(BaseMusicAggregator):
                                 indexed_data = list(enumerate(data))
                                 sampled_data = random.sample(indexed_data, min(10, len(indexed_data)))
                                 local_tracks = []
-                                is_beatport_pl = "beatport" in clean_g or "beatport" in (pl.get("title") or "").lower()
+                                p_title_low = (pl.get("title") or "").lower()
+                                p_user_low = ((pl.get("user") or {}).get("name") or "").lower()
+                                trusted_scene_labels = (
+                                    "beatport", "ukf", "hospital", "defected", "drumcode",
+                                    "liquicity", "monstercat", "armada", "spinnin", "anjuna", "afterlife",
+                                )
+                                is_verified_pl = (
+                                    "beatport" in clean_g
+                                    or any(lbl in p_title_low or lbl in p_user_low for lbl in trusted_scene_labels)
+                                )
+                                display_g = clean_playlist_genre_label(clean_g)
                                 for pos_idx, t in sampled_data:
                                     title = t.get("title", "Unknown")
                                     artist = t.get("artist", {}).get("name", "Unknown")
@@ -375,13 +425,13 @@ class DeezerAggregator(BaseMusicAggregator):
                                             title=title,
                                             artist=artist,
                                             album=t.get("album", {}).get("title"),
-                                            genre=clean_g.title(),
+                                            genre=display_g,
                                             source=f"deezer_{clean_g.replace(' ', '_')}",
                                             deezer_id=t.get("id"),
                                             preview_url=t.get("preview"),
                                             tier=tier,
-                                            relevance_score=0.92 if is_beatport_pl else 0.78,
-                                            verified_genre=is_beatport_pl,
+                                            relevance_score=0.92 if is_verified_pl else 0.78,
+                                            verified_genre=is_verified_pl,
                                         ))
                                 return pl.get("title", str(pl_id)), local_tracks
                         except Exception:

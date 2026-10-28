@@ -492,17 +492,30 @@ def skill_music_discovery(
                     s_song = s_meta.get("song", "")
                     s_artist = s_meta.get("artist", "")
                     sim_anchor = None
+                    inferred_sim_genre = s_meta.get("genre")
                     last_played = get_channel_last_played_song()
-                    if last_played and last_played.get("bpm"):
+                    if last_played:
                         lp_s = _norm_track_token(last_played.get("song") or "")
                         lp_alt = _norm_track_token(last_played.get("alt_song") or "")
                         norm_s = _norm_track_token(s_song)
                         if norm_s and (norm_s in (lp_s, lp_alt) or lp_s in norm_s):
-                            sim_anchor = {
-                                "bpm": float(last_played["bpm"]),
-                                "speed_score": float(last_played.get("speed_score") or 5.5),
-                                "intensity_score": float(last_played.get("intensity_score") or 5.5),
-                            }
+                            if not inferred_sim_genre and last_played.get("genre"):
+                                inferred_sim_genre = last_played.get("genre")
+                            if last_played.get("bpm"):
+                                sim_anchor = {
+                                    "bpm": float(last_played["bpm"]),
+                                    "speed_score": float(last_played.get("speed_score") or 5.5),
+                                    "intensity_score": float(last_played.get("intensity_score") or 5.5),
+                                }
+                    if not inferred_sim_genre:
+                        inferred_sim_genre = manager._infer_seed_genre(similar_to)
+                    if inferred_sim_genre:
+                        from src.skills.music.aggregators.deezer import clean_playlist_genre_label
+
+                        clean_sim_g = clean_playlist_genre_label(inferred_sim_genre)
+                        for t in top_sample:
+                            if not t.genre:
+                                t.genre = clean_sim_g
                     top_sample = audio_analyzer.rank_candidates_by_acoustic_similarity(
                         top_sample,
                         seed_song=s_song,

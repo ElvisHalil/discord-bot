@@ -928,7 +928,94 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(sent_cards), 8)
             _assert_only_last_card_next_enabled()
 
+    def test_enrich_music_tool_args_on_next_strips_hallucinated_similar_to_and_preserves_genre(self):
+        """When the user plays a genre (e.g. 'play liquid drum and bass') and hits Next / says 'next',
+        even if the LLM proposes `similar_to='<the song just skipped>'` (e.g. 'Pathways by Nu:Logic'),
+        `enrich_music_tool_args` must strip `similar_to` and keep the active genre."""
+        from unittest.mock import patch
+        from src.context import set_active_channel_id
+        from src.jobs.engine import JOB_ENGINE
+        from src.skills.music.context import (
+            clear_channel_played_songs,
+            enrich_music_tool_args,
+            record_channel_played_song,
+        )
 
+        cid = 888901
+        set_active_channel_id(cid)
+        clear_channel_played_songs(cid)
+        record_channel_played_song(
+            song="Pathways",
+            artist="Nu:Logic",
+            genre="Liquid Funk",
+            channel_id=cid,
+        )
+
+        history = [
+            {"role": "user", "content": "User jubkill says: play liquid drum and bass"},
+            {
+                "role": "assistant",
+                "content": (
+                    "Here’s a piece of liquid funk!\n\n"
+                    "**Song:** Pathways\n"
+                    "**Artist:** Nu:Logic\n"
+                    "**Album:** Somewhere Between The Light\n"
+                    "**Genre:** Liquid Funk\n\n"
+                    "https://music.youtube.com/watch?v=M-x9ipZ-ed8"
+                ),
+            },
+            {"role": "user", "content": "User jubkill says: next"},
+        ]
+
+        with patch.object(JOB_ENGINE, "get_active_autoplay_job", return_value=None):
+            enriched = enrich_music_tool_args({"similar_to": "Pathways by Nu:Logic"}, history)
+
+        self.assertEqual(enriched, {"genre": "liquid drum and bass"})
+        self.assertNotIn("similar_to", enriched)
+
+    def test_enrich_music_tool_args_on_next_after_like_keeps_original_liked_seed_not_skipped_song(self):
+        """When the user liked 'The Trip by Logistics' (👍) and then hits Next on the resulting track
+        ('Cowgirl by Underworld' or 'Downpipe by Mark Knight'), `enrich_music_tool_args` must keep
+        the original liked seed ('The Trip by Logistics') rather than chaining `similar_to` off the skipped song."""
+        from unittest.mock import patch
+        from src.context import set_active_channel_id
+        from src.jobs.engine import JOB_ENGINE
+        from src.skills.music.context import (
+            clear_channel_played_songs,
+            enrich_music_tool_args,
+            record_channel_played_song,
+        )
+
+        cid = 888902
+        set_active_channel_id(cid)
+        clear_channel_played_songs(cid)
+        record_channel_played_song(
+            song="Cowgirl",
+            artist="Underworld",
+            genre="Electronic",
+            channel_id=cid,
+        )
+
+        history = [
+            {
+                "role": "user",
+                "content": "jubkill reacted with 👍 to ''The Trip' by 'Logistics'' requesting a similar track.",
+            },
+            {
+                "role": "assistant",
+                "content": (
+                    "**Song:** Cowgirl\n"
+                    "**Artist:** Underworld\n\n"
+                    "https://music.youtube.com/watch?v=qEYeT-f1Fdo"
+                ),
+            },
+            {"role": "user", "content": "User jubkill says: next"},
+        ]
+
+        with patch.object(JOB_ENGINE, "get_active_autoplay_job", return_value=None):
+            enriched = enrich_music_tool_args({"similar_to": "Cowgirl by Underworld"}, history)
+
+        self.assertEqual(enriched, {"similar_to": "The Trip by Logistics"})
 
 
 if __name__ == "__main__":

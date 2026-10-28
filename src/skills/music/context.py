@@ -284,32 +284,180 @@ def enrich_music_tool_args(args: dict, history: list) -> dict:
         if active_genre:
             enriched["genre"] = active_genre
 
-    # 4. On bare 'next' / 'skip' while Autoplay is active, keep the station's seed/genre rather than drifting
-    if re.match(r"^\s*(?:next|skip)(?:\s+(?:song|track|one|tune|please|pls))?\s*[.?!]*$", clean_user, re.IGNORECASE):
-        try:
-            from src.jobs.engine import JOB_ENGINE
+    # 4. On bare 'next' / 'skip' (or ⏭️ Next button), keep the active station/genre rather than chaining
+    # `similar_to` off the song the user just skipped!
+    if _BARE_NEXT_SKIP_RE.match(clean_user):
+        next_args = _resolve_next_turn_music_args(history)
+        if next_args is not None:
+            enriched.clear()
+            enriched.update(next_args)
 
-            active_ap = JOB_ENGINE.get_active_autoplay_job(get_active_channel_id())
-            if active_ap and active_ap.payload_text and active_ap.payload_text.lower() != "top tracks":
-                ap_q = active_ap.payload_text.strip()
+    return enriched
+
+
+_BARE_NEXT_SKIP_RE = re.compile(
+    r"^\s*(?:next|skip)(?:\s+(?:song|track|one|tune|please|pls))?\s*[.?!]*$",
+    re.IGNORECASE,
+)
+
+
+def _extract_genre_or_music_request_from_user_text(u_text: str) -> Optional[dict]:
+    """
+    Parse a historical user message (excluding bare 'next'/'skip') to see if it established
+    an active music session (genre/mood, artist, or 👍 liked-track seed).
+    """
+    if not u_text or _BARE_NEXT_SKIP_RE.match(u_text):
+        return None
+    if u_text.startswith("!") or u_text.startswith("Now summarize") or u_text.startswith("You have used"):
+        return None
+
+    # 1. 👍 reaction recorded in chat_history: "<User> reacted with 👍 to '<Song> by <Artist>' requesting a similar track."
+    m_like = re.search(
+        r"reacted\s+with\s+👍\s+to\s+(.+?)\s+requesting\s+a\s+similar\s+track",
+        u_text,
+        re.IGNORECASE,
+    )
+    if m_like:
+        raw_seed = m_like.group(1).strip().strip("'\"")
+        raw_seed = re.sub(r"'\s+by\s+'", " by ", raw_seed, flags=re.IGNORECASE).strip("'\" ")
+        if raw_seed:
+            return {"similar_to": raw_seed}
+
+    # 2. Explicit similarity request: "play songs similar to X", "something like X"
+    m_sim = re.match(
+        r"^\s*(?:can\s+you\s+|could\s+you\s+|please\s+)?(?:play|put\s+on|find|recommend|give\s+me)?\s*"
+        r"(?:me\s+|us\s+)?(?:some\s+|something\s+|a\s+|any\s+)?(?:songs?\s+|tracks?\s+|music\s+)?"
+        r"(?:similar\s+to|like|mix\s+with)\s+(.+?)\s*[.?!]*$",
+        u_text,
+        re.IGNORECASE,
+    )
+    if m_sim:
+        sim_target = m_sim.group(1).strip(" .,!?'\"")
+        if sim_target and sim_target.lower() not in ("this", "that", "it"):
+            return {"similar_to": sim_target}
+
+    # 3. Artist request: "play songs by <Artist>"
+    m_by = _PLAY_BY_ARTIST_RE.match(u_text)
+    if m_by:
+        art = m_by.group(1).strip(" .,!?")
+        if art:
+            return {"artist": art}
+
+    # 4. Genre or mood request: "play liquid drum and bass genre", "play liquid drum and bass", "liquid drum and bass"
+    from src.skills.music.catalogs import BEATPORT_GENRE_QUERIES, GENRE_CANONICAL_MAP
+    from src.skills.music.engine.moods import parse_mood_and_genre
+    from src.skills.music.engine.spectrum import classify_genre_to_zone, has_non_music_domain_context
+
+    if has_non_music_domain_context(u_text):
+        return None
+
+    cand = re.sub(
+        r"^\s*(?:can\s+you\s+|could\s+you\s+|please\s+|yo\s+|hey\s+)?"
+        r"(?:play|put\s+on|queue|drop|recommend|give\s+me|stream)\s+(?:me\s+|us\s+)?(?:some\s+|a\s+|an\s+|more\s+)?",
+        "",
+        u_text,
+        flags=re.IGNORECASE,
+    ).strip()
+    cand = re.sub(
+        r"\s+(?:genre|music|songs?|tracks?|tunes?|vibes?|for\s+(?:me|us)|please|pls)\s*[.?!]*$",
+        "",
+        cand,
+        flags=re.IGNORECASE,
+    ).strip(" .,!?")
+
+    if not cand or len(cand) > 45:
+        return None
+
+    cand_low = cand.lower()
+    if (
+        cand_low in GENRE_CANONICAL_MAP
+        or cand_low in BEATPORT_GENRE_QUERIES
+        or classify_genre_to_zone(cand_low) is not None
+    ):
+        return {"genre": cand_low}
+
+    p_genre, p_mood = parse_mood_and_genre(cand_low, None)
+    if p_mood is not None:
+        if p_genre and (
+            p_genre in GENRE_CANONICAL_MAP
+            or p_genre in BEATPORT_GENRE_QUERIES
+            or classify_genre_to_zone(p_genre) is not None
+        ):
+            return {"genre": cand_low}
+        if not p_genre:
+            return {"mood": p_mood}
+
+    return None
+
+
+def _resolve_next_turn_music_args(history: list, channel_id: Optional[int] = None) -> Optional[dict]:
+    """
+    Resolve the active station/genre arguments when the user says 'next'/'skip' or clicks ⏭️ Next:
+    1. If Autoplay is active, keep the Autoplay job's seed/genre.
+    2. Otherwise, inspect previous user turns in `history` for the most recent explicit genre/mood/artist/👍 request.
+    3. Otherwise, use `last_played.genre` or the most recent Song Card's `Genre:` line in `history`.
+    4. Never chain `similar_to` off a song that the user just skipped with 'next' when a genre is active.
+    """
+    from src.skills.music.aggregators.deezer import clean_playlist_genre_label
+
+    cid = _get_channel_id(channel_id)
+    try:
+        from src.jobs.engine import JOB_ENGINE
+
+        active_ap = JOB_ENGINE.get_active_autoplay_job(cid)
+        if active_ap:
+            g = (
+                active_ap.payload_text.strip()
+                if active_ap.payload_text and active_ap.payload_text.lower() != "top tracks"
+                else None
+            )
+            if g:
                 m_sim = re.match(
                     r"^(?:similar\s+to|similar|songs?\s+like|tracks?\s+like|music\s+like|like|mix\s+with)\s+(.+)$",
-                    ap_q,
+                    g,
                     flags=re.IGNORECASE,
                 )
                 if m_sim:
-                    enriched["similar_to"] = m_sim.group(1).strip()
-                    enriched.pop("genre", None)
-                elif " by " in ap_q.lower():
-                    enriched["similar_to"] = ap_q
-                    enriched.pop("genre", None)
-                else:
-                    enriched["genre"] = ap_q
-                    enriched.pop("similar_to", None)
-        except Exception:
-            pass
+                    return {"similar_to": m_sim.group(1).strip()}
+                if " by " in g.lower():
+                    return {"similar_to": g}
+                return {"genre": g}
+            return {}
+    except Exception:
+        pass
 
-    return enriched
+    # Walk backwards through prior user messages in history (excluding the current 'next'/'skip' message)
+    if history and len(history) > 1:
+        for m in reversed(history[:-1]):
+            role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+            if role == "user":
+                u_text = _extract_raw_user_text(m)
+                req = _extract_genre_or_music_request_from_user_text(u_text)
+                if req is not None:
+                    return req
+
+    last_song = get_channel_last_played_song(cid)
+    if last_song and last_song.genre:
+        lp_g = last_song.genre.strip()
+        if lp_g and not lp_g.lower().startswith("similar to") and lp_g.lower() not in ("unknown", "detected", "acoustic dsp"):
+            return {"genre": clean_playlist_genre_label(lp_g)}
+
+    if history:
+        for m in reversed(history):
+            role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+            if role == "assistant":
+                c_text = str(m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "") or "")
+                m_g = re.search(r"(?im)^\s*(?:\*\*)?Genre:\*{0,2}\s*(.+)$", c_text)
+                if m_g:
+                    return {"genre": clean_playlist_genre_label(m_g.group(1).strip())}
+                if "**Song:**" in c_text:
+                    break
+
+    if last_song and last_song.song and last_song.artist:
+        return {"similar_to": f"{last_song.song} by {last_song.artist}"}
+    if last_song:
+        return {}
+    return None
 
 
 _GENERIC_PLAY_SONG_RE = re.compile(
@@ -413,35 +561,10 @@ def detect_missed_music_shift_tool_call(history: list) -> Optional[Tuple[str, di
         if classify_genre_to_zone(cand_g) is not None:
             return ("skill_music_discovery", {"genre": cand_g})
 
-    if re.match(r"^\s*(?:next|skip)(?:\s+(?:song|track|one|tune|please|pls))?\s*[.?!]*$", clean_user, re.IGNORECASE):
-        try:
-            from src.jobs.engine import JOB_ENGINE
-
-            cid = get_active_channel_id()
-            active_ap = JOB_ENGINE.get_active_autoplay_job(cid)
-            if active_ap:
-                g = active_ap.payload_text.strip() if active_ap.payload_text and active_ap.payload_text.lower() != "top tracks" else None
-                if g:
-                    m_sim = re.match(
-                        r"^(?:similar\s+to|similar|songs?\s+like|tracks?\s+like|music\s+like|like|mix\s+with)\s+(.+)$",
-                        g,
-                        flags=re.IGNORECASE,
-                    )
-                    if m_sim:
-                        return ("skill_music_discovery", {"similar_to": m_sim.group(1).strip()})
-                    if " by " in g.lower():
-                        return ("skill_music_discovery", {"similar_to": g})
-                    return ("skill_music_discovery", {"genre": g})
-                return ("skill_music_discovery", {})
-            last_song = get_channel_last_played_song(cid)
-            if last_song:
-                if last_song.genre and not last_song.genre.lower().startswith("similar to"):
-                    return ("skill_music_discovery", {"genre": last_song.genre})
-                if last_song.song and last_song.artist:
-                    return ("skill_music_discovery", {"similar_to": f"{last_song.song} by {last_song.artist}"})
-                return ("skill_music_discovery", {})
-        except Exception:
-            pass
+    if _BARE_NEXT_SKIP_RE.match(clean_user):
+        next_args = _resolve_next_turn_music_args(history)
+        if next_args is not None:
+            return ("skill_music_discovery", next_args)
 
     return None
 

@@ -609,12 +609,18 @@ class TestMoodVibeDiscovery(unittest.TestCase):
         mgr.aggregators["beatport"].get_charts.assert_called_once_with(genre="Beatport Hype 100")
         self.assertEqual(len(banger_tracks), 7)
 
-        # Combined 'melodic' + 'dnb' queries Liquid / Melodic DnB
+        # Combined 'melodic' + 'dnb' queries Liquid / Melodic DnB without generic Beatport Top 100 DnB jump-up pollution
         mgr.aggregators["deezer"].get_charts.reset_mock()
+        mgr.aggregators["beatport"].get_charts.reset_mock()
         melodic_dnb = mgr.get_mood_tracks(mood="melodic", genre="dnb")
         dz_called_genres = {call.kwargs.get("genre") for call in mgr.aggregators["deezer"].get_charts.call_args_list}
-        self.assertEqual(dz_called_genres, {"Liquid Drum & Bass", "Melodic Drum and Bass"})
+        self.assertEqual(
+            dz_called_genres,
+            {"Liquid Drum & Bass", "Liquicity Drum & Bass", "Hospital Records Drum & Bass", "Liquid Funk Drum & Bass"},
+        )
+        mgr.aggregators["beatport"].get_charts.assert_not_called()
         self.assertTrue(len(melodic_dnb) >= 3)
+        self.assertTrue(all(t.genre == "Liquid Drum & Bass" for t in melodic_dnb))
 
     def test_skill_music_discovery_mood_routing_and_alias(self):
         from src.orchestrator import normalize_tool_args

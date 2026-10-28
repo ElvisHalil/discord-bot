@@ -111,7 +111,12 @@ class MusicAggregatorManager:
 
         return fresh if fresh else deduped
 
-    def _apply_genre_gatekeeper(self, tracks: list[Track], genre: Optional[str] = None) -> list[Track]:
+    def _apply_genre_gatekeeper(
+        self,
+        tracks: list[Track],
+        genre: Optional[str] = None,
+        extra_tags: Optional[list[str]] = None,
+    ) -> list[Track]:
         """
         Cross-source genre gatekeeper:
         Uses Last.fm's verified primary-genre artist set (plus Beatport verified artists) to validate
@@ -124,10 +129,13 @@ class MusicAggregatorManager:
         lastfm = self.aggregators.get("lastfm")
         verified_artists: set[str] = set()
         if lastfm and hasattr(lastfm, "get_verified_genre_artists"):
-            try:
-                verified_artists.update(lastfm.get_verified_genre_artists(genre))
-            except Exception:
-                pass
+            for g_tag in [genre] + list(extra_tags or []):
+                if not g_tag:
+                    continue
+                try:
+                    verified_artists.update(lastfm.get_verified_genre_artists(g_tag))
+                except Exception:
+                    pass
 
         for t in tracks:
             if getattr(t, "verified_genre", False) and t.artist:
@@ -388,6 +396,7 @@ class MusicAggregatorManager:
         if similar_to and not target_genre:
             target_genre = self._infer_seed_genre(similar_to)
 
+        vibe_genre_label: Optional[str] = None
         if target_genre:
             canon_genre = GENRE_CANONICAL_MAP.get(target_genre.lower().strip(), target_genre.lower().strip())
             profile = GENRE_MOOD_MATRIX.get((canon_genre, canon_mood)) or {
@@ -395,6 +404,26 @@ class MusicAggregatorManager:
                 "lastfm_tags": [f"{canon_mood} {target_genre}", target_genre],
                 "beatport_query": None,
             }
+            _mood_subgenre_labels = {
+                ("dnb", "melodic"): "Liquid Drum & Bass",
+                ("dnb", "chill"): "Liquid Drum & Bass",
+                ("dnb", "hard"): "Neurofunk",
+                ("dnb", "dark"): "Neurofunk",
+                ("dnb", "banger"): "Drum & Bass",
+                ("dnb", "workout"): "Drum & Bass",
+                ("techno", "melodic"): "Melodic Techno",
+                ("techno", "hard"): "Hard Techno",
+                ("techno", "dark"): "Dark Techno",
+                ("techno", "banger"): "Techno",
+                ("house", "melodic"): "Melodic House",
+                ("house", "chill"): "Deep House",
+                ("house", "banger"): "Tech House",
+                ("house", "hard"): "Bass House",
+            }
+            vibe_genre_label = _mood_subgenre_labels.get(
+                (str(canon_genre), str(canon_mood)),
+                f"{canon_mood.title()} {target_genre.title()}",
+            )
             print(f"  └─ 🎭 [Mood Discovery]: Resolving genre+vibe '{canon_mood}' + '{target_genre}'...")
         else:
             profile = STANDALONE_MOOD_PROFILES.get(canon_mood) or {
@@ -420,6 +449,7 @@ class MusicAggregatorManager:
 
         # 2. Last.fm vibe/subgenre tags (sample up to 2 tags)
         lfm_tags = list(profile.get("lastfm_tags", []))
+        selected_tags: list[str] = []
         if lastfm and lfm_tags:
             selected_tags = random.sample(lfm_tags, min(2, len(lfm_tags)))
             for tag in selected_tags:
@@ -443,14 +473,30 @@ class MusicAggregatorManager:
         if ytmusic and hasattr(ytmusic, "get_charts") and all_tracks:
             try:
                 all_tracks.extend(
-                    ytmusic.get_charts(genre=target_genre or canon_mood, seed_tracks=all_tracks) or []
+                    ytmusic.get_charts(
+                        genre=vibe_genre_label or target_genre or canon_mood,
+                        seed_tracks=all_tracks,
+                    ) or []
                 )
             except Exception as e:
                 logger.debug("YTMusic mood radio fetch failed: %s", e)
 
         deduped = self._filter_and_deduplicate(all_tracks, exclude_query=similar_to)
         if target_genre:
-            deduped = self._apply_genre_gatekeeper(deduped, target_genre)
+            deduped = self._apply_genre_gatekeeper(
+                deduped,
+                target_genre,
+                extra_tags=selected_tags or lfm_tags,
+            )
+            if vibe_genre_label:
+                for t in deduped:
+                    t_g_low = (t.genre or "").strip().lower()
+                    if (
+                        not t_g_low
+                        or t_g_low in ("dnb", "drum and bass", "drumnbass", "electronic", "dance", "unknown", "music")
+                        or t_g_low.startswith("beatport")
+                    ):
+                        t.genre = vibe_genre_label
         return deduped
 
     def get_top_charts(self, genre: str = None, mood: str = None) -> list[Track]:

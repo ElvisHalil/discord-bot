@@ -26,14 +26,18 @@ class BeatportAggregator(BaseMusicAggregator):
             return []
 
         try:
-            from src.skills.music.aggregators.deezer import DeezerAggregator
+            from src.skills.music.aggregators.deezer import DeezerAggregator, clean_playlist_genre_label
+            if display_genre == "Electronic" and target_query:
+                display_genre = clean_playlist_genre_label(target_query)
+            else:
+                display_genre = clean_playlist_genre_label(display_genre)
             print(f"  └─ 🎧 [Beatport via Deezer]: Fetching '{target_query}' playlists...")
             deezer_tracks = DeezerAggregator().get_charts(genre=target_query)
             for dt in deezer_tracks:
                 tracks.append(Track(
                     title=dt.title,
                     artist=dt.artist,
-                    genre=display_genre if display_genre != "Electronic" else (dt.genre or "Electronic"),
+                    genre=display_genre if display_genre != "Electronic" else (clean_playlist_genre_label(dt.genre) if dt.genre else "Electronic"),
                     album=dt.album,
                     source="beatport_fallback_deezer",
                     deezer_id=dt.deezer_id,

@@ -381,6 +381,11 @@ GENRE_CANONICAL_MAP: dict[str, CanonicalGenre] = {
     "drum and bass": CanonicalGenre.DNB,
     "drumnbass": CanonicalGenre.DNB,
     "drum & bass": CanonicalGenre.DNB,
+    "liquid dnb": CanonicalGenre.DNB,
+    "liquid drum and bass": CanonicalGenre.DNB,
+    "liquid drum & bass": CanonicalGenre.DNB,
+    "liquid funk": CanonicalGenre.DNB,
+    "neurofunk": CanonicalGenre.DNB,
     "jungle": CanonicalGenre.DNB,
     "techno": CanonicalGenre.TECHNO,
     "house": CanonicalGenre.HOUSE,
@@ -410,13 +415,23 @@ GENRE_CANONICAL_MAP: dict[str, CanonicalGenre] = {
 
 GENRE_MOOD_MATRIX: dict[tuple[str, str], MoodProfile] = {
     (CanonicalGenre.DNB, MoodCategory.MELODIC): MoodProfile(
-        deezer_queries=["Liquid Drum & Bass", "Melodic Drum and Bass"],
-        lastfm_tags=["liquid funk", "liquid dnb", "drum and bass"],
-        beatport_query="Beatport Top 100 Drum & Bass",
+        deezer_queries=[
+            "Liquid Drum & Bass",
+            "Liquicity Drum & Bass",
+            "Hospital Records Drum & Bass",
+            "Liquid Funk Drum & Bass",
+        ],
+        lastfm_tags=["liquid funk", "liquid dnb", "liquid drum and bass"],
+        beatport_query=None,
     ),
     (CanonicalGenre.DNB, MoodCategory.CHILL): MoodProfile(
-        deezer_queries=["Liquid Drum & Bass", "Chill Drum and Bass"],
-        lastfm_tags=["liquid funk", "intelligent drum and bass"],
+        deezer_queries=[
+            "Liquid Drum & Bass",
+            "Chill Drum and Bass",
+            "Atmospheric Drum & Bass",
+            "Liquicity Chill",
+        ],
+        lastfm_tags=["liquid funk", "liquid dnb", "intelligent drum and bass"],
         beatport_query=None,
     ),
     (CanonicalGenre.DNB, MoodCategory.HARD): MoodProfile(

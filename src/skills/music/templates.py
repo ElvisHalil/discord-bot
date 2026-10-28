@@ -10,7 +10,7 @@ from typing import Optional
 
 SONG_TEMPLATE = """=== SONG RESPONSE TEMPLATE (no emojis in the song card) ===
 [If the user also asked a question or requested other info (e.g. sports, odds, news, facts), answer that part FIRST in full (calling any other needed tools first), then place the song card below:]
-[Optional one-line music intro]
+[Optional one-line music intro - if the user said 'next' or 'skip', introduce ONLY this new track/genre and NEVER mention or reference the previous/skipped song or artist]
 
 **Song:** <Song Title>
 **Artist:** <Artist Name>
