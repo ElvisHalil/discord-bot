@@ -263,7 +263,19 @@ def get_music_metadata(vid: str, fallback_text: str = "", fallback_title: str = 
     return meta
 
 
-def format_song_card(song: str, artist: str, url: str, genre: str = None, album: str = None, intro: str = "") -> str:
+def format_song_card(
+    song: str,
+    artist: str,
+    url: str,
+    genre: str = None,
+    album: str = None,
+    intro: str = "",
+    active_genre: str = None,
+    active_mood: str = None,
+    active_artist: str = None,
+    active_similar_to: str = None,
+    preserve_session: bool = True,
+) -> str:
     """
     Constructs the clean, consistent Markdown template for returning a song in Discord:
     [Optional Intro / Similarity Description]
@@ -282,7 +294,16 @@ def format_song_card(song: str, artist: str, url: str, genre: str = None, album:
 
     record_played_track(song, artist)
     try:
-        record_channel_played_song(song=song, artist=artist, genre=genre, preserve_session=True)
+        record_channel_played_song(
+            song=song,
+            artist=artist,
+            genre=genre,
+            active_genre=active_genre,
+            active_mood=active_mood,
+            active_artist=active_artist,
+            active_similar_to=active_similar_to,
+            preserve_session=preserve_session,
+        )
     except Exception:
         pass
     m_vid = re.search(r'(?:v=|youtu\.be\/)([0-9A-Za-z_-]{11})', url or "")

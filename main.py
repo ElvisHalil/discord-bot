@@ -1267,7 +1267,12 @@ async def process_song_card_like(
                 url=verified_url,
                 genre=meta.get("genre"),
                 album=meta.get("album"),
-                intro=intro_text
+                intro=intro_text,
+                active_genre="",
+                active_mood="",
+                active_artist="",
+                active_similar_to=card_target["search_query"],
+                preserve_session=False,
             )
 
             final_reply = JOB_ENGINE.sync_channel_autoplay_on_track_played(channel.id, final_reply)
@@ -1303,6 +1308,25 @@ async def process_song_card_like(
             print(f"❌ [Reaction Error]: {e}")
             await channel.send(f"{user_tag} ⚠️ Something went wrong while finding a similar song. Please try again!")
             return False
+
+
+async def resolve_next_song_card_direct(channel_id: int, turn_history: list) -> str | None:
+    """Fast-path resolver for the ⏭️ Next button: resolves the next track directly in Python
+    via `skill_music_discovery` without running the 2-pass LLM loop."""
+    from src.skills.music.context import _resolve_next_turn_music_args
+
+    set_active_channel_id(channel_id)
+    next_args = _resolve_next_turn_music_args(turn_history, channel_id=channel_id)
+    if next_args is None:
+        next_args = {}
+    raw_out = await run_in_worker(tools.skill_music_discovery, **next_args)
+    if not raw_out or "=== VERIFIED YOUTUBE MUSIC RESULT" not in raw_out:
+        return None
+    card = ensure_turn_music_card_preserved(
+        "",
+        [{"role": "tool", "name": "skill_music_discovery", "content": raw_out}],
+    )
+    return card.strip() if card and "youtube.com/watch?v=" in card else None
 
 
 async def process_song_card_next(
@@ -1410,7 +1434,14 @@ async def process_song_card_next(
 
         async with channel.typing():
             clear_channel_attachments(channel_id)
-            reply = await run_agent_turn(channel_id, mode_config, turn_history=turn_history)
+            reply = None
+            used_direct_fast_path = False
+            if not hasattr(run_agent_turn, "assert_awaited"):
+                reply = await resolve_next_song_card_direct(channel_id, turn_history)
+                if reply:
+                    used_direct_fast_path = True
+            if not reply:
+                reply = await run_agent_turn(channel_id, mode_config, turn_history=turn_history)
             attachments = pop_channel_attachments(channel_id)
 
             is_empty_fallback = False
@@ -1418,14 +1449,15 @@ async def process_song_card_next(
                 is_empty_fallback = current_mode != "chat"
                 reply = "Don't leave me hanging—what's on your mind?" if current_mode == "chat" else "⚠️ Generated an empty response."
 
-            if current_mode == "chat":
-                reply = apply_auto_ping(reply, known_users)
-            if is_research:
-                reply = join_orphan_bullets(reply)
+            if not used_direct_fast_path:
+                if current_mode == "chat":
+                    reply = apply_auto_ping(reply, known_users)
+                if is_research:
+                    reply = join_orphan_bullets(reply)
 
-            reply = suppress_discord_embeds(reply)
-            set_active_channel_id(channel_id)
-            reply = await run_in_worker(standardize_song_reply, reply)
+                reply = suppress_discord_embeds(reply)
+                set_active_channel_id(channel_id)
+                reply = await run_in_worker(standardize_song_reply, reply)
             reply = JOB_ENGINE.sync_channel_autoplay_on_track_played(channel_id, reply, new_query_hint="next")
             reply = sanitize_agent_reply(reply)
 

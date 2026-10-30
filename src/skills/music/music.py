@@ -2,12 +2,17 @@ import logging
 import re
 from typing import Optional
 
+from src.context import get_active_channel_id, set_active_channel_id
 from src.skills.music.aggregators.freqblog import FreqBlogAggregator
 from src.skills.music.aggregators.manager import MusicAggregatorManager
 from src.skills.music.context import (
-    RECENTLY_PLAYED_TRACKS,
+    _CHANNEL_DISCOVERY_CACHE,
+    _CHANNEL_DISCOVERY_GEN,
+    _DISCOVERY_CACHE_LOCK,
+    _get_music_channel_deque,
     _norm_track_token,
     get_channel_last_played_song,
+    invalidate_channel_discovery_cache,
     is_recently_played,
     record_channel_played_song,
     record_played_track,
@@ -24,11 +29,172 @@ from src.skills.music.enums import AudioAction
 from src.skills.music.models import Track
 from src.skills.music.playback.youtube_music import resolve_youtube_music_link
 from src.skills.music.templates import build_music_llm_instructions
+from src.utils.workers import submit_to_worker
 
 logger = logging.getLogger(__name__)
 
 manager = MusicAggregatorManager()
 freqblog = FreqBlogAggregator()
+
+
+def _get_or_consume_cached_discovery(
+    cid: int,
+    session_key: tuple,
+) -> tuple[Optional[list[Track]], Optional[tuple[Track, dict]]]:
+    """Retrieve a channel's cached track pool and/or background pre-resolved track for `session_key`.
+    If the channel's cached `session_key` differs from the requested `session_key`, immediately
+    invalidates the stale session so cross-genre/cross-artist leakage is impossible."""
+    if not cid:
+        return None, None
+    with _DISCOVERY_CACHE_LOCK:
+        entry = _CHANNEL_DISCOVERY_CACHE.get(cid)
+        if not entry:
+            return None, None
+        if entry.get("session_key") != session_key:
+            _CHANNEL_DISCOVERY_GEN[cid] += 1
+            _CHANNEL_DISCOVERY_CACHE.pop(cid, None)
+            return None, None
+
+        raw_tracks = list(entry.get("tracks") or [])
+        unplayed = [t for t in raw_tracks if not is_recently_played(t.title, t.artist, channel_id=cid)]
+        pre = entry.pop("pre_resolved", None)
+        pre_hit = None
+        if isinstance(pre, dict):
+            pre_cand = pre.get("cand")
+            pre_res = pre.get("resolved")
+            if (
+                pre_cand is not None
+                and isinstance(pre_res, dict)
+                and pre_res.get("url")
+                and not is_recently_played(pre_cand.title, pre_cand.artist, channel_id=cid)
+            ):
+                pre_hit = (pre_cand, pre_res)
+
+        if pre_hit is not None:
+            return (unplayed or raw_tracks), pre_hit
+        if len(unplayed) >= 4:
+            return unplayed, None
+        return None, None
+
+
+def _pre_resolve_next_candidate_for_channel(
+    cid: int,
+    session_key: tuple,
+    expected_gen: int,
+    enforce_artist_diversity: bool = True,
+) -> bool:
+    """Background worker that pre-resolves the next unplayed candidate for `(cid, session_key)`.
+    Verifies `session_key` and `expected_gen` before and after network calls so a genre change,
+    artist switch, or specific song request never gets overwritten."""
+    if not cid:
+        return False
+    set_active_channel_id(cid)
+    with _DISCOVERY_CACHE_LOCK:
+        entry = _CHANNEL_DISCOVERY_CACHE.get(cid)
+        if (
+            not entry
+            or entry.get("session_key") != session_key
+            or _CHANNEL_DISCOVERY_GEN.get(cid) != expected_gen
+        ):
+            return False
+        pool = list(entry.get("tracks") or [])
+
+    unplayed = [t for t in pool if not is_recently_played(t.title, t.artist, channel_id=cid)]
+    if not unplayed:
+        return False
+
+    sampled = MusicAggregatorManager.sample_tiered_tracks(
+        unplayed,
+        k=min(10, len(unplayed)),
+        weights=(0.45, 0.35, 0.20),
+        enforce_artist_diversity=enforce_artist_diversity,
+    )
+    chan_deque = _get_music_channel_deque(cid)
+    last_artist = chan_deque[-1][1] if chan_deque else ""
+    if enforce_artist_diversity and last_artist:
+        diff_art = [c for c in sampled if _norm_track_token(c.artist) != last_artist]
+        ordered = diff_art or sampled
+    else:
+        ordered = sampled
+
+    for cand in ordered[:3]:
+        with _DISCOVERY_CACHE_LOCK:
+            entry = _CHANNEL_DISCOVERY_CACHE.get(cid)
+            if (
+                not entry
+                or entry.get("session_key") != session_key
+                or _CHANNEL_DISCOVERY_GEN.get(cid) != expected_gen
+            ):
+                return False
+        if is_recently_played(cand.title, cand.artist, channel_id=cid):
+            continue
+        query = f"{cand.title} by {cand.artist}"
+        try:
+            results = resolve_youtube_music_link(query, max_results=1)
+            if not results:
+                continue
+            r = results[0]
+            vid = r.get("id")
+            if vid and vid in MUSIC_METADATA_CACHE:
+                if cand.genre:
+                    MUSIC_METADATA_CACHE[vid]["genre"] = cand.genre
+                if cand.album and not MUSIC_METADATA_CACHE[vid].get("album"):
+                    MUSIC_METADATA_CACHE[vid]["album"] = cand.album
+            with _DISCOVERY_CACHE_LOCK:
+                entry = _CHANNEL_DISCOVERY_CACHE.get(cid)
+                if (
+                    not entry
+                    or entry.get("session_key") != session_key
+                    or _CHANNEL_DISCOVERY_GEN.get(cid) != expected_gen
+                    or is_recently_played(cand.title, cand.artist, channel_id=cid)
+                ):
+                    return False
+                entry["pre_resolved"] = {"cand": cand, "resolved": r}
+                print(
+                    f"  └─ ⚡ [Music Pre-Resolver]: Lined up next track '{r['title']}' by '{r['artist']}' "
+                    f"for channel {cid} ({session_key[0]}={session_key[1]})"
+                )
+                return True
+        except Exception as e:
+            logger.debug("Background pre-resolve error for %r: %s", query, e)
+            continue
+    return False
+
+
+def _store_discovery_pool_and_schedule_next(
+    cid: int,
+    session_key: tuple,
+    tracks: list[Track],
+    enforce_artist_diversity: bool = True,
+) -> None:
+    """Cache the active track pool for `(cid, session_key)` and schedule background pre-resolution of the next track."""
+    if not cid or not tracks:
+        return
+    with _DISCOVERY_CACHE_LOCK:
+        existing = _CHANNEL_DISCOVERY_CACHE.get(cid)
+        if not existing or existing.get("session_key") != session_key:
+            _CHANNEL_DISCOVERY_GEN[cid] += 1
+        gen = _CHANNEL_DISCOVERY_GEN[cid]
+        _CHANNEL_DISCOVERY_CACHE[cid] = {
+            "session_key": session_key,
+            "tracks": list(tracks),
+            "pre_resolved": None,
+            "generation": gen,
+        }
+
+    unplayed_rem = [t for t in tracks if not is_recently_played(t.title, t.artist, channel_id=cid)]
+    if not unplayed_rem:
+        return
+    try:
+        submit_to_worker(
+            _pre_resolve_next_candidate_for_channel,
+            cid,
+            session_key,
+            gen,
+            enforce_artist_diversity,
+        )
+    except Exception as e:
+        logger.debug("Failed to schedule background music pre-resolver: %s", e)
 
 
 def _pre_resolve_top_candidate(
@@ -50,7 +216,8 @@ def _pre_resolve_top_candidate(
         return ""
 
     # Filter out any tracks that have already been played in this session, and deprioritize the last played artist
-    last_artist = RECENTLY_PLAYED_TRACKS[-1][1] if RECENTLY_PLAYED_TRACKS else ""
+    chan_deque = _get_music_channel_deque()
+    last_artist = chan_deque[-1][1] if chan_deque else ""
     fresh_diff_artist = [
         c for c in candidates
         if not is_recently_played(c.title, c.artist) and (not last_artist or _norm_track_token(c.artist) != last_artist)
@@ -357,6 +524,7 @@ def skill_music_discovery(
             top_sample = candidate_pool[:15]
             target_tags = target_zone.get("deep_cut_tags", []) if at_boundary else target_zone.get("mainstream_tags", [])
             shift_active_genre = (top_sample[0].genre if top_sample and top_sample[0].genre else None) or (target_tags[0] if target_tags else resolved_genre) or ""
+            invalidate_channel_discovery_cache(get_active_channel_id())
             pre_resolved = _pre_resolve_top_candidate(
                 top_sample,
                 ui_zone=target_zone_name,
@@ -436,7 +604,10 @@ def skill_music_discovery(
     if artist:
         print(f"🎵 [Executing Music Discovery Skill] Artist: {artist}")
         try:
-            tracks = manager.get_artist_tracks(artist)
+            cid = get_active_channel_id()
+            session_key = ("artist", _norm_track_token(artist))
+            cached_tracks, pre_hit = _get_or_consume_cached_discovery(cid, session_key)
+            tracks = cached_tracks if cached_tracks is not None else manager.get_artist_tracks(artist)
             if not tracks:
                 return f"No tracks found for artist '{artist}'."
 
@@ -447,13 +618,29 @@ def skill_music_discovery(
                 enforce_artist_diversity=False,
             )
             output = f"=== TOP TRACKS BY '{artist.title()}' ===\n\n"
-            pre_resolved = _pre_resolve_top_candidate(
-                top_sample,
-                active_genre="",
-                active_mood="",
-                active_artist=artist.strip(),
-                active_similar_to="",
-            )
+            if pre_hit is not None:
+                pre_cand, pre_r = pre_hit
+                if pre_cand in top_sample and top_sample[0] is not pre_cand:
+                    top_sample.remove(pre_cand)
+                    top_sample.insert(0, pre_cand)
+                elif pre_cand not in top_sample:
+                    top_sample.insert(0, pre_cand)
+                pre_resolved = _format_pre_resolved_entry(
+                    pre_cand,
+                    pre_r,
+                    active_genre="",
+                    active_mood="",
+                    active_artist=artist.strip(),
+                    active_similar_to="",
+                )
+            else:
+                pre_resolved = _pre_resolve_top_candidate(
+                    top_sample,
+                    active_genre="",
+                    active_mood="",
+                    active_artist=artist.strip(),
+                    active_similar_to="",
+                )
             if pre_resolved:
                 output += pre_resolved + "\n"
             elif top_sample:
@@ -466,6 +653,12 @@ def skill_music_discovery(
                     active_artist=artist.strip(),
                     active_similar_to="",
                 )
+            _store_discovery_pool_and_schedule_next(
+                cid,
+                session_key,
+                tracks,
+                enforce_artist_diversity=False,
+            )
 
             for t in top_sample:
                 output += t.display_line() + "\n"
@@ -484,7 +677,6 @@ def skill_music_discovery(
 
     if not genre and not similar_to and not artist and not mood and not shift_raw:
         try:
-            from src.context import get_active_channel_id
             from src.jobs.engine import JOB_ENGINE
 
             active_ap = JOB_ENGINE.get_active_autoplay_job(get_active_channel_id())
@@ -526,6 +718,15 @@ def skill_music_discovery(
         try:
             from src.skills.music.aggregators.deezer import clean_playlist_genre_label
 
+            cid = get_active_channel_id()
+            sim_session_key = (
+                "similar",
+                _norm_track_token(similar_to),
+                bool(match_mood),
+                _norm_track_token(parsed_genre or ""),
+            )
+            cached_sim_tracks, sim_pre_hit = _get_or_consume_cached_discovery(cid, sim_session_key)
+
             last_played = get_channel_last_played_song()
             s_meta = parse_song_meta(similar_to)
             s_song = s_meta.get("song", "")
@@ -541,7 +742,11 @@ def skill_music_discovery(
             prev_active_genre = last_played.active_genre if (last_played and seed_matches_last_played) else None
 
             mood_tag = None
-            if match_mood:
+            if cached_sim_tracks is not None:
+                tracks = cached_sim_tracks
+                if parsed_genre:
+                    mood_tag = parsed_genre.title()
+            elif match_mood:
                 tracks, mood_info = manager.get_mood_matched_tracks(similar_to)
                 if mood_info.get("mood"):
                     mood_tag = mood_info["mood"].title()
@@ -564,7 +769,7 @@ def skill_music_discovery(
             )
             is_unrelated_fallback = all(t.source == "fallback_unrelated" for t in top_sample)
 
-            if not is_unrelated_fallback and top_sample:
+            if not is_unrelated_fallback and top_sample and sim_pre_hit is None:
                 try:
                     sim_anchor = None
                     inferred_sim_genre = prev_active_genre or s_meta.get("genre")
@@ -604,13 +809,29 @@ def skill_music_discovery(
             output = header
             # When the user explicitly likes (👍) or requests tracks similar to a song,
             # anchor subsequent 'next' presses to that liked seed's YouTube Music Radio queue!
-            pre_resolved = _pre_resolve_top_candidate(
-                top_sample,
-                active_genre="",
-                active_mood="",
-                active_artist="",
-                active_similar_to=similar_to,
-            )
+            if sim_pre_hit is not None:
+                pre_cand, pre_r = sim_pre_hit
+                if pre_cand in top_sample and top_sample[0] is not pre_cand:
+                    top_sample.remove(pre_cand)
+                    top_sample.insert(0, pre_cand)
+                elif pre_cand not in top_sample:
+                    top_sample.insert(0, pre_cand)
+                pre_resolved = _format_pre_resolved_entry(
+                    pre_cand,
+                    pre_r,
+                    active_genre="",
+                    active_mood="",
+                    active_artist="",
+                    active_similar_to=similar_to,
+                )
+            else:
+                pre_resolved = _pre_resolve_top_candidate(
+                    top_sample,
+                    active_genre="",
+                    active_mood="",
+                    active_artist="",
+                    active_similar_to=similar_to,
+                )
             if pre_resolved:
                 output += pre_resolved + "\n"
             elif top_sample:
@@ -622,6 +843,13 @@ def skill_music_discovery(
                     active_mood="",
                     active_artist="",
                     active_similar_to=similar_to,
+                )
+            if not is_unrelated_fallback:
+                _store_discovery_pool_and_schedule_next(
+                    cid,
+                    sim_session_key,
+                    tracks,
+                    enforce_artist_diversity=True,
                 )
 
             for t in top_sample:
@@ -636,7 +864,19 @@ def skill_music_discovery(
 
     print(f"🎵 [Executing Music Discovery Skill] Genre: {parsed_genre or 'All'}, Mood: {parsed_mood or 'None'}")
     try:
-        all_tracks = manager.get_top_charts(genre=parsed_genre)
+        from src.skills.music.aggregators.deezer import clean_playlist_genre_label
+
+        cid = get_active_channel_id()
+        raw_req_genre = clean_playlist_genre_label((genre or parsed_genre or "").strip())
+        session_genre = raw_req_genre or (parsed_genre or "")
+        session_mood = (mood or "").strip() if mood else (parsed_mood or "" if not session_genre else "")
+        genre_session_key = (
+            "genre",
+            _norm_track_token(session_genre or "all"),
+            _norm_track_token(session_mood or ""),
+        )
+        cached_genre_tracks, genre_pre_hit = _get_or_consume_cached_discovery(cid, genre_session_key)
+        all_tracks = cached_genre_tracks if cached_genre_tracks is not None else manager.get_top_charts(genre=parsed_genre)
         is_artist_fallback = bool(
             parsed_genre
             and all_tracks
@@ -650,13 +890,29 @@ def skill_music_discovery(
                 weights=(0.45, 0.35, 0.20),
                 enforce_artist_diversity=False,
             )
-            pre_resolved = _pre_resolve_top_candidate(
-                featured_sample,
-                active_genre="",
-                active_mood="",
-                active_artist=parsed_genre.strip(),
-                active_similar_to="",
-            )
+            if genre_pre_hit is not None:
+                pre_cand, pre_r = genre_pre_hit
+                if pre_cand in featured_sample and featured_sample[0] is not pre_cand:
+                    featured_sample.remove(pre_cand)
+                    featured_sample.insert(0, pre_cand)
+                elif pre_cand not in featured_sample:
+                    featured_sample.insert(0, pre_cand)
+                pre_resolved = _format_pre_resolved_entry(
+                    pre_cand,
+                    pre_r,
+                    active_genre="",
+                    active_mood="",
+                    active_artist=parsed_genre.strip(),
+                    active_similar_to="",
+                )
+            else:
+                pre_resolved = _pre_resolve_top_candidate(
+                    featured_sample,
+                    active_genre="",
+                    active_mood="",
+                    active_artist=parsed_genre.strip(),
+                    active_similar_to="",
+                )
             if pre_resolved:
                 output += pre_resolved + "\n"
             elif featured_sample:
@@ -669,6 +925,12 @@ def skill_music_discovery(
                     active_artist=parsed_genre.strip(),
                     active_similar_to="",
                 )
+            _store_discovery_pool_and_schedule_next(
+                cid,
+                ("artist", _norm_track_token(parsed_genre)),
+                all_tracks,
+                enforce_artist_diversity=False,
+            )
             for t in featured_sample:
                 output += t.display_line() + "\n"
             output += "\n" + build_music_llm_instructions()
@@ -676,11 +938,6 @@ def skill_music_discovery(
 
         output = f"=== TODAY'S TOP CHARTING MUSIC ({parsed_genre.upper() if parsed_genre else 'ALL GENRES'}) ===\n\n"
         if all_tracks:
-            from src.skills.music.aggregators.deezer import clean_playlist_genre_label
-
-            raw_req_genre = clean_playlist_genre_label((genre or parsed_genre or "").strip())
-            session_genre = raw_req_genre or (parsed_genre or "")
-            session_mood = (mood or "").strip() if mood else (parsed_mood or "" if not session_genre else "")
             display_genre_label = session_genre.title() if session_genre == session_genre.lower() else session_genre
 
             featured_sample = MusicAggregatorManager.sample_tiered_tracks(
@@ -693,14 +950,37 @@ def skill_music_discovery(
                 for t in featured_sample:
                     if not t.genre or t.genre.strip().lower() in ("unknown", "music", "electronic", "dance", "dnb", "drum and bass", "drum & bass"):
                         t.genre = display_genre_label
+                for t in all_tracks:
+                    if not t.genre or t.genre.strip().lower() in ("unknown", "music", "electronic", "dance", "dnb", "drum and bass", "drum & bass"):
+                        t.genre = display_genre_label
 
-            pre_resolved = _pre_resolve_top_candidate(
-                featured_sample,
-                active_genre=session_genre,
-                active_mood=session_mood,
-                active_artist="",
-                active_similar_to="",
-            )
+            if genre_pre_hit is not None:
+                pre_cand, pre_r = genre_pre_hit
+                if display_genre_label and (
+                    not pre_cand.genre or pre_cand.genre.strip().lower() in ("unknown", "music", "electronic", "dance", "dnb", "drum and bass", "drum & bass")
+                ):
+                    pre_cand.genre = display_genre_label
+                if pre_cand in featured_sample and featured_sample[0] is not pre_cand:
+                    featured_sample.remove(pre_cand)
+                    featured_sample.insert(0, pre_cand)
+                elif pre_cand not in featured_sample:
+                    featured_sample.insert(0, pre_cand)
+                pre_resolved = _format_pre_resolved_entry(
+                    pre_cand,
+                    pre_r,
+                    active_genre=session_genre,
+                    active_mood=session_mood,
+                    active_artist="",
+                    active_similar_to="",
+                )
+            else:
+                pre_resolved = _pre_resolve_top_candidate(
+                    featured_sample,
+                    active_genre=session_genre,
+                    active_mood=session_mood,
+                    active_artist="",
+                    active_similar_to="",
+                )
             if pre_resolved:
                 output += pre_resolved + "\n"
             elif featured_sample:
@@ -713,6 +993,12 @@ def skill_music_discovery(
                     active_artist="",
                     active_similar_to="",
                 )
+            _store_discovery_pool_and_schedule_next(
+                cid,
+                genre_session_key,
+                all_tracks,
+                enforce_artist_diversity=True,
+            )
 
             output += f"[FEATURED DIVERSE SELECTION ({len(featured_sample)} Different Artists)]\n"
             for t in featured_sample:

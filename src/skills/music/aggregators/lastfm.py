@@ -556,10 +556,14 @@ class LastFmAggregator(BaseMusicAggregator):
                         high.add(t_name)
                 return a_name.lower().strip(), high
 
+            unverified_cand_artists = [
+                a for a in all_cand_artist_names
+                if a.lower().strip() not in verified_genre_artists
+            ]
             artist_high_tags: dict[str, set[str]] = {}
             tag_counter = Counter()
-            if all_cand_artist_names:
-                futs = [submit_to_worker(_fetch_high_tags, a) for a in all_cand_artist_names]
+            if unverified_cand_artists:
+                futs = [submit_to_worker(_fetch_high_tags, a) for a in unverified_cand_artists]
                 for fut in futs:
                     clean_a, high_set = fut.result(timeout=15)
                     artist_high_tags[clean_a] = high_set
@@ -569,7 +573,10 @@ class LastFmAggregator(BaseMusicAggregator):
             dominant_tag = tag_counter.most_common(1)[0][0] if tag_counter else tag
 
             def _is_verified_primary_artist(a_name: str) -> bool:
-                high_set = artist_high_tags.get(a_name.lower().strip())
+                clean_a = a_name.lower().strip()
+                if clean_a in verified_genre_artists:
+                    return True
+                high_set = artist_high_tags.get(clean_a)
                 if not high_set:
                     return True  # Graceful pass-through if unmocked or artist has no tags
                 if tag in high_set or dominant_tag in high_set:

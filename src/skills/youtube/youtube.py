@@ -1,5 +1,10 @@
 import re
 from typing import Optional
+from src.skills.music.context import (
+    invalidate_channel_discovery_cache,
+    record_channel_played_song,
+    record_played_track,
+)
 from src.skills.music.playback.youtube_music import (
     get_blocked_official_info,
     record_served_song_vid,
@@ -146,6 +151,23 @@ def skill_youtube_search(query: str, max_results: Optional[int] = 1, is_music: O
                 return build_no_tracks_found_message(reason_detail)
 
             print(f"✅ [YouTube Search Skill]: Returning {len(results)} music link(s) for '{query}'")
+            invalidate_channel_discovery_cache()
+            top_r = results[0]
+            top_title = (top_r.get("title") or "").strip()
+            top_artist = (top_r.get("artist") or "").strip()
+            if top_title:
+                record_played_track(top_title, top_artist)
+                sim_anchor = f"{top_title} by {top_artist}" if top_artist else top_title
+                record_channel_played_song(
+                    song=top_title,
+                    artist=top_artist,
+                    genre=top_r.get("genre"),
+                    active_genre="",
+                    active_mood="",
+                    active_artist="",
+                    active_similar_to=sim_anchor,
+                    preserve_session=False,
+                )
             formatted_results = ""
             for i, r in enumerate(results):
                 if r.get("id"):

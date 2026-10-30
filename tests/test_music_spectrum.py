@@ -1121,6 +1121,130 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
         self.assertIn("**Genre:** Liquid Drum & Bass", cleaned_card)
         self.assertNotIn("Similar to Desperado", cleaned_card)
 
+    async def test_next_button_fast_path_bypasses_llm_and_background_cache_invalidates_on_genre_or_specific_song(self):
+        """Verify that:
+        1. Pressing `⏭️ Next` outside Autoplay uses `resolve_next_song_card_direct` to resolve and post
+           the next Song Card directly in Python with 0 LLM (`ollama_client.chat`) calls.
+        2. Per-channel discovery pool caching + background pre-resolution serves the lined-up track in 0ms
+           on `⏭️ Next` without re-fetching charts.
+        3. Switching genres (`play hard techno`) or requesting a specific song (`skill_youtube_search(is_music=True)`)
+           while a track is lined up in `_CHANNEL_DISCOVERY_CACHE` immediately invalidates the old pool and
+           lined-up track, preventing any stale cross-genre playback."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
+        import main as bot_main
+        from src.context import set_active_channel_id
+        from src.skills.music import music as music_mod
+        from src.skills.music.context import (
+            _CHANNEL_DISCOVERY_CACHE,
+            _CHANNEL_DISCOVERY_GEN,
+            _resolve_next_turn_music_args,
+            clear_channel_played_songs,
+            clear_recently_played_tracks,
+            get_channel_last_played_song,
+        )
+        from src.skills.music.models import Track
+        from src.skills.youtube.youtube import skill_youtube_search
+
+        cid = 999111
+        set_active_channel_id(cid)
+        clear_channel_played_songs(cid)
+        clear_recently_played_tracks(cid)
+        bot_main.chat_history.pop(cid, None)
+
+        dnb_pool = [
+            Track(title=f"DnB Hit {i}", artist=f"DnB Artist {i}", genre="Liquid DnB", source="lastfm", tier=1)
+            for i in range(1, 8)
+        ]
+        techno_pool = [
+            Track(title=f"Techno Hit {i}", artist=f"Techno Artist {i}", genre="Hard Techno", source="lastfm", tier=1)
+            for i in range(1, 8)
+        ]
+
+        def fake_yt_resolve(query: str, max_results: int = 1, **_kwargs):
+            slug = query.replace(" ", "")[:11].ljust(11, "0")
+            parts = query.split(" by ", 1)
+            s_title = parts[0].strip()
+            s_art = parts[1].strip() if len(parts) > 1 else "Artist"
+            return [{"id": slug, "title": s_title, "artist": s_art, "url": f"https://music.youtube.com/watch?v={slug}"}]
+
+        with (
+            patch.object(bot_main.JOB_ENGINE, "get_active_autoplay_job", return_value=None),
+            patch.object(
+                music_mod.manager,
+                "get_top_charts",
+                side_effect=lambda genre=None: list(dnb_pool) if "dnb" in (genre or "").lower() else list(techno_pool),
+            ) as mock_charts,
+            patch.object(music_mod, "resolve_youtube_music_link", side_effect=fake_yt_resolve),
+            patch.object(music_mod, "submit_to_worker", side_effect=lambda fn, *a, **kw: fn(*a, **kw)),
+        ):
+            # 1. Initial `play liquid dnb` fetches charts once and lines up Track #2 in background cache
+            out1 = music_mod.skill_music_discovery(genre="liquid dnb")
+            self.assertIn("VERIFIED YOUTUBE MUSIC RESULT", out1)
+            self.assertEqual(mock_charts.call_count, 1)
+            cached_entry = _CHANNEL_DISCOVERY_CACHE.get(cid)
+            self.assertIsNotNone(cached_entry)
+            self.assertEqual(cached_entry["session_key"][0], "genre")
+            self.assertIsNotNone(cached_entry.get("pre_resolved"))
+            lined_up_dnb_title = cached_entry["pre_resolved"]["cand"].title
+
+            # 2. Pressing `⏭️ Next` button in Discord uses fast-path (0 LLM calls) and serves the lined-up DnB track!
+            channel = MagicMock()
+            channel.id = cid
+            channel.send = AsyncMock()
+            typing_cm = MagicMock()
+            typing_cm.__aenter__ = AsyncMock(return_value=None)
+            typing_cm.__aexit__ = AsyncMock(return_value=None)
+            channel.typing = MagicMock(return_value=typing_cm)
+
+            with patch.object(bot_main.ollama_client, "chat", AsyncMock()) as mock_ollama:
+                ok = await bot_main.process_song_card_next(
+                    channel=channel,
+                    message_content=f"**Song:** DnB Hit 1\n**Artist:** DnB Artist 1\n**Genre:** Liquid DnB\n\nhttps://music.youtube.com/watch?v=11111111111",
+                    user_id=42,
+                    user_display_name="Halil",
+                )
+            self.assertTrue(ok)
+            mock_ollama.assert_not_awaited()
+            # Charts were NOT re-fetched on Next because the cached pool + pre-resolved track was used!
+            self.assertEqual(mock_charts.call_count, 1)
+            sent_card = channel.send.call_args.args[0]
+            self.assertIn(f"**Song:** {lined_up_dnb_title}", sent_card)
+            # And a new DnB track is now lined up in background cache for the next press
+            self.assertIsNotNone(_CHANNEL_DISCOVERY_CACHE.get(cid, {}).get("pre_resolved"))
+            stale_lined_up = _CHANNEL_DISCOVERY_CACHE[cid]["pre_resolved"]["cand"].title
+            gen_before_switch = _CHANNEL_DISCOVERY_GEN[cid]
+
+            # 3. User switches genre to `hard techno` while `stale_lined_up` (DnB) is queued in background
+            out_tech = music_mod.skill_music_discovery(genre="hard techno")
+            self.assertIn("Techno Hit", out_tech)
+            self.assertNotIn(stale_lined_up, out_tech)
+            self.assertGreater(_CHANNEL_DISCOVERY_GEN[cid], gen_before_switch)
+            self.assertEqual(_CHANNEL_DISCOVERY_CACHE[cid]["session_key"][1], "hardtechno")
+            self.assertIn("Techno Hit", _CHANNEL_DISCOVERY_CACHE[cid]["pre_resolved"]["cand"].title)
+
+            # 4. User asks for a specific song (`play Kvaðning by Skálmöld`) via skill_youtube_search(is_music=True)
+            # while a Hard Techno track is lined up in background
+            with patch("src.skills.youtube.youtube.resolve_youtube_music_link", side_effect=fake_yt_resolve):
+                yt_out = skill_youtube_search("Kvaðning by Skálmöld", max_results=1, is_music=True)
+            self.assertIn("Kvaðning", yt_out)
+            # Background cache must be completely invalidated so the lined-up Hard Techno track is wiped
+            self.assertIsNone(_CHANNEL_DISCOVERY_CACHE.get(cid))
+            # Active session on the channel is now anchored to `similar_to='Kvaðning by Skálmöld'`, NOT `hard techno`!
+            last_rec = get_channel_last_played_song(cid)
+            self.assertIsNotNone(last_rec)
+            self.assertIsNone(last_rec.active_genre)
+            self.assertEqual(last_rec.active_similar_to, "Kvaðning by Skálmöld")
+            next_after_specific = _resolve_next_turn_music_args(
+                [
+                    {"role": "user", "content": "User Halil says: play hard techno"},
+                    {"role": "user", "content": "User Halil says: play Kvaðning by Skálmöld"},
+                    {"role": "user", "content": "User Halil says: next"},
+                ],
+                channel_id=cid,
+            )
+            self.assertEqual(next_after_specific, {"similar_to": "Kvaðning by Skálmöld"})
+
 
 if __name__ == "__main__":
     unittest.main()

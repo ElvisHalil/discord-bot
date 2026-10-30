@@ -9,6 +9,7 @@ Manages:
 
 from collections import defaultdict, deque
 import re
+import threading
 from typing import Dict, Optional, Tuple
 
 from src.context import get_active_channel_id
@@ -22,15 +23,34 @@ from src.utils.domain_vocab import compile_word_boundary_re
 # Per-channel active song context: {channel_id: PlayedSongRecord}
 _CHANNEL_LAST_PLAYED_SONG: Dict[int, PlayedSongRecord] = BoundedCache(maxsize=128)
 
+# Per-channel discovery pool & background pre-resolved track cache:
+# {channel_id: {"session_key": tuple, "tracks": list, "pre_resolved": Optional[dict], "generation": int}}
+_DISCOVERY_CACHE_LOCK = threading.Lock()
+_CHANNEL_DISCOVERY_CACHE: Dict[int, dict] = BoundedCache(maxsize=128)
+_CHANNEL_DISCOVERY_GEN: Dict[int, int] = defaultdict(int)
+
 # Rolling session history of recently played/recommended tracks to prevent repeats across turns
 # Scoped per channel_id so one chat's music history never affects another chat.
 _CHANNEL_RECENTLY_PLAYED_TRACKS = defaultdict(lambda: deque(maxlen=80))
+
+
+def invalidate_channel_discovery_cache(channel_id: Optional[int] = None) -> None:
+    """Invalidate cached discovery pools and any background pre-resolved track for a channel (or all)."""
+    with _DISCOVERY_CACHE_LOCK:
+        if channel_id is not None:
+            _CHANNEL_DISCOVERY_GEN[channel_id] += 1
+            _CHANNEL_DISCOVERY_CACHE.pop(channel_id, None)
+        else:
+            for cid in list(_CHANNEL_DISCOVERY_GEN.keys()):
+                _CHANNEL_DISCOVERY_GEN[cid] += 1
+            _CHANNEL_DISCOVERY_CACHE.clear()
 
 
 class _ChannelAwareDeque(deque):
     def clear(self) -> None:
         super().clear()
         _CHANNEL_RECENTLY_PLAYED_TRACKS.clear()
+        invalidate_channel_discovery_cache(None)
 
 
 RECENTLY_PLAYED_TRACKS = _ChannelAwareDeque(maxlen=80)
@@ -73,6 +93,7 @@ def clear_recently_played_tracks(channel_id: Optional[int] = None) -> None:
             super(_ChannelAwareDeque, RECENTLY_PLAYED_TRACKS).clear()
         else:
             _CHANNEL_RECENTLY_PLAYED_TRACKS.pop(channel_id, None)
+        invalidate_channel_discovery_cache(channel_id)
     else:
         RECENTLY_PLAYED_TRACKS.clear()
 
@@ -175,6 +196,14 @@ def record_channel_played_song(
         eff_active_artist = None
         eff_active_sim = None
 
+    if prev is not None and (
+        (prev.active_genre or "").lower() != (eff_active_genre or "").lower()
+        or (prev.active_mood or "").lower() != (eff_active_mood or "").lower()
+        or (prev.active_artist or "").lower() != (eff_active_artist or "").lower()
+        or (prev.active_similar_to or "").lower() != (eff_active_sim or "").lower()
+    ):
+        invalidate_channel_discovery_cache(cid)
+
     entry = PlayedSongRecord(
         song=s_clean,
         alt_song=alt_clean or (prev.alt_song if same_track and prev else None),
@@ -205,6 +234,7 @@ def clear_channel_played_songs(channel_id: Optional[int] = None) -> None:
         _CHANNEL_LAST_PLAYED_SONG.pop(channel_id, None)
     else:
         _CHANNEL_LAST_PLAYED_SONG.clear()
+    invalidate_channel_discovery_cache(channel_id)
 
 
 def _extract_raw_user_text(msg) -> str:
@@ -371,6 +401,13 @@ def _extract_genre_or_music_request_from_user_text(u_text: str) -> Optional[dict
         art = m_by.group(1).strip(" .,!?")
         if art:
             return {"artist": art}
+
+    # 3b. Specific single song request: "play <Song> by <Artist>" -> anchors subsequent 'next' to similar_to
+    m_spec = _PLAY_SPECIFIC_BY_ARTIST_RE.match(u_text)
+    if m_spec:
+        spec_q = m_spec.group(1).strip(" .,!?")
+        if spec_q:
+            return {"similar_to": spec_q}
 
     # 4. Genre or mood request: "play liquid drum and bass genre", "play liquid drum and bass", "liquid drum and bass"
     from src.skills.music.catalogs import BEATPORT_GENRE_QUERIES, GENRE_CANONICAL_MAP
