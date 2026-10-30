@@ -1245,6 +1245,84 @@ class TestSongCardButtons(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(next_after_specific, {"similar_to": "Kvaðning by Skálmöld"})
 
+    async def test_like_reaction_skips_dsp_and_llm_and_handles_release_topic_placeholder(self):
+        """
+        Regression test for `👍 Like` speed and `'Release - Topic'` placeholder artist protection:
+        1. `parse_song_meta` never overwrites the real artist (`KETTAMA`) with `'Release'` when YouTube's
+           auto-generated channel is `'Release - Topic'`.
+        2. `YouTubeMusicAggregator.get_similar` reuses the Song Card's `video_id` from `MUSIC_METADATA_CACHE`
+           in 0ms without calling `search_ytmusic_songs`.
+        3. `skill_music_discovery(similar_to=...)` skips the 7-MP3 Deezer DSP pass (`rank_candidates_by_acoustic_similarity`)
+           when `match_mood=False`.
+        4. `process_song_card_like` posts the Song Card directly without awaiting `ollama_client.chat`.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+        import main as bot_main
+        import src.skills.music.music as music_mod
+        from src.skills.music.aggregators.ytmusic import YouTubeMusicAggregator
+        from src.skills.music.engine.formatting import MUSIC_METADATA_CACHE, parse_song_meta
+
+        # 1. 'Release - Topic' placeholder must preserve 'KETTAMA' from query
+        meta = parse_song_meta(
+            "Yosemite (Wilkinson Remix)",
+            author="Release - Topic",
+            query="Yosemite (Wilkinson Remix) by KETTAMA",
+        )
+        self.assertEqual(meta["song"], "Yosemite (Wilkinson Remix)")
+        self.assertEqual(meta["artist"], "KETTAMA")
+
+        # 2. Seed MUSIC_METADATA_CACHE with the Song Card's videoId and verify YTMusic get_similar skips search_ytmusic_songs
+        MUSIC_METADATA_CACHE["PjGZX6K5XnE"] = {
+            "song": "Yosemite (Wilkinson Remix)",
+            "artist": "KETTAMA",
+            "genre": "Liquid Drum & Bass",
+            "url": "https://music.youtube.com/watch?v=PjGZX6K5XnE",
+        }
+        ytm_agg = YouTubeMusicAggregator()
+        with (
+            patch("src.skills.music.aggregators.ytmusic.search_ytmusic_songs") as mock_ytm_search,
+            patch(
+                "src.skills.music.aggregators.ytmusic.fetch_ytmusic_watch_radio",
+                return_value=[
+                    {
+                        "videoId": "GGoJts4dl_Y",
+                        "title": "Perseverance",
+                        "artists": [{"name": "Technimatic"}],
+                        "length": "4:52",
+                        "videoType": "MUSIC_VIDEO_TYPE_ATV",
+                    }
+                ],
+            ) as mock_ytm_radio,
+        ):
+            sim_tracks = ytm_agg.get_similar("Yosemite by KETTAMA")
+            mock_ytm_search.assert_not_called()
+            mock_ytm_radio.assert_called_once()
+            self.assertEqual(mock_ytm_radio.call_args.kwargs.get("video_id"), "PjGZX6K5XnE")
+            self.assertEqual(len(sim_tracks), 1)
+            self.assertEqual(sim_tracks[0].title, "Perseverance")
+
+        # 3. Verify skill_music_discovery(similar_to=...) skips rank_candidates_by_acoustic_similarity when match_mood=False
+        with (
+            patch.object(music_mod.manager, "get_similar_tracks", return_value=sim_tracks),
+            patch.object(
+                music_mod,
+                "resolve_youtube_music_link",
+                return_value=[
+                    {
+                        "id": "GGoJts4dl_Y",
+                        "title": "Perseverance",
+                        "artist": "Technimatic",
+                        "url": "https://music.youtube.com/watch?v=GGoJts4dl_Y",
+                    }
+                ],
+            ),
+            patch.object(music_mod.audio_analyzer, "rank_candidates_by_acoustic_similarity") as mock_dsp_sim,
+            patch.object(music_mod, "submit_to_worker"),
+        ):
+            out = music_mod.skill_music_discovery(similar_to="Yosemite by KETTAMA")
+            self.assertIn("Perseverance", out)
+            mock_dsp_sim.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

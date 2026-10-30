@@ -137,7 +137,8 @@ def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
     clean = re.sub(r'[\(\[\{](?:feat\.|ft\.)[^\)\]\}]*[\)\]\}]', '', clean, flags=re.IGNORECASE).strip()
 
     clean_author = re.sub(r'\s*-\s*Topic$', '', author or "", flags=re.IGNORECASE).strip()
-    is_topic_author = bool(re.search(r'\s*-\s*Topic$', author or "", flags=re.IGNORECASE))
+    is_generic_author = clean_author.lower() in ("youtube", "various artists", "unknown", "unknown artist", "release")
+    is_topic_author = bool(re.search(r'\s*-\s*Topic$', author or "", flags=re.IGNORECASE)) and not is_generic_author
     artist = None
     song = None
 
@@ -168,7 +169,7 @@ def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
         song = re.sub(r'\s+\b(?:ft|feat)\.?\s+[^(\[\{]*', '', song, flags=re.IGNORECASE).strip(" -–—\"'")
         if not song:
             song = q_song
-    elif clean_author and clean_author.lower() not in ("youtube", "various artists", "unknown"):
+    elif clean_author and not is_generic_author:
         artist = clean_author
         song = clean.strip(" -–—\"'")
         if song.lower().startswith(artist.lower()):
@@ -179,7 +180,7 @@ def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
         artist = parts[1].strip(" -–—\"'")
     else:
         song = clean or title
-        artist = clean_author or "Unknown Artist"
+        artist = (clean_author if not is_generic_author else "") or "Unknown Artist"
 
     # Extract any genuine remix/VIP/edit qualifier from `song` before stripping brackets and dash suffixes
     remix_tag = None
@@ -205,7 +206,7 @@ def parse_song_meta(title: str, author: str = "", query: str = "") -> dict:
     if not song:
         song = title or "Unknown Track"
     if not artist:
-        artist = clean_author or "Unknown Artist"
+        artist = (clean_author if not is_generic_author else "") or "Unknown Artist"
 
     return {
         "song": song,

@@ -218,13 +218,19 @@ def score_music_candidate(query: str, title: str, author: str) -> tuple[bool, in
         req_count = max(2, int(len(effective_song_tokens) * 0.6))
         song_match = len(effective_song_tokens.intersection(title_tokens)) >= req_count
 
+    has_title_delim = (" - " in (title or "")) or (" – " in (title or ""))
+    if is_topic or (exp_artist_tokens and exp_artist_tokens.intersection(effective_song_tokens) and not has_title_delim):
+        art_cand_tokens = author_tokens.union(title_tokens - effective_song_tokens)
+    else:
+        art_cand_tokens = cand_tokens
+
     if not exp_artist_tokens:
         artist_match = True
     elif len(exp_artist_tokens) <= 2:
-        artist_match = exp_artist_tokens.issubset(cand_tokens)
+        artist_match = exp_artist_tokens.issubset(art_cand_tokens)
     else:
         req_art = max(2, int(len(exp_artist_tokens) * 0.6))
-        artist_match = len(exp_artist_tokens.intersection(cand_tokens)) >= req_art
+        artist_match = len(exp_artist_tokens.intersection(art_cand_tokens)) >= req_art
 
     # On YouTube Music, remixes are often uploaded under the remixer's Topic/official channel
     if not artist_match and remixer_tokens and remixer_tokens.issubset(cand_tokens):
@@ -447,17 +453,23 @@ def resolve_youtube_music_link(query: str, max_results: int = 1, exclude_ids: se
             return None
         title = oembed["title"]
         author = oembed.get("author", "")
+        eff_author = author
+        clean_oe_auth = re.sub(r"\s*-\s*Topic$", "", author or "", flags=re.IGNORECASE).strip().lower()
+        if clean_oe_auth in ("release", "various artists") and vid in MUSIC_METADATA_CACHE:
+            cached_art = str((MUSIC_METADATA_CACHE.get(vid) or {}).get("artist") or "").strip()
+            if cached_art and cached_art.lower() not in ("release", "various artists", "unknown", "unknown artist"):
+                eff_author = f"{cached_art} - Topic"
 
         # 5. Robust Garbage & Relevance match check
-        is_valid, score, reason = score_music_candidate(query, title, author)
+        is_valid, score, reason = score_music_candidate(query, title, eff_author)
         if not is_valid:
             print(f"  └─ ⚠️ [Music Resolver]: Skipping {vid} ('{title}'): {reason}")
             return None
 
-        is_topic = " - Topic" in author or "Topic" in author
-        is_trusted_official = (score >= 2) or _is_trusted_music_label(author)
+        is_topic = " - Topic" in eff_author or "Topic" in eff_author
+        is_trusted_official = (score >= 2) or _is_trusted_music_label(eff_author)
         link = f"https://music.youtube.com/watch?v={vid}"
-        meta = parse_song_meta(title, author, query=query)
+        meta = parse_song_meta(title, eff_author, query=query)
 
         entry = {
             "id": vid,

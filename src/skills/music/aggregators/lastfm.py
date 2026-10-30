@@ -286,7 +286,7 @@ class LastFmAggregator(BaseMusicAggregator):
         meta = parse_song_meta(query)
         song_title = meta.get("song", "").strip()
         artist_name = meta.get("artist", "").strip()
-        if artist_name.lower() in ("unknown artist", "unknown"):
+        if artist_name.lower() in ("unknown artist", "unknown", "release", "various artists"):
             artist_name = ""
 
         # Strategy 1: Direct track.getSimilar if both song and artist were cleanly parsed
@@ -386,7 +386,7 @@ class LastFmAggregator(BaseMusicAggregator):
         # Strategy 5: Generic artist similarity fallback if query was an artist name
         if not tracks:
             target_artist = artist_name or (query.split(" by ")[-1].strip() if " by " in query else "")
-            if target_artist and target_artist.lower() not in ("unknown artist", "unknown"):
+            if target_artist and target_artist.lower() not in ("unknown artist", "unknown", "release", "various artists"):
                 tracks = self._get_similar_artists_tracks(target_artist)
                 if tracks:
                     print(f"  └─ ✅ [Last.fm]: Found {len(tracks)} tracks via similar artists for '{target_artist}'")

@@ -154,7 +154,35 @@ def _pre_resolve_next_candidate_for_channel(
                     f"  └─ ⚡ [Music Pre-Resolver]: Lined up next track '{r['title']}' by '{r['artist']}' "
                     f"for channel {cid} ({session_key[0]}={session_key[1]})"
                 )
-                return True
+            # Also pre-warm the currently playing Song Card's 👍 Like similarity caches in the background
+            # when YTMusic is active in live production (0ms cache hit if the user clicks 👍 Like!)
+            try:
+                from src.skills.music.aggregators.ytmusic import (
+                    YTMUSIC_SIMILAR_RADIO_LIMIT,
+                    _YTMUSIC_CLIENT,
+                    fetch_ytmusic_watch_radio,
+                )
+
+                if _YTMUSIC_CLIENT is not None:
+                    lp = get_channel_last_played_song(cid)
+                    if lp and lp.get("song"):
+                        lp_s_norm = _norm_track_token(lp.get("song") or "")
+                        lp_a_norm = _norm_track_token(lp.get("artist") or "")
+                        for c_vid, c_meta in reversed(list(MUSIC_METADATA_CACHE.items())):
+                            if not isinstance(c_meta, dict):
+                                continue
+                            if _norm_track_token(str(c_meta.get("song") or "")) == lp_s_norm:
+                                fetch_ytmusic_watch_radio(video_id=c_vid, limit=YTMUSIC_SIMILAR_RADIO_LIMIT + 12)
+                                break
+                        lfm = manager.aggregators.get("lastfm")
+                        if lfm and hasattr(lfm, "_call") and lp.get("artist"):
+                            lfm._call(
+                                "track.getsimilar",
+                                {"artist": lp["artist"], "track": lp["song"], "limit": 50, "autocorrect": 1},
+                            )
+            except Exception:
+                pass
+            return True
         except Exception as e:
             logger.debug("Background pre-resolve error for %r: %s", query, e)
             continue
@@ -783,19 +811,36 @@ def skill_music_discovery(
                                 "intensity_score": float(last_played.get("intensity_score") or 5.5),
                             }
                     if not inferred_sim_genre:
-                        inferred_sim_genre = manager._infer_seed_genre(similar_to)
+                        # Check in-memory MUSIC_METADATA_CACHE first (0ms); only call Last.fm network tag lookup when match_mood=True
+                        s_norm_lookup = _norm_track_token(s_song)
+                        a_norm_lookup = _norm_track_token(s_artist)
+                        for cached_m in MUSIC_METADATA_CACHE.values():
+                            if isinstance(cached_m, dict) and cached_m.get("genre"):
+                                if s_norm_lookup and _norm_track_token(cached_m.get("song", "")) == s_norm_lookup:
+                                    if not a_norm_lookup or _norm_track_token(cached_m.get("artist", "")) == a_norm_lookup:
+                                        inferred_sim_genre = cached_m["genre"]
+                                        break
+                        if not inferred_sim_genre and match_mood:
+                            inferred_sim_genre = manager._infer_seed_genre(similar_to)
                     if inferred_sim_genre:
                         clean_sim_g = clean_playlist_genre_label(inferred_sim_genre)
+                        lbl_sim_g = clean_sim_g.title() if clean_sim_g == clean_sim_g.lower() else clean_sim_g
                         for t in top_sample:
                             if not t.genre or (prev_active_genre and t.genre.lower() in ("dnb", "drum and bass", "drum & bass", "electronic", "dance")):
-                                t.genre = clean_sim_g.title() if clean_sim_g == clean_sim_g.lower() else clean_sim_g
-                    top_sample = audio_analyzer.rank_candidates_by_acoustic_similarity(
-                        top_sample,
-                        seed_song=s_song,
-                        seed_artist=s_artist,
-                        anchor_profile=sim_anchor,
-                        max_analyze=6,
-                    )
+                                t.genre = lbl_sim_g
+                        for t in tracks:
+                            if not t.genre or (prev_active_genre and t.genre.lower() in ("dnb", "drum and bass", "drum & bass", "electronic", "dance")):
+                                t.genre = lbl_sim_g
+                    # Only run the 7-MP3 Deezer acoustic DSP pass when explicit mood matching is requested
+                    # (or when an acoustic spectrum anchor is already cached in memory), saving ~2.5-5s on 👍 Like
+                    if match_mood or sim_anchor is not None:
+                        top_sample = audio_analyzer.rank_candidates_by_acoustic_similarity(
+                            top_sample,
+                            seed_song=s_song,
+                            seed_artist=s_artist,
+                            anchor_profile=sim_anchor,
+                            max_analyze=6,
+                        )
                 except Exception as e:
                     logger.debug("Acoustic similarity verification skipped for %r: %s", similar_to, e)
 

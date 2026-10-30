@@ -35,6 +35,27 @@ def extract_song_card_target(card_text: str) -> Optional[Dict[str, str]]:
 
     orig_title = m_card_song.group(1).strip()
     orig_artist = m_card_art.group(1).strip()
+    m_card_genre = re.search(r"(?im)^\s*(?:\*\*)?Genre:\*{0,2}\s*(.+)", card_text)
+    card_genre = m_card_genre.group(1).strip() if m_card_genre else ""
+
+    m_remix = re.search(
+        r"[\(\[\{]([^\)\]\}]*?\b(?:remix|rmx|vip|rework|bootleg|flip)\b[^\)\]\}]*)[\)\]\}]",
+        orig_title,
+        flags=re.IGNORECASE,
+    )
+    remix_tag = m_remix.group(1).strip() if m_remix else ""
+    if orig_artist.lower() in ("release", "various artists", "unknown", "unknown artist"):
+        if remix_tag:
+            remixer = re.sub(
+                r"\b(?:remix|rmx|vip|rework|bootleg|flip|edit|mix)\b",
+                "",
+                remix_tag,
+                flags=re.IGNORECASE,
+            ).strip(" -–—")
+            if remixer:
+                orig_artist = remixer
+        else:
+            orig_artist = ""
 
     clean_title = re.sub(
         r"[\(\[\{].*?(?:official|video|audio|lyrics|visualizer|download|remastered|hd|4k|hq|mix).*?[\)\]\}]",
@@ -60,6 +81,7 @@ def extract_song_card_target(card_text: str) -> Optional[Dict[str, str]]:
         "search_query": search_query,
         "orig_display": orig_display,
         "video_id": video_match.group(1),
+        "genre": card_genre,
     }
 
 

@@ -438,16 +438,52 @@ class YouTubeMusicAggregator(BaseMusicAggregator):
 
         print(f"  └─ 📻 [YouTube Music Radio]: Fetching up to {YTMUSIC_SIMILAR_RADIO_LIMIT} co-listened tracks for '{clean_q}'...")
         meta = parse_song_meta(clean_q)
-        song_hits = search_ytmusic_songs(clean_q, limit=4)
-        matched_hit = _match_ytmusic_song_hit(
-            song_hits,
-            target_song=meta.get("song", clean_q),
-            target_artist=meta.get("artist", ""),
+        target_song = meta.get("song", clean_q)
+        target_artist = meta.get("artist", "")
+        s_norm = _norm_track_token(target_song)
+        s_base = _norm_track_token(re.sub(r"[\(\[\{].*?[\)\]\}]", "", target_song or ""))
+        a_norm = (
+            ""
+            if (target_artist or "").strip().lower() in ("unknown artist", "unknown", "release", "various artists", "")
+            else _norm_track_token(target_artist)
         )
-        if not matched_hit:
-            return []
 
-        seed_vid = str(matched_hit.get("videoId") or "").strip()
+        # 1. Fast-path: If this track was already resolved/served on a Song Card in `MUSIC_METADATA_CACHE`,
+        # reuse its exact `videoId` in 0ms without an extra `search_ytmusic_songs` round-trip!
+        seed_vid = ""
+        if s_norm:
+            for cached_vid, c_meta in reversed(list(MUSIC_METADATA_CACHE.items())):
+                if not cached_vid or not isinstance(c_meta, dict):
+                    continue
+                c_song = str(c_meta.get("song") or "")
+                c_art = str(c_meta.get("artist") or "")
+                c_s_norm = _norm_track_token(c_song)
+                c_s_base = _norm_track_token(re.sub(r"[\(\[\{].*?[\)\]\}]", "", c_song))
+                if not c_s_norm:
+                    continue
+                if c_s_norm not in (s_norm, s_base) and s_base not in (c_s_norm, c_s_base):
+                    continue
+                c_a_norm = (
+                    ""
+                    if c_art.strip().lower() in ("unknown artist", "unknown", "release", "various artists", "")
+                    else _norm_track_token(c_art)
+                )
+                if not a_norm or not c_a_norm or a_norm in c_a_norm or c_a_norm in a_norm or (a_norm in c_s_norm):
+                    seed_vid = str(cached_vid).strip()
+                    break
+
+        # 2. Fallback: Search YouTube Music's `songs` (`ATV`) catalog if not already in `MUSIC_METADATA_CACHE`
+        if not seed_vid:
+            song_hits = search_ytmusic_songs(clean_q, limit=4)
+            matched_hit = _match_ytmusic_song_hit(
+                song_hits,
+                target_song=target_song,
+                target_artist="" if not a_norm else target_artist,
+            )
+            if not matched_hit:
+                return []
+            seed_vid = str(matched_hit.get("videoId") or "").strip()
+
         if not seed_vid:
             return []
 

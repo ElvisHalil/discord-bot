@@ -1176,6 +1176,28 @@ async def process_song_card_like(
 
     async with channel.typing():
         try:
+            from src.skills.music.engine.formatting import MUSIC_METADATA_CACHE
+
+            card_vid = card_target.get("video_id")
+            if card_vid:
+                existing_card_meta = MUSIC_METADATA_CACHE.get(card_vid) or {}
+                cached_card_art = str(existing_card_meta.get("artist") or "").strip()
+                if (
+                    not card_target.get("orig_artist")
+                    or card_target["orig_artist"].lower() in ("release", "various artists", "unknown", "unknown artist")
+                ) and cached_card_art and cached_card_art.lower() not in ("release", "various artists", "unknown", "unknown artist"):
+                    card_target["orig_artist"] = cached_card_art
+                    card_target["search_query"] = f"{card_target['clean_title']} by {cached_card_art}".strip()
+                    card_target["orig_display"] = f"'{card_target['orig_title']}' by '{cached_card_art}'"
+                elif card_vid not in MUSIC_METADATA_CACHE:
+                    MUSIC_METADATA_CACHE[card_vid] = {
+                        "song": card_target["orig_title"],
+                        "artist": card_target["orig_artist"] or "Unknown Artist",
+                        "genre": card_target.get("genre") or None,
+                        "url": f"https://music.youtube.com/watch?v={card_vid}",
+                        "embeddable": True,
+                    }
+
             orig_title = card_target["orig_title"]
             orig_artist = card_target["orig_artist"]
             clean_title = card_target["clean_title"]
@@ -1199,67 +1221,23 @@ async def process_song_card_like(
                 await channel.send(f"{user_tag} ⚠️ Found similar songs, but couldn't verify a working YouTube link. Please try again!")
                 return False
 
-            # 4. Generate natural persona intro in parallel with metadata lookup
+            # 4. Build recommendation intro directly without waiting on an Ollama LLM round-trip
             mode_config = MODES[current_mode]
             if is_unrelated_fallback:
-                intro_prompt = (
-                    f"User {user_display} reacted with 👍 to {orig_display}, "
-                    f"but no directly related songs could be found for it. "
-                    f"Write a single short sentence letting them know you couldn't find any related songs for {orig_display}, "
-                    f"and suggest '{chosen_track}' as a track they might like instead. "
-                    "Do NOT include any links, URLs, or markdown links."
-                )
                 default_intro = (
                     f"Couldn't find any directly related songs for **{orig_title}**"
                     + (f" by **{orig_artist}**" if orig_artist else "")
                     + ", but here is a track you might like instead:"
                 )
             else:
-                intro_prompt = (
-                    f"User {user_display} reacted with 👍 to the song {orig_display}. "
-                    f"Write a single short sentence recommending the similar song '{chosen_track}'. "
-                    "Do NOT include any links, URLs, or markdown links."
+                default_intro = (
+                    f"Here is a song similar to **{orig_title}**"
+                    + (f" by **{orig_artist}**" if orig_artist else "")
+                    + ":"
                 )
-                default_intro = f"Here is a song similar to **{orig_title}** by **{orig_artist}**:"
 
-            if current_mode == "chat":
-                light_sys_prompt = "you are a casual, opinionated human in discord. write 1 short, lowercase sentence with modern slang. no links, no emojis."
-            else:
-                light_sys_prompt = "You are a helpful music assistant in Discord. Write a single natural, concise 1-sentence recommendation intro. No links, no markdown URLs, no emojis."
-
-            reaction_options = {
-                **mode_config["ollama_options"],
-                "num_ctx": 1024,
-                "num_predict": 96,
-            }
-
-            async def _generate_intro():
-                try:
-                    resp = await ollama_client.chat(
-                        model=mode_config["model"],
-                        messages=[
-                            {"role": "system", "content": light_sys_prompt},
-                            {"role": "user", "content": intro_prompt}
-                        ],
-                        options=reaction_options
-                    )
-                    text = resp.message.content.strip()
-                    return re.sub(r'https?:\/\/\S+', '', text).strip()
-                except Exception as e:
-                    print(f"⚠️ [Reaction Ollama Error]: {e}")
-                    return default_intro
-
-            intro_text, meta = await asyncio.gather(
-                _generate_intro(),
-                run_in_worker(get_music_metadata, vid, fallback_text=chosen_track)
-            )
-
-            if not intro_text:
-                intro_text = default_intro
-
-            # Prepend user @ mention so the channel knows who triggered the recommendation
-            if user_tag not in intro_text:
-                intro_text = f"{user_tag} {intro_text}"
+            meta = await run_in_worker(get_music_metadata, vid, fallback_text=chosen_track)
+            intro_text = f"{user_tag} {default_intro}"
 
             final_reply = format_song_card(
                 song=meta["song"],
