@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.utils.telegram import (
-    _SENT_SONG_CARDS,
     clean_for_telegram,
     from_tg_channel_id,
     handle_telegram_update,
@@ -20,9 +19,6 @@ from src.utils.telegram import (
 
 
 class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        _SENT_SONG_CARDS.clear()
-
     def test_is_telegram_enabled_flag(self):
         with patch.dict(os.environ, {"ENABLE_TELEGRAM": "false"}, clear=False):
             self.assertFalse(is_telegram_enabled())
@@ -191,40 +187,6 @@ class TestTelegramBridge(unittest.IsolatedAsyncioTestCase):
                 bot_id=111,
             )
             main_mod.run_agent_turn.assert_awaited_once()
-            # Verify song card was cached for 👍 reaction support
-            self.assertIn((123456789, 42), _SENT_SONG_CARDS)
-            self.assertIn("Harder, Better, Faster, Stronger", _SENT_SONG_CARDS[(123456789, 42)])
-
-            # 3. 👍 reaction on that song card triggers similar song recommendation
-            reaction_update = {
-                "update_id": 4,
-                "message_reaction": {
-                    "chat": {"id": 123456789, "type": "private"},
-                    "message_id": 42,
-                    "user": {"id": 123456789, "is_bot": False, "first_name": "Alex"},
-                    "new_reaction": [{"type": "emoji", "emoji": "👍"}],
-                },
-            }
-            with patch(
-                "src.utils.telegram.tools.skill_music_discovery",
-                return_value=(
-                    "=== VERIFIED YOUTUBE MUSIC RESULT ===\n"
-                    "Song: One More Time\n"
-                    "Artist: Daft Punk\n"
-                    "Genre: Electronic\n"
-                    "Link: https://music.youtube.com/watch?v=FGBhQbmPwH8\n"
-                ),
-            ) as mock_music_discovery:
-                await handle_telegram_update(
-                    reaction_update,
-                    main_mod=main_mod,
-                    bot_token="fake-token",
-                    bot_username="TestBot",
-                    bot_id=111,
-                )
-                mock_music_discovery.assert_called_once_with(
-                    similar_to="Harder, Better, Faster, Stronger by Daft Punk"
-                )
 
     async def test_mode_switch_broadcasts_globally_and_no_cross_chat_leakage(self):
         from src.skills.music.context import (

@@ -1187,7 +1187,7 @@ class TestMultiTurnAndStatefulFlows(unittest.TestCase):
 
 class TestMultiUserDiscordChannelConcurrency(unittest.IsolatedAsyncioTestCase):
     """Emulates 2 and 3 users interacting concurrently in a shared Discord channel
-    through main.on_message, main.on_raw_reaction_add, and main.handle_live_match_update."""
+    through main.on_message, main.process_song_card_like, and main.handle_live_match_update."""
 
     async def test_three_users_concurrent_on_message_in_shared_discord_channel(self):
         import asyncio
@@ -1442,7 +1442,16 @@ class TestMultiUserDiscordChannelConcurrency(unittest.IsolatedAsyncioTestCase):
             ):
                 t_alex = asyncio.create_task(main_mod.on_message(msg_alex))
                 await asyncio.sleep(0.01)
-                t_sam_react = asyncio.create_task(main_mod.on_raw_reaction_add(reaction_payload))
+                t_sam_react = asyncio.create_task(
+                    main_mod.process_song_card_like(
+                        channel=fake_channel,
+                        message_id=5001,
+                        message_content=reacted_card_msg.content,
+                        user_id=102,
+                        user=user_sam,
+                        message=reacted_card_msg,
+                    )
+                )
                 t_tracker = asyncio.create_task(
                     main_mod.handle_live_match_update(live_match, live_snapshot, ["⚽ GOAL! Saka 78' (Arsenal)"])
                 )

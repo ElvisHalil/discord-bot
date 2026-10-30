@@ -7,23 +7,12 @@ with zero extra third-party dependencies and fail-closed allowlist security.
 
 import asyncio
 import os
-import random
 import re
 from typing import Any, Dict, Optional, Set, Tuple
 import requests
 
 import src.registry as tools
-try:
-    from src.config import MODES
-except ImportError:
-    import importlib.util as _importlib_util
-    from pathlib import Path as _Path
-    _spec = _importlib_util.spec_from_file_location("src.config", _Path(__file__).resolve().parent.parent / "config.example.py")
-    _mod = _importlib_util.module_from_spec(_spec)
-    _spec.loader.exec_module(_mod)
-    MODES = _mod.MODES
 from src.orchestrator import (
-    apply_auto_ping,
     extract_reply_context,
     join_orphan_bullets,
     sanitize_agent_reply,
@@ -37,24 +26,20 @@ from src.context import (
     set_active_user,
 )
 from src.jobs import JOB_ENGINE
-from src.utils.http import redact_secrets
 from src.skills.flights import (
     FLIGHT_TRACKER,
     skill_flight_tracker,
 )
-from src.skills.music.engine.formatting import format_song_card, get_music_metadata, standardize_song_reply
+from src.skills.music.engine.formatting import standardize_song_reply
 from src.skills.sports.tracker import (
     SPORTS_TRACKER,
     skill_sports_tracker,
 )
-from src.utils.cache import BoundedCache, BoundedSet
-from src.utils.discord import chunk_message
-from src.utils.dispatcher import (
-    dispatch_tracker_command,
-    extract_song_card_target,
-    resolve_reaction_recommendation,
-)
+from src.utils.discord import chunk_message, load_modes_config
+from src.utils.dispatcher import dispatch_tracker_command
 from src.utils.workers import run_in_worker
+
+MODES = load_modes_config()
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
@@ -62,12 +47,6 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 # never collide with positive Discord channel snowflakes in chat_history / SPORTS_TRACKER).
 _TG_CHANNEL_OFFSET = -10_000_000_000_000_000
 _TG_CHANNEL_MAP: Dict[int, int] = {}
-
-# Bounded cache of song cards sent on Telegram: (chat_id, message_id) -> text
-# Allows 👍 reactions on Telegram to look up the song card text without a fetch_message API.
-_MAX_SONG_CARD_CACHE = 500
-_SENT_SONG_CARDS: BoundedCache[Tuple[int, int], str] = BoundedCache(maxsize=_MAX_SONG_CARD_CACHE)
-_HANDLED_TG_REACTIONS: BoundedSet[Tuple[int, int, int]] = BoundedSet(maxsize=2000)
 
 
 def is_telegram_enabled() -> bool:
@@ -224,8 +203,6 @@ async def send_telegram_message(channel_or_chat_id: int, text: str, token: Optio
         res = await asyncio.to_thread(_tg_api_post, bot_token, "sendMessage", payload, 15)
         if res and res.get("ok") and isinstance(res.get("result"), dict):
             last_msg_id = res["result"].get("message_id")
-            if "music.youtube.com/watch?v=" in chunk and last_msg_id is not None:
-                _SENT_SONG_CARDS[(chat_id, int(last_msg_id))] = chunk
 
     return last_msg_id
 
@@ -360,72 +337,100 @@ async def broadcast_mode_switch(
             print(f"⚠️ [Mode Broadcast Warning (channel={cid})]: {e}")
 
 
-async def _handle_telegram_reaction(
-    reaction_obj: Dict[str, Any],
+async def execute_mode_switch(
     main_mod: Any,
-    bot_token: str,
+    new_mode: str,
+    origin_channel_id: int,
+    send_reply_fn: Any,
+    bot_token: Optional[str] = None,
 ) -> None:
-    """Handle 👍 reactions on bot song cards in Telegram to recommend a similar verified song."""
-    chat = reaction_obj.get("chat") or {}
-    user = reaction_obj.get("user") or {}
-    chat_id = chat.get("id")
-    user_id = user.get("id")
-    message_id = reaction_obj.get("message_id")
-
-    if chat_id is None or user_id is None or message_id is None:
-        return
-    if not is_authorized_telegram_event(user_id, chat_id):
+    """Shared `!mode <mode>` execution for both Discord and Telegram."""
+    modes_dict = getattr(main_mod, "MODES", None) or MODES
+    if new_mode not in modes_dict:
+        await send_reply_fn(f"⚠️ Unknown mode. Available modes: {', '.join(modes_dict.keys())}")
         return
 
-    new_reactions = reaction_obj.get("new_reaction") or []
-    has_thumbs_up = any(r.get("emoji") == "👍" for r in new_reactions if isinstance(r, dict))
-    if not has_thumbs_up:
-        return
+    previous_model = modes_dict[main_mod.current_mode]["model"]
+    new_model = modes_dict[new_mode]["model"]
+    if previous_model != new_model:
+        await send_reply_fn(f"🧹 Unloading `{previous_model}` from GPU memory to make room...")
+        try:
+            await main_mod.ollama_client.generate(model=previous_model, keep_alive=0)
+        except Exception as e:
+            print(f"Note: Could not explicitly unload model: {e}")
 
-    card_text = _SENT_SONG_CARDS.get((int(chat_id), int(message_id)))
-    card_target = extract_song_card_target(card_text or "")
-    if not card_target:
-        return
+    main_mod.current_mode = new_mode
+    main_mod.chat_history.clear()
+    if hasattr(main_mod, "clear_tool_caches"):
+        main_mod.clear_tool_caches()
+    elif hasattr(main_mod, "reset_channel_memory"):
+        main_mod.reset_channel_memory(origin_channel_id)
 
-    reaction_key = (int(chat_id), int(message_id), int(user_id))
-    if reaction_key in _HANDLED_TG_REACTIONS:
-        return
-    _HANDLED_TG_REACTIONS.add(reaction_key)
-
-    orig_title = card_target["orig_title"]
-    orig_artist = card_target["orig_artist"]
-    user_display = user.get("first_name") or user.get("username") or "User"
-    user_tag = f"@{user['username']}" if user.get("username") else user_display
-    internal_cid = to_tg_channel_id(int(chat_id))
-
-    await run_in_worker(_tg_api_post, bot_token, "sendChatAction", {"chat_id": chat_id, "action": "typing"}, 10)
-
-    rec = await resolve_reaction_recommendation(
-        channel_id=internal_cid,
-        card_target=card_target,
-        music_discovery_fn=tools.skill_music_discovery,
-        youtube_search_fn=tools.skill_youtube_search,
-        allow_chart_fallback=False,
-        max_candidates=4,
+    status_msg = f"🔄 Switched to **{new_mode.upper()}** mode (Model: `{new_model}`). Memory and context wiped."
+    await send_reply_fn(status_msg)
+    await broadcast_mode_switch(
+        main_mod,
+        status_msg,
+        origin_channel_id=origin_channel_id,
+        bot_token=bot_token,
     )
-    verified_url = rec["verified_url"]
-    chosen_track = rec["chosen_track"]
-    vid = rec["vid"]
-    if not verified_url or not chosen_track:
-        return
 
-    meta = await run_in_worker(get_music_metadata, vid, fallback_text=chosen_track)
-    intro_text = f"{user_tag} Here is a song similar to **{orig_title}** by **{orig_artist}**:"
-    final_reply = format_song_card(
-        song=meta["song"],
-        artist=meta["artist"],
-        url=verified_url,
-        genre=meta.get("genre"),
-        album=meta.get("album"),
-        intro=intro_text,
-    )
-    final_reply = JOB_ENGINE.sync_channel_autoplay_on_track_played(internal_cid, final_reply)
-    await send_telegram_message(internal_cid, final_reply, token=bot_token)
+
+def execute_channel_reset(main_mod: Any, channel_id: int) -> None:
+    """Shared `!reset` memory/cache wipe for a single Discord or Telegram channel."""
+    main_mod.chat_history.pop(channel_id, None)
+    if hasattr(main_mod, "clear_tool_caches"):
+        main_mod.clear_tool_caches(channel_id)
+    elif hasattr(main_mod, "reset_channel_memory"):
+        main_mod.reset_channel_memory(channel_id)
+
+
+async def snapshot_channel_turn_history(
+    main_mod: Any,
+    channel_id: int,
+    mode_config: Dict[str, Any],
+    user_msg: str,
+) -> Tuple[Dict[str, str], list, int]:
+    """Phase 1 of a conversation turn: snapshot channel history under the channel lock and append the user message."""
+    tools_mod = getattr(main_mod, "tools", None) or tools
+    async with main_mod.channel_locks[channel_id]:
+        system_msg = {"role": "system", "content": mode_config["get_prompt"](tools_mod.recall_memories())}
+        if channel_id not in main_mod.chat_history:
+            main_mod.chat_history[channel_id] = [system_msg]
+        else:
+            main_mod.chat_history[channel_id][0] = system_msg
+        turn_history = list(main_mod.chat_history[channel_id])
+
+    turn_history.append({"role": "user", "content": user_msg})
+    turn_history = trim_history(turn_history, mode_config.get("history_limit", 40))
+    turn_start_idx = len(turn_history) - 1
+    return system_msg, turn_history, turn_start_idx
+
+
+async def commit_channel_turn_history(
+    main_mod: Any,
+    channel_id: int,
+    mode_config: Dict[str, Any],
+    system_msg: Dict[str, str],
+    turn_history: list,
+    turn_start_idx: int,
+    reply: str,
+) -> None:
+    """Phase 3 of a conversation turn: atomically commit the completed turn delta to chat_history under the channel lock."""
+    turn_delta = turn_history[turn_start_idx:]
+    if len(turn_delta) == 1:
+        turn_delta.append({"role": "assistant", "content": reply})
+    else:
+        turn_delta[-1] = {"role": "assistant", "content": reply}
+
+    async with main_mod.channel_locks[channel_id]:
+        if channel_id not in main_mod.chat_history:
+            main_mod.chat_history[channel_id] = [system_msg]
+        main_mod.chat_history[channel_id].extend(turn_delta)
+        main_mod.chat_history[channel_id] = trim_history(
+            main_mod.chat_history[channel_id],
+            mode_config.get("history_limit", 40),
+        )
 
 
 async def handle_telegram_update(
@@ -435,11 +440,7 @@ async def handle_telegram_update(
     bot_username: str = "",
     bot_id: Optional[int] = None,
 ) -> None:
-    """Process a single Telegram update dictionary (message or message_reaction)."""
-    if "message_reaction" in update:
-        await _handle_telegram_reaction(update["message_reaction"], main_mod, bot_token)
-        return
-
+    """Process a single Telegram message update dictionary."""
     msg = update.get("message")
     if not isinstance(msg, dict):
         return
@@ -504,51 +505,17 @@ async def handle_telegram_update(
             await send_telegram_message(internal_cid, "🔒 Only the bot owner can switch modes.", token=bot_token)
             return
         new_mode = normalized_input.split(" ")[-1].lower()
-        if new_mode in MODES:
-            previous_model = MODES[main_mod.current_mode]["model"]
-            new_model = MODES[new_mode]["model"]
-            if previous_model != new_model:
-                await send_telegram_message(
-                    internal_cid,
-                    f"🧹 Unloading `{previous_model}` from GPU memory to make room...",
-                    token=bot_token,
-                )
-                try:
-                    await main_mod.ollama_client.generate(model=previous_model, keep_alive=0)
-                except Exception:
-                    pass
-            main_mod.current_mode = new_mode
-            main_mod.chat_history.clear()
-            if hasattr(main_mod, "clear_tool_caches"):
-                main_mod.clear_tool_caches()
-            elif hasattr(main_mod, "reset_channel_memory"):
-                main_mod.reset_channel_memory(internal_cid)
-            status_msg = f"🔄 Switched to **{new_mode.upper()}** mode (Model: `{new_model}`). Memory and context wiped."
-            await send_telegram_message(
-                internal_cid,
-                status_msg,
-                token=bot_token,
-            )
-            await broadcast_mode_switch(
-                main_mod,
-                status_msg,
-                origin_channel_id=internal_cid,
-                bot_token=bot_token,
-            )
-        else:
-            await send_telegram_message(
-                internal_cid,
-                f"⚠️ Unknown mode. Available modes: {', '.join(MODES.keys())}",
-                token=bot_token,
-            )
+        await execute_mode_switch(
+            main_mod,
+            new_mode=new_mode,
+            origin_channel_id=internal_cid,
+            send_reply_fn=lambda text: send_telegram_message(internal_cid, text, token=bot_token),
+            bot_token=bot_token,
+        )
         return
 
     if low_input == "!reset":
-        main_mod.chat_history.pop(internal_cid, None)
-        if hasattr(main_mod, "clear_tool_caches"):
-            main_mod.clear_tool_caches(internal_cid)
-        elif hasattr(main_mod, "reset_channel_memory"):
-            main_mod.reset_channel_memory(internal_cid)
+        execute_channel_reset(main_mod, internal_cid)
         await send_telegram_message(internal_cid, "🧹 Memory and context wiped for this chat.", token=bot_token)
         return
 
@@ -572,9 +539,11 @@ async def handle_telegram_update(
         return
 
     # 4. Run standard conversation turn reusing main.run_agent_turn (3-phase lock-free execution)
-    mode_config = MODES[main_mod.current_mode]
+    modes_dict = getattr(main_mod, "MODES", None) or MODES
+    mode_config = modes_dict[main_mod.current_mode]
     is_research = mode_config.get("is_research", False)
-    tools.set_memory_file(mode_config["memory_file"])
+    tools_mod = getattr(main_mod, "tools", None) or tools
+    tools_mod.set_memory_file(mode_config["memory_file"])
     set_active_channel_id(internal_cid)
 
     ref_context = ""
@@ -588,17 +557,9 @@ async def handle_telegram_update(
         user_msg = f"User {user_display} says{ref_context}: {normalized_input}"
 
     # Phase 1: Snapshot history (<1ms under channel lock)
-    async with main_mod.channel_locks[internal_cid]:
-        system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
-        if internal_cid not in main_mod.chat_history:
-            main_mod.chat_history[internal_cid] = [system_msg]
-        else:
-            main_mod.chat_history[internal_cid][0] = system_msg
-        turn_history = list(main_mod.chat_history[internal_cid])
-
-    turn_history.append({"role": "user", "content": user_msg})
-    turn_history = trim_history(turn_history, mode_config.get("history_limit", 40))
-    turn_start_idx = len(turn_history) - 1
+    system_msg, turn_history, turn_start_idx = await snapshot_channel_turn_history(
+        main_mod, internal_cid, mode_config, user_msg
+    )
 
     # Phase 2: Lock-free execution & post-processing
     await run_in_worker(
@@ -640,20 +601,15 @@ async def handle_telegram_update(
 
         # Phase 3: Atomic commit (<1ms under channel lock)
         if not is_empty_fallback:
-            turn_delta = turn_history[turn_start_idx:]
-            if len(turn_delta) == 1:
-                turn_delta.append({"role": "assistant", "content": reply})
-            else:
-                turn_delta[-1] = {"role": "assistant", "content": reply}
-
-            async with main_mod.channel_locks[internal_cid]:
-                if internal_cid not in main_mod.chat_history:
-                    main_mod.chat_history[internal_cid] = [system_msg]
-                main_mod.chat_history[internal_cid].extend(turn_delta)
-                main_mod.chat_history[internal_cid] = trim_history(
-                    main_mod.chat_history[internal_cid],
-                    mode_config.get("history_limit", 40),
-                )
+            await commit_channel_turn_history(
+                main_mod,
+                internal_cid,
+                mode_config,
+                system_msg,
+                turn_history,
+                turn_start_idx,
+                reply,
+            )
 
         await send_telegram_message(internal_cid, reply, token=bot_token)
         for att in attachments:
@@ -733,7 +689,7 @@ async def start_telegram_bridge(main_mod: Any) -> None:
                 poll_payload = {
                     "offset": offset,
                     "timeout": 25,
-                    "allowed_updates": ["message", "message_reaction"],
+                    "allowed_updates": ["message"],
                 }
                 data = await _poll_updates_daemon(poll_payload)
                 if not data or not data.get("ok"):
@@ -760,5 +716,3 @@ async def start_telegram_bridge(main_mod: Any) -> None:
                 await asyncio.sleep(5)
     finally:
         _POLLING_ACTIVE = False
-
-

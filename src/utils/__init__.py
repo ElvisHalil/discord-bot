@@ -4,6 +4,7 @@ from src.utils.cache import (
 )
 from src.utils.discord import (
     ensure_ollama_running,
+    load_modes_config,
     chunk_message,
     suppress_discord_embeds,
 )
@@ -47,6 +48,7 @@ __all__ = [
     "BoundedCache",
     "BoundedSet",
     "ensure_ollama_running",
+    "load_modes_config",
     "chunk_message",
     "suppress_discord_embeds",
     "dispatch_tracker_command",

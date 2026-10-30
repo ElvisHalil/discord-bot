@@ -22,6 +22,7 @@ from src.utils import (
     dispatch_voice_command,
     ensure_ollama_running,
     extract_song_card_target,
+    load_modes_config,
     chunk_message,
     resolve_reaction_recommendation,
     suppress_discord_embeds,
@@ -68,15 +69,7 @@ from src.skills.voice import (
     clear_voice_cache,
     skill_voice_info,
 )
-try:
-    from src.config import MODES
-except ImportError:
-    import importlib.util as _importlib_util
-    from pathlib import Path as _Path
-    _spec = _importlib_util.spec_from_file_location("src.config", _Path(__file__).resolve().parent / "src" / "config.example.py")
-    _mod = _importlib_util.module_from_spec(_spec)
-    _spec.loader.exec_module(_mod)
-    MODES = _mod.MODES
+MODES = load_modes_config()
 from src.orchestrator import (
     normalize_tool_args,
     enrich_sports_tool_args,
@@ -108,9 +101,13 @@ from src.orchestrator import (
 )
 from src.utils.telegram import (
     broadcast_mode_switch,
+    commit_channel_turn_history,
+    execute_channel_reset,
+    execute_mode_switch,
     is_telegram_channel,
     send_telegram_message,
     send_telegram_photo,
+    snapshot_channel_turn_history,
     start_telegram_bridge,
 )
 
@@ -1133,14 +1130,14 @@ async def process_song_card_like(
     message=None,
 ) -> bool:
     """
-    Shared handler for both the 👍 emoji reaction and the 👍 Like button on a Song Card.
+    Handler for the 👍 Like button on a Song Card.
     Preserves identical behavior across normal chat and active Autoplay/Voice states.
     """
     card_target = extract_song_card_target(message_content)
     if not card_target:
         return False
 
-    # Only recommend once per (message, user), even if they click the button and/or react with 👍.
+    # Only recommend once per (message, user).
     reaction_key = (message_id, user_id)
     if reaction_key in handled_reactions:
         return False
@@ -1727,40 +1724,6 @@ async def handle_song_card_button_interaction(interaction: discord.Interaction, 
             user_id=user.id,
             user_display_name=user_display,
             author_voice_channel=author_voice_channel,
-        )
-
-
-@client.event
-async def on_raw_reaction_add(payload):
-    if payload.user_id == client.user.id:
-        return
-    if getattr(payload, "guild_id", "present") is None:
-        if BOT_OWNER_ID is None or payload.user_id != BOT_OWNER_ID:
-            return
-    record_channel_human_activity(payload.channel_id)
-        
-    if str(payload.emoji) == '👍':
-        channel = client.get_channel(payload.channel_id)
-        if not channel:
-            try:
-                channel = await client.fetch_channel(payload.channel_id)
-            except Exception:
-                return
-                
-        try:
-            message = await channel.fetch_message(payload.message_id)
-        except Exception:
-            return
-            
-        if message.author.id != client.user.id:
-            return
-            
-        await process_song_card_like(
-            channel=channel,
-            message_id=payload.message_id,
-            message_content=message.content,
-            user_id=payload.user_id,
-            message=message,
         )
 
 
@@ -2838,38 +2801,17 @@ async def on_message(message):
             await message.channel.send("🔒 Only the bot owner can switch modes.")
             return
         new_mode = user_input.split(" ")[-1].lower()
-        if new_mode in MODES:
-            previous_model = MODES[current_mode]["model"]
-            new_model = MODES[new_mode]["model"]
-
-            if previous_model != new_model:
-                await message.channel.send(f"🧹 Unloading `{previous_model}` from GPU memory to make room...")
-                try:
-                    # Unload the previous model explicitly by setting keep_alive=0
-                    await ollama_client.generate(model=previous_model, keep_alive=0)
-                except Exception as e:
-                    print(f"Note: Could not explicitly unload model: {e}")
-
-            current_mode = new_mode
-            # The mode is global, so every channel's history was built with the old
-            # system prompt/persona. Wipe them all, not just this channel.
-            chat_history.clear()
-            clear_tool_caches()
-            status_msg = f"🔄 Switched to **{new_mode.upper()}** mode (Model: `{new_model}`). Memory and context wiped."
-            await message.channel.send(status_msg)
-            await broadcast_mode_switch(
-                sys.modules[__name__],
-                status_msg,
-                origin_channel_id=message.channel.id,
-            )
-        else:
-            await message.channel.send(f"⚠️ Unknown mode. Available modes: {', '.join(MODES.keys())}")
+        await execute_mode_switch(
+            sys.modules[__name__],
+            new_mode=new_mode,
+            origin_channel_id=message.channel.id,
+            send_reply_fn=message.channel.send,
+        )
         return
 
     if user_input.lower() == "!reset":
         active_channels.add(message.channel.id)
-        chat_history.pop(message.channel.id, None)
-        clear_tool_caches(message.channel.id)
+        execute_channel_reset(sys.modules[__name__], message.channel.id)
         await message.channel.send("🧹 Memory and context wiped for this channel.")
         return
 
@@ -2981,18 +2923,10 @@ async def on_message(message):
         user_msg = f"User {message.author.display_name} says{mention_context}{ref_context}: {user_input}"
 
     # Phase 1: Take a fast (<1ms) isolated snapshot of chat_history and release the channel lock
-    # so slow worker tool fetches never block other prompts, 👍 reactions, or live tracker alerts.
-    async with channel_locks[channel_id]:
-        system_msg = {"role": "system", "content": mode_config["get_prompt"](tools.recall_memories())}
-        if channel_id not in chat_history:
-            chat_history[channel_id] = [system_msg]
-        else:
-            chat_history[channel_id][0] = system_msg
-        turn_history = list(chat_history[channel_id])
-
-    turn_history.append({"role": "user", "content": user_msg})
-    turn_history = trim_history(turn_history, mode_config.get("history_limit", 40))
-    turn_start_idx = len(turn_history) - 1
+    # so slow worker tool fetches never block other prompts, 👍 Like clicks, or live tracker alerts.
+    system_msg, turn_history, turn_start_idx = await snapshot_channel_turn_history(
+        sys.modules[__name__], channel_id, mode_config, user_msg
+    )
 
     # Phase 2: Lock-free turn execution and reply post-processing
     if has_explicit_autoplay_start_intent(user_input):
@@ -3061,19 +2995,15 @@ async def on_message(message):
 
             # Phase 3: Atomically commit this turn's completed message block (<1ms)
             if not is_empty_fallback:
-                turn_delta = turn_history[turn_start_idx:]
-                if len(turn_delta) == 1:
-                    turn_delta.append({"role": "assistant", "content": reply})
-                else:
-                    turn_delta[-1] = {"role": "assistant", "content": reply}
-
-                async with channel_locks[channel_id]:
-                    if channel_id not in chat_history:
-                        chat_history[channel_id] = [system_msg]
-                    chat_history[channel_id].extend(turn_delta)
-                    chat_history[channel_id] = trim_history(
-                        chat_history[channel_id], mode_config.get("history_limit", 40)
-                    )
+                await commit_channel_turn_history(
+                    sys.modules[__name__],
+                    channel_id,
+                    mode_config,
+                    system_msg,
+                    turn_history,
+                    turn_start_idx,
+                    reply,
+                )
 
             chunks = [c for c in chunk_message(reply) if c]
             discord_files = [

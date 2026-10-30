@@ -16,30 +16,35 @@ def get_ollama_base_url() -> str:
     return raw.rstrip("/")
 
 
+def load_modes_config() -> dict:
+    """Load the MODES configuration dictionary from src.config, falling back to src/config.example.py."""
+    try:
+        from src.config import MODES
+        if MODES:
+            return MODES
+    except Exception:
+        pass
+    try:
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location(
+            "src.config",
+            Path(__file__).resolve().parent.parent / "config.example.py",
+        )
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return getattr(mod, "MODES", {})
+    except Exception:
+        pass
+    return {}
+
+
 def ensure_ollama_models(base_url: str, models: list[str] | None = None) -> None:
     """Verify configured Ollama models exist in the target Ollama instance and pull any missing ones."""
     if models is None:
-        try:
-            from src.config import MODES
-        except ImportError:
-            from src.config_example_loader import MODES  # type: ignore[import-not-found]
-        except Exception:
-            MODES = {}
-        if not MODES:
-            try:
-                import importlib.util
-                from pathlib import Path
-                spec = importlib.util.spec_from_file_location(
-                    "src.config",
-                    Path(__file__).resolve().parent.parent / "config.example.py",
-                )
-                if spec and spec.loader:
-                    mod = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(mod)
-                    MODES = getattr(mod, "MODES", {})
-            except Exception:
-                MODES = {}
-        models = list(dict.fromkeys(m.get("model", "") for m in MODES.values() if m.get("model")))
+        modes_cfg = load_modes_config()
+        models = list(dict.fromkeys(m.get("model", "") for m in modes_cfg.values() if m.get("model")))
 
     if not models:
         return
