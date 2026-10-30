@@ -5,6 +5,9 @@ services:
     restart: unless-stopped
     networks:
       - bot_internal
+    environment:
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=q8_0
     volumes:
       # Isolated Docker-managed named volume for LLM weights (zero host path mounts)
       - ollama_models:/root/.ollama
